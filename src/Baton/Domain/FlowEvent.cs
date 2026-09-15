@@ -27,6 +27,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(VerifyPassed), "verifyPassed")]
 [JsonDerivedType(typeof(VerifyFailed), "verifyFailed")]
 [JsonDerivedType(typeof(VerifyNotRun), "verifyNotRun")]
+[JsonDerivedType(typeof(DeliveryObservationRecorded), "deliveryObservationRecorded")]
 [JsonDerivedType(typeof(VerifyDeclarationIgnored), "verifyDeclarationIgnored")]
 [JsonDerivedType(typeof(VerifyDeclarationUnreviewed), "verifyDeclarationUnreviewed")]
 [JsonDerivedType(typeof(ExecutionArrested), "executionArrested")]
@@ -329,6 +330,25 @@ public abstract record FlowEvent
     /// so a ledger line written before #1796 still deserializes into the original diagnostic-only shape.
     /// </param>
     public sealed record VerifyNotRun(ExecutionId ExecutionId, string Reason, bool BuildLockBusy = false) : FlowEvent;
+
+    /// <summary>
+    /// #2309: the engine's immutable post-exit delivery observation. This journal event, not any
+    /// worker-writable artifact file, is the authority for delivery facts on settle and replay.
+    /// It is appended after the read-only Git/PR observation and before any delivery verdict event.
+    /// A recorded exit without this fact cannot be classified as delivered on recovery.
+    /// </summary>
+    public sealed record DeliveryObservationRecorded(
+        ExecutionId ExecutionId,
+        string ObservedAt,
+        string? LocalHead,
+        string? Branch,
+        string? RemoteHead,
+        int? PullRequestNumber,
+        string Verification,
+        IReadOnlyList<string>? FailingMembers = null,
+        string? VerificationReason = null,
+        string? ObservationProblem = null,
+        string? PullRequestHead = null) : FlowEvent;
 
     /// <summary>
     /// #1708 H1: the workspace's working-tree <c>.baton/verify</c> differed from the one committed in

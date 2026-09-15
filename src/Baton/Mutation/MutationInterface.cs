@@ -916,7 +916,8 @@ public static class MutationInterface
             Adapter: processBinding.Adapter,
             Model: processBinding.Model,
             HookCanaryArmed: hookCanaryArmed,
-            HookVerdictLedgerFileName: hookVerdictLedgerFileName);
+            HookVerdictLedgerFileName: hookVerdictLedgerFileName,
+            DeliversBranch: processBinding.DeliversBranch);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -1098,6 +1099,9 @@ public static class MutationInterface
                 // unless the recorded exit reason was itself CancelRequested (the crash clause).
                 if (crashRecovery.ToClassify.Count > 0)
                 {
+                    var priorDeliveryObservations = (await eventLogReader.ReadAllAsync(ioCancellationToken).ConfigureAwait(false))
+                        .OfType<FlowEvent.DeliveryObservationRecorded>()
+                        .ToList();
                     foreach (var (executionId, exit) in crashRecovery.ToClassify)
                     {
                         // #1623 / F2: an execution carrying an unmatched VerifyStarted must NOT settle by
@@ -1241,6 +1245,45 @@ public static class MutationInterface
                             writeToolCallCount: writeToolCallCount, hookVerdictCount: hookVerdictCount,
                             workspaceHeadShaAtStart: workspaceHeadShaAtStart,
                             verifiesWorkspace: verifiesWorkspace);
+
+                        // A recorded exit is not a recorded delivery. The exact obligation was
+                        // journalled before spawn; neither a worker file nor today's remote state
+                        // can turn an unobserved/malformed delivery into replay success.
+                        if (classification.Verdict == OutcomeVerdict.Succeeded && request.DeliversBranch == true)
+                        {
+                            var recorded = priorDeliveryObservations.LastOrDefault(observation => observation.ExecutionId == executionId);
+                            var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
+                            if (reading.Evidence is not { } evidence)
+                            {
+                                await eventLogWriter.AppendAsync(
+                                    new FlowEvent.VerifyFailed(executionId, Tail: reading.Problem,
+                                        Kind: VerifyFailedKind.EngineRestart), ioCancellationToken).ConfigureAwait(false);
+                                continue;
+                            }
+
+                            switch (evidence.Verification)
+                            {
+                                case DeliveryCheckStatus.Failed:
+                                    await eventLogWriter.AppendAsync(
+                                        new FlowEvent.VerifyFailed(executionId, evidence.FailingMembers,
+                                            evidence.VerificationReason, VerifyFailedKind.DeliveryFailed), ioCancellationToken)
+                                        .ConfigureAwait(false);
+                                    continue;
+                                case DeliveryCheckStatus.Cancelled:
+                                    await eventLogWriter.AppendAsync(new FlowEvent.ExecutionCancelled(executionId), ioCancellationToken)
+                                        .ConfigureAwait(false);
+                                    continue;
+                                case DeliveryCheckStatus.NotRun:
+                                    await eventLogWriter.AppendAsync(
+                                        new FlowEvent.VerifyNotRun(executionId, evidence.VerificationReason
+                                            ?? "delivery observation did not run"), ioCancellationToken).ConfigureAwait(false);
+                                    break;
+                                case DeliveryCheckStatus.Passed:
+                                    break;
+                                default:
+                                    throw new ArgumentOutOfRangeException(nameof(evidence.Verification));
+                            }
+                        }
 
                         // #1709: no TokenBudgetMonitor in scope on this path -- this classifies a
                         // RECORDED exit from a possibly-defunct workspace, never a live process, so
@@ -1951,7 +1994,8 @@ public static class MutationInterface
             Adapter: processBindingForRequest?.Adapter,
             Model: processBindingForRequest?.Model,
             HookCanaryArmed: hookCanaryArmed,
-            HookVerdictLedgerFileName: hookVerdictLedgerFileName);
+            HookVerdictLedgerFileName: hookVerdictLedgerFileName,
+            DeliversBranch: processBindingForRequest?.DeliversBranch);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -2229,6 +2273,11 @@ public static class MutationInterface
                 await eventLogWriter.AppendAsync(
                     CreateExecutionArrested(prepared, binding, budgetMonitor, workspaceChanged),
                     CancellationToken.None).ConfigureAwait(false);
+                if (binding.DeliversBranch)
+                {
+                    await RecordArrestDeliveryObservationAsync(prepared, binding, eventLogWriter)
+                        .ConfigureAwait(false);
+                }
                 return;
             }
 
@@ -2415,20 +2464,65 @@ public static class MutationInterface
                 // it writes is the only place that cause survives.
                 var shippingCeilingExceeded = ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(
                     usageParser, prepared.OutputDirectory);
-                // A post-exit observation is authoritative on replay. A new live probe could instead
-                // describe a later remote state, not this execution's delivered work.
-                var evidenceReading = await DeliveryVerifier.ReadEvidenceAsync(prepared.OutputDirectory, CancellationToken.None).ConfigureAwait(false);
-                var deliveryOutcome = evidenceReading.Evidence?.ToOutcome()
-                    ?? (evidenceReading.Problem is { } problem
-                        ? new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun, NotRunReason: problem)
-                        : await DeliveryVerifier.CheckAsync(
-                            binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
-                            shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false));
-                if (evidenceReading.IsMissing)
+                // The output directory is worker-writable. Only an engine-authored journal event can
+                // identify a prior observation on replay; a pre-placed file never skips the probe.
+                var priorDeliveryEvents = await eventLogReader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false);
+                var recorded = priorDeliveryEvents.OfType<FlowEvent.DeliveryObservationRecorded>()
+                    .LastOrDefault(observation => observation.ExecutionId == prepared.Request.ExecutionId);
+                DeliveryCheckOutcome deliveryOutcome;
+                if (recorded is not null)
                 {
-                    await DeliveryVerifier.WriteEvidenceAsync(
-                        prepared.OutputDirectory, binding.Target.WorkingDirectory, binding.ExpectPr,
-                        deliveryOutcome, CancellationToken.None).ConfigureAwait(false);
+                    var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
+                    deliveryOutcome = reading.Evidence?.ToOutcome()
+                        ?? new DeliveryCheckOutcome(DeliveryCheckStatus.Failed, Tail: reading.Problem);
+                }
+                else
+                {
+                    deliveryOutcome = await DeliveryVerifier.CheckAsync(
+                        binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
+                        shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
+                    var evidence = await DeliveryVerifier.ObserveAsync(
+                        binding.Target.WorkingDirectory, binding.ExpectPr, deliveryOutcome, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    if (deliveryOutcome.Status == DeliveryCheckStatus.Passed)
+                    {
+                        if (deliveryOutcome.CheckedLocalHead is null || deliveryOutcome.CheckedRemoteHead is null)
+                        {
+                            evidence = evidence with { ObservationProblem = "passing probe did not retain its exact checked heads" };
+                        }
+                        else if (evidence.LocalHead is not null && evidence.RemoteHead is not null
+                            && (!string.Equals(deliveryOutcome.CheckedLocalHead, evidence.LocalHead, StringComparison.Ordinal)
+                                || !string.Equals(deliveryOutcome.CheckedRemoteHead, evidence.RemoteHead, StringComparison.Ordinal)))
+                        {
+                            // A second valid answer about a different head is not the head the
+                            // ancestry check proved. Never attach that old pass to the new stamp.
+                            const string changedHeads = "delivery heads changed between verification and final observation";
+                            evidence = evidence with
+                            {
+                                Verification = DeliveryCheckStatus.Failed,
+                                VerificationReason = changedHeads,
+                                ObservationProblem = changedHeads,
+                            };
+                        }
+                    }
+                    var observationEvent = evidence.ToRecordedEvent(prepared.Request.ExecutionId);
+                    await eventLogWriter.AppendAsync(observationEvent, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    // The delivery probe and the provenance reads are separate spawns. A Passed
+                    // check with an incomplete final HEAD/remote observation cannot advance a lane
+                    // whose status would truthfully call its machine stamp unknown.
+                    var validatedObservation = DeliveryVerifier.ReadRecordedEvidence(observationEvent);
+                    deliveryOutcome = validatedObservation.Evidence?.ToOutcome()
+                        ?? new DeliveryCheckOutcome(DeliveryCheckStatus.Failed, Tail: validatedObservation.Problem);
+                    try
+                    {
+                        await DeliveryVerifier.WriteEvidenceSnapshotAsync(prepared.OutputDirectory, evidence, CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        Console.Error.WriteLine($"Could not project delivery observation cache: {ex.Message}.");
+                    }
                 }
                 switch (deliveryOutcome.Status)
                 {
@@ -2528,6 +2622,40 @@ public static class MutationInterface
         finally
         {
             inFlightExecutions.Unregister(prepared.Request.ExecutionId);
+        }
+    }
+
+    private static async Task RecordArrestDeliveryObservationAsync(
+        PreparedExecution prepared, WorkerBinding.Process binding, IEventLogWriter eventLogWriter)
+    {
+        // An arrest is never delivery success. Its stopped worker can nevertheless have changed the
+        // exact local/remote/PR heads after writing changes.md. Record those read-only facts after the
+        // dispatcher, checkpoint, and grace have stopped; the NotRun verdict cannot advance the lane.
+        const string reason = "delivery assertion not run: worker was arrested before a clean exit";
+        DeliveryEvidence evidence;
+        using var probeBound = new CancellationTokenSource(OpenPullRequestLookupTimeout);
+        try
+        {
+            evidence = await DeliveryVerifier.ObserveAsync(binding.Target.WorkingDirectory, binding.ExpectPr,
+                new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun, NotRunReason: reason), probeBound.Token)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or UnauthorizedAccessException)
+        {
+            evidence = new DeliveryEvidence(DateTimeOffset.UtcNow.ToString("O"), null, null, null, null,
+                DeliveryCheckStatus.NotRun, null, reason,
+                $"post-arrest Git/PR observation unavailable: {ex.GetType().Name}");
+        }
+        await eventLogWriter.AppendAsync(evidence.ToRecordedEvent(prepared.Request.ExecutionId), CancellationToken.None)
+            .ConfigureAwait(false);
+        try
+        {
+            await DeliveryVerifier.WriteEvidenceSnapshotAsync(prepared.OutputDirectory, evidence, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not project arrested delivery observation cache: {ex.Message}.");
         }
     }
 

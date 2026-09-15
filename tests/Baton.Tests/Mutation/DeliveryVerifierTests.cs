@@ -58,7 +58,8 @@ public sealed class DeliveryVerifierTests
         try
         {
             Directory.CreateDirectory(outputDirectory);
-            var gh = WriteFakeGh(workspace, """[{"number":2309}]""");
+            var prHead = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":2309,"headRefOid":"{{prHead}}"}]""");
             var outcome = await DeliveryVerifier.CheckAsync(workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
             await DeliveryVerifier.WriteEvidenceAsync(outputDirectory, workspace, expectPr: true, outcome, TestContext.Current.CancellationToken, ghProgram: gh);
             var evidencePath = Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName);
@@ -69,11 +70,13 @@ public sealed class DeliveryVerifierTests
 
             Assert.Contains(GitRevParseHead(workspace), original, StringComparison.Ordinal);
             Assert.Contains("\"pullRequestNumber\":2309", original, StringComparison.Ordinal);
+            Assert.Contains($"\"pullRequestHead\":\"{prHead}\"", original, StringComparison.Ordinal);
             Assert.Equal(original, await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken));
 
             TempGitRepository.CommitAll(workspace, "later local change must not rewrite delivery evidence");
             var recovered = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
             Assert.Equal(DeliveryCheckStatus.Passed, recovered.Evidence?.Verification);
+            Assert.Equal(prHead, recovered.Evidence?.PullRequestHead);
             Assert.NotEqual(GitRevParseHead(workspace), recovered.Evidence?.LocalHead);
         }
         finally
@@ -398,19 +401,47 @@ public sealed class DeliveryVerifierTests
         var (workspace, origin) = CreatePushedWorkspace("feature-pr-named");
         try
         {
-            var gh = WriteFakeGh(workspace, """[{"number":1974}]""");
+            var prHead = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":1974,"headRefOid":"{{prHead}}"}]""");
 
             var reading = await DeliveryVerifier.ReadOpenPullRequestAsync(
                 workspace, TestContext.Current.CancellationToken, ghProgram: gh);
 
             Assert.True(reading.AnyOpen);
             Assert.Equal(1974, reading.Number);
+            Assert.Equal(prHead, reading.Head);
             Assert.Null(reading.NotRunReason);
         }
         finally
         {
             Cleanup(workspace, origin);
         }
+    }
+
+    [Fact]
+    public async Task An_arrest_after_PR_update_records_the_exact_PR_head_without_certifying_delivery()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-updated-before-arrest");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":2309,"headRefOid":"{{head}}"}]""");
+            var observation = await DeliveryVerifier.ObserveAsync(workspace, expectPr: true,
+                new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
+                    NotRunReason: "delivery assertion not run: worker was arrested before a clean exit"),
+                TestContext.Current.CancellationToken, ghProgram: gh);
+            var recorded = observation.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-updated-arrest"));
+            var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
+
+            Assert.NotNull(reading.Evidence);
+            Assert.Equal(head, recorded.LocalHead);
+            Assert.Equal(head, recorded.RemoteHead);
+            Assert.Equal(2309, recorded.PullRequestNumber);
+            Assert.Equal(head, recorded.PullRequestHead);
+            Assert.Equal("NotRun", recorded.Verification);
+            Assert.Equal(DeliveryCheckStatus.NotRun, reading.Evidence!.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
     }
 
     [Fact]

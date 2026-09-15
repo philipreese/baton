@@ -336,8 +336,12 @@ public class TerminalSentinelEndToEndTests
     /// hermetic git.exe exits after starting a sleeper that inherited its output handle, so wrapper
     /// EOF and the dead sleeper prove production containment rather than merely proving no probe ran.
     /// </summary>
-    [Fact]
-    public async Task A_real_CLI_delivery_probe_contains_an_inherited_handle_sleeper_before_wrapper_eof()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task A_real_CLI_delivery_probe_contains_an_inherited_handle_sleeper_before_wrapper_eof(
+        bool missingFinalRemoteObservation, bool changedFinalRemoteObservation)
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-delivery-probe-containment-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
@@ -353,13 +357,13 @@ public class TerminalSentinelEndToEndTests
             WriteLingeringGitFixture(fixtureBin);
 
             using var wrapper = StartRedirectingPowerShellWrapper(
-                markerPath, logPath, fixtureBin, true,
+                markerPath, logPath, fixtureBin, true, missingFinalRemoteObservation, changedFinalRemoteObservation,
                 "run", workflowFilePath, "--bindings", bindingsFilePath, "--room-dir", roomDirectory);
             await BoundedProcessWait.RunToExitAsync(
                 wrapper, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
-            Assert.Equal(0, wrapper.ExitCode);
-            Assert.True(File.Exists(markerPath), "the wrapper did not reach EOF after the delivery probe settled");
+            Assert.Equal(missingFinalRemoteObservation || changedFinalRemoteObservation ? 1 : 0, wrapper.ExitCode);
+            Assert.Equal(!missingFinalRemoteObservation && !changedFinalRemoteObservation, File.Exists(markerPath));
             var sleeperPidPath = Path.Combine(fixtureBin, "sleeper.pid");
             Assert.True(
                 File.Exists(sleeperPidPath),
@@ -371,7 +375,13 @@ public class TerminalSentinelEndToEndTests
             var sentinel = JsonSerializer.Deserialize<WorkflowStatusView>(
                 await File.ReadAllTextAsync(Path.Combine(roomDirectory, "terminal.json"), TestContext.Current.CancellationToken));
             var delivery = Assert.Single(sentinel!.Delivery!);
-            Assert.Equal("passed", delivery.AuthoritativeObservation.State);
+            Assert.Equal(changedFinalRemoteObservation ? "failed"
+                : missingFinalRemoteObservation ? "unknown" : "passed",
+                delivery.AuthoritativeObservation.State);
+            if (missingFinalRemoteObservation || changedFinalRemoteObservation)
+            {
+                Assert.NotEqual("Succeeded", sentinel.State);
+            }
         }
         finally
         {
@@ -714,6 +724,18 @@ public class TerminalSentinelEndToEndTests
 
     private static Process StartRedirectingPowerShellWrapper(
         string markerPath, string logPath, string fixtureBin, bool triggerDeliveryProbeSleeper = false, params string[] args)
+        => StartRedirectingPowerShellWrapper(markerPath, logPath, fixtureBin, triggerDeliveryProbeSleeper,
+            missingFinalRemoteObservation: false, args);
+
+    private static Process StartRedirectingPowerShellWrapper(
+        string markerPath, string logPath, string fixtureBin, bool triggerDeliveryProbeSleeper,
+        bool missingFinalRemoteObservation, params string[] args)
+        => StartRedirectingPowerShellWrapper(markerPath, logPath, fixtureBin, triggerDeliveryProbeSleeper,
+            missingFinalRemoteObservation, changedFinalRemoteObservation: false, args);
+
+    private static Process StartRedirectingPowerShellWrapper(
+        string markerPath, string logPath, string fixtureBin, bool triggerDeliveryProbeSleeper,
+        bool missingFinalRemoteObservation, bool changedFinalRemoteObservation, params string[] args)
     {
         static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
@@ -722,6 +744,8 @@ public class TerminalSentinelEndToEndTests
         var script = $"$env:PATH = {Quote(fixtureBin)} + ';' + $env:PATH; "
             + $"$env:BATON_CRASH_TEST_SLEEPER_PID_FILE = {Quote(sleeperPidPath)}; "
             + (triggerDeliveryProbeSleeper ? "$env:BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER = '1'; " : string.Empty)
+            + (missingFinalRemoteObservation ? "$env:BATON_CRASH_TEST_SECOND_REMOTE_OBSERVATION_MISSING = '1'; " : string.Empty)
+            + (changedFinalRemoteObservation ? "$env:BATON_CRASH_TEST_SECOND_REMOTE_OBSERVATION_CHANGED = '1'; " : string.Empty)
             + $"& dotnet exec {Quote(typeof(RunCommand).Assembly.Location)} {batonArguments} *> {Quote(logPath)}; "
             + $"if ($LASTEXITCODE -eq 0) {{ New-Item -ItemType File -Path {Quote(markerPath)} | Out-Null; exit 0 }}; exit $LASTEXITCODE";
         var startInfo = new ProcessStartInfo("powershell")

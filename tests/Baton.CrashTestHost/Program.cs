@@ -66,13 +66,29 @@ if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER"
     && args is ["-c", "credential.interactive=false", "ls-remote", "--heads", "origin", "2190-verified-pr-ownership"])
 {
     // The delivery stamp makes a second, separate remote-head observation after the check.
-    // Keep that positive provenance control truthful without launching another sleeper.
+    // A missing second answer must not inherit the earlier passing probe's authority.
+    if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_SECOND_REMOTE_OBSERVATION_MISSING") == "1")
+    {
+        return 0;
+    }
+    if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_SECOND_REMOTE_OBSERVATION_CHANGED") == "1")
+    {
+        await Console.Out.WriteLineAsync("fedcba9876543210fedcba9876543210fedcba98\trefs/heads/2190-verified-pr-ownership");
+        return 0;
+    }
+    // Keep the positive provenance control truthful without launching another sleeper.
     await Console.Out.WriteLineAsync($"{HermeticHead}\trefs/heads/2190-verified-pr-ownership");
     return 0;
 }
 if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
+    && args is ["rev-parse", "origin/2190-verified-pr-ownership"])
+{
+    await Console.Out.WriteLineAsync(HermeticHead);
+    return 0;
+}
+if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
     && (args is ["-c", "credential.interactive=false", "fetch", "origin", "+refs/heads/2190-verified-pr-ownership:refs/remotes/origin/2190-verified-pr-ownership"]
-        or ["merge-base", "--is-ancestor", "HEAD", "origin/2190-verified-pr-ownership"]))
+        or ["merge-base", "--is-ancestor", HermeticHead, HermeticHead]))
 {
     return 0;
 }

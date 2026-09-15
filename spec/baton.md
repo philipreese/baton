@@ -1691,10 +1691,33 @@ mark), an open PR exists for that branch (`gh pr list --head <branch> --json num
 `implement: Succeeded` reports describing a push and a PR while their branch sat only local — the
 motivating measurement.
 
-A machine-owned, create-new `delivery-evidence.json` is also written in that post-exit boundary beside
-the worker output: it records the observation time, final local HEAD/branch, readable remote head and
-PR number, and the check verdict. It never rewrites `changes.md`; an existing stamp wins on restart, so
-the worker narrative is explicitly only an earlier as-of account and cannot certify later delivery.
+**Machine-owned delivery observation (#2309).** The worker's `changes.md` is an early, as-of
+narrative, never a certificate for a later commit, push, or PR change. On the eligible post-exit path
+above, Baton probes the workspace/remote itself and appends one
+`FlowEvent.DeliveryObservationRecorded` to the engine-owned flow ledger before the delivery verdict
+event. That append-only event is the authoritative stamp: observation time, final local HEAD, branch,
+remote head, readable PR number/head, verification result, and any reason. A `delivery-evidence.json`
+beside the worker's handoff is only an inspectable cache in a worker-writable directory; even a valid
+file placed there before exit cannot skip the live probe or become status, lifecycle, sentinel, or
+cost-ledger authority. Status links the handoff artifact and its filesystem as-of time separately,
+labels its timing relative to the later machine observation, and marks semantic disagreement
+`unassessed-free-form-narrative`; it never parses prose into structured delivery facts. A human can
+inspect both sources when they disagree, but only the stamp routes the lane. If a recorded exit is
+replayed after an engine restart, only the journalled observation may reproduce its delivery verdict;
+absent or incomplete
+observation settles Indeterminate with an engine-restart verification failure, never a fresh remote
+probe that could mistake a later push for this execution's delivered work. The event is immutable per
+observation; a missing, stale, or overwritten cache does not change it. A delivery-capable worker
+stopped by the engine's budget monitor receives a post-stop `NotRun` machine observation after any
+checkpoint/grace work; it records whatever local/remote/PR heads are readable at that arrest boundary
+without running the exit-0 delivery assertion or allowing `ExecutionSucceeded`. Missing facts remain
+unknown. Restart reads the arrested event and observation rather than re-probing a later remote. Other
+arrest origins retain their existing stop/settlement rules and never fabricate a delivery pass.
+
+For a passing exit-0 assertion, the ancestry check names the exact local and fetched remote object IDs
+instead of movable symbolic refs. The later stamp observation must report those same IDs; a readable
+different head is recorded as a failed delivery fact, and missing/incomplete provenance remains unknown.
+Neither case may inherit the earlier pass or advance the lane.
 
 A failure appends `FlowEvent.VerifyFailed` with `VerifyFailedKind.DeliveryFailed` and `FailingMembers`
 naming exactly which of the two is missing — `branch-not-pushed`, `pr-not-open`, or both — settling

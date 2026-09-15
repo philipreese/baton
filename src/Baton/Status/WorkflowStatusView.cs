@@ -262,7 +262,10 @@ public sealed record DeliveryObservationStatusView(
     string? Reason = null,
     [property: JsonPropertyName("observationProblem")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ObservationProblem = null);
+    string? ObservationProblem = null,
+    [property: JsonPropertyName("pullRequestHead")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PullRequestHead = null);
 
 /// <summary>
 /// A worker-authored narrative artifact. Its <see cref="AsOf"/> is the file-system observation of
@@ -282,7 +285,13 @@ public sealed record ExecutionDeliveryStatusView(
     [property: JsonPropertyName("authoritativeObservation")] DeliveryObservationStatusView AuthoritativeObservation,
     [property: JsonPropertyName("handoff")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    DeliveryHandoffStatusView? Handoff = null);
+    DeliveryHandoffStatusView? Handoff = null,
+    [property: JsonPropertyName("handoffTemporalRelation")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? HandoffTemporalRelation = null,
+    [property: JsonPropertyName("disagreement")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Disagreement = null);
 
 /// <summary>
 /// #1530: the wire shape for one <see cref="ArrestLedgerEntry"/> — plain strings throughout, the
@@ -545,11 +554,11 @@ public static class WorkflowStatusProjector
     }
 
     /// <summary>
-    /// Adds immutable per-execution delivery observations to an already-derived status view. This is
-    /// intentionally a file read only: absent, unreadable, or incomplete evidence is reported as
-    /// unknown and is never replaced by a fresh GitHub or git probe while status is being rendered.
+    /// Adds immutable per-execution delivery observations to an already-derived status view. This
+    /// reads only engine-owned journal facts for authority; absent or incomplete observations are
+    /// unknown, and status never substitutes a worker file or fresh GitHub/git probe.
     /// </summary>
-    public static async Task<WorkflowStatusView> WithDeliveryEvidenceAsync(
+    public static Task<WorkflowStatusView> WithDeliveryEvidenceAsync(
         WorkflowStatusView view,
         IReadOnlyList<LogEntry> entries,
         string roomDirectoryPath,
@@ -560,6 +569,11 @@ public static class WorkflowStatusProjector
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
 
         var artifactsRootPath = Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName);
+        var observations = entries.OfType<LogEntry.FlowLogEntry>()
+            .Select(entry => entry.Event)
+            .OfType<FlowEvent.DeliveryObservationRecorded>()
+            .GroupBy(observation => observation.ExecutionId.Value, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
         var executions = new List<ExecutionDeliveryStatusView>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in entries)
@@ -580,23 +594,45 @@ public static class WorkflowStatusProjector
                     File.GetLastWriteTimeUtc(handoffPath).ToString("O"));
             }
 
-            var reading = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, cancellationToken).ConfigureAwait(false);
-            if (reading.IsMissing && handoff is null)
+            var hasRecordedObservation = observations.TryGetValue(accepted.Request.ExecutionId.Value, out var recorded);
+            if (!hasRecordedObservation && handoff is null)
             {
                 continue;
             }
 
+            // The file beside changes.md is worker-writable. Only the engine's journalled fact can
+            // provide structured delivery authority; without it, the handoff is linked as unknown.
+            var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
             var authoritative = reading.Evidence is { } evidence
                 ? new DeliveryObservationStatusView(
                     evidence.Verification.ToString().ToLowerInvariant(), evidence.ObservedAt, evidence.LocalHead,
                     evidence.Branch, evidence.RemoteHead, evidence.PullRequestNumber, evidence.FailingMembers,
-                    evidence.VerificationReason, evidence.ObservationProblem)
+                    evidence.VerificationReason, evidence.ObservationProblem, evidence.PullRequestHead)
                 : new DeliveryObservationStatusView(
                     "unknown", Reason: reading.Problem ?? "delivery evidence stamp is absent");
-            executions.Add(new ExecutionDeliveryStatusView(accepted.Request.ExecutionId.Value, authoritative, handoff));
+            // Free-form handoff prose is deliberately not parsed into a machine verdict. Even when
+            // it says "push failed" beside a Passed observation, status exposes both sources and
+            // explicitly leaves semantic disagreement unassessed; only the stamp routes the lane.
+            string? handoffTemporalRelation = null;
+            string? disagreement = null;
+            if (handoff is not null)
+            {
+                disagreement = "unassessed-free-form-narrative";
+                if (DateTimeOffset.TryParse(handoff.AsOf, out var handoffAsOf)
+                    && DateTimeOffset.TryParse(authoritative.ObservedAt, out var observedAt))
+                {
+                    handoffTemporalRelation = handoffAsOf <= observedAt ? "earlier" : "later-or-rewritten";
+                }
+                else
+                {
+                    handoffTemporalRelation = "unknown";
+                }
+            }
+            executions.Add(new ExecutionDeliveryStatusView(accepted.Request.ExecutionId.Value, authoritative,
+                handoff, handoffTemporalRelation, disagreement));
         }
 
-        return view with { Delivery = executions.Count > 0 ? executions : null };
+        return Task.FromResult(view with { Delivery = executions.Count > 0 ? executions : null });
     }
 
     /// <summary>

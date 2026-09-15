@@ -60,7 +60,9 @@ Before completion, in this same context:
 
 - Compare final `origin/main..HEAD` to the brief; name any unmet acceptance.
 - Confirm final HEAD is pushed and a draft PR exists at that head.
-- Re-read the stored PR body and `changes.md`; all claims must match the final commit.
+- Re-read the stored PR body against the final commit. Treat `changes.md` as an as-of handoff:
+  its local HEAD/time describe what was known when it was written; Baton's post-exit
+  observation, not a later rewrite of that handoff, records final push and PR facts.
 - Confirm every required check ran and every recorded exit code is true.
 
 This is result validation, not an independent review. Failed or uncertain GitHub effects remain explicit
@@ -70,6 +72,8 @@ obligations; issuing a command does not prove its intended state.
 
 Write the review handoff to `$BATON_OUTPUT_DIR/changes.md`:
 
+- State the local HEAD and observation time when this handoff is written. Preserve it before
+  the final commit/push/PR calls; report those later facts through the branch and PR, not here.
 - One section per requested finding/slice: files, change, and reason.
 - Every verification command with its exit code.
 - What was NOT done and why; only the operator may scale down.

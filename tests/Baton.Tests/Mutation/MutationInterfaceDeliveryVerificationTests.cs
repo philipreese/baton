@@ -171,6 +171,106 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     [Fact]
+    public async Task A_worker_placed_passing_stamp_cannot_replace_post_exit_delivery_verification()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-preplaced-stamp");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            Directory.CreateDirectory(roomDirectory);
+            var fixturePath = Path.Combine(roomDirectory, "fake-stamp.json");
+            await File.WriteAllTextAsync(fixturePath,
+                """{"observedAt":"2026-09-15T00:00:00Z","localHead":"0123456789abcdef0123456789abcdef01234567","branch":"lane-preplaced-stamp","remoteHead":"0123456789abcdef0123456789abcdef01234567","verification":"Passed"}""",
+                TestContext.Current.CancellationToken);
+            var command = "$ErrorActionPreference = 'Stop'; "
+                + "Set-Content -LiteralPath (Join-Path $env:BATON_OUTPUT_DIR 'changes.md') -Value 'claimed push'; "
+                + $"Copy-Item -LiteralPath '{fixturePath}' -Destination (Join-Path $env:BATON_OUTPUT_DIR '{DeliveryVerifier.DeliveryEvidenceFileName}'); "
+                + "git commit --allow-empty -m unpushed -q; exit $LASTEXITCODE";
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget("pwsh", ["-NoProfile", "-NonInteractive", "-Command", command], WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30), DeliversBranch: true, ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath,
+                bindings);
+            var step = finalState.Steps.Single();
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var outputDirectory = await OutputDirectoryAsync(logPath, artifactsRoot);
+            Assert.Equal("claimed push", (await File.ReadAllTextAsync(
+                Path.Combine(outputDirectory, "changes.md"), TestContext.Current.CancellationToken)).Trim());
+            Assert.True(File.Exists(Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName)),
+                "the worker process did not place its stamp file");
+            var actualDelivery = await DeliveryVerifier.CheckAsync(workspace, expectPr: false, TestContext.Current.CancellationToken);
+
+            Assert.Equal(DeliveryCheckStatus.Failed, actualDelivery.Status);
+            Assert.Equal(["branch-not-pushed"], actualDelivery.FailingMembers);
+
+            Assert.True(step.IndeterminateAwaitingResolution);
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["branch-not-pushed"], failed.FailingMembers);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(roomDirectory); DirectoryCleanup.DeleteRecursively(workspace); DirectoryCleanup.DeleteRecursively(origin); }
+    }
+
+    [Theory]
+    [InlineData("after-artifact")]
+    [InlineData("after-commit")]
+    [InlineData("after-push-before-pr")]
+    public async Task A_budget_arrest_records_non_certifying_heads_at_each_delivery_boundary(string boundary)
+    {
+        const string branch = "lane-arrest-boundary";
+        var (workspace, origin) = CreatePushedWorkspace(branch);
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var before = await DeliveryVerifier.ObserveAsync(workspace, expectPr: false,
+                new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun, NotRunReason: "pre-worker control"),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(before.LocalHead, before.RemoteHead);
+            const string toolStepLine = """{"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"run_command"}}""";
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget("cmd", ["/c", "exit 0"], WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30), Adapter: "agy", MaxToolSteps: 2,
+                    ChangesTree: true, DeliversBranch: true, ExpectPr: false, VerifiesWorkspace: false),
+            };
+            var dispatcher = new ArrestAtBoundaryDispatcher(workspace, artifactsRoot, branch, boundary, toolStepLine);
+            var state = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings, dispatcher);
+            Assert.NotEqual(StepStatus.Succeeded, Assert.Single(state.Steps).Status);
+
+            var reader = new FlowEventLogReader(logPath);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+            var observation = Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+            Assert.Equal("NotRun", observation.Verification);
+            Assert.Contains("arrested", observation.VerificationReason, StringComparison.Ordinal);
+            Assert.Equal(branch, observation.Branch);
+            Assert.Equal(before.LocalHead == observation.LocalHead, boundary == "after-artifact");
+            Assert.Equal(observation.LocalHead == observation.RemoteHead, boundary != "after-commit");
+            if (boundary == "after-commit") Assert.Equal(before.RemoteHead, observation.RemoteHead);
+
+            var outputDirectory = await OutputDirectoryAsync(logPath, artifactsRoot);
+            var handoffPath = Path.Combine(outputDirectory, "changes.md");
+            var handoff = await File.ReadAllTextAsync(handoffPath, TestContext.Current.CancellationToken);
+            Assert.Contains("early account", handoff, StringComparison.Ordinal);
+            if (boundary == "after-commit") TempGitRepository.Push(workspace, "origin", branch);
+            await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var replayed = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(observation, Assert.Single(replayed.OfType<FlowEvent.DeliveryObservationRecorded>()));
+            Assert.Equal(handoff, await File.ReadAllTextAsync(handoffPath, TestContext.Current.CancellationToken));
+            Assert.Empty(replayed.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally { DirectoryCleanup.DeleteRecursively(roomDirectory); DirectoryCleanup.DeleteRecursively(workspace); DirectoryCleanup.DeleteRecursively(origin); }
+    }
+
+    [Fact]
     public async Task A_negative_handoff_does_not_hide_an_already_durable_remote_head()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-negative-with-durable-head");
@@ -210,7 +310,8 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     private static async Task<FlowState> RunSingleStepPumpAsync(
-        string roomDirectory, string artifactsRoot, string logPath, IReadOnlyDictionary<string, WorkerBinding> bindings)
+        string roomDirectory, string artifactsRoot, string logPath, IReadOnlyDictionary<string, WorkerBinding> bindings,
+        ICoreDispatcher? dispatcherOverride = null)
     {
         var snapshot = new WorkflowDefinitionSnapshot(
             new WorkflowDefinitionSnapshotId("snapshot-delivery"),
@@ -220,7 +321,7 @@ public sealed class MutationInterfaceDeliveryVerificationTests
 
         await using var writer = new FlowEventLogWriter(logPath);
         var reader = new FlowEventLogReader(logPath);
-        var dispatcher = new CoreDispatcher(writer, writer);
+        var dispatcher = dispatcherOverride ?? new CoreDispatcher(writer, writer);
 
         return await MutationInterface.StartWorkflowAsync(
             new WorkflowId("wf-delivery"), roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, dispatcher,
@@ -231,6 +332,28 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     {
         var roomDirectory = Path.Combine(Path.GetTempPath(), $"task-delivery-{Guid.NewGuid():N}");
         return (roomDirectory, Path.Combine(roomDirectory, "artifacts"), Path.Combine(roomDirectory, "flow.jsonl"));
+    }
+
+    private sealed class ArrestAtBoundaryDispatcher(
+        string workspace, string artifactsRoot, string branch, string boundary, string toolStepLine) : ICoreDispatcher
+    {
+        public async Task<CoreDispatchResult> DispatchAsync(ExecutionRequest request, CoreDispatchTarget target,
+            CancellationToken cancellationToken = default)
+        {
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, request.ExecutionId);
+            Directory.CreateDirectory(outputDirectory);
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, "changes.md"), "early account");
+            if (boundary != "after-artifact")
+            {
+                TempGitRepository.CommitAll(workspace, "commit after handoff");
+                if (boundary == "after-push-before-pr") TempGitRepository.Push(workspace, "origin", branch);
+            }
+            for (var i = 0; i < 3; i++) target.OnStdoutLine?.Invoke(toolStepLine);
+            var arrested = new TaskCompletionSource();
+            using var registration = cancellationToken.Register(() => arrested.TrySetResult());
+            await arrested.Task.WaitAsync(TimeSpan.FromSeconds(120), CancellationToken.None);
+            return new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+        }
     }
 
     private static (string Workspace, string Origin) CreatePushedWorkspace(string branch)

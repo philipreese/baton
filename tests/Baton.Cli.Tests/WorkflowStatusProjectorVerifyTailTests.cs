@@ -108,9 +108,14 @@ public sealed class WorkflowStatusProjectorVerifyTailTests
             Directory.CreateDirectory(roomDirectory);
             await SnapshotBinder.PersistAsync(
                 snapshot, Path.Combine(roomDirectory, BatonPaths.SnapshotFileName), TestContext.Current.CancellationToken);
+            var observedAt = DateTimeOffset.UtcNow.AddMinutes(1).ToString("O");
+            const string observedHead = "0123456789abcdef0123456789abcdef01234567";
             await using (var writer = new FlowEventLogWriter(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName)))
             {
                 await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId)), TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new FlowEvent.DeliveryObservationRecorded(
+                    executionId, observedAt, observedHead, "lane", observedHead, 2309, "Passed",
+                    PullRequestHead: observedHead), TestContext.Current.CancellationToken);
                 await writer.AppendAsync(new FlowEvent.ExecutionSucceeded(executionId), TestContext.Current.CancellationToken);
             }
 
@@ -120,14 +125,15 @@ public sealed class WorkflowStatusProjectorVerifyTailTests
             // Deliberately conflicting prose. Status exposes it only as an artifact link; it does
             // not parse this sentence or let it outrank the later machine observation.
             await File.WriteAllTextAsync(Path.Combine(outputDirectory, "changes.md"), "Worker handoff: push failed.", TestContext.Current.CancellationToken);
-            var observedAt = DateTimeOffset.UtcNow.AddMinutes(1).ToString("O");
             await File.WriteAllTextAsync(
                 Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName),
-                $$"""{"observedAt":"{{observedAt}}","localHead":"later-head","branch":"lane","remoteHead":"later-head","pullRequestNumber":2309,"verification":"Passed","failingMembers":null,"verificationReason":null,"observationProblem":null}""",
+                "worker-writable file is not delivery authority",
                 TestContext.Current.CancellationToken);
 
             var reader = new FlowEventLogReader(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName));
             var entries = await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var costLedgerDelivery = TerminalSettleRecorder.ReadDeliveryEvidenceByWorker(entries);
+            Assert.Equal("2309", costLedgerDelivery["implement"].PullRequest);
             var state = StateProjector.Project(entries.OfType<LogEntry.FlowLogEntry>().Select(entry => entry.Event).ToList(), snapshot);
             var view = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
                 WorkflowStatusProjector.Project(state, snapshot, roomDirectory, entries), entries, roomDirectory,
@@ -136,10 +142,13 @@ public sealed class WorkflowStatusProjectorVerifyTailTests
 
             var projected = Assert.Single(view.Delivery!);
             Assert.Equal("passed", projected.AuthoritativeObservation.State);
-            Assert.Equal("later-head", projected.AuthoritativeObservation.RemoteHead);
+            Assert.Equal(observedHead, projected.AuthoritativeObservation.RemoteHead);
+            Assert.Equal(observedHead, projected.AuthoritativeObservation.PullRequestHead);
             Assert.NotNull(projected.Handoff);
             Assert.Equal(Path.Combine("artifacts", $"execution_{executionId.Value}", "changes.md"), projected.Handoff!.Artifact);
             Assert.True(DateTimeOffset.Parse(projected.Handoff.AsOf) < DateTimeOffset.Parse(projected.AuthoritativeObservation.ObservedAt!));
+            Assert.Equal("earlier", projected.HandoffTemporalRelation);
+            Assert.Equal("unassessed-free-form-narrative", projected.Disagreement);
 
             using var output = new StringWriter();
             await StatusCommand.ExecuteAsync(new StatusOptions(roomDirectory, Json: true), output, TestContext.Current.CancellationToken);
@@ -179,7 +188,17 @@ public sealed class WorkflowStatusProjectorVerifyTailTests
             await File.WriteAllTextAsync(Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName), "not json", TestContext.Current.CancellationToken);
             var corrupt = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(baseView, entries, roomDirectory, TestContext.Current.CancellationToken);
             Assert.Equal("unknown", Assert.Single(corrupt.Delivery!).AuthoritativeObservation.State);
-            Assert.Contains("unreadable", corrupt.Delivery![0].AuthoritativeObservation.Reason, StringComparison.Ordinal);
+            Assert.Contains("absent", corrupt.Delivery![0].AuthoritativeObservation.Reason, StringComparison.Ordinal);
+            Assert.Empty(TerminalSettleRecorder.ReadDeliveryEvidenceByWorker(entries));
+
+            var malformedLedgerEntries = entries.Append(new LogEntry.FlowLogEntry(
+                new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
+                    null, null, null, null, "Invalid"), DateTime.UtcNow)).ToArray();
+            var malformed = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+                baseView, malformedLedgerEntries, roomDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", Assert.Single(malformed.Delivery!).AuthoritativeObservation.State);
+            Assert.Contains("incomplete", malformed.Delivery![0].AuthoritativeObservation.Reason, StringComparison.Ordinal);
+            Assert.Empty(TerminalSettleRecorder.ReadDeliveryEvidenceByWorker(malformedLedgerEntries));
         }
         finally
         {
