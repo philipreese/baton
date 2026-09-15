@@ -71,6 +71,17 @@ public class FlowEventLogJsonTests
         new FlowEvent.ExecutionProgress(ExecutionId),
         new FlowEvent.CancellationDelivered(ExecutionId),
         new FlowEvent.CancellationRejected(ExecutionId),
+        // #2309: replay must retain the engine-owned observation across all verdict shapes;
+        // a worker-writable evidence file cannot repair a damaged journal line.
+        new FlowEvent.DeliveryObservationRecorded(
+            ExecutionId, FixedInstant.ToString("O"), new string('a', 40), "delivery-branch",
+            new string('a', 40), 123, "Passed", PullRequestHead: new string('a', 40)),
+        new FlowEvent.DeliveryObservationRecorded(
+            ExecutionId, FixedInstant.ToString("O"), new string('b', 40), "delivery-branch",
+            null, null, "Failed", ["branch-not-pushed"], "remote branch absent"),
+        new FlowEvent.DeliveryObservationRecorded(
+            ExecutionId, FixedInstant.ToString("O"), null, "delivery-branch",
+            null, null, "NotRun", ObservationProblem: "execution arrested"),
         new FlowEvent.DeliveryPrOpened(123, "734-lane"),
         new FlowEvent.DeliveryChecksGreen(123),
         new FlowEvent.DeliveryChecksRed(123),

@@ -142,9 +142,9 @@ public static class QueueCommand
         // #2142: queue admission uses the already-resolved tuple the launcher will forward, not the
         // raw item fields and not RoleDispatch's display-only stamp. Refuse before the early tag read,
         // spec copy, worktree provision, or queue mutation so a bad request leaves no queue side effect.
-        if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+        if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
         {
-            throw ClaudeInvocationModelPolicy.Refusal(refusal, tier.Adapter);
+            throw WorkerInvocationModelPolicy.Refusal(refusal, tier.Adapter);
         }
 
         // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
@@ -1025,9 +1025,9 @@ public static class QueueCommand
 
             var tier = QueueTierTable.ResolveForStage(
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
-            if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+            if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
             {
-                throw ClaudeInvocationModelPolicy.Refusal(
+                throw WorkerInvocationModelPolicy.Refusal(
                     $"The {WorkStages.Token(stage)} selection is invalid: {refusal}", tier.Adapter);
             }
 

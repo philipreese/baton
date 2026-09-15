@@ -185,6 +185,8 @@ public static class StatusCommand
                 var view = WorkflowStatusProjector.Project(
                     state, snapshot, options.RoomDirectoryPath, entries, WorkerAdapterRegistry.Default, arrestLedger,
                     arrestLedgerUnavailableReason);
+                view = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+                    view, entries, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
                 output.WriteLine(JsonSerializer.Serialize(view with { Runway = runway, DeclaredTaskSize = declaredTaskSize }));
                 return;
             }

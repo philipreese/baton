@@ -1,5 +1,7 @@
 using Baton.Accounting;
+using Baton.Artifacts;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Status;
 using Baton.Store;
 
@@ -58,6 +60,8 @@ public static class TerminalSettleRecorder
         var terminalEntries = await new FlowEventLogReader(terminalLogPath)
             .ReadAllEntriesWithTimestampsAsync(CancellationToken.None).ConfigureAwait(false);
         var view = WorkflowStatusProjector.Project(result.State, result.Snapshot, terminalRoomDirectoryPath, terminalEntries);
+        view = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+            view, terminalEntries, terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
         // CancellationToken.None: a Ctrl-C that already carried the workflow to Terminal must not
         // then lose the sentinel write for the terminal state it just reached.
         await TerminalSentinelWriter.WriteAsync(terminalRoomDirectoryPath, view, CancellationToken.None).ConfigureAwait(false);
@@ -111,14 +115,9 @@ public static class TerminalSettleRecorder
                 var stamps = await RoomBindingStamps
                     .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
 
-                // #1901 C1: the issue, PR and diff shape each worker's own workspace still holds. Read
-                // here rather than inside the ledger for the same reason the overrides above are
-                // (WorkspaceDeliveryProbe's own remarks), and fail-open in exactly the same way -- a
-                // workspace that is gone, a `gh` that is absent, or a network that is down costs the
-                // stamp, never the row. See this method's own parameter doc for why this one call
-                // takes the caller's token where every other write here takes None.
-                var delivery = await WorkspaceDeliveryProbe
-                    .ReadForRoomAsync(terminalRoomDirectoryPath, deliveryProbeToken).ConfigureAwait(false);
+                // The ledger is an as-of execution record. Read the immutable post-execution stamp
+                // rather than reprobe a workspace whose remote state may have changed after settle.
+                var delivery = ReadDeliveryEvidenceByWorker(terminalEntries);
 
                 // identitySource, from the resolver rather than assumed here (#1931 re-review MEDIUM):
                 // the settle site writes most of the ledger, so a field only the backfill stamped would
@@ -147,5 +146,29 @@ public static class TerminalSettleRecorder
         {
             Console.Error.WriteLine($"Could not append to the cost ledger: {ex.Message}.");
         }
+    }
+
+    /// <summary>Projects only ledger-authorized delivery facts into cost-ledger PR provenance.</summary>
+    internal static IReadOnlyDictionary<string, WorkspaceDelivery> ReadDeliveryEvidenceByWorker(
+        IReadOnlyList<LogEntry> entries)
+    {
+        var result = new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal);
+        var workerByExecution = entries.OfType<LogEntry.FlowLogEntry>()
+            .Select(entry => entry.Event)
+            .OfType<FlowEvent.ExecutionRequestAccepted>()
+            .ToDictionary(accepted => accepted.Request.ExecutionId, accepted => accepted.Request.Worker);
+        foreach (var entry in entries)
+        {
+            if (entry is not LogEntry.FlowLogEntry { Event: FlowEvent.DeliveryObservationRecorded recorded }
+                || !workerByExecution.TryGetValue(recorded.ExecutionId, out var worker)) continue;
+            var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
+            if (reading.Evidence is { PullRequestNumber: { } pullRequestNumber })
+            {
+                result[worker] = new WorkspaceDelivery(
+                    PullRequest: pullRequestNumber.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+
+        return result;
     }
 }

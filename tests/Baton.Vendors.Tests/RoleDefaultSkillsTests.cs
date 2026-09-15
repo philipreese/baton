@@ -285,7 +285,8 @@ public sealed class RoleDefaultSkillsTests : IDisposable
         Assert.Contains("gh pr create --draft", content, StringComparison.Ordinal);
         Assert.Contains("End-of-implementation self-check", content, StringComparison.Ordinal);
         Assert.Contains("Confirm final HEAD is pushed", content, StringComparison.Ordinal);
-        Assert.Contains("Re-read the stored PR body and `changes.md`", content, StringComparison.Ordinal);
+        Assert.Contains("Re-read the stored PR body against the final commit", content, StringComparison.Ordinal);
+        Assert.Contains("Treat `changes.md` as an as-of handoff", content, StringComparison.Ordinal);
         Assert.Contains("result validation, not an independent review", content, StringComparison.Ordinal);
     }
 

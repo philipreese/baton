@@ -1687,9 +1687,50 @@ origin/<branch>`), and (2) when a PR is expected (`--expect-pr`, defaulting to
 `role.DeliversBranch`, overridable per dispatch — `Baton.Vendors.RoleDispatch.ToBinding` resolves the
 effective bool there rather than leaving it null, so a plain-`bool` default trap on
 `WorkerBindingConfigEntry.ExpectPr` can never silently disable the check for a role the catalog does
-mark), an open PR exists for that branch (`gh pr list --head <branch> --json number`). Two lanes shipped
+mark), an open PR exists for that branch with a readable exact number/head
+(`gh pr list --head <branch> --json number,headRefOid`). A positive-but-unnameable PR reading
+cannot certify the later exact head and makes this delivery assertion `NotRun`, without changing the
+general PR reader's truthful "some PR is open" answer. Two lanes shipped
 `implement: Succeeded` reports describing a push and a PR while their branch sat only local — the
 motivating measurement.
+
+**Machine-owned delivery observation (#2309).** The worker's `changes.md` is an early, as-of
+narrative, never a certificate for a later commit, push, or PR change. On the eligible post-exit path
+above, Baton probes the workspace/remote itself and appends one
+`FlowEvent.DeliveryObservationRecorded` to the engine-owned flow ledger before the delivery verdict
+event. That append-only event is the authoritative stamp: observation time, final local HEAD, branch,
+remote head, readable PR number/head, verification result, and any reason. A `delivery-evidence.json`
+beside the worker's handoff is only an inspectable cache in a worker-writable directory; even a valid
+file placed there before exit cannot skip the live probe or become status, lifecycle, sentinel, or
+cost-ledger authority. Status links the handoff artifact and its filesystem as-of time separately,
+labels its timing relative to the later machine observation, and marks semantic disagreement
+`unassessed-free-form-narrative`; it never parses prose into structured delivery facts. A human can
+inspect both sources when they disagree, but only the stamp routes the lane. If a recorded exit is
+replayed after an engine restart, only the journalled observation may reproduce its delivery verdict;
+absent or incomplete
+observation settles Indeterminate with an engine-restart verification failure, never a fresh remote
+probe that could mistake a later push for this execution's delivered work. The event is immutable per
+observation; a missing, stale, or overwritten cache does not change it. A delivery-capable worker
+stopped by the engine's budget monitor receives a post-stop `NotRun` machine observation after any
+checkpoint/grace work; it records whatever local/remote/PR heads are readable at that arrest boundary
+without running the exit-0 delivery assertion or allowing `ExecutionSucceeded`. Missing facts remain
+unknown. Restart reads the arrested event and observation rather than re-probing a later remote. Other
+arrest origins retain their existing stop/settlement rules and never fabricate a delivery pass.
+
+For a passing exit-0 assertion, the ancestry check names the exact local and fetched remote object IDs
+instead of movable symbolic refs. The later stamp observation must report those same IDs; a readable
+different head is recorded as a failed delivery fact, and missing/incomplete provenance remains unknown.
+Neither case may inherit the earlier pass or advance the lane.
+When a PR is expected, the check retains its positive open reading and exact PR number/head. If
+either identity or object ID is unreadable in the first answer, delivery is `NotRun` rather than a
+pass that cannot be compared with the later forge state.
+The final stamp re-reads the PR: a positive absence or a different readable number/head fails
+`pr-not-open` for that checked PR, while an unreadable final lookup becomes `NotRun`. The same earlier
+PR reading cannot certify a later close or force-push. Unreadable fields can still be recorded in a
+non-certifying stamp when available later; they never become retroactive proof of the first answer.
+A `Passed` journal observation that names a PR must retain its exact valid PR head; losing the
+optional head member makes that event incomplete on replay rather than silently treating the pass
+as branch-only. Failed and `NotRun` observations may still lack PR facts without fabricating them.
 
 A failure appends `FlowEvent.VerifyFailed` with `VerifyFailedKind.DeliveryFailed` and `FailingMembers`
 naming exactly which of the two is missing — `branch-not-pushed`, `pr-not-open`, or both — settling
@@ -7320,6 +7361,14 @@ Whenever model hints identify any candidates, the resolved adapter must belong t
 when `--adapter` is named. With zero candidates, a named adapter's own validation alone decides.
 The resolved adapter's offline rules also check models when no adapter was named. These refusals
 precede row writes, spec copies, and worktree provisioning. Import does not perform this add-time validation.
+
+**Known adapter/model mismatches refuse before spawn (#2328).** Queue add already checks recorded
+model candidates as above. Direct dispatch applies that same candidate check to each final resolved
+binding after role/template/continuation resolution but before room creation, runway admission, or a
+vendor process. The scheduler repeats it for persisted/imported rows before claiming a room. A model
+known only to Codex cannot ride a role's default Claude adapter merely because `--adapter` was omitted.
+Candidate hints are not a universal allowlist: an unknown token still reaches the selected adapter's
+own validation, and a candidate shared by adapters remains usable on each listed adapter.
 
 **Conductor-only worker models fail closed (#2233).** The one conductor-model catalog classifies Fable
 and Astra. Queue admission, including every explicitly selected lifecycle stage, refuses either model

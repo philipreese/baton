@@ -447,6 +447,7 @@ public static class StateProjector
             case FlowEvent.ZeroOutputsDespiteSubstantialWork:
             case FlowEvent.VerifyDeclarationIgnored:
             case FlowEvent.VerifyDeclarationUnreviewed:
+            case FlowEvent.DeliveryObservationRecorded:
             case FlowEvent.ExecutionProgress:
             case FlowEvent.CancellationDelivered:
             case FlowEvent.CancellationRejected:
@@ -468,6 +469,8 @@ public static class StateProjector
                 // #1885's StreamLogLossDeclared joins them: it is read by ExecutionUsageProjector off the
                 // raw ledger entries, never off this projection, so a stream-log gap has no bearing on
                 // whether a step succeeded, failed, or may retry.
+                // #2309's delivery observation is read by settle/recovery and status from this same
+                // ledger; it cannot itself turn a step into success or failure.
                 break;
 
             case FlowEvent.ExecutionIndeterminate indeterminate:

@@ -228,9 +228,9 @@ public static class DispatchCommand
         // before runway admission, room provisioning, or any other dispatch write.
         foreach (var (workerName, binding) in bindings)
         {
-            if (ClaudeInvocationModelPolicy.RefusalMessage(binding.Adapter, binding.Model, binding.ModelResolved) is { } refusal)
+            if (WorkerInvocationModelPolicy.RefusalMessage(binding.Adapter, binding.Model, binding.ModelResolved) is { } refusal)
             {
-                throw ClaudeInvocationModelPolicy.Refusal(
+                throw WorkerInvocationModelPolicy.Refusal(
                     $"Worker '{workerName}' {refusal}", binding.Adapter);
             }
         }

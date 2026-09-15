@@ -1,7 +1,13 @@
+using System.Text.Json;
+using Baton.Artifacts;
+using Baton.Cli;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Projection;
 using Baton.Status;
+using Baton.Store;
+using Baton.Templates;
 
 namespace Baton.Cli.Tests;
 
@@ -84,6 +90,115 @@ public sealed class WorkflowStatusProjectorVerifyTailTests
             var step = Assert.Single(view.Steps);
             Assert.Equal("Arrested", step.IndeterminateProducerKind);
             Assert.Null(step.VerifyTail);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Delivery_status_keeps_the_earlier_handoff_separate_and_the_later_stamp_authoritative_in_status_and_sentinel()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"delivery-status-{Guid.NewGuid():N}");
+        try
+        {
+            var executionId = new ExecutionId("exec-delivery-status");
+            var snapshot = OneStepSnapshot();
+            Directory.CreateDirectory(roomDirectory);
+            await SnapshotBinder.PersistAsync(
+                snapshot, Path.Combine(roomDirectory, BatonPaths.SnapshotFileName), TestContext.Current.CancellationToken);
+            var observedAt = DateTimeOffset.UtcNow.AddMinutes(1).ToString("O");
+            const string observedHead = "0123456789abcdef0123456789abcdef01234567";
+            await using (var writer = new FlowEventLogWriter(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName)))
+            {
+                await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId)), TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new FlowEvent.DeliveryObservationRecorded(
+                    executionId, observedAt, observedHead, "lane", observedHead, 2309, "Passed",
+                    PullRequestHead: observedHead), TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new FlowEvent.ExecutionSucceeded(executionId), TestContext.Current.CancellationToken);
+            }
+
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(
+                Path.Combine(roomDirectory, ArtifactManager.ArtifactsDirectoryName), executionId);
+            Directory.CreateDirectory(outputDirectory);
+            // Deliberately conflicting prose. Status exposes it only as an artifact link; it does
+            // not parse this sentence or let it outrank the later machine observation.
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, "changes.md"), "Worker handoff: push failed.", TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName),
+                "worker-writable file is not delivery authority",
+                TestContext.Current.CancellationToken);
+
+            var reader = new FlowEventLogReader(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName));
+            var entries = await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var costLedgerDelivery = TerminalSettleRecorder.ReadDeliveryEvidenceByWorker(entries);
+            Assert.Equal("2309", costLedgerDelivery["implement"].PullRequest);
+            var state = StateProjector.Project(entries.OfType<LogEntry.FlowLogEntry>().Select(entry => entry.Event).ToList(), snapshot);
+            var view = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+                WorkflowStatusProjector.Project(state, snapshot, roomDirectory, entries), entries, roomDirectory,
+                TestContext.Current.CancellationToken);
+            await TerminalSentinelWriter.WriteAsync(roomDirectory, view, TestContext.Current.CancellationToken);
+
+            var projected = Assert.Single(view.Delivery!);
+            Assert.Equal("passed", projected.AuthoritativeObservation.State);
+            Assert.Equal(observedHead, projected.AuthoritativeObservation.RemoteHead);
+            Assert.Equal(observedHead, projected.AuthoritativeObservation.PullRequestHead);
+            Assert.NotNull(projected.Handoff);
+            Assert.Equal(Path.Combine("artifacts", $"execution_{executionId.Value}", "changes.md"), projected.Handoff!.Artifact);
+            Assert.True(DateTimeOffset.Parse(projected.Handoff.AsOf) < DateTimeOffset.Parse(projected.AuthoritativeObservation.ObservedAt!));
+            Assert.Equal("earlier", projected.HandoffTemporalRelation);
+            Assert.Equal("unassessed-free-form-narrative", projected.Disagreement);
+
+            using var output = new StringWriter();
+            await StatusCommand.ExecuteAsync(new StatusOptions(roomDirectory, Json: true), output, TestContext.Current.CancellationToken);
+            var status = JsonSerializer.Deserialize<WorkflowStatusView>(output.ToString());
+            Assert.Equal(view.Delivery, status!.Delivery);
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(roomDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal(view.Delivery, sentinel!.Delivery);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Missing_or_corrupt_delivery_evidence_is_unknown_without_a_status_reprobe()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"delivery-status-unknown-{Guid.NewGuid():N}");
+        try
+        {
+            var executionId = new ExecutionId("exec-delivery-unknown");
+            var snapshot = OneStepSnapshot();
+            var entries = new LogEntry[]
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId)), DateTime.UtcNow),
+            };
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(
+                Path.Combine(roomDirectory, ArtifactManager.ArtifactsDirectoryName), executionId);
+            Directory.CreateDirectory(outputDirectory);
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, "changes.md"), "handoff only", TestContext.Current.CancellationToken);
+            var baseView = WorkflowStatusProjector.Project(StateProjector.Project([((LogEntry.FlowLogEntry)entries[0]).Event], snapshot), snapshot, roomDirectory, entries);
+
+            var missing = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(baseView, entries, roomDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", Assert.Single(missing.Delivery!).AuthoritativeObservation.State);
+            Assert.Contains("absent", missing.Delivery![0].AuthoritativeObservation.Reason, StringComparison.Ordinal);
+
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName), "not json", TestContext.Current.CancellationToken);
+            var corrupt = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(baseView, entries, roomDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", Assert.Single(corrupt.Delivery!).AuthoritativeObservation.State);
+            Assert.Contains("absent", corrupt.Delivery![0].AuthoritativeObservation.Reason, StringComparison.Ordinal);
+            Assert.Empty(TerminalSettleRecorder.ReadDeliveryEvidenceByWorker(entries));
+
+            var malformedLedgerEntries = entries.Append(new LogEntry.FlowLogEntry(
+                new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
+                    null, null, null, null, "Invalid"), DateTime.UtcNow)).ToArray();
+            var malformed = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+                baseView, malformedLedgerEntries, roomDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", Assert.Single(malformed.Delivery!).AuthoritativeObservation.State);
+            Assert.Contains("incomplete", malformed.Delivery![0].AuthoritativeObservation.Reason, StringComparison.Ordinal);
+            Assert.Empty(TerminalSettleRecorder.ReadDeliveryEvidenceByWorker(malformedLedgerEntries));
         }
         finally
         {

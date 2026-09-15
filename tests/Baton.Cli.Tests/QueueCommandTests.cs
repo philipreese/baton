@@ -234,6 +234,7 @@ public sealed class QueueCommandTests
     [InlineData("codex", "opus", "absent from the recorded Codex capability snapshot")]
     [InlineData("claude", "claude-opus-4.8", "cannot use the requested --model")]
     [InlineData("agy", "gpt-5.6-sol", "cannot use it")]
+    [InlineData("claude", "gpt-5.6-terra", "cannot use it")]
     public async Task Add_refuses_ambiguous_or_invalid_models_before_any_queue_side_effect(
         string? adapter, string model, string message)
     {

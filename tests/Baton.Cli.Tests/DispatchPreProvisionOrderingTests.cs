@@ -248,6 +248,48 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("claude")]
+    public async Task A_recorded_Codex_model_on_default_or_explicit_Claude_refuses_before_room_or_runway(
+        string? adapter)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-cross-model-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with
+            {
+                Name = "review", // frontier defaults to Claude when --adapter was omitted.
+                Adapter = adapter,
+                Model = "gpt-5.6-terra",
+            };
+            var runwayCalls = 0;
+            RunwayDecision TrackRunway(string vendor)
+            {
+                runwayCalls++;
+                return Admit(vendor);
+            }
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: TrackRunway));
+            Assert.Contains("known by codex", refusal.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, runwayCalls);
+            Assert.False(Directory.Exists(options.RoomDirectoryPath));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(testRoot); }
+    }
+
+    [Theory]
+    [InlineData("claude", "sonnet")]
+    [InlineData("codex", "gpt-5.6-terra")]
+    [InlineData("claude", "future-unknown-model")]
+    [InlineData("agy", "future-unknown-model")]
+    public void Known_compatible_and_unknown_models_keep_their_existing_adapter_policy(
+        string adapter, string model)
+    {
+        Assert.Null(WorkerInvocationModelPolicy.RefusalMessage(adapter, model));
+    }
+
     [Fact]
     public async Task An_unpinned_codex_dispatch_refuses_its_recorded_Astra_default_before_room_creation()
     {

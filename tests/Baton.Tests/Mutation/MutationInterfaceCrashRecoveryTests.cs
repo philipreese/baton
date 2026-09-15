@@ -2,6 +2,7 @@ using Baton.Artifacts;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Status;
 using Baton.Store;
 using Baton.Tests.TestSupport;
 
@@ -828,6 +829,140 @@ public class MutationInterfaceCrashRecoveryTests
         }
     }
 
+    [Theory]
+    [InlineData("missing", false)]
+    [InlineData("passed", true)]
+    [InlineData("failed", false)]
+    [InlineData("invalid", false)]
+    public async Task A_replayed_delivery_exit_uses_only_its_journalled_observation(string observationCase, bool expectSuccess)
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-delivery-replay");
+            var executionId = await AcceptRequestAsync(writer, workflowId, artifactsRoot, A, deliversBranch: true);
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, executionId);
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName),
+                """{"observedAt":"2026-09-15T00:00:00Z","verification":"Passed","localHead":"0123456789abcdef0123456789abcdef01234567","branch":"lane","remoteHead":"0123456789abcdef0123456789abcdef01234567"}""",
+                TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionStarted(executionId, Pid: 4242), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionExited(executionId, ExitCode: 0, CoreExitReason.Natural), TestContext.Current.CancellationToken);
+
+            const string head = "0123456789abcdef0123456789abcdef01234567";
+            var observation = observationCase switch
+            {
+                "passed" => new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
+                    head, "lane", head, null, "Passed"),
+                "failed" => new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
+                    head, "lane", null, null, "Failed", ["branch-not-pushed"], "branch-not-pushed"),
+                "invalid" => new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
+                    null, null, null, null, "Invalid"),
+                _ => null,
+            };
+            if (observation is not null) await writer.AppendAsync(observation, TestContext.Current.CancellationToken);
+
+            // No worker or Git probe is available in recovery. Even a passing file in its output
+            // cannot decide this exit; only the flow-ledger observation above may do that.
+            var state = await MutationInterface.StartWorkflowAsync(workflowId, roomDirectory, snapshot,
+                MakeBindings(), artifactsRoot, reader, writer, new StubCoreDispatcher(),
+                cancellationToken: TestContext.Current.CancellationToken);
+            var step = Assert.Single(state.Steps);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            if (expectSuccess)
+            {
+                Assert.Equal(StepStatus.Succeeded, step.Status);
+                Assert.Single(events.OfType<FlowEvent.ExecutionSucceeded>());
+                Assert.Empty(events.OfType<FlowEvent.VerifyFailed>());
+            }
+            else
+            {
+                Assert.True(step.IndeterminateAwaitingResolution);
+                Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+                var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+                Assert.Equal(observationCase == "failed" ? VerifyFailedKind.DeliveryFailed : VerifyFailedKind.EngineRestart,
+                    failure.Kind);
+            }
+        }
+        finally { DirectoryCleanup.DeleteRecursively(roomDirectory); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_later_remote_push_cannot_upgrade_a_missing_or_failed_delivery_observation_on_restart(bool recordedFailure)
+    {
+        var origin = TempGitRepository.InitBareRepository(Path.Combine(Path.GetTempPath(), $"replay-origin-{Guid.NewGuid():N}"));
+        var workspace = Path.Combine(Path.GetTempPath(), $"replay-ws-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workspace);
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            TempGitRepository.InitWithEverythingCommitted(workspace);
+            TempGitRepository.AddRemote(workspace, "origin", origin);
+            TempGitRepository.CreateAndCheckoutBranch(workspace, "replay-lane");
+            TempGitRepository.CommitAll(workspace, "pushed base");
+            TempGitRepository.Push(workspace, "origin", "replay-lane");
+            TempGitRepository.CommitAll(workspace, "not yet pushed at observation");
+            var localHead = TempGitRepository.TagHeadWithItsOwnSha(workspace);
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-remote-replay");
+            var executionId = await AcceptRequestAsync(writer, workflowId, artifactsRoot, A, deliversBranch: true);
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, executionId);
+            var handoffPath = Path.Combine(outputDirectory, "changes.md");
+            await File.WriteAllTextAsync(handoffPath, "push succeeded (worker claim)", TestContext.Current.CancellationToken);
+            var handoffBefore = await File.ReadAllBytesAsync(handoffPath, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName),
+                """{"observedAt":"2026-09-15T00:00:00Z","verification":"Passed","localHead":"0123456789abcdef0123456789abcdef01234567","branch":"replay-lane","remoteHead":"0123456789abcdef0123456789abcdef01234567"}""",
+                TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionStarted(executionId, Pid: 4242), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionExited(executionId, ExitCode: 0, CoreExitReason.Natural), TestContext.Current.CancellationToken);
+            if (recordedFailure)
+            {
+                await writer.AppendAsync(new FlowEvent.DeliveryObservationRecorded(executionId,
+                    DateTimeOffset.UtcNow.ToString("O"), localHead, "replay-lane", null, null, "Failed",
+                    ["branch-not-pushed"], "branch-not-pushed"), TestContext.Current.CancellationToken);
+            }
+
+            // The remote changes AFTER this execution's observation/crash window.
+            TempGitRepository.Push(workspace, "origin", "replay-lane");
+            Assert.Equal(DeliveryCheckStatus.Passed,
+                (await DeliveryVerifier.CheckAsync(workspace, expectPr: false, TestContext.Current.CancellationToken)).Status);
+
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["stub-worker"] = new WorkerBinding.Process(ProcessContract,
+                    new CoreDispatchTarget("stub", [], WorkingDirectory: workspace), Timeout,
+                    DeliversBranch: true, ExpectPr: false),
+            };
+            var state = await MutationInterface.StartWorkflowAsync(workflowId, roomDirectory, snapshot,
+                bindings, artifactsRoot, reader, writer, new StubCoreDispatcher(),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(Assert.Single(state.Steps).IndeterminateAwaitingResolution);
+            Assert.Empty((await reader.ReadAllAsync(TestContext.Current.CancellationToken)).OfType<FlowEvent.ExecutionSucceeded>());
+            Assert.Equal(handoffBefore, await File.ReadAllBytesAsync(handoffPath, TestContext.Current.CancellationToken));
+
+            var entries = await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var projected = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+                WorkflowStatusProjector.Project(state, snapshot, roomDirectory, entries), entries, roomDirectory,
+                TestContext.Current.CancellationToken);
+            var delivery = Assert.Single(projected.Delivery!);
+            Assert.NotNull(delivery.Handoff);
+            Assert.Equal(recordedFailure ? "failed" : "unknown", delivery.AuthoritativeObservation.State);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
     [Fact]
     public async Task StartWorkflowAsync_settles_a_replayed_natural_exit0_with_tool_calls_and_an_empty_ledger_Indeterminate()
     {
@@ -1055,7 +1190,8 @@ public class MutationInterfaceCrashRecoveryTests
         string artifactsRoot,
         StepId stepId,
         string? adapter = null,
-        string? model = null)
+        string? model = null,
+        bool? deliversBranch = null)
     {
         var executionId = new ExecutionId(Guid.NewGuid().ToString("n"));
         var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, executionId);
@@ -1070,7 +1206,8 @@ public class MutationInterfaceCrashRecoveryTests
             ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot),
             UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
             Adapter: adapter,
-            Model: model);
+            Model: model,
+            DeliversBranch: deliversBranch);
 
         await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(request));
         return executionId;

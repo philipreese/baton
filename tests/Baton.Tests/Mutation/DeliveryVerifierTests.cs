@@ -1,4 +1,8 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Baton.Domain;
 using Baton.Mutation;
+using Baton.Store;
 using Baton.Tests.TestSupport;
 using Xunit;
 
@@ -19,7 +23,8 @@ public sealed class DeliveryVerifierTests
         var (workspace, origin) = CreatePushedWorkspace("feature-a");
         try
         {
-            var gh = WriteFakeGh(workspace, """[{"number":42}]""");
+            var head = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":42,"headRefOid":"{{head}}"}]""");
 
             var outcome = await DeliveryVerifier.CheckAsync(
                 workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
@@ -47,6 +52,98 @@ public sealed class DeliveryVerifierTests
         finally
         {
             Cleanup(workspace, origin);
+        }
+    }
+
+    [Fact]
+    public async Task Delivery_evidence_is_immutable_and_records_the_post_execution_HEAD()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-evidence");
+        var outputDirectory = TempPath("evidence-output");
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            var prHead = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":2309,"headRefOid":"{{prHead}}"}]""");
+            var outcome = await DeliveryVerifier.CheckAsync(workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            await DeliveryVerifier.WriteEvidenceAsync(outputDirectory, workspace, expectPr: true, outcome, TestContext.Current.CancellationToken, ghProgram: gh);
+            var evidencePath = Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName);
+            var original = await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken);
+
+            await DeliveryVerifier.WriteEvidenceAsync(outputDirectory, workspace, expectPr: true,
+                new DeliveryCheckOutcome(DeliveryCheckStatus.Failed), TestContext.Current.CancellationToken, ghProgram: gh);
+
+            Assert.Contains(GitRevParseHead(workspace), original, StringComparison.Ordinal);
+            Assert.Contains("\"pullRequestNumber\":2309", original, StringComparison.Ordinal);
+            Assert.Contains($"\"pullRequestHead\":\"{prHead}\"", original, StringComparison.Ordinal);
+            Assert.Equal(original, await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken));
+
+            TempGitRepository.CommitAll(workspace, "later local change must not rewrite delivery evidence");
+            var recovered = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal(DeliveryCheckStatus.Passed, recovered.Evidence?.Verification);
+            Assert.Equal(prHead, recovered.Evidence?.PullRequestHead);
+            Assert.NotEqual(GitRevParseHead(workspace), recovered.Evidence?.LocalHead);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+            DirectoryCleanup.DeleteRecursively(outputDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task A_passed_expected_PR_journal_event_missing_its_PR_head_fails_replay_closed()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-journal-damage");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":2309,"headRefOid":"{{head}}"}]""");
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(DeliveryCheckStatus.Passed, check.Status);
+            var observed = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            var recorded = observed.ToRecordedEvent(new ExecutionId("exec-pr-journal-damage"));
+            Assert.Equal(DeliveryCheckStatus.Passed, DeliveryVerifier.ReadRecordedEvidence(recorded).Evidence?.Verification);
+
+            var node = JsonNode.Parse(JsonSerializer.Serialize<FlowEvent>(recorded, FlowEventLogJson.Options))!.AsObject();
+            Assert.True(node.Remove("PullRequestHead"));
+            var damaged = Assert.IsType<FlowEvent.DeliveryObservationRecorded>(
+                JsonSerializer.Deserialize<FlowEvent>(node.ToJsonString(), FlowEventLogJson.Options));
+            var reading = DeliveryVerifier.ReadRecordedEvidence(damaged);
+            Assert.Null(reading.Evidence);
+            Assert.Contains("incomplete", reading.Problem, StringComparison.Ordinal);
+        }
+        finally { Cleanup(workspace, origin); }
+    }
+
+    [Fact]
+    public async Task Incomplete_delivery_evidence_never_defaults_to_a_passing_observation()
+    {
+        var outputDirectory = TempPath("incomplete-evidence");
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            var path = Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName);
+            await File.WriteAllTextAsync(path, """{"observedAt":"2026-09-15T00:00:00Z"}""", TestContext.Current.CancellationToken);
+
+            var incomplete = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Null(incomplete.Evidence);
+            Assert.Contains("incomplete", incomplete.Problem, StringComparison.Ordinal);
+
+            await File.WriteAllTextAsync(path, """{"observedAt":"2026-09-15T00:00:00Z","verification":"Failed"}""", TestContext.Current.CancellationToken);
+            var failed = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal(DeliveryCheckStatus.Failed, failed.Evidence?.Verification);
+
+            await File.WriteAllTextAsync(path, """{"observedAt":"not-a-time","verification":"Passed","localHead":"a","branch":"lane","remoteHead":"a"}""", TestContext.Current.CancellationToken);
+            var malformedTime = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Null(malformedTime.Evidence);
+            Assert.Contains("incomplete", malformedTime.Problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(outputDirectory);
         }
     }
 
@@ -336,19 +433,141 @@ public sealed class DeliveryVerifierTests
         var (workspace, origin) = CreatePushedWorkspace("feature-pr-named");
         try
         {
-            var gh = WriteFakeGh(workspace, """[{"number":1974}]""");
+            var prHead = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":1974,"headRefOid":"{{prHead}}"}]""");
 
             var reading = await DeliveryVerifier.ReadOpenPullRequestAsync(
                 workspace, TestContext.Current.CancellationToken, ghProgram: gh);
 
             Assert.True(reading.AnyOpen);
             Assert.Equal(1974, reading.Number);
+            Assert.Equal(prHead, reading.Head);
             Assert.Null(reading.NotRunReason);
         }
         finally
         {
             Cleanup(workspace, origin);
         }
+    }
+
+    [Fact]
+    public async Task An_arrest_after_PR_update_records_the_exact_PR_head_without_certifying_delivery()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-updated-before-arrest");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":2309,"headRefOid":"{{head}}"}]""");
+            var observation = await DeliveryVerifier.ObserveAsync(workspace, expectPr: true,
+                new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
+                    NotRunReason: "delivery assertion not run: worker was arrested before a clean exit"),
+                TestContext.Current.CancellationToken, ghProgram: gh);
+            var recorded = observation.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-updated-arrest"));
+            var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
+
+            Assert.NotNull(reading.Evidence);
+            Assert.Equal(head, recorded.LocalHead);
+            Assert.Equal(head, recorded.RemoteHead);
+            Assert.Equal(2309, recorded.PullRequestNumber);
+            Assert.Equal(head, recorded.PullRequestHead);
+            Assert.Equal("NotRun", recorded.Verification);
+            Assert.Equal(DeliveryCheckStatus.NotRun, reading.Evidence!.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
+    }
+
+    [Theory]
+    [InlineData("closed")]
+    [InlineData("head-changed")]
+    public async Task An_expected_PR_changed_after_a_passing_check_cannot_keep_the_old_delivery_pass(string change)
+    {
+        var (workspace, origin) = CreatePushedWorkspace($"feature-pr-race-{change}");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var first = $$"""[{"number":2309,"headRefOid":"{{head}}"}]""";
+            var second = change == "closed"
+                ? "[]"
+                : $$"""[{"number":2309,"headRefOid":"{{new string('b', 40)}}"}]""";
+            var (gh, marker) = WriteSequentialFakeGh(workspace, first, second);
+
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(DeliveryCheckStatus.Passed, check.Status); // The first PR reading really admitted.
+
+            var final = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(2, File.ReadAllLines(marker).Length); // Both fake-gh child invocations entered.
+            Assert.Equal(head, final.LocalHead);
+            Assert.Equal(head, final.RemoteHead); // Only the PR changed; Git provenance stayed valid.
+            Assert.Equal(DeliveryCheckStatus.Failed, final.Verification);
+            Assert.Equal(["pr-not-open"], final.FailingMembers);
+            Assert.Equal(DeliveryCheckStatus.Failed,
+                DeliveryVerifier.ReadRecordedEvidence(final.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-race")))
+                    .Evidence?.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
+    }
+
+    [Fact]
+    public async Task An_unreadable_final_expected_PR_lookup_cannot_inherit_an_earlier_pass()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-race-unreadable");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var first = $$"""[{"number":2309,"headRefOid":"{{head}}"}]""";
+            var (gh, marker) = WriteSequentialFakeGh(workspace, first, "not-json");
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(DeliveryCheckStatus.Passed, check.Status);
+
+            var final = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(2, File.ReadAllLines(marker).Length);
+            Assert.Equal(DeliveryCheckStatus.NotRun, final.Verification);
+            Assert.Contains("final expected PR observation", final.VerificationReason, StringComparison.Ordinal);
+            Assert.Equal(DeliveryCheckStatus.NotRun,
+                DeliveryVerifier.ReadRecordedEvidence(final.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-unreadable")))
+                    .Evidence?.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
+    }
+
+    [Theory]
+    [InlineData("missing-head")]
+    [InlineData("unnameable")]
+    [InlineData("malformed-head")]
+    public async Task An_expected_PR_without_a_checked_exact_head_cannot_certify_a_later_head(string firstReading)
+    {
+        var (workspace, origin) = CreatePushedWorkspace($"feature-pr-first-unknown-{firstReading}");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var first = firstReading switch
+            {
+                "missing-head" => """[{"number":2309}]""",
+                "malformed-head" => """[{"number":2309,"headRefOid":"not-a-sha"}]""",
+                _ => "[{}]",
+            };
+            var changed = $$"""[{"number":2309,"headRefOid":"{{new string('b', 40)}}"}]""";
+            var (gh, marker) = WriteSequentialFakeGh(workspace, first, changed);
+
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            var final = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(2, File.ReadAllLines(marker).Length); // Both child PR probes actually ran.
+            Assert.Equal(head, final.LocalHead);
+            Assert.Equal(head, final.RemoteHead);
+            Assert.Equal(DeliveryCheckStatus.NotRun, check.Status);
+            Assert.Contains("exact PR", check.NotRunReason, StringComparison.Ordinal);
+            Assert.Equal(DeliveryCheckStatus.NotRun, final.Verification);
+            Assert.Equal(DeliveryCheckStatus.NotRun,
+                DeliveryVerifier.ReadRecordedEvidence(final.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-first-unknown")))
+                    .Evidence?.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
     }
 
     [Fact]
@@ -402,6 +621,16 @@ public sealed class DeliveryVerifierTests
         var path = Path.Combine(directory, $"fake-gh-{Guid.NewGuid():N}.cmd");
         File.WriteAllText(path, $"@echo off\necho {jsonOutput}\nexit /b 0\n");
         return path;
+    }
+
+    private static (string Script, string Marker) WriteSequentialFakeGh(string directory, string first, string second)
+    {
+        var marker = Path.Combine(directory, $"fake-gh-entered-{Guid.NewGuid():N}.txt");
+        var script = Path.Combine(directory, $"fake-gh-sequence-{Guid.NewGuid():N}.cmd");
+        File.WriteAllText(script,
+            $"@echo off\nif exist \"{marker}\" goto second\necho first>\"{marker}\"\necho {first}\nexit /b 0\n"
+            + $":second\necho second>>\"{marker}\"\necho {second}\nexit /b 0\n");
+        return (script, marker);
     }
 
     private static string GitRevParseHead(string workspace) =>

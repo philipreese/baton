@@ -103,4 +103,7 @@ public sealed record ExecutionRequest(
     string? Adapter = null,
     string? Model = null,
     bool? HookCanaryArmed = null,
-    string? HookVerdictLedgerFileName = null);
+    string? HookVerdictLedgerFileName = null,
+    // #2309: recorded before spawn so crash recovery does not infer the delivery obligation from
+    // a catalog or binding that may have changed or become unavailable since this execution ran.
+    bool? DeliversBranch = null);

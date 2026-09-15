@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Baton.Core;
 using Baton.Domain;
 
@@ -36,10 +37,46 @@ public sealed record DeliveryCheckOutcome(
     DeliveryCheckStatus Status,
     IReadOnlyList<string>? FailingMembers = null,
     string? Tail = null,
-    string? NotRunReason = null)
+    string? NotRunReason = null,
+    string? CheckedLocalHead = null,
+    string? CheckedRemoteHead = null,
+    bool CheckedPullRequestOpen = false,
+    int? CheckedPullRequestNumber = null,
+    string? CheckedPullRequestHead = null)
 {
     public static readonly DeliveryCheckOutcome Pass = new(DeliveryCheckStatus.Passed);
     public static readonly DeliveryCheckOutcome CancelledOutcome = new(DeliveryCheckStatus.Cancelled);
+}
+
+/// <summary>The immutable, machine-owned post-execution delivery observation.</summary>
+public sealed record DeliveryEvidence(
+    [property: JsonPropertyName("observedAt")] string ObservedAt,
+    [property: JsonPropertyName("localHead")] string? LocalHead,
+    [property: JsonPropertyName("branch")] string? Branch,
+    [property: JsonPropertyName("remoteHead")] string? RemoteHead,
+    [property: JsonPropertyName("pullRequestNumber")] int? PullRequestNumber,
+    [property: JsonPropertyName("verification")] DeliveryCheckStatus Verification,
+    [property: JsonPropertyName("failingMembers")] IReadOnlyList<string>? FailingMembers,
+    [property: JsonPropertyName("verificationReason")] string? VerificationReason,
+    [property: JsonPropertyName("observationProblem")] string? ObservationProblem,
+    [property: JsonPropertyName("pullRequestHead")] string? PullRequestHead = null)
+{
+    public FlowEvent.DeliveryObservationRecorded ToRecordedEvent(ExecutionId executionId) =>
+        new(executionId, ObservedAt, LocalHead, Branch, RemoteHead, PullRequestNumber,
+            Verification.ToString(), FailingMembers, VerificationReason, ObservationProblem, PullRequestHead);
+
+    public DeliveryCheckOutcome ToOutcome() => Verification switch
+    {
+        DeliveryCheckStatus.Failed => new(Verification, FailingMembers, VerificationReason),
+        DeliveryCheckStatus.NotRun => new(Verification, NotRunReason: VerificationReason),
+        _ => new(Verification),
+    };
+}
+
+/// <summary>The result of opening an immutable stamp; unreadable is distinct from absent.</summary>
+public sealed record DeliveryEvidenceReading(DeliveryEvidence? Evidence, string? Problem = null)
+{
+    public bool IsMissing => Evidence is null && Problem is null;
 }
 
 /// <summary>
@@ -54,7 +91,8 @@ public sealed record DeliveryCheckOutcome(
 /// and when the answer was unmeasurable — never a fabricated number, so a consumer must read
 /// <see cref="AnyOpen"/> to tell those apart.
 /// </param>
-public sealed record OpenPullRequestReading(bool? AnyOpen, int? Number = null, string? NotRunReason = null)
+public sealed record OpenPullRequestReading(bool? AnyOpen, int? Number = null, string? NotRunReason = null,
+    string? Head = null)
 {
     /// <summary>The question was answered and no PR is open for the branch.</summary>
     public static readonly OpenPullRequestReading NoneOpen = new(AnyOpen: false);
@@ -75,6 +113,14 @@ public sealed record OpenPullRequestReading(bool? AnyOpen, int? Number = null, s
 /// </summary>
 public static class DeliveryVerifier
 {
+    /// <summary>The machine-owned, append-only observation written after a delivery-capable worker exits.</summary>
+    public const string DeliveryEvidenceFileName = "delivery-evidence.json";
+
+    private static readonly JsonSerializerOptions EvidenceJsonOptions = new()
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
+
     /// <summary>
     /// <c>git ls-remote --exit-code</c>'s own documented meaning for this exit code: the query succeeded
     /// in reaching the remote, and no ref matched.
@@ -121,6 +167,214 @@ public static class DeliveryVerifier
         return cancellationToken.IsCancellationRequested ? DeliveryCheckOutcome.CancelledOutcome : outcome;
     }
 
+    /// <summary>
+    /// Makes one post-exit machine observation. Its returned value becomes authoritative only when
+    /// the engine appends <see cref="FlowEvent.DeliveryObservationRecorded"/> to its own flow ledger;
+    /// a file already in the worker-writable output directory is never input to this method.
+    /// </summary>
+    public static async Task<DeliveryEvidence> ObserveAsync(string? workingDirectory, bool expectPr,
+        DeliveryCheckOutcome deliveryOutcome, CancellationToken cancellationToken, string gitProgram = "git", string ghProgram = "gh")
+    {
+        string? branch = null, localHead = null, remoteHead = null, observationProblem = null;
+        int? pullRequestNumber = null;
+        string? pullRequestHead = null;
+        OpenPullRequestReading? finalPullRequest = null;
+        if (string.IsNullOrWhiteSpace(workingDirectory)) observationProblem = "no working directory for this execution";
+        else
+        {
+            var branchResult = await RunAsync(gitProgram, ["rev-parse", "--abbrev-ref", "HEAD"], workingDirectory, cancellationToken).ConfigureAwait(false);
+            var headResult = await RunAsync(gitProgram, ["rev-parse", "HEAD"], workingDirectory, cancellationToken).ConfigureAwait(false);
+            branch = branchResult.Spawned && branchResult.ExitCode == 0 ? branchResult.Output.Trim() : null;
+            localHead = headResult.Spawned && headResult.ExitCode == 0 ? headResult.Output.Trim() : null;
+            if (branch is null || localHead is null) observationProblem = "could not determine the final local branch and HEAD";
+            else if (!string.Equals(branch, "HEAD", StringComparison.Ordinal))
+            {
+                var remote = await RunNetworkAsync(gitProgram, ["ls-remote", "--heads", "origin", branch], workingDirectory, cancellationToken).ConfigureAwait(false);
+                remoteHead = remote.Spawned && remote.ExitCode == 0 ? remote.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() : null;
+                if (expectPr)
+                {
+                    finalPullRequest = await ReadOpenPullRequestAsync(workingDirectory, branch, ghProgram, cancellationToken)
+                        .ConfigureAwait(false);
+                    pullRequestNumber = finalPullRequest.Number;
+                    pullRequestHead = finalPullRequest.Head;
+                }
+            }
+        }
+        var evidence = new DeliveryEvidence(
+            DateTimeOffset.UtcNow.ToString("O"), localHead, branch, remoteHead, pullRequestNumber,
+            deliveryOutcome.Status, deliveryOutcome.FailingMembers,
+            deliveryOutcome.Tail ?? deliveryOutcome.NotRunReason, observationProblem, pullRequestHead);
+        return deliveryOutcome.Status == DeliveryCheckStatus.Passed && expectPr
+            ? ReconcileExpectedPullRequest(evidence, deliveryOutcome, finalPullRequest)
+            : evidence;
+    }
+
+    /// <summary>
+    /// Protected invariant (#2309): an earlier open PR cannot certify its own later forge state.
+    /// A passing expected-PR check applies only while that same readable PR identity/head remains
+    /// open at the engine's final observation; absence or a changed head never inherits the pass.
+    /// </summary>
+    private static DeliveryEvidence ReconcileExpectedPullRequest(
+        DeliveryEvidence evidence, DeliveryCheckOutcome checkedOutcome, OpenPullRequestReading? finalPullRequest)
+    {
+        if (!checkedOutcome.CheckedPullRequestOpen || finalPullRequest?.AnyOpen is null)
+        {
+            var reason = finalPullRequest?.NotRunReason
+                ?? "passing delivery check did not retain its expected PR reading";
+            return evidence with
+            {
+                Verification = DeliveryCheckStatus.NotRun,
+                VerificationReason = $"final expected PR observation could not be confirmed: {reason}",
+                ObservationProblem = reason,
+            };
+        }
+
+        if (finalPullRequest.AnyOpen is false)
+        {
+            return FailExpectedPullRequest(evidence,
+                "the PR open during delivery verification is no longer open at final observation");
+        }
+
+        if (checkedOutcome.CheckedPullRequestNumber is { } checkedNumber)
+        {
+            if (finalPullRequest.Number is null)
+                return UnknownExpectedPullRequest(evidence, "the final open PR number could not be read");
+            if (finalPullRequest.Number != checkedNumber)
+                return FailExpectedPullRequest(evidence, "the final open PR number differs from the checked PR");
+        }
+
+        if (checkedOutcome.CheckedPullRequestHead is { } checkedHead)
+        {
+            if (!IsObjectId(finalPullRequest.Head))
+                return UnknownExpectedPullRequest(evidence, "the final open PR head could not be read");
+            if (!string.Equals(finalPullRequest.Head, checkedHead, StringComparison.OrdinalIgnoreCase))
+                return FailExpectedPullRequest(evidence, "the final open PR head differs from the checked PR head");
+        }
+
+        return evidence;
+    }
+
+    private static DeliveryEvidence UnknownExpectedPullRequest(DeliveryEvidence evidence, string reason) =>
+        evidence with
+        {
+            Verification = DeliveryCheckStatus.NotRun,
+            VerificationReason = reason,
+            ObservationProblem = reason,
+        };
+
+    private static DeliveryEvidence FailExpectedPullRequest(DeliveryEvidence evidence, string reason) =>
+        evidence with
+        {
+            Verification = DeliveryCheckStatus.Failed,
+            FailingMembers = ["pr-not-open"],
+            VerificationReason = $"pr-not-open: {reason}",
+            ObservationProblem = reason,
+        };
+
+    /// <summary>
+    /// A convenience projection of an already-journalled observation for a human holding only the
+    /// execution directory. Status, lifecycle, and recovery MUST NOT take authority from this cache.
+    /// Replacing a worker-preplaced cache is safe after the worker has exited; the ledger event itself
+    /// stays immutable and the worker's named handoff is never rewritten.
+    /// </summary>
+    public static async Task WriteEvidenceSnapshotAsync(string outputDirectory, DeliveryEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        var path = Path.Combine(outputDirectory, DeliveryEvidenceFileName);
+        var json = JsonSerializer.Serialize(evidence, EvidenceJsonOptions);
+        var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            await File.WriteAllTextAsync(temporaryPath, json, cancellationToken).ConfigureAwait(false);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+        }
+    }
+
+    /// <summary>Legacy fixture writer; the fixed-path file it creates is not a routing authority.</summary>
+    public static async Task WriteEvidenceAsync(string outputDirectory, string? workingDirectory, bool expectPr,
+        DeliveryCheckOutcome deliveryOutcome, CancellationToken cancellationToken, string gitProgram = "git", string ghProgram = "gh")
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        if (File.Exists(Path.Combine(outputDirectory, DeliveryEvidenceFileName))) return;
+        var evidence = await ObserveAsync(workingDirectory, expectPr, deliveryOutcome, cancellationToken, gitProgram, ghProgram)
+            .ConfigureAwait(false);
+        await WriteEvidenceSnapshotAsync(outputDirectory, evidence, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads only the engine-owned ledger fact; absent or incomplete events fail closed.</summary>
+    public static DeliveryEvidenceReading ReadRecordedEvidence(FlowEvent.DeliveryObservationRecorded? recorded)
+    {
+        if (recorded is null) return new(null, "delivery observation event is absent");
+        if (!Enum.TryParse<DeliveryCheckStatus>(recorded.Verification, ignoreCase: false, out var verification)
+            || !Enum.IsDefined(verification)
+            || !string.Equals(recorded.Verification, verification.ToString(), StringComparison.Ordinal))
+        {
+            return new(null, "delivery observation event is incomplete");
+        }
+
+        var evidence = new DeliveryEvidence(recorded.ObservedAt, recorded.LocalHead, recorded.Branch,
+            recorded.RemoteHead, recorded.PullRequestNumber, verification, recorded.FailingMembers,
+            recorded.VerificationReason, recorded.ObservationProblem, recorded.PullRequestHead);
+        return IsCompleteEvidence(evidence)
+            ? new(evidence)
+            : new(null, "delivery observation event is incomplete");
+    }
+
+    /// <summary>Reads the immutable observation for an execution, if its complete JSON is available.</summary>
+    public static async Task<DeliveryEvidenceReading> ReadEvidenceAsync(string outputDirectory, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        var path = Path.Combine(outputDirectory, DeliveryEvidenceFileName);
+        if (!File.Exists(path)) return new(null);
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var evidence = await JsonSerializer.DeserializeAsync<DeliveryEvidence>(stream, EvidenceJsonOptions, cancellationToken).ConfigureAwait(false);
+            return IsCompleteEvidence(evidence)
+                ? new(evidence)
+                : new(null, "delivery evidence stamp is incomplete");
+        }
+        catch (JsonException) { return new(null, "delivery evidence stamp is unreadable"); }
+        catch (IOException) { return new(null, "delivery evidence stamp could not be read"); }
+    }
+
+    private static bool IsCompleteEvidence(DeliveryEvidence? evidence)
+    {
+        if (evidence is null
+            || !DateTimeOffset.TryParse(evidence.ObservedAt, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out _)
+            || !Enum.IsDefined(evidence.Verification)
+            || (evidence.PullRequestHead is not null && !IsObjectId(evidence.PullRequestHead)))
+        {
+            return false;
+        }
+
+        // A pass is an affirmative claim about exact Git heads and, when it names a PR, that
+        // PR's exact head. Dropping the optional PR-head member from a valid journal line cannot
+        // silently turn an expected-PR pass into branch-only success on replay. Failed and NotRun
+        // permit unavailable facts so a truthful fail-closed observation stays readable.
+        if (evidence.Verification == DeliveryCheckStatus.NotRun
+            && string.IsNullOrWhiteSpace(evidence.VerificationReason)) return false;
+
+        return evidence.Verification != DeliveryCheckStatus.Passed
+            || (string.IsNullOrWhiteSpace(evidence.ObservationProblem)
+                && IsObjectId(evidence.LocalHead)
+                && !string.IsNullOrWhiteSpace(evidence.Branch)
+                && !string.Equals(evidence.Branch, "HEAD", StringComparison.Ordinal)
+                && IsObjectId(evidence.RemoteHead)
+                && (evidence.PullRequestNumber is null
+                    ? evidence.PullRequestHead is null
+                    : evidence.PullRequestNumber > 0 && IsObjectId(evidence.PullRequestHead)));
+    }
+
+    private static bool IsObjectId(string? value) =>
+        value is { Length: 40 or 64 } && value.All(char.IsAsciiHexDigit);
+
     private static async Task<DeliveryCheckOutcome> CheckCoreAsync(
         string? workingDirectory, bool expectPr, CancellationToken cancellationToken, string gitProgram, string ghProgram,
         bool shippingCeilingExceeded)
@@ -165,6 +419,8 @@ public static class DeliveryVerifier
         var failingMembers = new List<string>();
         var tailLines = new List<string>();
         var notRunReasons = new List<string>();
+        DeliveryCheckOutcome? checkedPush = null;
+        OpenPullRequestReading? checkedPr = null;
 
         var lsRemoteResult = await RunNetworkAsync(
             gitProgram, ["ls-remote", "--exit-code", "--heads", "origin", branch], workingDirectory, cancellationToken)
@@ -197,6 +453,10 @@ public static class DeliveryVerifier
             {
                 notRunReasons.Add(pushed.NotRunReason!);
             }
+            else
+            {
+                checkedPush = pushed;
+            }
         }
 
         if (expectPr)
@@ -212,6 +472,15 @@ public static class DeliveryVerifier
                 failingMembers.Add("pr-not-open");
                 tailLines.Add($"pr-not-open: no open PR found for branch '{branch}' — open one before this lane can settle Succeeded.");
             }
+            else if (pr.Number.GetValueOrDefault() <= 0 || !IsObjectId(pr.Head))
+            {
+                // Protected invariant (#2309): an unnameable open PR is positive evidence of
+                // existence, but cannot certify the exact PR head after a later forge mutation.
+                // Keep the general three-state PR reader; only delivery's positive assertion
+                // requires the identity and object ID needed for the final comparison.
+                notRunReasons.Add("exact PR number/head was unavailable in the first open PR reading");
+            }
+            else checkedPr = pr;
         }
 
         if (failingMembers.Count > 0)
@@ -224,7 +493,15 @@ public static class DeliveryVerifier
             return new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun, NotRunReason: string.Join("; ", notRunReasons));
         }
 
-        return DeliveryCheckOutcome.Pass;
+        return checkedPush is null
+            ? new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
+                NotRunReason: "delivery push check supplied no exact checked heads")
+            : checkedPush with
+            {
+                CheckedPullRequestOpen = checkedPr?.AnyOpen == true,
+                CheckedPullRequestNumber = checkedPr?.Number,
+                CheckedPullRequestHead = checkedPr?.Head,
+            };
     }
 
     /// <summary>
@@ -236,6 +513,16 @@ public static class DeliveryVerifier
         string gitProgram, string workingDirectory, string branch, bool shippingCeilingExceeded,
         CancellationToken cancellationToken)
     {
+        // Name the exact local object BEFORE the fetch/ancestry probe. A later HEAD change cannot
+        // inherit this verdict merely because the symbolic name moved during separate spawns.
+        var localResult = await RunAsync(gitProgram, ["rev-parse", "HEAD"], workingDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        var localHead = localResult.Output.Trim();
+        if (!localResult.Spawned || localResult.ExitCode != 0 || !IsObjectId(localHead))
+        {
+            return new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
+                NotRunReason: "could not read the exact local HEAD for delivery verification");
+        }
         // spec/baton.md §3 states why the explicit refspec form is used here rather than a bare
         // `git fetch origin <branch>`.
         var fetchResult = await RunNetworkAsync(
@@ -248,8 +535,17 @@ public static class DeliveryVerifier
                 NotRunReason: $"'git fetch origin {branch}' did not succeed (network, auth, or credential prompt unavailable)");
         }
 
+        var remoteResult = await RunAsync(gitProgram, ["rev-parse", $"origin/{branch}"], workingDirectory,
+            cancellationToken).ConfigureAwait(false);
+        var remoteHead = remoteResult.Output.Trim();
+        if (!remoteResult.Spawned || remoteResult.ExitCode != 0 || !IsObjectId(remoteHead))
+        {
+            return new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
+                NotRunReason: "could not read the exact fetched remote HEAD for delivery verification");
+        }
+
         var ancestorResult = await RunAsync(
-            gitProgram, ["merge-base", "--is-ancestor", "HEAD", $"origin/{branch}"], workingDirectory, cancellationToken)
+            gitProgram, ["merge-base", "--is-ancestor", localHead, remoteHead], workingDirectory, cancellationToken)
             .ConfigureAwait(false);
         if (!ancestorResult.Spawned)
         {
@@ -259,7 +555,8 @@ public static class DeliveryVerifier
 
         if (ancestorResult.ExitCode == 0)
         {
-            return DeliveryCheckOutcome.Pass;
+            return new DeliveryCheckOutcome(DeliveryCheckStatus.Passed,
+                CheckedLocalHead: localHead, CheckedRemoteHead: remoteHead);
         }
 
         if (ancestorResult.ExitCode == MergeBaseNotAncestorExitCode)
@@ -278,7 +575,7 @@ public static class DeliveryVerifier
     }
 
     /// <summary>
-    /// #1978: <c>gh pr list --head &lt;branch&gt; --json number</c>, resolving the branch from
+    /// #1978/#2309: <c>gh pr list --head &lt;branch&gt; --json number,headRefOid</c>, resolving the branch from
     /// <paramref name="workingDirectory"/> itself. Extracted from this class's own <c>expectPr</c> block
     /// so the timeout summary (<c>Outcomes.OutcomeClassifier</c>'s #1373 mutated-workspace arm, wired at
     /// <c>MutationInterface</c>) names a PR through the SAME question and the same spelling this check
@@ -325,7 +622,7 @@ public static class DeliveryVerifier
     private static async Task<OpenPullRequestReading> ReadOpenPullRequestAsync(
         string workingDirectory, string branch, string ghProgram, CancellationToken cancellationToken)
     {
-        var prResult = await RunAsync(ghProgram, ["pr", "list", "--head", branch, "--json", "number"], workingDirectory, cancellationToken)
+        var prResult = await RunAsync(ghProgram, ["pr", "list", "--head", branch, "--json", "number,headRefOid"], workingDirectory, cancellationToken)
             .ConfigureAwait(false);
         if (!prResult.Spawned)
         {
@@ -341,7 +638,7 @@ public static class DeliveryVerifier
     }
 
     /// <summary>
-    /// The three readings <c>gh pr list --json number</c>'s stdout admits, kept as three rather than
+    /// The three readings <c>gh pr list --json number,headRefOid</c>'s stdout admits, kept as three rather than
     /// collapsed: a positively-parsed empty array (no PR), a non-empty one (at least one PR, named when
     /// its <c>number</c> is readable), and output that does not parse as an array at all.
     /// </summary>
@@ -371,14 +668,20 @@ public static class DeliveryVerifier
                 {
                     // The first of several open PRs for one branch, which `gh` orders newest-first --
                     // the same choice Cli.WorkspaceDeliveryProbe makes for the same output.
-                    return new OpenPullRequestReading(AnyOpen: true, Number: value);
+                    string? head = null;
+                    if (element.TryGetProperty("headRefOid", out var headRefOid)
+                        && headRefOid.ValueKind == JsonValueKind.String)
+                    {
+                        head = headRefOid.GetString();
+                    }
+                    return new OpenPullRequestReading(AnyOpen: true, Number: value, Head: head);
                 }
             }
 
-            // A non-empty array whose entries carry no readable `number`. `--json number` cannot produce
-            // it, so this stays "a PR is open, unnameable" rather than fabricating either polarity: the
-            // delivery check passes on it exactly as it did before #1978, and the timeout summary names
-            // nothing.
+            // A non-empty array whose entries carry no readable number stays "a PR is open,
+            // unnameable" rather than fabricating either polarity. The timeout summary names
+            // nothing; the stricter delivery check records NotRun because it cannot compare an
+            // exact PR identity/head at the final observation.
             return new OpenPullRequestReading(AnyOpen: true, Number: null);
         }
         catch (JsonException)

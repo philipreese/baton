@@ -46,6 +46,18 @@ public class WorkerAdapterRegistryTests
     private static readonly PermissionGrant Withheld = new(
         ReadFiles: false, WriteFiles: false, RunShellCommands: false, ShellCommandPatterns: [], NetworkAccess: false);
 
+    [Fact]
+    public void The_noop_adapter_forwards_the_configured_workspace_and_preserves_null()
+    {
+        var adapter = new NoOpWorkerAdapter();
+
+        var configured = adapter.Resolve(new WorkerInvocation("prompt", WorkingDirectory: "C:\\workspace"), Contract);
+        var unspecified = adapter.Resolve(new WorkerInvocation("prompt"), Contract);
+
+        Assert.Equal("C:\\workspace", configured.WorkingDirectory);
+        Assert.Null(unspecified.WorkingDirectory);
+    }
+
     /// <summary>
     /// Everything about a dispatch a grant could reach. Both channels are compared because a grant
     /// can arrive on any of them: Claude's denials ride <c>--disallowedTools</c> in
