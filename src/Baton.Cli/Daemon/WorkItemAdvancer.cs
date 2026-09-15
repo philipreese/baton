@@ -769,6 +769,7 @@ public sealed class WorkItemAdvancer
             return;
         }
 
+        var mergedRetirements = new List<(string Tag, QueueDispositionOperation Operation)>();
         await QueueStore.MutateAsync(
             BatonPaths.QueueFile,
             current =>
@@ -786,8 +787,34 @@ public sealed class WorkItemAdvancer
                     }
                 }
 
+                var items = current.Items;
+                foreach (var pair in refreshed.Where(pair =>
+                    pair.Value is { State: PullRequestObservationStates.Merged, Error: null }))
+                {
+                    var retirement = new QueueRetirement(QueueRetirement.Merged, now,
+                        $"trusted merged observation for PR #{pair.Key.PullRequest}");
+                    items = items.Select(item =>
+                    {
+                        if (!IsEligibleForMergedObservationRetirement(item, pair.Key))
+                        {
+                            return item;
+                        }
+
+                        var operation = new QueueDispositionOperation(
+                            Guid.NewGuid().ToString("N"), now, QueueDecisionEntry.Retired,
+                            $"merged: PR #{pair.Key.PullRequest}");
+                        mergedRetirements.Add((item.Tag, operation));
+                        return item with
+                        {
+                            Retirement = retirement,
+                            DispositionOperations = [.. item.DispositionOutbox, operation],
+                        };
+                    }).ToList();
+                }
+
                 return current with
                 {
+                    Items = items,
                     PullRequestObservations = observations.Values
                         .OrderBy(o => o.Repository, StringComparer.Ordinal)
                         .ThenBy(o => o.PullRequest)
@@ -795,7 +822,27 @@ public sealed class WorkItemAdvancer
                 };
             },
             CancellationToken.None).ConfigureAwait(false);
+
+        foreach (var (tag, operation) in mergedRetirements)
+        {
+            await QueueDecisionLedgerStore.AppendDispositionAsync(
+                tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+        }
     }
+
+    private static bool IsEligibleForMergedObservationRetirement(QueueItem item, QualifiedPullRequest observation) =>
+        item is
+        {
+            Stage: not null,
+            Retirement: null,
+            State: QueueItemState.Queued or QueueItemState.Failed,
+            RoomDirectory: null,
+            ReadinessMutationClaim: null,
+            PullRequest: not null,
+            Repository: not null,
+        }
+        && item.PullRequest == observation.PullRequest
+        && string.Equals(item.Repository, observation.Repository, StringComparison.Ordinal);
 
     private static HashSet<QualifiedPullRequest> ObservationKeys(IReadOnlyList<QueueItem> items) =>
         items
