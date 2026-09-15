@@ -2415,12 +2415,18 @@ public static class MutationInterface
                 // it writes is the only place that cause survives.
                 var shippingCeilingExceeded = ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(
                     usageParser, prepared.OutputDirectory);
-                var deliveryOutcome = await DeliveryVerifier.CheckAsync(
+                // A post-exit observation is authoritative on replay. A new live probe could instead
+                // describe a later remote state, not this execution's delivered work.
+                var evidence = await DeliveryVerifier.ReadEvidenceAsync(prepared.OutputDirectory, CancellationToken.None).ConfigureAwait(false);
+                var deliveryOutcome = evidence?.ToOutcome() ?? await DeliveryVerifier.CheckAsync(
                     binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
                     shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
-                await DeliveryVerifier.WriteEvidenceAsync(
-                    prepared.OutputDirectory, binding.Target.WorkingDirectory, binding.ExpectPr,
-                    deliveryOutcome, CancellationToken.None).ConfigureAwait(false);
+                if (evidence is null)
+                {
+                    await DeliveryVerifier.WriteEvidenceAsync(
+                        prepared.OutputDirectory, binding.Target.WorkingDirectory, binding.ExpectPr,
+                        deliveryOutcome, CancellationToken.None).ConfigureAwait(false);
+                }
                 switch (deliveryOutcome.Status)
                 {
                     // #1788 review: the operator's own cancel landing inside this check's own window --

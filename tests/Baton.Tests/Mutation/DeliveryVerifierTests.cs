@@ -70,11 +70,16 @@ public sealed class DeliveryVerifierTests
             Assert.Contains(GitRevParseHead(workspace), original, StringComparison.Ordinal);
             Assert.Contains("\"pullRequestNumber\":2309", original, StringComparison.Ordinal);
             Assert.Equal(original, await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken));
+
+            TempGitRepository.CommitAll(workspace, "later local change must not rewrite delivery evidence");
+            var recovered = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal(DeliveryCheckStatus.Passed, recovered?.Verification);
+            Assert.NotEqual(GitRevParseHead(workspace), recovered?.LocalHead);
         }
         finally
         {
             Cleanup(workspace, origin);
-            if (Directory.Exists(outputDirectory)) Directory.Delete(outputDirectory, recursive: true);
+            DirectoryCleanup.DeleteRecursively(outputDirectory);
         }
     }
 

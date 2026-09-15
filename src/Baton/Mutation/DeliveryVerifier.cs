@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Baton.Core;
 using Baton.Domain;
 
@@ -42,6 +43,26 @@ public sealed record DeliveryCheckOutcome(
     public static readonly DeliveryCheckOutcome CancelledOutcome = new(DeliveryCheckStatus.Cancelled);
 }
 
+/// <summary>The immutable, machine-owned post-execution delivery observation.</summary>
+public sealed record DeliveryEvidence(
+    [property: JsonPropertyName("observedAt")] string ObservedAt,
+    [property: JsonPropertyName("localHead")] string? LocalHead,
+    [property: JsonPropertyName("branch")] string? Branch,
+    [property: JsonPropertyName("remoteHead")] string? RemoteHead,
+    [property: JsonPropertyName("pullRequestNumber")] int? PullRequestNumber,
+    [property: JsonPropertyName("verification")] DeliveryCheckStatus Verification,
+    [property: JsonPropertyName("failingMembers")] IReadOnlyList<string>? FailingMembers,
+    [property: JsonPropertyName("verificationReason")] string? VerificationReason,
+    [property: JsonPropertyName("observationProblem")] string? ObservationProblem)
+{
+    public DeliveryCheckOutcome ToOutcome() => Verification switch
+    {
+        DeliveryCheckStatus.Failed => new(Verification, FailingMembers, VerificationReason),
+        DeliveryCheckStatus.NotRun => new(Verification, NotRunReason: VerificationReason),
+        _ => new(Verification),
+    };
+}
+
 /// <summary>
 /// #1978: what <c>gh pr list --head &lt;branch&gt; --json number</c> answered, as three states rather
 /// than a bool — <see cref="AnyOpen"/> <see langword="null"/> means the question was NOT answered
@@ -77,6 +98,11 @@ public static class DeliveryVerifier
 {
     /// <summary>The machine-owned, append-only observation written after a delivery-capable worker exits.</summary>
     public const string DeliveryEvidenceFileName = "delivery-evidence.json";
+
+    private static readonly JsonSerializerOptions EvidenceJsonOptions = new()
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
 
     /// <summary>
     /// <c>git ls-remote --exit-code</c>'s own documented meaning for this exit code: the query succeeded
@@ -148,7 +174,10 @@ public static class DeliveryVerifier
                 if (expectPr) pullRequestNumber = (await ReadOpenPullRequestAsync(workingDirectory, branch, ghProgram, cancellationToken).ConfigureAwait(false)).Number;
             }
         }
-        var evidence = JsonSerializer.Serialize(new { observedAt = DateTimeOffset.UtcNow.ToString("O"), localHead, branch, remoteHead, pullRequestNumber, verification = deliveryOutcome.Status.ToString(), failingMembers = deliveryOutcome.FailingMembers, verificationReason = deliveryOutcome.Tail ?? deliveryOutcome.NotRunReason, observationProblem });
+        var evidence = JsonSerializer.Serialize(new DeliveryEvidence(
+            DateTimeOffset.UtcNow.ToString("O"), localHead, branch, remoteHead, pullRequestNumber,
+            deliveryOutcome.Status, deliveryOutcome.FailingMembers,
+            deliveryOutcome.Tail ?? deliveryOutcome.NotRunReason, observationProblem), EvidenceJsonOptions);
         try
         {
             await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
@@ -156,6 +185,21 @@ public static class DeliveryVerifier
             await writer.WriteAsync(evidence.AsMemory(), cancellationToken).ConfigureAwait(false);
         }
         catch (IOException) when (File.Exists(path)) { }
+    }
+
+    /// <summary>Reads the immutable observation for an execution, if its complete JSON is available.</summary>
+    public static async Task<DeliveryEvidence?> ReadEvidenceAsync(string outputDirectory, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        var path = Path.Combine(outputDirectory, DeliveryEvidenceFileName);
+        if (!File.Exists(path)) return null;
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return await JsonSerializer.DeserializeAsync<DeliveryEvidence>(stream, EvidenceJsonOptions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (JsonException) { return null; }
+        catch (IOException) { return null; }
     }
 
     private static async Task<DeliveryCheckOutcome> CheckCoreAsync(
