@@ -76,8 +76,13 @@ public static class QueueScheduler
         // where that rule lives; the gates below are then applied to whatever it picked, which for a
         // passer means neither shuts (it bypasses both by construction) and for the head means exactly
         // what they meant before.
-        var candidate = Candidate(items, liveWeight, freeGb, floorGb, settings, held)!;
         var portfolio = QueuePortfolio.From(items);
+        var candidate = Candidate(items, liveWeight, freeGb, floorGb, settings, held)!;
+        var selectedBand = PriorityBandFor(candidate);
+        var passedNewWorkHead = head is not null && !ReferenceEquals(head, candidate)
+            && PriorityBandFor(head) == QueuePriorityBand.NewWork;
+        var decisionContext = new QueueDecisionContext(portfolio, selectedBand, passedNewWorkHead,
+            items.FirstOrDefault(IsActiveLifecycle)?.Tag);
 
         // One predicate for both bypasses (spec/baton.md §13), hoisted above the floor rather than
         // repeated in each condition, so the two can never diverge into a lane that skips one gate and
@@ -86,30 +91,30 @@ public static class QueueScheduler
 
         if (IsNewLifecycle(candidate) && portfolio.ActiveLifecycles >= settings.EffectiveMaxActiveLifecycles)
         {
-            return QueueDecision.Wait(QueueWaitReason.LifecycleCap, candidate, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.LifecycleCap, candidate, liveWeight, freeGb, floorGb, decisionContext);
         }
 
         if (IsNewLifecycle(candidate) && portfolio.PrePullRequestLifecycles >= settings.EffectiveMaxPrePullRequestLifecycles)
         {
-            return QueueDecision.Wait(QueueWaitReason.PrePullRequestCap, candidate, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.PrePullRequestCap, candidate, liveWeight, freeGb, floorGb, decisionContext);
         }
 
         if (IsReview(candidate) && portfolio.LiveReviews >= settings.EffectiveMaxLiveReviews)
         {
-            return QueueDecision.Wait(QueueWaitReason.ReviewCap, candidate, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.ReviewCap, candidate, liveWeight, freeGb, floorGb, decisionContext);
         }
 
         if (!bypasses && BelowFloor(freeGb, floorGb))
         {
-            return QueueDecision.Wait(QueueWaitReason.Memory, candidate, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.Memory, candidate, liveWeight, freeGb, floorGb, decisionContext);
         }
 
         if (!bypasses && OverCap(candidate, liveWeight, settings))
         {
-            return QueueDecision.Wait(QueueWaitReason.Slots, candidate, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.Slots, candidate, liveWeight, freeGb, floorGb, decisionContext);
         }
 
-        return new QueueDecision(QueueDecisionKind.Launch, null, candidate, liveWeight, freeGb, floorGb);
+        return new QueueDecision(QueueDecisionKind.Launch, null, candidate, liveWeight, freeGb, floorGb, decisionContext);
     }
 
     /// <summary>
@@ -149,7 +154,10 @@ public static class QueueScheduler
             return Candidate(items);
         }
 
-        var finishFirst = items.FirstOrDefault(i => IsEligible(i) && PriorityBandFor(i) == QueuePriorityBand.Review)
+        var portfolio = QueuePortfolio.From(items);
+        var finishFirst = items.FirstOrDefault(i => IsEligible(i)
+                && PriorityBandFor(i) == QueuePriorityBand.Review
+                && portfolio.LiveReviews < settings.EffectiveMaxLiveReviews)
             ?? items.FirstOrDefault(i => IsEligible(i) && PriorityBandFor(i) == QueuePriorityBand.Repair)
             ?? items.FirstOrDefault(i => IsEligible(i) && PriorityBandFor(i) == QueuePriorityBand.Transition);
         if (finishFirst is not null)
@@ -157,22 +165,9 @@ public static class QueueScheduler
             return finishFirst;
         }
 
-        // Preserve the established weightless-review escape hatch for a slot-blocked new-work head.
-        // It is a host-capacity exception, distinct from lifecycle finish-first ordering above.
-        var head = Candidate(items);
-        if (head is null
-            || QueueWeights.BypassesCap(head.Role)
-            || BelowFloor(freeGb, floorGb)
-            || !OverCap(head, liveWeight, settings))
-        {
-            return head;
-        }
-
-        return items
-            .SkipWhile(i => !ReferenceEquals(i, head))
-            .Skip(1)
-            .FirstOrDefault(i => IsEligible(i) && QueueWeights.BypassesCap(i.Role))
-            ?? head;
+        // New work remains in operator order. A WIP-cap-blocked round-zero head cannot be passed by
+        // later new work; only the finish-first bands above may pass it.
+        return Candidate(items);
     }
 
     /// <summary>The floor gate, spelled once for <see cref="Decide"/> and the pass-through pick.</summary>
@@ -215,8 +210,11 @@ public static class QueueScheduler
     internal static bool IsActiveLifecycle(QueueItem item) =>
         item.Stage is not null
         && item.Retirement is null
+        // Cancelled is explicitly before-launch. A round-zero cancellation must not consume WIP.
+        && item.State != QueueItemState.Cancelled
         && (item.AttemptId is not null
             || item.ParentAttemptId is not null
+            // Compatibility evidence for rows written before attempt identities existed.
             || item.RoomDirectory is { Length: > 0 }
             || item.PullRequest is not null
             || item.Round != 0
@@ -273,12 +271,20 @@ public sealed record QueueDecision(
     QueueItem? Item,
     double LiveWeight,
     double? FreeGb,
-    double FloorGb)
+    double FloorGb,
+    QueueDecisionContext? Context = null)
 {
     internal static QueueDecision Wait(
-        QueueWaitReason reason, QueueItem? item, double liveWeight, double? freeGb, double floorGb) =>
-        new(QueueDecisionKind.Wait, reason, item, liveWeight, freeGb, floorGb);
+        QueueWaitReason reason, QueueItem? item, double liveWeight, double? freeGb, double floorGb,
+        QueueDecisionContext? context = null) =>
+        new(QueueDecisionKind.Wait, reason, item, liveWeight, freeGb, floorGb, context);
 }
+
+public sealed record QueueDecisionContext(
+    QueuePortfolio Portfolio,
+    QueuePriorityBand SelectedBand,
+    bool PassedNewWorkHead,
+    string? OldestOccupyingLifecycleTag);
 
 public enum QueueDecisionKind
 {

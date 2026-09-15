@@ -211,7 +211,13 @@ public sealed class QueueSchedulerService : BackgroundService
                     new QueueDecisionEntry(
                         now, decision.Item?.Tag, QueueDecisionEntry.Waited,
                         QueueWaitReasons.Token(decision.WaitReason!.Value),
-                        decision.LiveWeight, decision.FreeGb, decision.FloorGb),
+                        decision.LiveWeight, decision.FreeGb, decision.FloorGb,
+                        ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
+                        PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
+                        LiveReviews: decision.Context?.Portfolio.LiveReviews,
+                        PriorityBand: decision.Context?.SelectedBand.ToString().ToLowerInvariant(),
+                        PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
+                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -474,7 +480,13 @@ public sealed class QueueSchedulerService : BackgroundService
                         QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
                         decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                         tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                        SelectionSource: tier.SelectionSource, Admission: admission),
+                        SelectionSource: tier.SelectionSource, Admission: admission,
+                        ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
+                        PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
+                        LiveReviews: decision.Context?.Portfolio.LiveReviews,
+                        PriorityBand: decision.Context?.SelectedBand.ToString().ToLowerInvariant(),
+                        PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
+                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -502,7 +514,13 @@ public sealed class QueueSchedulerService : BackgroundService
                     now, item.Tag, QueueDecisionEntry.Launched, null,
                     decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                     tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource, admission),
+                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource, admission,
+                    ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
+                    PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
+                    LiveReviews: decision.Context?.Portfolio.LiveReviews,
+                    PriorityBand: decision.Context?.SelectedBand.ToString().ToLowerInvariant(),
+                    PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
+                    OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag),
                 CancellationToken.None).ConfigureAwait(false);
 
             return interval;

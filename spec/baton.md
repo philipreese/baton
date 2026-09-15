@@ -7299,6 +7299,23 @@ bypasses the cap: it is not what consumes the memory the floor protects. It stil
 the gap.
 
 **Operator order is the launch order, with exactly one thing allowed past the head (#2136).** The
+
+**Lifecycle WIP and finish-first selection.** `MaxActiveLifecycles`,
+`MaxPrePullRequestLifecycles`, and `MaxLiveReviews` default to respectively 4, 2, and 2 when absent,
+null, zero, or negative. An active lifecycle has a stage, no retirement, and a claimed attempt
+identity (`attemptId` or `parentAttemptId`); legacy rows without an identity count only when their
+room, PR, nonzero round, or non-queued execution state is durable evidence of an earlier launch.
+`Cancelled` is explicitly before-launch: a round-zero cancellation never consumes active or pre-PR
+WIP. Pre-PR is the active subset without a bound PR; live reviews are launched review or re-review
+attempts. Retired rows count in none of these sets.
+
+Selection is review/re-review, fix/continue, other existing-lifecycle transition, then new work,
+preserving operator order within each band. A review held by `review-cap` may not block a launchable
+repair or transition in a later finish-first band. New work never passes new work, including behind a
+WIP-cap-blocked round-zero head. The scheduler records its chosen tag and band, whether it passed a
+new-work head, the three counts, cap waits, and oldest occupying lifecycle once in the decision
+ledger; Queue CLI and Fleet Glass project that recorded decision rather than independently selecting
+a contradictory next row.
 head is the first queued, non-external, non-`ready` item; nothing reorders weighted items among
 themselves. When the head is blocked on **slots and nothing else**, the scheduler launches the first
 later queued, non-external, non-`ready` item whose role bypasses the cap (`review`), because that item

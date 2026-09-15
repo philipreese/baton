@@ -69,7 +69,19 @@ public sealed record QueueDecisionEntry(
     QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault,
     [property: JsonPropertyName("admission")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    TaskRequirementAdmission? Admission = null)
+    TaskRequirementAdmission? Admission = null,
+    [property: JsonPropertyName("activeLifecycles")]
+    int? ActiveLifecycles = null,
+    [property: JsonPropertyName("prePullRequestLifecycles")]
+    int? PrePullRequestLifecycles = null,
+    [property: JsonPropertyName("liveReviews")]
+    int? LiveReviews = null,
+    [property: JsonPropertyName("priorityBand")]
+    string? PriorityBand = null,
+    [property: JsonPropertyName("passedNewWorkHead")]
+    bool? PassedNewWorkHead = null,
+    [property: JsonPropertyName("oldestOccupyingLifecycle")]
+    string? OldestOccupyingLifecycle = null)
 {
     public const string Launched = "launched";
     public const string Waited = "waited";
