@@ -7312,7 +7312,10 @@ the gap.
 null, zero, or negative. An active lifecycle has a stage, no retirement, and a claimed attempt
 identity (`attemptId` or `parentAttemptId`); legacy rows without an identity count only when their
 room, PR, nonzero round, or non-queued execution state is durable evidence of an earlier launch.
-`Cancelled` before launch never consumes active or pre-PR WIP. Pre-PR is the active subset without a bound PR; live reviews are launched review or re-review
+Only cancellation before the first launch avoids active or pre-PR WIP. `baton queue cancel`
+refuses a queued review, fix, or ready lifecycle that already has launch proof; an older malformed
+`Cancelled` row with that proof still occupies WIP until trusted retirement. Pre-PR is the active
+subset without a bound PR; live reviews are launched review or re-review
 attempts. Retired rows count in none of these sets.
 
 Selection is review/re-review, fix/continue, other existing-lifecycle transition, then new work,
@@ -7639,12 +7642,16 @@ on the operator.
 One line per evaluation in `~/.baton/fleet/queue.jsonl`, through the same `JsonLinesLedger` the burn
 and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` | `failed` |
 `advanced` | `cancelled`), `reason`
-(`slots` | `memory` | `gap` | `hold` | `runway-held` | `no-items`, the error, or `operator cancelled before launch`),
+(`lifecycle-cap` | `pre-pr-cap` | `review-cap` | `slots` | `memory` | `gap` | `hold` |
+`runway-held` | `no-items`, the error, or `operator cancelled before launch`),
 `liveWeight`,
 `freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
 `overrideReason`, `room`, `selectionSource` (`StageDefault` | `StageOverride` | `LifecyclePin` |
 `PersistedLifecycleCompatibility`), and optional `admission` (`requestedRequirements`, `effectiveGrant`,
-`result`, `missing`, `vendorUsage`). An admission refusal records `vendorUsage: 0`: it happened before
+`result`, `missing`, `vendorUsage`). Scheduling rows also carry optional WIP/flow facts:
+`activeLifecycles`, `prePullRequestLifecycles`, `liveReviews`, `priorityBand`,
+`passedNewWorkHead`, `oldestOccupyingLifecycle`, `consumingLifecycles` (oldest first), and
+`newWorkHeadCap`. An admission refusal records `vendorUsage: 0`: it happened before
 any vendor process could run.
 
 **`cancelled` is the retained pre-launch cancellation fact.** Its `at` is the item's
@@ -7661,20 +7668,25 @@ auditable.
 
 **It records transitions, every launch and every failure — not a per-tick heartbeat.** A verdict
 identical to the one immediately before it is not re-appended, so a queue waiting on memory for three
-hours writes one line rather than three hundred and sixty. "Is it still waiting, and on what" is
-`baton queue list`'s question. The gate order is hold → no-items → gap → memory → slots, and that
+hours writes one line rather than three hundred and sixty. Host counters alone do not re-append a
+standing verdict, but changed WIP counts, occupants, or flow selection do, even under the same wait
+reason: otherwise retirement would leave the projected WIP snapshot stale. "Is it still waiting, and
+on what" is `baton queue list`'s question. The scheduler gate order is hold → no-items → gap →
+lifecycle-cap → pre-pr-cap → review-cap → memory → slots, and that
 order is load-bearing for the reason recorded: an operator who held the queue must read `hold`, not
 whichever other gate happens also to be shut. The ledger **fails open** like every other accounting
 write: a recording failure is never the reason a lane that launched is treated as not having launched.
 
 `fleet_status` carries nothing new for the queue. **The projection does, since #1912 slice 1** — its
 `queue` key (§6) is the conductor's board, and this ledger is one of the three things it reads: the
-newest row's `reason` is what a candidate row prints, so the queue's *recorded* verdict and the
+newest scheduling row's `reason` is what its matching candidate row prints, so the queue's *recorded* verdict and the
 displayed one cannot be two answers. The row's `at` travels with it, because the collapse above means
 a standing verdict is legitimately hours old and a reason rendered without its age would read as this
-instant's. The counters beside it are deliberately **not** read — the board recomputes `liveWeight`,
+instant's. The host counters beside it are deliberately **not** read — the board recomputes `liveWeight`,
 `freeGb` and `floorGb` on its own tick, and pairing a three-hour-old floor with a current free-memory
 reading would invent a comparison nothing made.
+The WIP counts and flow fields are projected from that recorded scheduling row, not reinterpreted by
+the Fleet panel; an old row without them displays WIP as unrecorded rather than zero.
 
 ### Launching, done detection, and shutdown
 

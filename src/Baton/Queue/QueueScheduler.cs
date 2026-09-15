@@ -209,18 +209,19 @@ public static class QueueScheduler
     internal static QueueItem? Candidate(IReadOnlyList<QueueItem> items) =>
         items.FirstOrDefault(IsEligible);
 
-    internal static bool IsActiveLifecycle(QueueItem item) =>
+    /// <summary>The sole started/unretired lifecycle predicate used by scheduling and pre-launch
+    /// cancellation. A historical malformed Cancelled row with prior-launch proof still occupies WIP;
+    /// cancellation only releases a slot when it was truly before the first launch.</summary>
+    public static bool IsActiveLifecycle(QueueItem item) =>
         item.Stage is not null
         && item.Retirement is null
-        // Cancelled is explicitly before-launch. A round-zero cancellation must not consume WIP.
-        && item.State != QueueItemState.Cancelled
         && (item.AttemptId is not null
             || item.ParentAttemptId is not null
             // Compatibility evidence for rows written before attempt identities existed.
             || item.RoomDirectory is { Length: > 0 }
             || item.PullRequest is not null
             || item.Round != 0
-            || item.State != QueueItemState.Queued);
+            || item.State is QueueItemState.Launched or QueueItemState.Done or QueueItemState.Failed);
 
     internal static bool IsNewLifecycle(QueueItem item) => item.Stage is not null && !IsActiveLifecycle(item);
 

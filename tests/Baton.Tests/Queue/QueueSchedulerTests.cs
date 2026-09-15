@@ -155,6 +155,31 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void A_cancelled_row_with_prior_launch_proof_still_consumes_wip_until_retirement()
+    {
+        var malformed = Item("prior") with
+        {
+            Stage = WorkStage.Ready,
+            State = QueueItemState.Cancelled,
+            AttemptId = FleetAttemptId.New(),
+        };
+        var next = Item("next") with { Stage = WorkStage.Implement };
+        var settings = new QueueSettings { MaxActiveLifecycles = 1 };
+        var blocked = QueueScheduler.Decide(LocalAt(12), [malformed, next], 0, 8,
+            settings, null, held: false);
+        var retired = malformed with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, LocalAt(11), "resolved"),
+        };
+        var admitted = QueueScheduler.Decide(LocalAt(12), [retired, next], 0, 8,
+            settings, null, held: false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, blocked.WaitReason);
+        Assert.Equal(1, blocked.Context!.Portfolio.ActiveLifecycles);
+        Assert.Equal(QueueDecisionKind.Launch, admitted.Kind);
+    }
+
+    [Fact]
     public void Legacy_lifecycle_evidence_counts_but_an_untouched_round_zero_row_does_not()
     {
         var legacyStarted = Item("legacy") with { Stage = WorkStage.Implement, RoomDirectory = "C:\\room" };

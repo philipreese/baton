@@ -1601,6 +1601,8 @@ public sealed class QueueCommandTests
                 {
                     Tag = "2159-lane",
                     Role = "implement",
+                    Stage = WorkStage.Implement,
+                    Issue = 2159,
                     Workspace = workspace,
                     SpecFile = spec,
                 }],
@@ -1838,6 +1840,56 @@ public sealed class QueueCommandTests
 
             Assert.Contains("does not exist", refusal.Message, StringComparison.Ordinal);
             Assert.False(File.Exists(BatonPaths.QueueDecisionLedgerFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_refuses_a_queued_but_started_lifecycle_without_freeing_its_wip_slot()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var started = new QueueItem
+            {
+                Tag = "started",
+                Role = "implement",
+                Stage = WorkStage.Ready,
+                Issue = 2314,
+                AttemptId = FleetAttemptId.New(),
+                State = QueueItemState.Queued,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "started.md"),
+            };
+            var next = new QueueItem
+            {
+                Tag = "new",
+                Role = "implement",
+                Stage = WorkStage.Implement,
+                Issue = 2315,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "new.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                snapshot => snapshot with { Items = [started, next] }, Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "started"), TextWriter.Null, Ct));
+            Assert.Contains("already-started lifecycle", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("queue retire", refusal.TryInvocation, StringComparison.Ordinal);
+
+            var retained = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.Equal(QueueItemState.Queued, retained.Items[0].State);
+            Assert.Null(retained.Items[0].CancelledAt);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            var decision = QueueScheduler.Decide(DateTimeOffset.UtcNow, retained.Items, 0, 8,
+                new QueueSettings { MaxActiveLifecycles = 1 }, null, held: false);
+            Assert.Equal(QueueWaitReason.LifecycleCap, decision.WaitReason);
+            Assert.Equal(1, decision.Context!.Portfolio.ActiveLifecycles);
         }
         finally
         {

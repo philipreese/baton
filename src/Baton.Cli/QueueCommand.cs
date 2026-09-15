@@ -585,7 +585,8 @@ public static class QueueCommand
         {
             observed = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
             if (observed?.State != QueueItemState.Queued
-                || observed.ReadinessMutationClaim is { Length: > 0 })
+                || observed.ReadinessMutationClaim is { Length: > 0 }
+                || QueueScheduler.IsActiveLifecycle(observed))
             {
                 return snapshot;
             }
@@ -606,6 +607,12 @@ public static class QueueCommand
                 throw new CliArgumentException(
                     $"Queue item '{tag}' has an in-flight pull-request readiness update and cannot be cancelled yet.",
                     "the operation was already claimed; wait for reconciliation to finish, then retry cancellation.");
+            case { State: QueueItemState.Queued } started when QueueScheduler.IsActiveLifecycle(started):
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' is an already-started lifecycle waiting at stage '{WorkStages.Token(started.Stage!.Value)}' "
+                    + "and cannot be cancelled as a pre-launch request.",
+                    "resolve its PR or retire the settled lifecycle with 'baton queue retire <tag> --reason <why>'; "
+                    + "a live room instead uses 'baton cancel <room-dir>'.");
             case { State: QueueItemState.Queued }:
                 await QueueDecisionLedgerStore.AppendCancellationAsync(
                     cancelledAt, tag, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
