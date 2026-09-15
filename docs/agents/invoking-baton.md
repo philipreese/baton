@@ -767,4 +767,8 @@ launches without stopping the daemon or touching live lanes. `baton queue retire
 retains a settled lifecycle item outside active attention; `restore` takes the same tag and reason
 for an operator retirement. Every decision, including each stage change and the evidence it was
 derived from, lands in `~/.baton/fleet/queue.jsonl`.
+For an old roomless Failed continuation, retirement requires an exact typed refused attempt and a
+terminal parent room. For an old Cancelled next stage, it requires its keyed cancellation fact and
+terminal proof for every recorded prior launched room. Neither state word alone is enough; if the
+command refuses a row, leave it active and investigate the missing evidence rather than edit the queue.
 `spec/baton.md` §13 is the contract.

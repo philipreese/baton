@@ -7141,9 +7141,11 @@ refuse it unless the current attempt has an exact typed `attemptRefused` event w
 `attemptStarted`/`attemptSettled` event, and its named parent attempt has matching `attemptStarted`
 and `attemptSettled` events for one room whose terminal sentinel agrees with the settled outcome.
 An older `Cancelled` next-stage row may likewise be operator-retired only when it has no claimed
-current attempt or room, its exact parent has that same settled-room proof, and an exact keyed
+current attempt or room, its exact parent has that same settled-room proof, every recorded prior
+launched room has a terminal sentinel, and an exact keyed
 `cancelled` queue-decision fact agrees with `cancelledAt`; a later launch for the work forbids it.
-Both operator exceptions require strict, retained live-plus-rollover event and decision reads and
+Both operator exceptions require strict, retained live-plus-rollover event reads; Cancelled also
+requires a strict queue-decision read. Their source and sentinel files have
 read-deny-write leases held through the queue commit. Missing, torn, mismatched, or changing proof
 keeps the lifecycle active; a bare admitted admission result or Cancelled state is never proof.
 These are operator dispositions, not a new automatic merged-retirement shortcut.

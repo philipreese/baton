@@ -690,7 +690,7 @@ public static class QueueCommand
         if ((observed.State != QueueItemState.Failed || !terminalRoomProof.IsProven)
             && !hasLegacyProof && !readyClosed)
         {
-            throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement.");
+            throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement. It requires a terminal current room, exact refused-attempt/terminal-parent proof, or recorded cancellation with terminal proof for every prior launched room.");
         }
         // A restoration can have committed its CAS while its ledger append failed. Replaying every
         // retained predecessor here is a fence: do not commit this successor unless the full ordered
@@ -722,12 +722,7 @@ public static class QueueCommand
                         && observation.Error is null) == true;
                 if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
                     || current.State == QueueItemState.Launched
-                    || current.State != observed.State
-                    || current.Stage != observed.Stage
-                    || current.RoomDirectory != observed.RoomDirectory
-                    || current.AttemptId != observed.AttemptId
-                    || current.ParentAttemptId != observed.ParentAttemptId
-                    || current.CancelledAt != observed.CancelledAt
+                    || !SameRetirementAttempt(observed, current)
                     || (current.State != QueueItemState.Failed
                         || !HasTerminalRoomProofAtMutation(current, terminalRoomProof, out journalLease))
                         && (legacyLease = TryAcquireLegacyRetirementProof(current)) is null
@@ -772,7 +767,15 @@ public static class QueueCommand
     /// durably cancelled before launch. Missing, torn, or changing evidence keeps it active.
     /// The leases remain open through QueueStore's write, not merely its mutation callback.
     /// </summary>
-    private static LegacyRetirementProofLease? TryAcquireLegacyRetirementProof(QueueItem item)
+    internal static bool SameRetirementAttempt(QueueItem observed, QueueItem current) =>
+        current.State == observed.State
+        && current.Stage == observed.Stage
+        && current.RoomDirectory == observed.RoomDirectory
+        && current.AttemptId == observed.AttemptId
+        && current.ParentAttemptId == observed.ParentAttemptId
+        && current.CancelledAt == observed.CancelledAt;
+
+    internal static LegacyRetirementProofLease? TryAcquireLegacyRetirementProof(QueueItem item)
     {
         var refused = item is
         {
@@ -791,16 +794,22 @@ public static class QueueCommand
 
         FleetEventLog.FleetEventProofLease? events = null;
         FileStream? decisionStream = null;
-        FileStream? sentinel = null;
+        var sentinels = new List<FileStream>();
         try
         {
             events = FleetEventLog.OpenOperational().AcquireRetainedProof();
             var workEvents = events.Events.Where(e =>
                 string.Equals(e.WorkId?.Value, item.Tag, StringComparison.Ordinal)).ToList();
             var parent = item.ParentAttemptId!.Value;
-            var started = workEvents.Where(e => e.AttemptId == parent
+            var parentEvents = events.Events.Where(e => e.AttemptId == parent
+                && e.Kind is FleetEventKind.AttemptStarted or FleetEventKind.AttemptSettled).ToList();
+            if (parentEvents.Any(e => e.WorkId?.Value != item.Tag))
+            {
+                return null;
+            }
+            var started = parentEvents.Where(e => e.AttemptId == parent
                 && e.Kind == FleetEventKind.AttemptStarted).ToList();
-            var settled = workEvents.Where(e => e.AttemptId == parent
+            var settled = parentEvents.Where(e => e.AttemptId == parent
                 && e.Kind == FleetEventKind.AttemptSettled).ToList();
             if (started.Count != 1 || settled.Count != 1
                 || started[0].RoomId is not { Value.Length: > 0 } room
@@ -815,9 +824,10 @@ public static class QueueCommand
             {
                 return null;
             }
-            sentinel = new FileStream(Path.Combine(parentRoom, TerminalSentinelWriter.TerminalSentinelFileName),
+            var parentSentinel = new FileStream(Path.Combine(parentRoom, TerminalSentinelWriter.TerminalSentinelFileName),
                 FileMode.Open, FileAccess.Read, FileShare.Read);
-            var status = JsonSerializer.Deserialize<WorkflowStatusView>(sentinel);
+            sentinels.Add(parentSentinel);
+            var status = JsonSerializer.Deserialize<WorkflowStatusView>(parentSentinel);
             if (status is null || !IsTerminalOutcome(status.State)
                 || !string.Equals(status.State, settled[0].Outcome, StringComparison.Ordinal))
             {
@@ -827,9 +837,10 @@ public static class QueueCommand
             if (refused)
             {
                 var current = item.AttemptId!.Value;
-                var currentEvents = workEvents.Where(e => e.AttemptId == current).ToList();
+                var currentEvents = events.Events.Where(e => e.AttemptId == current).ToList();
                 var refusal = currentEvents.Where(e => e.Kind == FleetEventKind.AttemptRefused
-                    && e.ParentAttemptId == parent && e.RoomId is null).ToList();
+                    && e.ParentAttemptId == parent && e.RoomId is null
+                    && e.WorkId?.Value == item.Tag).ToList();
                 if (refusal.Count != 1 || refusal[0].At < settled[0].At
                     || currentEvents.Any(e => e.Kind is FleetEventKind.AttemptStarted
                         or FleetEventKind.AttemptSettled))
@@ -855,12 +866,34 @@ public static class QueueCommand
                 {
                     return null;
                 }
+                foreach (var launch in decisions.Where(d => d.Tag == item.Tag
+                    && d.Decision == QueueDecisionEntry.Launched))
+                {
+                    if (launch.Room is not { Length: > 0 } priorRoom
+                        || launch.At > item.CancelledAt)
+                    {
+                        return null;
+                    }
+                    var path = BatonPaths.RecordKey(priorRoom);
+                    if (!BatonPaths.RecordKeyComparer.Equals(path, priorRoom))
+                    {
+                        return null;
+                    }
+                    var priorSentinel = new FileStream(
+                        Path.Combine(path, TerminalSentinelWriter.TerminalSentinelFileName),
+                        FileMode.Open, FileAccess.Read, FileShare.Read);
+                    sentinels.Add(priorSentinel);
+                    if (!IsTerminalOutcome(JsonSerializer.Deserialize<WorkflowStatusView>(priorSentinel)?.State))
+                    {
+                        return null;
+                    }
+                }
             }
 
-            var proof = new LegacyRetirementProofLease(events, decisionStream, sentinel);
+            var proof = new LegacyRetirementProofLease(events, decisionStream, sentinels);
             events = null;
             decisionStream = null;
-            sentinel = null;
+            sentinels = [];
             return proof;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
@@ -870,7 +903,7 @@ public static class QueueCommand
         }
         finally
         {
-            sentinel?.Dispose();
+            foreach (var sentinel in sentinels) sentinel.Dispose();
             decisionStream?.Dispose();
             events?.Dispose();
         }
@@ -898,12 +931,12 @@ public static class QueueCommand
         WorkflowOutcome.Succeeded or WorkflowOutcome.FinishedDuringTeardown or WorkflowOutcome.Failed
         or WorkflowOutcome.Cancelled or WorkflowOutcome.Indeterminate;
 
-    private sealed class LegacyRetirementProofLease(
-        FleetEventLog.FleetEventProofLease events, FileStream? decisions, FileStream sentinel) : IDisposable
+    internal sealed class LegacyRetirementProofLease(
+        FleetEventLog.FleetEventProofLease events, FileStream? decisions, IReadOnlyList<FileStream> sentinels) : IDisposable
     {
         public void Dispose()
         {
-            sentinel.Dispose();
+            foreach (var sentinel in sentinels) sentinel.Dispose();
             decisions?.Dispose();
             events.Dispose();
         }
