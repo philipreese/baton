@@ -1687,7 +1687,10 @@ origin/<branch>`), and (2) when a PR is expected (`--expect-pr`, defaulting to
 `role.DeliversBranch`, overridable per dispatch — `Baton.Vendors.RoleDispatch.ToBinding` resolves the
 effective bool there rather than leaving it null, so a plain-`bool` default trap on
 `WorkerBindingConfigEntry.ExpectPr` can never silently disable the check for a role the catalog does
-mark), an open PR exists for that branch (`gh pr list --head <branch> --json number`). Two lanes shipped
+mark), an open PR exists for that branch with a readable exact number/head
+(`gh pr list --head <branch> --json number,headRefOid`). A positive-but-unnameable PR reading
+cannot certify the later exact head and makes this delivery assertion `NotRun`, without changing the
+general PR reader's truthful "some PR is open" answer. Two lanes shipped
 `implement: Succeeded` reports describing a push and a PR while their branch sat only local — the
 motivating measurement.
 
@@ -1718,11 +1721,16 @@ For a passing exit-0 assertion, the ancestry check names the exact local and fet
 instead of movable symbolic refs. The later stamp observation must report those same IDs; a readable
 different head is recorded as a failed delivery fact, and missing/incomplete provenance remains unknown.
 Neither case may inherit the earlier pass or advance the lane.
-When a PR is expected, the check also retains its positive open reading and any readable PR number/head.
+When a PR is expected, the check retains its positive open reading and exact PR number/head. If
+either identity or object ID is unreadable in the first answer, delivery is `NotRun` rather than a
+pass that cannot be compared with the later forge state.
 The final stamp re-reads the PR: a positive absence or a different readable number/head fails
 `pr-not-open` for that checked PR, while an unreadable final lookup becomes `NotRun`. The same earlier
-PR reading cannot certify a later close or force-push. Fields that were not readable in the first
-reading remain unknown rather than being invented for a comparison.
+PR reading cannot certify a later close or force-push. Unreadable fields can still be recorded in a
+non-certifying stamp when available later; they never become retroactive proof of the first answer.
+A `Passed` journal observation that names a PR must retain its exact valid PR head; losing the
+optional head member makes that event incomplete on replay rather than silently treating the pass
+as branch-only. Failed and `NotRun` observations may still lack PR facts without fabricating them.
 
 A failure appends `FlowEvent.VerifyFailed` with `VerifyFailedKind.DeliveryFailed` and `FailingMembers`
 naming exactly which of the two is missing — `branch-not-pushed`, `pr-not-open`, or both — settling

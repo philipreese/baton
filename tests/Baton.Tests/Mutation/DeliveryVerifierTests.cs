@@ -1,4 +1,8 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Baton.Domain;
 using Baton.Mutation;
+using Baton.Store;
 using Baton.Tests.TestSupport;
 using Xunit;
 
@@ -19,7 +23,8 @@ public sealed class DeliveryVerifierTests
         var (workspace, origin) = CreatePushedWorkspace("feature-a");
         try
         {
-            var gh = WriteFakeGh(workspace, """[{"number":42}]""");
+            var head = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":42,"headRefOid":"{{head}}"}]""");
 
             var outcome = await DeliveryVerifier.CheckAsync(
                 workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
@@ -84,6 +89,33 @@ public sealed class DeliveryVerifierTests
             Cleanup(workspace, origin);
             DirectoryCleanup.DeleteRecursively(outputDirectory);
         }
+    }
+
+    [Fact]
+    public async Task A_passed_expected_PR_journal_event_missing_its_PR_head_fails_replay_closed()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-journal-damage");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":2309,"headRefOid":"{{head}}"}]""");
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(DeliveryCheckStatus.Passed, check.Status);
+            var observed = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            var recorded = observed.ToRecordedEvent(new ExecutionId("exec-pr-journal-damage"));
+            Assert.Equal(DeliveryCheckStatus.Passed, DeliveryVerifier.ReadRecordedEvidence(recorded).Evidence?.Verification);
+
+            var node = JsonNode.Parse(JsonSerializer.Serialize<FlowEvent>(recorded, FlowEventLogJson.Options))!.AsObject();
+            Assert.True(node.Remove("PullRequestHead"));
+            var damaged = Assert.IsType<FlowEvent.DeliveryObservationRecorded>(
+                JsonSerializer.Deserialize<FlowEvent>(node.ToJsonString(), FlowEventLogJson.Options));
+            var reading = DeliveryVerifier.ReadRecordedEvidence(damaged);
+            Assert.Null(reading.Evidence);
+            Assert.Contains("incomplete", reading.Problem, StringComparison.Ordinal);
+        }
+        finally { Cleanup(workspace, origin); }
     }
 
     [Fact]
@@ -497,6 +529,42 @@ public sealed class DeliveryVerifierTests
             Assert.Contains("final expected PR observation", final.VerificationReason, StringComparison.Ordinal);
             Assert.Equal(DeliveryCheckStatus.NotRun,
                 DeliveryVerifier.ReadRecordedEvidence(final.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-unreadable")))
+                    .Evidence?.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
+    }
+
+    [Theory]
+    [InlineData("missing-head")]
+    [InlineData("unnameable")]
+    [InlineData("malformed-head")]
+    public async Task An_expected_PR_without_a_checked_exact_head_cannot_certify_a_later_head(string firstReading)
+    {
+        var (workspace, origin) = CreatePushedWorkspace($"feature-pr-first-unknown-{firstReading}");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var first = firstReading switch
+            {
+                "missing-head" => """[{"number":2309}]""",
+                "malformed-head" => """[{"number":2309,"headRefOid":"not-a-sha"}]""",
+                _ => "[{}]",
+            };
+            var changed = $$"""[{"number":2309,"headRefOid":"{{new string('b', 40)}}"}]""";
+            var (gh, marker) = WriteSequentialFakeGh(workspace, first, changed);
+
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            var final = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(2, File.ReadAllLines(marker).Length); // Both child PR probes actually ran.
+            Assert.Equal(head, final.LocalHead);
+            Assert.Equal(head, final.RemoteHead);
+            Assert.Equal(DeliveryCheckStatus.NotRun, check.Status);
+            Assert.Contains("exact PR", check.NotRunReason, StringComparison.Ordinal);
+            Assert.Equal(DeliveryCheckStatus.NotRun, final.Verification);
+            Assert.Equal(DeliveryCheckStatus.NotRun,
+                DeliveryVerifier.ReadRecordedEvidence(final.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-first-unknown")))
                     .Evidence?.ToOutcome().Status);
         }
         finally { Cleanup(workspace, origin); }

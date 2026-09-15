@@ -354,9 +354,10 @@ public static class DeliveryVerifier
             return false;
         }
 
-        // A pass is an affirmative claim about one exact local/remote relationship. Failed and
-        // NotRun deliberately permit unavailable Git facts: requiring them would turn a truthful
-        // fail-closed observation into an unreadable stamp on replay.
+        // A pass is an affirmative claim about exact Git heads and, when it names a PR, that
+        // PR's exact head. Dropping the optional PR-head member from a valid journal line cannot
+        // silently turn an expected-PR pass into branch-only success on replay. Failed and NotRun
+        // permit unavailable facts so a truthful fail-closed observation stays readable.
         if (evidence.Verification == DeliveryCheckStatus.NotRun
             && string.IsNullOrWhiteSpace(evidence.VerificationReason)) return false;
 
@@ -365,7 +366,10 @@ public static class DeliveryVerifier
                 && IsObjectId(evidence.LocalHead)
                 && !string.IsNullOrWhiteSpace(evidence.Branch)
                 && !string.Equals(evidence.Branch, "HEAD", StringComparison.Ordinal)
-                && IsObjectId(evidence.RemoteHead));
+                && IsObjectId(evidence.RemoteHead)
+                && (evidence.PullRequestNumber is null
+                    ? evidence.PullRequestHead is null
+                    : evidence.PullRequestNumber > 0 && IsObjectId(evidence.PullRequestHead)));
     }
 
     private static bool IsObjectId(string? value) =>
@@ -468,6 +472,14 @@ public static class DeliveryVerifier
                 failingMembers.Add("pr-not-open");
                 tailLines.Add($"pr-not-open: no open PR found for branch '{branch}' — open one before this lane can settle Succeeded.");
             }
+            else if (pr.Number.GetValueOrDefault() <= 0 || !IsObjectId(pr.Head))
+            {
+                // Protected invariant (#2309): an unnameable open PR is positive evidence of
+                // existence, but cannot certify the exact PR head after a later forge mutation.
+                // Keep the general three-state PR reader; only delivery's positive assertion
+                // requires the identity and object ID needed for the final comparison.
+                notRunReasons.Add("exact PR number/head was unavailable in the first open PR reading");
+            }
             else checkedPr = pr;
         }
 
@@ -563,7 +575,7 @@ public static class DeliveryVerifier
     }
 
     /// <summary>
-    /// #1978: <c>gh pr list --head &lt;branch&gt; --json number</c>, resolving the branch from
+    /// #1978/#2309: <c>gh pr list --head &lt;branch&gt; --json number,headRefOid</c>, resolving the branch from
     /// <paramref name="workingDirectory"/> itself. Extracted from this class's own <c>expectPr</c> block
     /// so the timeout summary (<c>Outcomes.OutcomeClassifier</c>'s #1373 mutated-workspace arm, wired at
     /// <c>MutationInterface</c>) names a PR through the SAME question and the same spelling this check
@@ -626,7 +638,7 @@ public static class DeliveryVerifier
     }
 
     /// <summary>
-    /// The three readings <c>gh pr list --json number</c>'s stdout admits, kept as three rather than
+    /// The three readings <c>gh pr list --json number,headRefOid</c>'s stdout admits, kept as three rather than
     /// collapsed: a positively-parsed empty array (no PR), a non-empty one (at least one PR, named when
     /// its <c>number</c> is readable), and output that does not parse as an array at all.
     /// </summary>
@@ -666,10 +678,10 @@ public static class DeliveryVerifier
                 }
             }
 
-            // A non-empty array whose entries carry no readable `number`. `--json number` cannot produce
-            // it, so this stays "a PR is open, unnameable" rather than fabricating either polarity: the
-            // delivery check passes on it exactly as it did before #1978, and the timeout summary names
-            // nothing.
+            // A non-empty array whose entries carry no readable number stays "a PR is open,
+            // unnameable" rather than fabricating either polarity. The timeout summary names
+            // nothing; the stricter delivery check records NotRun because it cannot compare an
+            // exact PR identity/head at the final observation.
             return new OpenPullRequestReading(AnyOpen: true, Number: null);
         }
         catch (JsonException)
