@@ -841,9 +841,10 @@ public static class QueueCommand
                 var refusal = currentEvents.Where(e => e.Kind == FleetEventKind.AttemptRefused
                     && e.ParentAttemptId == parent && e.RoomId is null
                     && e.WorkId?.Value == item.Tag).ToList();
-                if (refusal.Count != 1 || refusal[0].At < settled[0].At
-                    || currentEvents.Any(e => e.Kind is FleetEventKind.AttemptStarted
-                        or FleetEventKind.AttemptSettled))
+                // A second same-ID event, even another refusal with a different parent/work,
+                // makes the identity history contradictory rather than more convincing.
+                if (currentEvents.Count != 1 || refusal.Count != 1
+                    || refusal[0].At < settled[0].At)
                 {
                     return null;
                 }
@@ -899,7 +900,7 @@ public static class QueueCommand
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
             or InvalidOperationException or ArgumentException or BatonFlowException)
         {
-            return null;
+            throw new LegacyRetirementProofReadException(item.Tag, ex);
         }
         finally
         {
@@ -941,6 +942,9 @@ public static class QueueCommand
             events.Dispose();
         }
     }
+
+    internal sealed class LegacyRetirementProofReadException(string tag, Exception cause)
+        : BatonFlowException($"Queue item '{tag}' retirement proof read failed: {cause.Message}. The row remains active; repair the retained source before retrying.", cause);
 
     private static async Task<int> RestoreAsync(string tag, string reason, TextWriter output, CancellationToken cancellationToken)
     {

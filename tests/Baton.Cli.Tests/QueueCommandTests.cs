@@ -2012,9 +2012,10 @@ public sealed class QueueCommandTests
             foreach (var brokenTail in new[] { "{", "{broken\n" })
             {
                 await File.AppendAllTextAsync(BatonPaths.FleetEventsFile, brokenTail, Ct);
-                await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                var unreadable = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() => QueueCommand.ExecuteAsync(
                     new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "unreadable fleet proof"),
                     TextWriter.Null, Ct));
+                Assert.Contains("proof read failed", unreadable.Message, StringComparison.Ordinal);
                 await File.WriteAllBytesAsync(BatonPaths.FleetEventsFile, retainedLive, Ct);
             }
             var currentItem = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
@@ -2093,11 +2094,19 @@ public sealed class QueueCommandTests
             await QueueDecisionLedgerStore.AppendCancellationAsync(
                 cancelledAt, tag, BatonPaths.QueueDecisionLedgerFile, Ct);
 
-            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+            var missingSentinel = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "earlier room not terminal"),
                 TextWriter.Null, Ct));
+            Assert.Contains("terminal.json", missingSentinel.Message, StringComparison.Ordinal);
             await TerminalSentinelWriter.WriteAsync(earlierRoom,
                 new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null), Ct);
+            var retainedDecisions = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            await File.AppendAllTextAsync(BatonPaths.QueueDecisionLedgerFile, "{broken\n", Ct);
+            var unreadableDecisions = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() =>
+                QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Retire, Tag: tag,
+                    Reason: "corrupt keyed decision proof"), TextWriter.Null, Ct));
+            Assert.Contains("proof read failed", unreadableDecisions.Message, StringComparison.Ordinal);
+            await File.WriteAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, retainedDecisions, Ct);
             var currentItem = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             using (var lease = QueueCommand.TryAcquireLegacyRetirementProof(currentItem))
             {
@@ -2127,6 +2136,8 @@ public sealed class QueueCommandTests
     [InlineData("started-current")]
     [InlineData("wrong-parent")]
     [InlineData("wrong-work-tag")]
+    [InlineData("valid-plus-wrong-parent")]
+    [InlineData("valid-plus-wrong-work-tag")]
     [InlineData("nonterminal-parent")]
     public async Task Retire_refuses_legacy_proof_with_a_live_attempt_or_broken_parent(string brokenProof)
     {
@@ -2152,11 +2163,17 @@ public sealed class QueueCommandTests
                 $"attempt-settled:{parent.Value}", at.AddMinutes(1), AttemptId: parent,
                 WorkId: new FleetWorkId(tag), RoomId: new FleetRoomId(BatonPaths.RecordKey(room)),
                 Outcome: WorkflowOutcome.Failed), Ct);
+            if (brokenProof.StartsWith("valid-plus-", StringComparison.Ordinal))
+            {
+                await log.Append(new FleetEventDraft(FleetEventKind.AttemptRefused,
+                    $"attempt-refused:{current.Value}", at.AddMinutes(2), AttemptId: current,
+                    ParentAttemptId: parent, WorkId: new FleetWorkId(tag)), Ct);
+            }
             await log.Append(new FleetEventDraft(FleetEventKind.AttemptRefused,
-                $"attempt-refused:{current.Value}", at.AddMinutes(2), AttemptId: current,
-                ParentAttemptId: brokenProof == "wrong-parent"
+                $"attempt-refused:{current.Value}:conflict", at.AddMinutes(2), AttemptId: current,
+                ParentAttemptId: brokenProof is "wrong-parent" or "valid-plus-wrong-parent"
                     ? new FleetAttemptId("some-other-parent") : parent,
-                WorkId: new FleetWorkId(brokenProof == "wrong-work-tag"
+                WorkId: new FleetWorkId(brokenProof is "wrong-work-tag" or "valid-plus-wrong-work-tag"
                     ? "other-work" : tag)), Ct);
             if (brokenProof == "started-current")
             {
