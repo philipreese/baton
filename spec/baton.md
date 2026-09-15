@@ -7486,6 +7486,9 @@ A halted no-PR row keeps its terminal room and original delivery evidence attach
 and unreadable step evidence never proves an open PR, so none may stage a continuation QueueLauncher
 will refuse before a room exists. The advancer re-observes the exact branch; only a verified bound open
 draft PR releases normal re-review or continuation routing. It never infers that PR from a pushed branch.
+The recovery allowance is a persisted, closed reconciliation kind on the queue item, not a substring of
+the operator-facing error. Failed or empty GitHub observations preserve the original halt, room, and
+reason without adding another failure fact; every other halted item remains terminal.
 
 **Draft is the lifecycle's visible readiness signal, not merge authority.** Every open PR with an
 unfinished review, fix, continuation, stale-approval, or required-check obligation is reconciled to draft.

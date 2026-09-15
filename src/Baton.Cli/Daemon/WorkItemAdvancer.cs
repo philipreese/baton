@@ -142,10 +142,10 @@ public sealed class WorkItemAdvancer
             LastAdmission.Result: TaskRequirementAdmission.Refused,
         };
 
-    // The lifecycle pins this wording because it is the durable marker for the one halted state
-    // whose stated recovery is a later exact draft-PR observation. Other halted rows remain terminal.
+    // Only the typed, persisted recovery granted by the lifecycle may re-enter a halted row.
+    // Error text is for the operator and can change without changing scheduler state.
     private static bool IsAwaitingMissingPullRequestReconciliation(QueueItem item) =>
-        item.Error?.Contains("no verified open pull request is bound", StringComparison.Ordinal) == true;
+        item.ReconciliationKind == QueueReconciliationKind.AwaitingVerifiedPullRequest;
 
     private async Task<QueueDecisionEntry?> AdvanceOneAsync(
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
@@ -256,7 +256,8 @@ public sealed class WorkItemAdvancer
         // Preserve the original delivery failure and terminal room while the operator has not yet
         // supplied the exact forge object. Re-observation is the supported recovery seam; it does
         // not infer a PR from a branch or manufacture another failure fact each scheduler tick.
-        if (awaitingMissingPullRequest && pr.Succeeded && pr.Number is null)
+        if (awaitingMissingPullRequest
+            && (!pr.Succeeded || pr.Number is null || pr.IsOpen != true))
         {
             return null;
         }
@@ -537,6 +538,7 @@ public sealed class WorkItemAdvancer
             AttemptBaseRevision = null,
             Error = null,
             Halted = false,
+            ReconciliationKind = null,
             ReadinessMutationClaim = null,
         }, () =>
         {
@@ -569,6 +571,7 @@ public sealed class WorkItemAdvancer
             RoomDirectory = null,
             LaunchedAt = null,
             Error = null,
+            ReconciliationKind = null,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 
@@ -615,6 +618,7 @@ public sealed class WorkItemAdvancer
             Stage = from,
             State = QueueItemState.Failed,
             Error = transition.Reason,
+            ReconciliationKind = transition.ReconciliationKind,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
             Halted = true,

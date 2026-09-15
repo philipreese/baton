@@ -1533,6 +1533,53 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task Missing_pr_halt_survives_forge_outage_and_resumes_only_on_exact_open_draft()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var head = new Func<string, CancellationToken, Task<string?>>(
+                (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var first = Assert.Single(await Advancer(new FakeGh("[]"), head).AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, first.Decision);
+            var halted = await ReadBackAsync();
+            Assert.True(halted.Halted);
+            Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, halted.ReconciliationKind);
+            Assert.Null(halted.PullRequest);
+
+            // An unavailable lookup is not a new delivery failure. Neither it nor a successful
+            // empty lookup may rewrite the original halt or emit another Failed fact.
+            Assert.Empty(await Advancer(new FakeGh("[]", exitCode: 1), head)
+                .AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
+            Assert.Empty(await Advancer(new FakeGh("[]"), head)
+                .AdvanceAsync(Now.AddMinutes(2), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
+
+            var recovered = Assert.Single(await Advancer(new FakeGh(PrJson(77, PushedSha)), head)
+                .AdvanceAsync(Now.AddMinutes(3), Ct));
+            Assert.Equal(QueueDecisionEntry.Advanced, recovered.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.ReReview, item.Stage);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(77, item.PullRequest);
+            Assert.False(item.Halted);
+            Assert.Null(item.ReconciliationKind);
+            Assert.Null(item.Error);
+            Assert.Equal(room, halted.RoomDirectory);
+            Assert.Null(item.RoomDirectory);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task An_incomplete_terminal_without_outputs_retains_positive_zero_step_evidence()
     {
         var home = CreateTempHome();

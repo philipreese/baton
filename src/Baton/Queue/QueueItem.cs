@@ -278,6 +278,13 @@ public sealed record QueueItem
     public string? Error { get; init; }
 
     /// <summary>
+    /// The one halted lifecycle recovery that may re-observe an exact open PR. This is a closed,
+    /// persisted discriminator; <see cref="Error"/> is an explanation, not scheduler state.
+    /// Null on historical rows and on all other operator halts.
+    /// </summary>
+    public QueueReconciliationKind? ReconciliationKind { get; init; }
+
+    /// <summary>
     /// True once the lifecycle has failed this work item with a reason a person has to act on —
     /// <c>WorkItemLifecycle</c>'s <c>NeedsOperator</c> arms, including the
     /// <see cref="WorkStages.MaxRounds"/> ceiling. <b>The flag the advance's candidate filter reads.</b>
@@ -289,8 +296,8 @@ public sealed record QueueItem
     /// queue had already given up on matched the candidate filter on every tick forever — same stage,
     /// same failed state, same recorded room — re-spawning <c>gh</c> and <c>git</c> and rewriting
     /// <c>queue.json</c> each time, and invisibly, for the reason spec/baton.md §13 gives (#2004
-    /// review). Nothing in the product clears it: see <c>WorkItemLifecycle</c>'s recovery
-    /// sentence, which says so to the operator rather than promising a verb that does not exist.
+    /// review). Only a typed <see cref="ReconciliationKind"/> permits a later exact PR observation;
+    /// every other halted row remains terminal until explicit retirement.
     /// </remarks>
     public bool Halted { get; init; }
 
@@ -308,6 +315,14 @@ public sealed record QueueItem
     /// rather than enforced — the enforcement is that no code path substitutes a model at all.
     /// </summary>
     public bool PinModel { get; init; }
+}
+
+/// <summary>The closed set of automatic reconciliations permitted after an operator halt.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<QueueReconciliationKind>))]
+public enum QueueReconciliationKind
+{
+    /// <summary>A settled incomplete lane lacked an exact open PR; a later verified PR may resume it.</summary>
+    AwaitingVerifiedPullRequest,
 }
 
 /// <summary>Why a lifecycle row is retained as history rather than active attention.</summary>

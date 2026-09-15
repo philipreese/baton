@@ -305,7 +305,8 @@ public static class WorkItemLifecycle
             return WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} but no verified "
                 + $"open pull request is bound to '{observation.Branch}' — a pushed branch is not a pull request; "
-                + "open the exact draft PR and Baton will reconcile this retained terminal row");
+                + "open the exact draft PR and Baton will reconcile this retained terminal row",
+                QueueReconciliationKind.AwaitingVerifiedPullRequest);
         }
 
         if (IsPushed(observation))
@@ -515,7 +516,8 @@ public sealed record WorkItemTransition(
     int Round,
     string Reason,
     bool UsesAutomaticFix = false,
-    PullRequestReadinessAction PullRequestAction = PullRequestReadinessAction.None)
+    PullRequestReadinessAction PullRequestAction = PullRequestReadinessAction.None,
+    QueueReconciliationKind? ReconciliationKind = null)
 {
     internal static WorkItemTransition None(string reason) =>
         new(WorkItemTransitionKind.None, null, 0, reason);
@@ -528,8 +530,10 @@ public sealed record WorkItemTransition(
         PullRequestReadinessAction pullRequestAction = PullRequestReadinessAction.None) =>
         new(WorkItemTransitionKind.Stop, stage, 0, reason, PullRequestAction: pullRequestAction);
 
-    internal static WorkItemTransition NeedsOperator(string reason) =>
-        new(WorkItemTransitionKind.NeedsOperator, null, 0, reason);
+    internal static WorkItemTransition NeedsOperator(
+        string reason, QueueReconciliationKind? reconciliationKind = null) =>
+        new(WorkItemTransitionKind.NeedsOperator, null, 0, reason,
+            ReconciliationKind: reconciliationKind);
 }
 
 /// <summary>
