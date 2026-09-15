@@ -1138,13 +1138,13 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
-    public async Task A_merged_retirement_after_a_pre_launch_failure_CAS_suppresses_the_delayed_failure_record()
+    public async Task A_merged_observation_after_a_pre_launch_failure_without_refused_admission_preserves_the_failure()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            const string tag = "failure-before-merged-retirement";
+            const string tag = "failure-before-merged-observation";
             var lifecycle = Item(tag, role: "review") with
             {
                 Stage = WorkStage.Review,
@@ -1178,17 +1178,18 @@ public sealed class QueueSchedulerServiceTests
             await tick;
 
             var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
-            Assert.Equal(QueueRetirement.Merged, retained.Retirement?.Kind);
+            Assert.Null(retained.Retirement);
             Assert.Equal(WorkStage.Review, retained.Stage);
             Assert.Equal(2, retained.Round);
             Assert.Equal(lifecycle.LastVerdict, retained.LastVerdict);
             Assert.Equal(QueueItemState.Failed, retained.State);
             Assert.Null(retained.RoomDirectory);
+            Assert.Equal(TaskRequirementAdmission.Unknown, retained.LastAdmission?.Result);
             Assert.Contains("Git lock file", retained.Error!, StringComparison.Ordinal);
             var decisions = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
-            Assert.Contains(decisions, entry => entry.Tag == tag && entry.Decision == QueueDecisionEntry.Retired);
+            Assert.Contains(decisions, entry => entry.Tag == tag && entry.Decision == QueueDecisionEntry.Failed);
             Assert.DoesNotContain(decisions, entry => entry.Tag == tag
-                && entry.Decision is QueueDecisionEntry.Failed or QueueDecisionEntry.Launched);
+                && entry.Decision is QueueDecisionEntry.Retired or QueueDecisionEntry.Launched);
         }
         finally
         {
