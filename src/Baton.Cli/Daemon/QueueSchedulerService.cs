@@ -377,6 +377,7 @@ public sealed class QueueSchedulerService : BackgroundService
             {
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                 if (current?.State != QueueItemState.Queued
+                    || current.Retirement is not null
                     || !HasSameAdmissionDeclaration(current, item, admittedDeclaration))
                 {
                     return snapshot;

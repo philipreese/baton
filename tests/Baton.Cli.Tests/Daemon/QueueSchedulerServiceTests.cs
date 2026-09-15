@@ -34,6 +34,18 @@ public sealed class QueueSchedulerServiceTests
         }
     }
 
+    private sealed class MergedObservationGh : IGhCliRunner
+    {
+        public Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            var number = int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture);
+            return Task.FromResult(new GhCliResult(true, 0,
+                $$"""{"number":{{number}},"state":"MERGED","headRefOid":"head-{{number}}"}""",
+                string.Empty));
+        }
+    }
+
     [Fact]
     public async Task An_unknown_unscoped_role_fails_one_item_and_the_next_unscoped_item_launches()
     {
@@ -980,6 +992,77 @@ public sealed class QueueSchedulerServiceTests
         double? freeGb = 16.0,
         DateTimeOffset? now = null) =>
         new(launch, _ => Task.FromResult(liveWeight), () => freeGb, () => now ?? DateTimeOffset.UtcNow);
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_merged_retirement_blocks_a_queued_lifecycle_launch_regardless_of_lock_order(bool retireBeforeSelection)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "merged-review";
+            Directory.CreateDirectory(BatonPaths.Queue);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [Item(tag, role: "review") with
+                {
+                    Stage = WorkStage.Review,
+                    Repository = "github.com/aer-works/baton",
+                    PullRequest = 2307,
+                    Workspace = home,
+                }],
+            }, Ct);
+
+            var advancer = new WorkItemAdvancer(
+                new MergedObservationGh(),
+                (_, _) => Task.FromResult<string?>(null));
+            Task RetireAsync() => advancer.RefreshPullRequestObservationsAsync(DateTimeOffset.UtcNow, Ct);
+
+            var launches = new List<QueueLaunchRequest>();
+            var claimReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var allowClaim = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launches.Add(request);
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: _ =>
+                {
+                    claimReached.TrySetResult(true);
+                    return allowClaim.Task;
+                });
+
+            if (retireBeforeSelection)
+            {
+                await RetireAsync();
+                allowClaim.TrySetResult(true);
+                await service.TickOnceAsync(Ct);
+            }
+            else
+            {
+                var tick = service.TickOnceAsync(Ct);
+                await claimReached.Task.WaitAsync(Ct);
+                await RetireAsync();
+                allowClaim.TrySetResult(true);
+                await tick;
+            }
+
+            Assert.Empty(launches);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Queued, retained.State);
+            Assert.Equal(QueueRetirement.Merged, retained.Retirement?.Kind);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
 
     [Fact]
     public async Task A_launchable_item_is_marked_launched_with_its_room_and_recorded_as_launched()
