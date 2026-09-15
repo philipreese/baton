@@ -1960,6 +1960,273 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Retire_accepts_an_exactly_refused_roomless_attempt_with_a_terminal_parent_room()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var tag = "legacy-refused";
+            var parent = new FleetAttemptId("parent-legacy-refused");
+            var current = new FleetAttemptId("current-legacy-refused");
+            var room = Path.Combine(home, "rooms", "queue-legacy-refused-parent");
+            Directory.CreateDirectory(room);
+            await TerminalSentinelWriter.WriteAsync(
+                room, new WorkflowStatusView(WorkflowOutcome.Failed, [], [], "parent terminal"), Ct);
+            var log = new FleetEventLog(
+                BatonPaths.FleetEventsFile, BatonPaths.FleetEventsRolloverFile, maxLiveBytes: 100_000);
+            var at = DateTimeOffset.Parse("2026-09-15T14:00:00Z");
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptStarted, $"attempt-started:{parent.Value}", at,
+                AttemptId: parent, WorkId: new FleetWorkId(tag),
+                RoomId: new FleetRoomId(BatonPaths.RecordKey(room))), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptSettled, $"attempt-settled:{parent.Value}", at.AddMinutes(1),
+                AttemptId: parent, WorkId: new FleetWorkId(tag),
+                RoomId: new FleetRoomId(BatonPaths.RecordKey(room)), Outcome: "Failed"), Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = tag, Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(tag), Stage = WorkStage.Continue,
+                    State = QueueItemState.Failed, AttemptId = current, ParentAttemptId = parent,
+                    LastAdmission = new TaskRequirementAdmission(
+                        [], ["repository-read"], TaskRequirementAdmission.Admitted),
+                }],
+            }, Ct);
+
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "missing exact refusal"),
+                TextWriter.Null, Ct));
+            // Force the terminal parent into retained rollover while the refusal stays live.
+            var rotatedLog = new FleetEventLog(BatonPaths.FleetEventsFile,
+                BatonPaths.FleetEventsRolloverFile,
+                maxLiveBytes: new FileInfo(BatonPaths.FleetEventsFile).Length + 1);
+            await rotatedLog.Append(new FleetEventDraft(
+                FleetEventKind.AttemptRefused, $"attempt-refused:{current.Value}", at.AddMinutes(2),
+                AttemptId: current, ParentAttemptId: parent, WorkId: new FleetWorkId(tag),
+                Outcome: "Queue continue cannot launch without its canonical repository, recorded branch, and tracked open PR."), Ct);
+
+            var retainedLive = await File.ReadAllBytesAsync(BatonPaths.FleetEventsFile, Ct);
+            foreach (var brokenTail in new[] { "{", "{broken\n" })
+            {
+                await File.AppendAllTextAsync(BatonPaths.FleetEventsFile, brokenTail, Ct);
+                var unreadable = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() => QueueCommand.ExecuteAsync(
+                    new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "unreadable fleet proof"),
+                    TextWriter.Null, Ct));
+                Assert.Contains("proof read failed", unreadable.Message, StringComparison.Ordinal);
+                await File.WriteAllBytesAsync(BatonPaths.FleetEventsFile, retainedLive, Ct);
+            }
+            var currentItem = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            using (var lease = QueueCommand.TryAcquireLegacyRetirementProof(currentItem))
+            {
+                Assert.NotNull(lease);
+                foreach (var source in new[] { BatonPaths.FleetEventsFile,
+                    BatonPaths.FleetEventsRolloverFile,
+                    Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName) })
+                {
+                    Assert.Throws<IOException>(() => new FileStream(source, FileMode.Append,
+                        FileAccess.Write, FileShare.Read).Dispose());
+                }
+            }
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "typed refusal and terminal parent"),
+                TextWriter.Null, Ct);
+
+            Assert.Equal(QueueRetirement.Operator,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement?.Kind);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Retire_accepts_a_legacy_cancelled_next_stage_with_a_recorded_terminal_parent_room()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var tag = "legacy-cancelled";
+            var parent = new FleetAttemptId("parent-legacy-cancelled");
+            var room = Path.Combine(home, "rooms", "queue-legacy-cancelled-parent");
+            Directory.CreateDirectory(room);
+            await TerminalSentinelWriter.WriteAsync(
+                room, new WorkflowStatusView(WorkflowOutcome.Succeeded, [], [], null), Ct);
+            var log = new FleetEventLog(
+                BatonPaths.FleetEventsFile, BatonPaths.FleetEventsRolloverFile, maxLiveBytes: 100_000);
+            var at = DateTimeOffset.Parse("2026-09-15T14:00:00Z");
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptStarted, $"attempt-started:{parent.Value}", at,
+                AttemptId: parent, WorkId: new FleetWorkId(tag),
+                RoomId: new FleetRoomId(BatonPaths.RecordKey(room))), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptSettled, $"attempt-settled:{parent.Value}", at.AddMinutes(1),
+                AttemptId: parent, WorkId: new FleetWorkId(tag),
+                RoomId: new FleetRoomId(BatonPaths.RecordKey(room)), Outcome: "Succeeded"), Ct);
+            var earlierRoom = Path.Combine(home, "rooms", "queue-legacy-cancelled-earlier");
+            Directory.CreateDirectory(earlierRoom);
+            await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(
+                at.AddMinutes(-10), tag, QueueDecisionEntry.Launched, null, 0, 8, 2,
+                Room: earlierRoom), previousVerdictKey: null, BatonPaths.QueueDecisionLedgerFile, Ct);
+            await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(
+                at, tag, QueueDecisionEntry.Launched, null, 0, 8, 2, Room: room),
+                previousVerdictKey: null, BatonPaths.QueueDecisionLedgerFile, Ct);
+            var cancelledAt = at.AddMinutes(2);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = tag, Role = "review", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(tag), Stage = WorkStage.Review,
+                    State = QueueItemState.Cancelled, CancelledAt = cancelledAt,
+                    ParentAttemptId = parent, Round = 1,
+                }],
+            }, Ct);
+
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "missing keyed cancellation"),
+                TextWriter.Null, Ct));
+            await QueueDecisionLedgerStore.AppendCancellationAsync(
+                cancelledAt, tag, BatonPaths.QueueDecisionLedgerFile, Ct);
+
+            var missingSentinel = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "earlier room not terminal"),
+                TextWriter.Null, Ct));
+            Assert.Contains("terminal.json", missingSentinel.Message, StringComparison.Ordinal);
+            await TerminalSentinelWriter.WriteAsync(earlierRoom,
+                new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null), Ct);
+            var retainedDecisions = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            await File.AppendAllTextAsync(BatonPaths.QueueDecisionLedgerFile, "{broken\n", Ct);
+            var unreadableDecisions = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() =>
+                QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Retire, Tag: tag,
+                    Reason: "corrupt keyed decision proof"), TextWriter.Null, Ct));
+            Assert.Contains("proof read failed", unreadableDecisions.Message, StringComparison.Ordinal);
+            await File.WriteAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, retainedDecisions, Ct);
+            var currentItem = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            using (var lease = QueueCommand.TryAcquireLegacyRetirementProof(currentItem))
+            {
+                Assert.NotNull(lease);
+                foreach (var source in new[] { BatonPaths.QueueDecisionLedgerFile,
+                    Path.Combine(earlierRoom, TerminalSentinelWriter.TerminalSentinelFileName) })
+                {
+                    Assert.Throws<IOException>(() => new FileStream(source, FileMode.Append,
+                        FileAccess.Write, FileShare.Read).Dispose());
+                }
+            }
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "cancelled next stage and terminal parent"),
+                TextWriter.Null, Ct);
+
+            Assert.Equal(QueueRetirement.Operator,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement?.Kind);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("started-current")]
+    [InlineData("wrong-parent")]
+    [InlineData("wrong-work-tag")]
+    [InlineData("valid-plus-wrong-parent")]
+    [InlineData("valid-plus-wrong-work-tag")]
+    [InlineData("nonterminal-parent")]
+    public async Task Retire_refuses_legacy_proof_with_a_live_attempt_or_broken_parent(string brokenProof)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var tag = "legacy-broken-proof";
+            var parent = new FleetAttemptId("parent-broken-proof");
+            var current = new FleetAttemptId("current-broken-proof");
+            var room = Path.Combine(home, "rooms", "queue-legacy-broken-parent");
+            Directory.CreateDirectory(room);
+            await TerminalSentinelWriter.WriteAsync(room,
+                new WorkflowStatusView(brokenProof == "nonterminal-parent"
+                    ? WorkflowOutcome.Running : WorkflowOutcome.Failed, [], [], null), Ct);
+            var log = new FleetEventLog(BatonPaths.FleetEventsFile,
+                BatonPaths.FleetEventsRolloverFile, maxLiveBytes: 100_000);
+            var at = DateTimeOffset.Parse("2026-09-15T14:00:00Z");
+            await log.Append(new FleetEventDraft(FleetEventKind.AttemptStarted,
+                $"attempt-started:{parent.Value}", at, AttemptId: parent,
+                WorkId: new FleetWorkId(tag), RoomId: new FleetRoomId(BatonPaths.RecordKey(room))), Ct);
+            await log.Append(new FleetEventDraft(FleetEventKind.AttemptSettled,
+                $"attempt-settled:{parent.Value}", at.AddMinutes(1), AttemptId: parent,
+                WorkId: new FleetWorkId(tag), RoomId: new FleetRoomId(BatonPaths.RecordKey(room)),
+                Outcome: WorkflowOutcome.Failed), Ct);
+            if (brokenProof.StartsWith("valid-plus-", StringComparison.Ordinal))
+            {
+                await log.Append(new FleetEventDraft(FleetEventKind.AttemptRefused,
+                    $"attempt-refused:{current.Value}", at.AddMinutes(2), AttemptId: current,
+                    ParentAttemptId: parent, WorkId: new FleetWorkId(tag)), Ct);
+            }
+            await log.Append(new FleetEventDraft(FleetEventKind.AttemptRefused,
+                $"attempt-refused:{current.Value}:conflict", at.AddMinutes(2), AttemptId: current,
+                ParentAttemptId: brokenProof is "wrong-parent" or "valid-plus-wrong-parent"
+                    ? new FleetAttemptId("some-other-parent") : parent,
+                WorkId: new FleetWorkId(brokenProof is "wrong-work-tag" or "valid-plus-wrong-work-tag"
+                    ? "other-work" : tag)), Ct);
+            if (brokenProof == "started-current")
+            {
+                await log.Append(new FleetEventDraft(FleetEventKind.AttemptStarted,
+                    $"attempt-started:{current.Value}", at.AddMinutes(3), AttemptId: current,
+                    ParentAttemptId: parent, WorkId: new FleetWorkId(tag),
+                    RoomId: new FleetRoomId(BatonPaths.RecordKey(room))), Ct);
+            }
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = tag, Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(tag), Stage = WorkStage.Continue,
+                    State = QueueItemState.Failed, AttemptId = current, ParentAttemptId = parent,
+                }],
+            }, Ct);
+
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "broken legacy proof"),
+                TextWriter.Null, Ct));
+            Assert.Null(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public void Legacy_retirement_CAS_refuses_a_changed_attempt_or_stage()
+    {
+        var observed = new QueueItem
+        {
+            Tag = "cas-legacy",
+            Role = "implement",
+            Workspace = "unused",
+            SpecFile = "unused",
+            Stage = WorkStage.Continue,
+            State = QueueItemState.Failed,
+            AttemptId = new FleetAttemptId("current"),
+            ParentAttemptId = new FleetAttemptId("parent"),
+        };
+        Assert.True(QueueCommand.SameRetirementAttempt(observed, observed));
+        Assert.False(QueueCommand.SameRetirementAttempt(observed,
+            observed with { AttemptId = new FleetAttemptId("late-launch") }));
+        Assert.False(QueueCommand.SameRetirementAttempt(observed,
+            observed with { RoomDirectory = "late-room" }));
+        Assert.False(QueueCommand.SameRetirementAttempt(observed,
+            observed with { Stage = WorkStage.Review }));
+    }
+
+    [Fact]
     public async Task Retire_accepts_a_failed_room_with_terminal_journal_proof_but_no_sentinel()
     {
         var home = CreateTempHome();
