@@ -16,7 +16,7 @@ public class RedispatchOptionsParserTests
             [
                 "parent-room", "--spec", "amended.md", "--adapter", "agy", "--model", "opus",
                 "--effort", "careful", "--workspace", ".", "--output", "custom.md", "--timeout", "90",
-                "--label", "env-snapshot lane",
+                "--label", "env-snapshot lane", "--originating-pr", "aer-works/baton#2304",
             ]);
 
         Assert.EndsWith("parent-room", options.ParentRoomDirectoryPath);
@@ -28,6 +28,7 @@ public class RedispatchOptionsParserTests
         Assert.Equal(Path.GetFullPath("custom.md"), options.OutputPath);
         Assert.Equal(TimeSpan.FromMinutes(90), options.Timeout);
         Assert.Equal("env-snapshot lane", options.Label);
+        Assert.Equal("aer-works/baton#2304", options.OriginatingPullRequest);
     }
 
     [Fact]
@@ -45,6 +46,7 @@ public class RedispatchOptionsParserTests
         Assert.Null(options.Label);
         Assert.False(options.LabelSpecified);
         Assert.Null(options.Attachments);
+        Assert.Null(options.OriginatingPullRequest);
     }
 
     /// <summary>#1576: mirrors <c>DispatchOptionsParserTests.Parses_repeatable_attach_flags_in_order</c>.</summary>

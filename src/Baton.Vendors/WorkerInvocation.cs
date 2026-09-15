@@ -163,5 +163,6 @@ public sealed record WorkerInvocation(
     // #1151: see the Skills doc above.
     IReadOnlyList<SkillPackage>? Skills = null,
     // #2190: durable binding authority, not a live workspace claim.
-    GhPullRequestCreateIdentity? PullRequestCreateIdentity = null);
+    GhPullRequestCreateIdentity? PullRequestCreateIdentity = null,
+    OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null);
 

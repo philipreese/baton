@@ -746,7 +746,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
             grant,
             contract.ProducedOutputs.Select(output => output.Name).ToArray(),
             invocation.AllowsSubagents,
-            pullRequestCreateProvenance);
+            pullRequestCreateProvenance,
+            invocation.OriginatingPullRequestOwnership);
         CoreDispatchTarget BuildBrokerTarget(CodexBrokerConfiguration brokerConfiguration, string brokerPrompt) => new(
             "dotnet",
             [hostDllPath, "codex-broker", "--config", configPath, brokerPrompt],

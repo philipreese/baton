@@ -54,6 +54,10 @@ What Baton is **not**, stated as exclusions (§10 expands each):
 
 ## §2 The dispatch unit
 
+### Originating pull-request ownership (#2178)
+
+`baton dispatch` and `baton redispatch` accept one `--originating-pr owner/repo#number` option. Before a room is created, the conductor verifies that the workspace's canonical repository and recorded branch match that open PR and that its head equals the pre-dispatch workspace head. Queue launches also require the queue item's recorded branch to match the workspace branch. Verification invokes an absolute, link-free `gh` executable resolved outside the worker workspace; a workspace-local executable cannot answer the ownership query. The verified value is serialized into the worker-facing binding, retained as authority in a Baton-owned record outside the room, and exposed by the effective grant together with its conductor-verified branch and head. The binding alone cannot mint authority. A same-room continuation or ordinary redispatch inherits the value only while its binding agrees with that Baton-owned record; a workspace override clears inherited evidence unless the option re-verifies it. This authority permits only the matching PR's allowed view/body operations; it never grants labels, merge, enumeration, unrelated PRs, or repository settings.
+
 A **room** is one working directory: `~/.baton/rooms/<room>/` (`BatonPaths.Rooms`,
 `src/Baton/Status/BatonPaths.cs`). One directory may contain several repositories; the room does
 not know or care.
@@ -435,8 +439,8 @@ carry is the conductor's own merging rules, which are the conductor's and never 
 | Verb | Usage | Source |
 |---|---|---|
 | `run` | `baton run <workflow-file> --bindings <bindings-file> [--room-dir <dir>] [--workflow-id <id>] [--echo-worker] [--register] [--wait] [--wait-timeout <minutes>]` | `RunOptionsParser.cs` |
-| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--declared-size <small\|medium\|large> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
-| `redispatch` | `baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] [--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>] [--declared-size <small\\|medium\\|large> --size-rationale <clause>]` | `RedispatchOptionsParser.cs` |
+| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--declared-size <small\|medium\|large> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--originating-pr <owner/repo#number>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
+| `redispatch` | `baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] [--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--originating-pr <owner/repo#number>] [--label <text>] [--workstream <slug>] [--declared-size <small\\|medium\\|large> --size-rationale <clause>]` | `RedispatchOptionsParser.cs` |
 | `resume` | `baton resume <room-dir> --worker <role> (--message <text> \| --message-file <path>) --bindings <bindings-file> [--workflow-id <id>]` | `ResumeOptionsParser.cs` |
 | `decide` | `baton decide <room-dir> --execution <execution-id> --type resume\|reject\|retry-with-revision\|supersede [--target-step <step-id>] [--supplementary <execution-id>] --bindings <bindings-file> [--workflow-id <id>]` | `DecideOptionsParser.cs` |
 | `resolve` | `baton resolve <room-dir> [--execution <execution-id>] --accept-capture \| --reject --reason <text> \| --close --reason <text>` | `ResolveOptionsParser.cs` |
@@ -5115,6 +5119,16 @@ A harness-authored binding may populate the field only when the harness is actin
 and has independently verified the same repository/head inputs; worker-authored data and shell output
 have no authority to populate it. General shell output never mints PR ownership evidence.
 
+**`OriginatingPullRequestOwnership` is conductor-verified update authority (#2178).** Its binding
+value is a worker-facing projection, not the authority source. The verifier invokes an absolute,
+link-free `gh` resolved outside the workspace and, for a queue launch, requires the queue's recorded
+branch to match the workspace branch. Baton records the verified value under `BatonPaths.Root`, keyed
+to the room's canonical identity. Binding resolution, same-room continuation, and ordinary redispatch
+expose or inherit it only when the room binding still agrees with that Baton-owned record. Missing,
+malformed, unreadable, or mismatched records fail closed. This is the same cooperative-process trust
+boundary as the project ceiling: it prevents worker-owned room state from minting authority; it is not
+an operating-system sandbox against a process running as the Baton user.
+
 Readable-wrapper recognition uses the outer native shell's syntax (`cmd` on Windows, `/bin/sh`
 elsewhere), then the selected wrapper family's syntax for its body. Windows command-head `@`
 (attached or separated by whitespace) and unquoted caret escapes are recognized; apostrophes are
@@ -5779,7 +5793,11 @@ now one of those boundaries too on this scope rather than a fatal character — 
 adversarial evasion, so folding it into one segment was over-permissive in the wrong direction. Each
 segment's deny check matches a deny pattern against the segment's whitespace-tokenized *head* rather
 than a substring/prefix scan (`gh label*` against `gh label create x` compares `["gh","label"]` to
-the segment's first two tokens, not the raw text) — and a segment `TrySegmentChainedCommand` still
+the segment's first two tokens, not the raw text). **A deny-side executable head is matched as a
+command family regardless of a path qualifier or Windows executable suffix (#2320):** `gh`,
+`.\\gh`, `./gh`, and `C:\\tools\\gh.exe` all compare as `gh`. This normalization applies only to
+deny candidates; applying it to exceptions would widen an allowed command spelling into authority
+that was never granted. A segment `TrySegmentChainedCommand` still
 cannot find a boundary for (a backtick, `$(`, a subshell, an unterminated quote) is evaluated as one
 unsplit whole-line segment instead of refused as `Unparseable`; that verdict no longer fires at all
 on this scope, except the pre-existing empty/whitespace-only-command-line guard, which still fires

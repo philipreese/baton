@@ -213,6 +213,16 @@ public static class DispatchCommand
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 
+        if (options.OriginatingPullRequest is not null)
+        {
+            if (bindings.Count != 1)
+                throw new CliArgumentException("'--originating-pr' applies to one direct role dispatch, not a workflow template.");
+            var ownership = await OriginatingPullRequestVerifier.VerifyAsync(
+                options.OriginatingPullRequest, workspace, cancellationToken,
+                options.OriginatingPullRequestBranch).ConfigureAwait(false);
+            bindings = bindings.ToDictionary(pair => pair.Key, pair => pair.Value with { OriginatingPullRequestOwnership = ownership }, StringComparer.Ordinal);
+        }
+
         // The requested model reaches the vendor argv; ModelResolved supplies a bind-time default only
         // when it is absent. This is after role/template resolution and continuation inheritance, but
         // before runway admission, room provisioning, or any other dispatch write.
@@ -282,6 +292,17 @@ public static class DispatchCommand
         // through the CLI -- it is reachable through a hand-built DispatchOptions, which is exactly what
         // an in-process caller (and every test) constructs.
         var verifyCommands = ParseVerifyCommands(options.VerifyCommands);
+
+        var originatingPullRequests = bindings.Values
+            .Select(binding => binding.OriginatingPullRequestOwnership)
+            .Where(ownership => ownership is not null)
+            .Distinct()
+            .ToArray();
+        if (originatingPullRequests.Length > 1)
+        {
+            throw new CliArgumentException(
+                "A room cannot carry conflicting originating pull-request ownership across its bindings.");
+        }
 
         // #1848: the runway hold — the last thing checked before this invocation provisions anything,
         // for the same reason the drain refusal is the first: a refusal here must leave no
@@ -461,6 +482,9 @@ public static class DispatchCommand
         var bindingsFilePath = Path.Combine(options.RoomDirectoryPath, BindingsFileName);
         await WorkflowDefinitionWriter.SaveToFileAsync(definition, workflowFilePath, cancellationToken).ConfigureAwait(false);
         await WorkerBindingConfigWriter.SaveToFileAsync(bindings, bindingsFilePath, cancellationToken).ConfigureAwait(false);
+        await OriginatingPullRequestAuthorityStore.WriteAsync(
+            originatingPullRequests.SingleOrDefault(),
+            options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
         // Register: true -- rationale is spec/baton.md §8 (#1657).
         var runOptions = new RunOptions(
@@ -1073,7 +1097,7 @@ public static class DispatchCommand
     /// <c>OutcomeClassifier</c>'s worktree-cleanliness audit. Do not restate the two mechanisms here
     /// beyond naming them (record-once); the citations above are the source, this line is the gloss.
     /// </remarks>
-    private static string DescribeGrant(WorkerBindingConfigEntry binding)
+    internal static string DescribeGrant(WorkerBindingConfigEntry binding)
     {
         var grant = binding.PermissionGrant;
         if (grant is null)
@@ -1101,7 +1125,11 @@ public static class DispatchCommand
             grant.ReadFiles ? "read" : "no-read",
             write,
             shell,
-            grant.NetworkAccess ? "network" : "no-network");
+            grant.NetworkAccess ? "network" : "no-network")
+            + (binding.OriginatingPullRequestOwnership is { } origin
+                ? $", originating-pr {origin.Repository}#{origin.Number} "
+                    + $"(conductor-verified: {origin.HeadBranch}@{origin.LaunchHead})"
+                : string.Empty);
     }
 
     private static async Task<(WorkflowDefinition Definition, IReadOnlyDictionary<string, WorkerBindingConfigEntry> Bindings)>
@@ -1606,6 +1634,11 @@ public static class DispatchCommand
             ResumeSession = true,
             // #2190: continuing a worker-controlled workspace must never re-probe its mutable remote.
             PullRequestCreateIdentity = parentEntry.PullRequestCreateIdentity,
+            OriginatingPullRequestOwnership =
+                OriginatingPullRequestAuthorityStore.Read(continueFromRoomDirectoryPath) ==
+                    parentEntry.OriginatingPullRequestOwnership
+                    ? parentEntry.OriginatingPullRequestOwnership
+                    : null,
         };
         var provenance = new ContinuationProvenance(continueFromRoomDirectoryPath, parentExecutionId, parentEntry.SessionId);
         return (resumedEntry, provenance);

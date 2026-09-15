@@ -194,4 +194,6 @@ public sealed record DispatchOptions(
     IReadOnlyList<string>? Skills = null,
     bool NoDefaultSkills = false,
     IReadOnlyList<string>? Requirements = null,
-    TaskSizeDeclaration? DeclaredTaskSize = null);
+    TaskSizeDeclaration? DeclaredTaskSize = null,
+    string? OriginatingPullRequest = null,
+    string? OriginatingPullRequestBranch = null);

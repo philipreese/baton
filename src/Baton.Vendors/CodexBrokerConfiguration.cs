@@ -16,4 +16,5 @@ public sealed record CodexBrokerConfiguration(
     PermissionGrant PermissionGrant,
     IReadOnlyList<string> ProducedOutputNames,
     bool AllowsSubagents,
-    GhPullRequestCreateProvenance? PullRequestCreateProvenance = null);
+    GhPullRequestCreateProvenance? PullRequestCreateProvenance = null,
+    OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null);

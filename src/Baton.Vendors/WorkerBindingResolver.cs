@@ -270,7 +270,11 @@ public static class WorkerBindingResolver
             WorktreeSourceRepository: entry.WorktreeSourceRepository,
             AllowsSubagents: entry.AllowsSubagents,
             Skills: skills,
-            PullRequestCreateIdentity: entry.PullRequestCreateIdentity);
+            PullRequestCreateIdentity: entry.PullRequestCreateIdentity,
+            OriginatingPullRequestOwnership: entry.OriginatingPullRequestOwnership is { } originating
+                && OriginatingPullRequestAuthorityStore.Read(bindingsFileDirectory) == originating
+                    ? originating
+                    : null);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)

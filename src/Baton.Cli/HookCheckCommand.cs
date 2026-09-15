@@ -58,6 +58,8 @@ public static class HookCheckCommand
     /// </summary>
     public const string ShellPatternsEnvironmentVariable = "BATON_HOOK_SHELL_PATTERNS";
 
+    public const string OriginatingPullRequestEnvironmentVariable = "BATON_HOOK_ORIGINATING_PULL_REQUEST";
+
     /// <summary>
     /// The environment variable carrying this invocation's standing-deny shell patterns (0022's
     /// DenyAlways rung, #390) — same literal as <c>AgyHookCheckCommand.DeniedShellPatternsEnvironmentVariable</c>
@@ -112,7 +114,7 @@ public static class HookCheckCommand
         TextReader stdin, TextWriter stderr, string? deniedToolsRaw, string? outboxDirectory = null,
         string? workspaceDirectory = null, string? shellPatternsRaw = null,
         string? deniedShellPatternsRaw = null, string? deniedShellOptionTokensRaw = null,
-        string? deniedShellExceptionsRaw = null)
+        string? deniedShellExceptionsRaw = null, string? originatingPullRequestRaw = null)
     {
         ArgumentNullException.ThrowIfNull(stdin);
         ArgumentNullException.ThrowIfNull(stderr);
@@ -127,7 +129,8 @@ public static class HookCheckCommand
         {
             return Decide(
                 scribe, stdin, stderr, deniedToolsRaw, outboxDirectory, workspaceDirectory,
-                shellPatternsRaw, deniedShellPatternsRaw, deniedShellOptionTokensRaw, deniedShellExceptionsRaw);
+                shellPatternsRaw, deniedShellPatternsRaw, deniedShellOptionTokensRaw, deniedShellExceptionsRaw,
+                originatingPullRequestRaw);
         }
         catch (Exception ex)
         {
@@ -165,7 +168,8 @@ public static class HookCheckCommand
     private static int Decide(
         GrantDecisionScribe scribe, TextReader stdin, TextWriter stderr, string? deniedToolsRaw,
         string? outboxDirectory, string? workspaceDirectory, string? shellPatternsRaw,
-        string? deniedShellPatternsRaw, string? deniedShellOptionTokensRaw, string? deniedShellExceptionsRaw)
+        string? deniedShellPatternsRaw, string? deniedShellOptionTokensRaw, string? deniedShellExceptionsRaw,
+        string? originatingPullRequestRaw)
     {
         // Always drain stdin before deciding anything, even when there is nothing to check
         // against below: Claude Code is the writer on the other end of this pipe, and exiting
@@ -460,7 +464,8 @@ public static class HookCheckCommand
                         GrantRules.UnjudgeableCall);
                 }
 
-                if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(shellCommandLine)
+                if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(shellCommandLine,
+                    Baton.Vendors.OriginatingPullRequestOwnership.FromHookValue(originatingPullRequestRaw))
                     is { } siblingPullRequestRefusal)
                 {
                     return Refuse(scribe, stderr, $"AER: {siblingPullRequestRefusal}",

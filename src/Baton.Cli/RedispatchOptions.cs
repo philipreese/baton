@@ -67,4 +67,5 @@ public sealed record RedispatchOptions(
     IReadOnlyList<string>? Skills = null,
     bool SkillsSpecified = false,
     bool NoDefaultSkills = false,
-    TaskSizeDeclaration? DeclaredTaskSize = null);
+    TaskSizeDeclaration? DeclaredTaskSize = null,
+    string? OriginatingPullRequest = null);

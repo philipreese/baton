@@ -1,0 +1,166 @@
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using Baton.Vendors;
+
+namespace Baton.Cli;
+
+/// <summary>Conductor verification for the sole originating pull-request authority a room can carry.</summary>
+internal static class OriginatingPullRequestVerifier
+{
+    private static readonly TimeSpan GhVerificationTimeout = TimeSpan.FromSeconds(20);
+
+    public static async Task<OriginatingPullRequestOwnership> VerifyAsync(
+        string reference, string workspace, CancellationToken cancellationToken, string? expectedBranch = null)
+    {
+        var (repository, number) = ParseReference(reference);
+        var identity = GhPullRequestCreateProvenanceResolver.TryCaptureIdentity(workspace);
+        var launchHead = await WorkspaceHead.TryCaptureAsync(workspace, cancellationToken).ConfigureAwait(false);
+        if (identity is null || launchHead is null || identity.Repository != repository)
+            throw new CliArgumentException("The workspace repository and launch HEAD must be readable before originating PR ownership can be granted.");
+        ValidateExpectedBranch(identity, expectedBranch);
+
+        var gh = ResolveExecutable(workspace, Environment.GetEnvironmentVariable("PATH"), OperatingSystem.IsWindows());
+        var start = ChildProcessStartInfo.Create(gh, info =>
+        {
+            info.WorkingDirectory = workspace;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            info.StandardOutputEncoding = Encoding.UTF8;
+            info.StandardErrorEncoding = Encoding.UTF8;
+        });
+        foreach (var argument in new[] { "pr", "view", number.ToString(), "--repo", repository, "--json", "state,headRefName,headRefOid" }) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new CliArgumentException("Could not start gh to verify '--originating-pr'.");
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bound.CancelAfter(GhVerificationTimeout);
+        using var killOnCancellation = bound.Token.Register(() =>
+        {
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // The child won the exit race; its exit status below remains authoritative.
+            }
+        });
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(bound.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (bound.IsCancellationRequested)
+        {
+            if (!process.HasExited)
+            {
+                try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            }
+            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+            throw new CliArgumentException("Timed out or was cancelled while verifying '--originating-pr'.");
+        }
+        var output = await stdoutTask.ConfigureAwait(false);
+        _ = await stderrTask.ConfigureAwait(false);
+        return ValidateResponse(repository, number, identity, launchHead, process.ExitCode, output);
+    }
+
+    internal static string ResolveExecutable(string workspace, string? searchPath, bool isWindows) =>
+        OutsideWorkspaceExecutableResolver.TryResolve(searchPath, workspace, "gh", isWindows)
+        ?? throw new CliArgumentException(
+            "Could not resolve an absolute, link-free gh executable outside the worker workspace; '--originating-pr' was not verified.");
+
+    internal static void ValidateExpectedBranch(GhPullRequestCreateIdentity identity, string? expectedBranch)
+    {
+        if (expectedBranch is not null
+            && !string.Equals(identity.HeadBranch, expectedBranch, StringComparison.Ordinal))
+        {
+            throw new CliArgumentException(
+                "The queue's recorded branch does not match the workspace branch; originating PR ownership was refused before launch.");
+        }
+    }
+
+    internal static (string Repository, int Number) ParseReference(string reference)
+    {
+        var separator = reference.LastIndexOf('#');
+        var repository = separator > 0 ? CanonicalRepository(reference[..separator]) : null;
+        if (repository is null || !int.TryParse(reference[(separator + 1)..], out var number) || number <= 0)
+            throw new CliArgumentException("'--originating-pr' must be owner/repository#number.");
+        return (repository, number);
+    }
+
+    internal static string CanonicalReference(string repositoryIdentity, int number)
+    {
+        var repository = repositoryIdentity.StartsWith("github.com/", StringComparison.OrdinalIgnoreCase)
+            ? repositoryIdentity["github.com/".Length..]
+            : repositoryIdentity;
+        var canonical = CanonicalRepository(repository);
+        if (canonical is null || number <= 0)
+        {
+            throw new CliArgumentException(
+                "An originating pull request requires a canonical GitHub repository and positive PR number.");
+        }
+
+        return $"{canonical}#{number}";
+    }
+
+    internal static OriginatingPullRequestOwnership ValidateResponse(
+        string repository,
+        int number,
+        GhPullRequestCreateIdentity identity,
+        string launchHead,
+        int exitCode,
+        string output)
+    {
+        if (exitCode != 0)
+        {
+            throw new CliArgumentException("The originating pull request could not be read.");
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(output);
+        }
+        catch (JsonException)
+        {
+            throw new CliArgumentException("The originating pull request returned an unreadable response.");
+        }
+
+        using (document)
+        {
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("state", out var stateValue)
+                || !root.TryGetProperty("headRefName", out var branchValue)
+                || !root.TryGetProperty("headRefOid", out var headValue)
+                || stateValue.ValueKind != JsonValueKind.String
+                || branchValue.ValueKind != JsonValueKind.String
+                || headValue.ValueKind != JsonValueKind.String)
+            {
+                throw new CliArgumentException(
+                    "The originating pull request returned a malformed response; retry after GitHub is reachable.");
+            }
+
+            var state = stateValue.GetString();
+            var branch = branchValue.GetString();
+            var head = headValue.GetString();
+            if (!string.Equals(state, "OPEN", StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(branch, identity.HeadBranch, StringComparison.Ordinal)
+                || !string.Equals(head, launchHead, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new CliArgumentException(
+                    "The originating pull request must be open and match the workspace repository, branch, and pre-dispatch HEAD.");
+            }
+
+            return new OriginatingPullRequestOwnership(repository, number, branch!, launchHead);
+        }
+    }
+
+    private static string? CanonicalRepository(string value)
+    {
+        var parts = value.Trim().Replace('\\', '/').Trim('/').Split('/');
+        return parts.Length == 2 && parts.All(part => part.Length > 0 && part.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_'))
+            ? string.Join('/', parts).ToLowerInvariant() : null;
+    }
+}

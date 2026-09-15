@@ -116,6 +116,47 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Continuing_a_room_retains_only_its_Baton_authorized_originating_PR()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-continue-origin-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentWithSessionAsync(
+                testRoot, "Continue the repair.", "codex-thread-123", adapter: "codex");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            var ownership = new OriginatingPullRequestOwnership(
+                "aer-works/baton", 2304, "2178-lane", "0123456789abcdef0123456789abcdef01234567");
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["advise"] = parentBindings["advise"] with { OriginatingPullRequestOwnership = ownership },
+                },
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            await OriginatingPullRequestAuthorityStore.WriteAsync(
+                ownership, parentRoom, TestContext.Current.CancellationToken);
+
+            var specPath = await WriteSpecAsync(testRoot, "Finish the repair.");
+            var childRoom = Path.Combine(testRoot, "child");
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "advise", specPath, childRoom, Adapter: "codex",
+                    ContinueFromRoomDirectoryPath: parentRoom),
+                Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Equal(ownership, childBindings["advise"].OriginatingPullRequestOwnership);
+            Assert.Equal(ownership, OriginatingPullRequestAuthorityStore.Read(childRoom));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     /// <summary>
     /// Chaining: the child room's own bindings.json now carries the same session id (Claude's own
     /// <c>--resume</c> continues a session under its existing id rather than minting a new one), so a

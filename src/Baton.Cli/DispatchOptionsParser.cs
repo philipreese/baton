@@ -16,7 +16,7 @@ public static class DispatchOptionsParser
 {
     /// <summary>The one copy of <c>baton dispatch</c>'s usage line, printed here on error and by <c>Program</c>.</summary>
     public const string Usage =
-        $"Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <{TaskSizeDeclaration.Usage}> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
+        $"Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <{TaskSizeDeclaration.Usage}> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--originating-pr <owner/repo#number>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
 
     /// <summary>
     /// <c>--label</c>'s cap (#1499) — a Fleet Glass room title, not a description; long enough for "the
@@ -79,6 +79,8 @@ public static class DispatchOptionsParser
         string? repoPath = null;
         string? continueFromRoomDirectoryPath = null;
         string? overrideRunwayReason = null;
+        string? originatingPullRequest = null;
+        string? originatingPullRequestBranch = null;
         var attachments = new List<string>();
         var skills = new List<string>();
         var requirements = new List<string>();
@@ -195,6 +197,15 @@ public static class DispatchOptionsParser
                 case "--continue":
                     continueFromRoomDirectoryPath = RequireValue(args, ref i, arg);
                     break;
+                case "--originating-pr":
+                    originatingPullRequest = RequireValue(args, ref i, arg);
+                    break;
+                // Internal queue transport: narrows --originating-pr verification to the branch the
+                // lifecycle item recorded. It is intentionally absent from Usage; operators name the
+                // PR, while QueueLauncher supplies this second conductor-owned fact.
+                case "--originating-pr-branch":
+                    originatingPullRequestBranch = RequireValue(args, ref i, arg);
+                    break;
                 case "--override-runway":
                     overrideRunwayReason = RequireOverrideRunwayReason(RequireValue(args, ref i, arg));
                     break;
@@ -294,7 +305,9 @@ public static class DispatchOptionsParser
             NormalizeSkills(skills),
             noDefaultSkills,
             requirements.Count > 0 ? NormalizeRequirements(requirements) : null,
-            ParseTaskSizeDeclaration(declaredSize, sizeRationale));
+            ParseTaskSizeDeclaration(declaredSize, sizeRationale),
+            originatingPullRequest,
+            originatingPullRequestBranch);
     }
 
     internal static TaskSizeDeclaration? ParseTaskSizeDeclaration(string? declaredSize, string? sizeRationale)

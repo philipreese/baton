@@ -723,6 +723,8 @@ public class AgyHookCheckCommandTests
     // #2001: respelled selectorless for the reason HookCheckCommandTests' equivalent rows state.
     [InlineData("implement", "gh pr edit --body-file y", "allow")]
     [InlineData("implement", "gh label create x", "deny")]
+    [InlineData("implement", @"C:\tools\gh.exe label create x", "deny")]
+    [InlineData("implement", @"C:\tools\baton.exe status room-1", "deny")]
     [InlineData("implement", "gh pr edit --add-label x", "deny")]
     [InlineData("implement", "gh pr edit --remove-label x", "deny")]
     // Found-while-fixing, same PR: `--label` at creation time attaches a label too, and was never
@@ -846,6 +848,41 @@ public class AgyHookCheckCommandTests
                 doc.RootElement.GetProperty("reason").GetString()!,
                 StringComparison.Ordinal);
         }
+    }
+
+    [Theory]
+    [InlineData("gh pr view 2304", "allow")]
+    [InlineData("gh pr diff 2304", "allow")]
+    [InlineData("gh pr comment 2304 --body-file out.md", "allow")]
+    [InlineData("gh pr view 2305", "deny")]
+    [InlineData("gh pr list", "deny")]
+    [InlineData("gh pr edit 2304 --add-label operator-merge", "deny")]
+    [InlineData("gh pr merge 2304 --squash", "deny")]
+    [InlineData(@".\gh pr merge 2304 --squash", "deny")]
+    [InlineData("./gh pr merge 2304 --squash", "deny")]
+    public void An_originating_PR_grant_is_exact_and_does_not_widen_other_PR_authority(
+        string command, string expectedDecision)
+    {
+        var role = Baton.Vendors.WorkerRoleCatalog.For("implement");
+        var payload = $$"""
+            {"artifactDirectoryPath":"C:/x/brain/abc","conversationId":"abc",
+             "modelName":"gemini-3.6-flash-medium","stepIdx":3,
+             "toolCall":{"args":{"CommandLine":{{JsonSerializer.Serialize(command)}}, "Cwd":"C:\\x","WaitMsBeforeAsync":5000},
+                         "name":"run_command"},
+             "transcriptPath":"C:/x/transcript_full.jsonl","workspacePaths":["C:/x"]}
+            """;
+        using var stdin = new StringReader(payload);
+        using var stdout = new StringWriter();
+
+        AgyHookCheckCommand.Execute(
+            stdin, stdout, "agy:write_to_file,replace_file_content",
+            shellPatternsRaw: "agy:",
+            deniedShellPatternsRaw: "agy:" + string.Join(",", role.Grant.DeniedShellCommandPatterns!),
+            deniedShellOptionTokensRaw: "agy:" + string.Join(",", role.Grant.DeniedShellOptionTokens!),
+            originatingPullRequestRaw: "aer-works/baton#2304");
+
+        using var doc = JsonDocument.Parse(stdout.ToString());
+        Assert.Equal(expectedDecision, doc.RootElement.GetProperty("decision").GetString());
     }
 
     [Fact]

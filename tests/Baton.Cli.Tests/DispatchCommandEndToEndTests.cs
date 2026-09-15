@@ -1153,6 +1153,25 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
     }
 
     [Fact]
+    public void Effective_grant_names_the_repository_qualified_originating_PR_and_its_provenance()
+    {
+        var ownership = new OriginatingPullRequestOwnership(
+            "aer-works/baton", 2304, "2178-lane", "0123456789abcdef0123456789abcdef01234567");
+        var binding = new WorkerBindingConfigEntry(
+            "codex", new WorkerContract("implement", [], [], []), "Continue.", TimeSpan.FromMinutes(5),
+            PermissionGrant: new PermissionGrant(
+                ReadFiles: true, WriteFiles: true, RunShellCommands: true, NetworkAccess: true),
+            OriginatingPullRequestOwnership: ownership);
+
+        var description = DispatchCommand.DescribeGrant(binding);
+
+        Assert.Contains("originating-pr aer-works/baton#2304", description, StringComparison.Ordinal);
+        Assert.Contains(
+            "conductor-verified: 2178-lane@0123456789abcdef0123456789abcdef01234567",
+            description, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Dispatching_implement_against_a_foreign_workspace_without_gates_quiet_settles_Succeeded_and_still_delivers_output()
     {
         // #1702, the measured defect: a foreign (non-baton) workspace's pixi.toml has no gates-quiet

@@ -132,6 +132,7 @@ public sealed class CodexDynamicToolPolicy
         Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
         TimeProvider? timeProvider = null,
         GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
+        OriginatingPullRequestOwnership? originatingPullRequestOwnership = null,
         IEnumerable<string>? artifactOnlyOutputNames = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
@@ -160,6 +161,7 @@ public sealed class CodexDynamicToolPolicy
         _directGhPrefixArguments = [];
         _repeats = new RepeatedToolCallLedger(timeProvider);
         _ownPullRequestOnly = OwnPullRequestOnlyRule.AppliesTo(grant) ? new OwnPullRequestOnlyRule() : null;
+        _ownPullRequestOnly?.Observe(originatingPullRequestOwnership?.ToEvidence());
     }
 
     /// <summary>
@@ -177,10 +179,11 @@ public sealed class CodexDynamicToolPolicy
         Func<string, Stream>? commandCaptureStreamFactory,
         Action<CancellationToken>? beforeCommandTimeoutStartsForTest = null,
         GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
-        IReadOnlyList<string>? directGhPrefixArguments = null)
+        IReadOnlyList<string>? directGhPrefixArguments = null,
+        OriginatingPullRequestOwnership? originatingPullRequestOwnership = null)
         : this(
             grant, workingDirectory, outputDirectory, inputPaths, producedOutputNames,
-            commandCeiling, timeProvider, pullRequestCreateProvenance)
+            commandCeiling, timeProvider, pullRequestCreateProvenance, originatingPullRequestOwnership)
     {
         _commandCaptureStreamFactory = commandCaptureStreamFactory ?? CreateCommandCaptureStream;
         _beforeCommandTimeoutStartsForTest = beforeCommandTimeoutStartsForTest;

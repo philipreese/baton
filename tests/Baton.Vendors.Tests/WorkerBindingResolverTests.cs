@@ -809,6 +809,61 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public async Task Originating_PR_ownership_reaches_an_adapter_only_when_Batons_outside_room_authority_matches()
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"baton-originating-pr-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var ownership = new OriginatingPullRequestOwnership(
+                "aer-works/baton", 2304, "2178-lane", "0123456789abcdef0123456789abcdef01234567");
+            var entry = new WorkerBindingConfigEntry(
+                "capture", ArchitectContract, "Continue the fix.", TimeSpan.FromMinutes(5),
+                OriginatingPullRequestOwnership: ownership);
+            var config = new Dictionary<string, WorkerBindingConfigEntry> { ["implement"] = entry };
+
+            // A worker can duplicate or edit room-local state; agreement between two files in the
+            // same room is not independent provenance and must mint nothing.
+            await File.WriteAllTextAsync(
+                Path.Combine(room, "originating-pr-provenance.json"),
+                System.Text.Json.JsonSerializer.Serialize(ownership),
+                TestContext.Current.CancellationToken);
+            var withoutProvenance = new InvocationCapturingAdapter();
+            WorkerBindingResolver.Resolve(
+                config, new Dictionary<string, IWorkerAdapter> { ["capture"] = withoutProvenance },
+                bindingsFileDirectory: room);
+            Assert.Null(withoutProvenance.Invocation!.OriginatingPullRequestOwnership);
+
+            await OriginatingPullRequestAuthorityStore.WriteAsync(
+                ownership, room, TestContext.Current.CancellationToken);
+            var matching = new InvocationCapturingAdapter();
+            WorkerBindingResolver.Resolve(
+                config, new Dictionary<string, IWorkerAdapter> { ["capture"] = matching },
+                bindingsFileDirectory: room);
+            Assert.Equal(ownership, matching.Invocation!.OriginatingPullRequestOwnership);
+
+            var mismatched = new InvocationCapturingAdapter();
+            WorkerBindingResolver.Resolve(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = entry with
+                    {
+                        OriginatingPullRequestOwnership = ownership with { Number = 2305 },
+                    },
+                },
+                new Dictionary<string, IWorkerAdapter> { ["capture"] = mismatched },
+                bindingsFileDirectory: room);
+            Assert.Null(mismatched.Invocation!.OriginatingPullRequestOwnership);
+        }
+        finally
+        {
+            await OriginatingPullRequestAuthorityStore.WriteAsync(
+                null, room, TestContext.Current.CancellationToken);
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
     public void A_hand_authored_non_audited_write_files_false_with_outputs_on_agy_resolves_through_the_outbox_exemption()
     {
         var adapters = new Dictionary<string, IWorkerAdapter> { ["agy"] = new AgyWorkerAdapter() };
@@ -876,6 +931,17 @@ public class WorkerBindingResolverTests
 
         var ex = Assert.Throws<UnknownWorkerAdapterException>(() => WorkerBindingResolver.ResolveFallbacks(config, adapters));
         Assert.Equal("claude", ex.AdapterName);
+    }
+
+    private sealed class InvocationCapturingAdapter : IWorkerAdapter
+    {
+        public WorkerInvocation? Invocation { get; private set; }
+
+        public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
+        {
+            Invocation = invocation;
+            return new CoreDispatchTarget("capture", []);
+        }
     }
 
     /// <summary>

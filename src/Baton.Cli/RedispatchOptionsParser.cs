@@ -14,7 +14,7 @@ public static class RedispatchOptionsParser
     public const string Usage =
         "Usage: baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] "
         + "[--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] "
-        + $"[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>] [--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>] [--size-rationale <clause>]";
+        + $"[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--originating-pr <owner/repo#number>] [--label <text>] [--workstream <slug>] [--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>] [--size-rationale <clause>]";
 
     public static RedispatchOptions Parse(IReadOnlyList<string> args)
     {
@@ -40,6 +40,7 @@ public static class RedispatchOptionsParser
         var noDefaultSkills = false;
         string? declaredSize = null;
         string? sizeRationale = null;
+        string? originatingPullRequest = null;
 
         var i = 0;
         while (i < args.Count)
@@ -53,6 +54,9 @@ public static class RedispatchOptionsParser
                 case "--no-default-skills":
                     noDefaultSkills = true;
                     i++;
+                    break;
+                case "--originating-pr":
+                    originatingPullRequest = RequireValue(args, ref i, arg);
                     break;
                 case "--attach":
                     attachments.Add(RequireValue(args, ref i, arg));
@@ -149,7 +153,7 @@ public static class RedispatchOptionsParser
             timeout, label, labelSpecified, tokenBudget, workstream, workstreamSpecified,
             attachments.Count > 0 ? attachments : null, maxToolSteps, billedRateLimit, verifyCommand,
             DispatchOptionsParser.NormalizeSkills(skills), skillsSpecified, noDefaultSkills,
-            DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale));
+            DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale), originatingPullRequest);
     }
 
     /// <summary>Same shape and rationale as <see cref="DispatchOptionsParser"/>'s own <c>--token-budget</c> (#1623).</summary>

@@ -1,4 +1,8 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using Baton.Status;
 
 namespace Baton.Vendors;
 
@@ -64,6 +68,112 @@ public sealed record PullRequestOwnershipEvidence
         }
 
         return evidence;
+    }
+}
+
+/// <summary>
+/// Conductor-authored ownership of the pull request a follow-on room continues. This is binding
+/// metadata, not worker input: the conductor verifies repository, branch, state, and launch head
+/// before writing it. Created and continued PRs reduce to the same enforcement evidence.
+/// </summary>
+public sealed record OriginatingPullRequestOwnership(
+    string Repository,
+    int Number,
+    string HeadBranch,
+    string LaunchHead)
+{
+    public PullRequestOwnershipEvidence? ToEvidence() =>
+        string.IsNullOrWhiteSpace(HeadBranch) || string.IsNullOrWhiteSpace(LaunchHead)
+            ? null
+            : PullRequestOwnershipEvidence.FromVerified(Repository, Number);
+
+    public static PullRequestOwnershipEvidence? FromHookValue(string? value)
+    {
+        var separator = value?.LastIndexOf('#') ?? -1;
+        return separator > 0 && int.TryParse(value![(separator + 1)..], out var number)
+            ? PullRequestOwnershipEvidence.FromVerified(value[..separator], number)
+            : null;
+    }
+
+}
+
+/// <summary>
+/// Baton-owned authority for originating-PR grants. The binding is the worker-facing projection;
+/// this record lives under <see cref="BatonPaths.Root"/>, outside the room and workspace, so editing
+/// room files cannot mint or alter the authority consumed at launch. This follows the same trust
+/// boundary as Baton's project ceiling: roles are cooperative processes rather than an OS sandbox,
+/// but worker-authored room state is never itself an authority source.
+/// </summary>
+public static class OriginatingPullRequestAuthorityStore
+{
+    private const string DirectoryName = "originating-pr-authority";
+    private sealed record AuthorityRecord(string RoomDirectory, OriginatingPullRequestOwnership Ownership);
+
+    public static OriginatingPullRequestOwnership? Read(string? roomDirectory)
+    {
+        var identity = RoomIdentity(roomDirectory);
+        if (identity is null) return null;
+        try
+        {
+            var path = RecordPath(identity);
+            var recorded = File.Exists(path)
+                ? JsonSerializer.Deserialize<AuthorityRecord>(File.ReadAllText(path))
+                : null;
+            return recorded is not null
+                && BatonPaths.RecordKeyComparer.Equals(recorded.RoomDirectory, identity)
+                    ? recorded.Ownership
+                    : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    public static async Task WriteAsync(
+        OriginatingPullRequestOwnership? ownership, string roomDirectory, CancellationToken cancellationToken)
+    {
+        var identity = RoomIdentity(roomDirectory)
+            ?? throw new ArgumentException("The room directory must be an absolute path.", nameof(roomDirectory));
+        var path = RecordPath(identity);
+        if (ownership is null)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await File.WriteAllTextAsync(
+                temporary, JsonSerializer.Serialize(new AuthorityRecord(identity, ownership)), cancellationToken)
+                .ConfigureAwait(false);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private static string? RoomIdentity(string? roomDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(roomDirectory) || !Path.IsPathFullyQualified(roomDirectory)) return null;
+        try
+        {
+            return BatonPaths.RecordKey(Path.GetFullPath(roomDirectory));
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private static string RecordPath(string roomIdentity)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(roomIdentity))).ToLowerInvariant();
+        return Path.Combine(BatonPaths.Root, DirectoryName, $"{digest}.json");
     }
 }
 
