@@ -1,3 +1,4 @@
+using Baton.Artifacts;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
@@ -124,6 +125,88 @@ public sealed class MutationInterfaceDeliveryVerificationTests
             DirectoryCleanup.DeleteRecursively(workspace);
             DirectoryCleanup.DeleteRecursively(origin);
         }
+    }
+
+    [Fact]
+    public async Task An_early_negative_handoff_is_separate_from_a_later_pushed_delivery_stamp()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-negative-then-pushed");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var bindings = DeliveryBinding(workspace,
+                "echo no push yet>%BATON_OUTPUT_DIR%\\changes.md && git commit --allow-empty -m later -q && git push -q origin HEAD");
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var outputDirectory = await OutputDirectoryAsync(logPath, artifactsRoot);
+            var evidence = (await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken)).Evidence;
+
+            Assert.Equal(StepStatus.Succeeded, finalState.Steps.Single().Status);
+            Assert.Equal("no push yet", (await File.ReadAllTextAsync(Path.Combine(outputDirectory, "changes.md"), TestContext.Current.CancellationToken)).Trim());
+            Assert.NotNull(evidence);
+            Assert.Equal(DeliveryCheckStatus.Passed, evidence!.Verification);
+            Assert.Equal(evidence.LocalHead, evidence.RemoteHead);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(roomDirectory); DirectoryCleanup.DeleteRecursively(workspace); DirectoryCleanup.DeleteRecursively(origin); }
+    }
+
+    [Fact]
+    public async Task A_positive_handoff_cannot_override_an_unpushed_delivery_stamp()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-positive-then-unpushed");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, DeliveryBinding(workspace,
+                "echo push succeeded>%BATON_OUTPUT_DIR%\\changes.md && git commit --allow-empty -m unpushed -q"));
+            var outputDirectory = await OutputDirectoryAsync(logPath, artifactsRoot);
+            var evidence = (await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken)).Evidence;
+
+            Assert.True(finalState.Steps.Single().IndeterminateAwaitingResolution);
+            Assert.Equal("push succeeded", (await File.ReadAllTextAsync(Path.Combine(outputDirectory, "changes.md"), TestContext.Current.CancellationToken)).Trim());
+            Assert.NotNull(evidence);
+            Assert.Equal(DeliveryCheckStatus.Failed, evidence!.Verification);
+            Assert.Equal(["branch-not-pushed"], evidence.FailingMembers);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(roomDirectory); DirectoryCleanup.DeleteRecursively(workspace); DirectoryCleanup.DeleteRecursively(origin); }
+    }
+
+    [Fact]
+    public async Task A_negative_handoff_does_not_hide_an_already_durable_remote_head()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-negative-with-durable-head");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, DeliveryBinding(workspace, "echo no push>%BATON_OUTPUT_DIR%\\changes.md"));
+            var outputDirectory = await OutputDirectoryAsync(logPath, artifactsRoot);
+            var evidencePath = Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName);
+            var handoffPath = Path.Combine(outputDirectory, "changes.md");
+            var evidenceBefore = await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken);
+            var handoffBefore = await File.ReadAllTextAsync(handoffPath, TestContext.Current.CancellationToken);
+            var reread = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+
+            Assert.Equal(DeliveryCheckStatus.Passed, reread.Evidence!.Verification);
+            Assert.Equal(reread.Evidence.LocalHead, reread.Evidence.RemoteHead);
+            Assert.Equal(evidenceBefore, await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken));
+            Assert.Equal(handoffBefore, await File.ReadAllTextAsync(handoffPath, TestContext.Current.CancellationToken));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(roomDirectory); DirectoryCleanup.DeleteRecursively(workspace); DirectoryCleanup.DeleteRecursively(origin); }
+    }
+
+    private static IReadOnlyDictionary<string, WorkerBinding> DeliveryBinding(string workspace, string command) =>
+        new Dictionary<string, WorkerBinding>
+        {
+            ["implementer"] = new WorkerBinding.Process(
+                new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                new CoreDispatchTarget("cmd", ["/c", command], WorkingDirectory: workspace), TimeSpan.FromSeconds(30),
+                DeliversBranch: true, ExpectPr: false),
+        };
+
+    private static async Task<string> OutputDirectoryAsync(string logPath, string artifactsRoot)
+    {
+        var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+        var executionId = Assert.Single(events.OfType<FlowEvent.ExecutionRequestAccepted>()).Request.ExecutionId;
+        return ArtifactManager.ResolveOutputDirectory(artifactsRoot, executionId);
     }
 
     private static async Task<FlowState> RunSingleStepPumpAsync(
