@@ -175,6 +175,52 @@ public static class QueueDecisionLedgerStore
     }
 
     /// <summary>
+    /// Appends a disposition while the caller owns the queue mutex. The only permitted nested order
+    /// is queue then decision ledger; this synchronous method deliberately performs no task-pool
+    /// scheduling because the outer mutex is thread-affine. The committed queue outbox remains the
+    /// recovery source if this append fails or the process stops before it runs.
+    /// </summary>
+    public static void AppendDispositionUnderQueueLock(
+        string tag,
+        QueueDispositionOperation operation,
+        string ledgerFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tag);
+        ArgumentNullException.ThrowIfNull(operation);
+        var fault = DispositionAppendFault?.Invoke(tag, operation);
+        if (fault is not null)
+        {
+            throw fault;
+        }
+
+        _ = Ledger.AppendAndGetAppendedSynchronously(
+            [new QueueDecisionEntry(operation.At, tag, operation.Decision, operation.Reason,
+                LiveWeight: 0, FreeGb: null, FloorGb: 0) { OperationKey = operation.Key }],
+            ledgerFilePath,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Appends a scheduler decision while the caller owns the queue mutex, returning the scheduler's
+    /// next collapse key. The caller must preserve the queue-then-ledger order; no ledger path may
+    /// acquire the queue mutex.
+    /// </summary>
+    public static string AppendUnderQueueLock(
+        QueueDecisionEntry entry,
+        string? previousVerdictKey,
+        string ledgerFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        _ = Ledger.AppendAndGetAppendedSynchronously([entry], ledgerFilePath, cancellationToken);
+        return entry.VerdictKey;
+    }
+
+    /// <summary>
     /// Appends <paramref name="entry"/> unless <paramref name="previousVerdictKey"/> already equals
     /// its <see cref="QueueDecisionEntry.VerdictKey"/>, and returns the key the caller should carry
     /// into the next evaluation.

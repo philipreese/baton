@@ -205,5 +205,32 @@ public sealed class QueueStoreTests
         Assert.Equal("baton-queue", QueueStore.LockNamePrefix);
     }
 
+    [Fact]
+    public async Task A_record_runs_on_the_queue_mutex_owner_thread()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            var mutationThread = 0;
+            var recordThread = 0;
+            await QueueStore.MutateAndRecordAsync(
+                path,
+                snapshot =>
+                {
+                    mutationThread = Environment.CurrentManagedThreadId;
+                    return snapshot with { Items = [Item("ordered")] };
+                },
+                () => recordThread = Environment.CurrentManagedThreadId,
+                Ct);
+
+            Assert.NotEqual(0, mutationThread);
+            Assert.Equal(mutationThread, recordThread);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
     private static void Cleanup(string path) => DirectoryCleanup.DeleteRecursively(Path.GetDirectoryName(path)!);
 }

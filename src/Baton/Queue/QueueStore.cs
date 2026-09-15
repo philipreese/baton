@@ -91,6 +91,63 @@ public static class QueueStore
             cancellationToken);
     }
 
+    /// <summary>
+    /// Commits a queue mutation and its durable record under the same queue ordering seam.
+    /// The queue is written before <paramref name="record"/> runs, so a record failure never rolls
+    /// back a committed lifecycle mutation; holding the lock only prevents a successor mutation from
+    /// making that record stale before it is appended.
+    /// </summary>
+    public static Task<QueueSnapshot> MutateAndRecordAsync(
+        string path,
+        Func<QueueSnapshot, QueueSnapshot> mutate,
+        Action record,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        ArgumentNullException.ThrowIfNull(mutate);
+        ArgumentNullException.ThrowIfNull(record);
+
+        EnsureParentDirectory(path);
+        return Task.Run(
+            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+            {
+                var updated = mutate(ReadUnlocked(path));
+                WriteUnlocked(path, updated);
+                record();
+                return updated;
+            }),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Appends a scheduler record only while its row remains current under the queue ordering seam.
+    /// A record action is synchronous because the file mutex is thread-affine; callers may bridge an
+    /// asynchronous ledger append only after the queue mutation has committed.
+    /// </summary>
+    public static Task<bool> RecordIfCurrentAsync(
+        string path,
+        Func<QueueSnapshot, bool> isCurrent,
+        Action record,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        ArgumentNullException.ThrowIfNull(isCurrent);
+        ArgumentNullException.ThrowIfNull(record);
+
+        return Task.Run(
+            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+            {
+                if (!isCurrent(ReadUnlocked(path)))
+                {
+                    return false;
+                }
+
+                record();
+                return true;
+            }),
+            cancellationToken);
+    }
+
     private static QueueSnapshot ReadUnlocked(string path)
     {
         if (!File.Exists(path))

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using Baton.Accounting;
 using Baton.Queue;
 using Baton.Status;
@@ -668,7 +669,7 @@ public static class QueueCommand
                 || current.State == QueueItemState.Launched
                 || current.RoomDirectory != observed.RoomDirectory
                 || (current.State != QueueItemState.Failed
-                    || !HasTerminalRoomProofAsync(current, cancellationToken).GetAwaiter().GetResult())
+                    || !HasTerminalRoomProofAtMutation(current))
                     && !currentReadyClosed)
             {
                 return snapshot;
@@ -765,6 +766,36 @@ public static class QueueCommand
         }
 
         return await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false) is not null;
+    }
+
+    /// <summary>
+    /// Re-proves the terminal sentinel while the queue mutex is held. This deliberately uses
+    /// synchronous file I/O: scheduling an asynchronous read and blocking for it would strand the
+    /// thread-affine queue mutex when the thread pool is saturated.
+    /// </summary>
+    private static bool HasTerminalRoomProofAtMutation(QueueItem item)
+    {
+        if (item.RoomDirectory is not { Length: > 0 } room)
+        {
+            return false;
+        }
+
+        var path = Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName);
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return JsonSerializer.Deserialize<WorkflowStatusView>(stream) is not null;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static async Task<int> ImportAsync(QueueOptions options, TextWriter output, CancellationToken cancellationToken)

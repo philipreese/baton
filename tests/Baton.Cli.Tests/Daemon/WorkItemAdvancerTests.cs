@@ -2401,4 +2401,165 @@ public sealed class WorkItemAdvancerTests
             DirectoryCleanup.DeleteRecursively(home);
         }
     }
+
+    [Fact]
+    public async Task Current_merged_observation_retires_every_matching_roomless_unclaimed_lifecycle_row()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var items = new[]
+            {
+                new QueueItem
+                {
+                    Tag = "failed-ready", Role = "ready", Stage = WorkStage.Ready,
+                    State = QueueItemState.Failed, Halted = true, Repository = Repository, PullRequest = 2307,
+                    Workspace = home, SpecFile = Path.Combine(home, "failed-ready.md"),
+                },
+                new QueueItem
+                {
+                    Tag = "queued-review", Role = "review", Stage = WorkStage.Review,
+                    State = QueueItemState.Queued, Repository = Repository, PullRequest = 2307,
+                    Workspace = home, SpecFile = Path.Combine(home, "queued-review.md"), Round = 2,
+                },
+                new QueueItem
+                {
+                    Tag = "live-sibling", Role = "fix", Stage = WorkStage.Fix,
+                    State = QueueItemState.Failed, Repository = Repository, PullRequest = 2307,
+                    RoomDirectory = Path.Combine(home, "room"), Workspace = home,
+                    SpecFile = Path.Combine(home, "live-sibling.md"),
+                },
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Items = items }, Ct);
+
+            await new WorkItemAdvancer(new ObservationGh(), (_, _) => Task.FromResult<string?>(null))
+                .RefreshPullRequestObservationsAsync(Now, Ct);
+
+            var updated = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            foreach (var retired in updated.Where(item => item.Tag is "failed-ready" or "queued-review"))
+            {
+                Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
+                Assert.Single(retired.DispositionOutbox);
+            }
+            var review = Assert.Single(updated, item => item.Tag == "queued-review");
+            Assert.Equal(WorkStage.Review, review.Stage);
+            Assert.Equal(QueueItemState.Queued, review.State);
+            Assert.Equal(2, review.Round);
+            Assert.Null(Assert.Single(updated, item => item.Tag == "live-sibling").Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("OPEN")]
+    [InlineData("CLOSED")]
+    public async Task Non_merged_observations_do_not_retire_roomless_lifecycle_rows(string state)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var item = new QueueItem
+            {
+                Tag = "not-merged",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Queued,
+                Repository = Repository,
+                PullRequest = 2307,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "not-merged.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Items = [item] }, Ct);
+
+            await new WorkItemAdvancer(new ObservationGh { State = state }, (_, _) => Task.FromResult<string?>(null))
+                .RefreshPullRequestObservationsAsync(Now, Ct);
+
+            Assert.Null((await ReadBackAsync()).Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("readiness-claim")]
+    [InlineData("bound-room")]
+    [InlineData("changed-pr")]
+    [InlineData("changed-repository")]
+    [InlineData("prior-retirement")]
+    [InlineData("row-removal")]
+    public async Task A_merged_observation_rechecks_every_retirement_guard_at_the_mutation_point(string change)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var item = new QueueItem
+            {
+                Tag = "guarded-retirement",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Queued,
+                Repository = Repository,
+                PullRequest = 2307,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "guarded-retirement.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Items = [item] }, Ct);
+
+            var gh = new ObservationGh(async _ =>
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = change switch
+                    {
+                        "readiness-claim" => snapshot.Items.Select(current => current with
+                        {
+                            ReadinessMutationClaim = "claimed",
+                        }).ToList(),
+                        "bound-room" => snapshot.Items.Select(current => current with
+                        {
+                            RoomDirectory = Path.Combine(home, "live-room"),
+                        }).ToList(),
+                        "changed-pr" => snapshot.Items.Select(current => current with
+                        {
+                            PullRequest = 9999,
+                        }).ToList(),
+                        "changed-repository" => snapshot.Items.Select(current => current with
+                        {
+                            Repository = "github.com/other/baton",
+                        }).ToList(),
+                        "prior-retirement" => snapshot.Items.Select(current => current with
+                        {
+                            Retirement = new QueueRetirement(QueueRetirement.Operator, Now, "operator retained evidence"),
+                        }).ToList(),
+                        "row-removal" => [],
+                        _ => throw new InvalidOperationException($"Unknown mutation '{change}'."),
+                    },
+                }, Ct);
+            });
+
+            await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null))
+                .RefreshPullRequestObservationsAsync(Now, Ct);
+
+            var updated = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.DoesNotContain(updated.Items, current => current.Retirement?.Kind == QueueRetirement.Merged);
+            Assert.DoesNotContain(
+                await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct),
+                entry => entry.Decision == QueueDecisionEntry.Retired);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
 }
