@@ -80,6 +80,7 @@ public static class DispatchOptionsParser
         string? continueFromRoomDirectoryPath = null;
         string? overrideRunwayReason = null;
         string? originatingPullRequest = null;
+        string? originatingPullRequestBranch = null;
         var attachments = new List<string>();
         var skills = new List<string>();
         var requirements = new List<string>();
@@ -199,6 +200,12 @@ public static class DispatchOptionsParser
                 case "--originating-pr":
                     originatingPullRequest = RequireValue(args, ref i, arg);
                     break;
+                // Internal queue transport: narrows --originating-pr verification to the branch the
+                // lifecycle item recorded. It is intentionally absent from Usage; operators name the
+                // PR, while QueueLauncher supplies this second conductor-owned fact.
+                case "--originating-pr-branch":
+                    originatingPullRequestBranch = RequireValue(args, ref i, arg);
+                    break;
                 case "--override-runway":
                     overrideRunwayReason = RequireOverrideRunwayReason(RequireValue(args, ref i, arg));
                     break;
@@ -299,7 +306,8 @@ public static class DispatchOptionsParser
             noDefaultSkills,
             requirements.Count > 0 ? NormalizeRequirements(requirements) : null,
             ParseTaskSizeDeclaration(declaredSize, sizeRationale),
-            originatingPullRequest);
+            originatingPullRequest,
+            originatingPullRequestBranch);
     }
 
     internal static TaskSizeDeclaration? ParseTaskSizeDeclaration(string? declaredSize, string? sizeRationale)

@@ -69,4 +69,38 @@ public sealed class OriginatingPullRequestVerifierTests
     public void An_unreadable_or_malformed_forge_response_is_refused(int exitCode, string response) =>
         Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
             "aer-works/baton", 2304, Identity, Head, exitCode, response));
+
+    [Fact]
+    public void A_queue_recorded_branch_must_match_before_the_forge_is_spawned()
+    {
+        OriginatingPullRequestVerifier.ValidateExpectedBranch(Identity, "2178-lane");
+        Assert.Throws<CliArgumentException>(() =>
+            OriginatingPullRequestVerifier.ValidateExpectedBranch(Identity, "worker-changed-branch"));
+    }
+
+    [Fact]
+    public void Gh_resolution_skips_a_workspace_local_executable_and_requires_an_outside_absolute_one()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-origin-gh-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(root, "workspace");
+        var outside = Path.Combine(root, "trusted-bin");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(workspace, "gh.exe"), "worker fake");
+        File.WriteAllText(Path.Combine(outside, "gh.exe"), "conductor fake");
+        try
+        {
+            var search = string.Join(Path.PathSeparator, workspace, outside);
+            Assert.Equal(
+                Path.Combine(outside, "gh.exe"),
+                OriginatingPullRequestVerifier.ResolveExecutable(workspace, search, isWindows: true),
+                ignoreCase: true);
+            Assert.Throws<CliArgumentException>(() =>
+                OriginatingPullRequestVerifier.ResolveExecutable(workspace, workspace, isWindows: true));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
 }

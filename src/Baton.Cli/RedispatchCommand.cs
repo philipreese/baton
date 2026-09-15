@@ -88,6 +88,14 @@ public static class RedispatchCommand
         }
 
         var (workerName, parentEntry) = parentBindings.Single();
+        parentEntry = parentEntry with
+        {
+            OriginatingPullRequestOwnership =
+                OriginatingPullRequestAuthorityStore.Read(options.ParentRoomDirectoryPath) ==
+                    parentEntry.OriginatingPullRequestOwnership
+                    ? parentEntry.OriginatingPullRequestOwnership
+                    : null,
+        };
 
         // A first launch freezes its routing declaration. Reject an attempted replacement while
         // this command still has only the parent binding in hand: no child room or worker exists.
@@ -288,7 +296,7 @@ public static class RedispatchCommand
         await WorkerBindingConfigWriter.SaveToFileAsync(
             new Dictionary<string, WorkerBindingConfigEntry> { [workerName] = entry }, bindingsFilePath, cancellationToken)
             .ConfigureAwait(false);
-        await OriginatingPullRequestOwnership.WriteProvenanceAsync(
+        await OriginatingPullRequestAuthorityStore.WriteAsync(
             entry.OriginatingPullRequestOwnership, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
         var workspace = entry.WorkingDirectory ?? entry.Worktree?.Repository ?? Directory.GetCurrentDirectory();

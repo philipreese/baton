@@ -272,7 +272,7 @@ public static class WorkerBindingResolver
             Skills: skills,
             PullRequestCreateIdentity: entry.PullRequestCreateIdentity,
             OriginatingPullRequestOwnership: entry.OriginatingPullRequestOwnership is { } originating
-                && originating.IsVerifiedForBindingsDirectory(bindingsFileDirectory)
+                && OriginatingPullRequestAuthorityStore.Read(bindingsFileDirectory) == originating
                     ? originating
                     : null);
         var target = adapter.Resolve(invocation, entry.Contract);

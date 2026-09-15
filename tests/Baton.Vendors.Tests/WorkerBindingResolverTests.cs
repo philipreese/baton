@@ -809,7 +809,7 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
-    public async Task Originating_PR_ownership_reaches_an_adapter_only_when_its_room_provenance_matches()
+    public async Task Originating_PR_ownership_reaches_an_adapter_only_when_Batons_outside_room_authority_matches()
     {
         var room = Path.Combine(Path.GetTempPath(), $"baton-originating-pr-{Guid.NewGuid():N}");
         Directory.CreateDirectory(room);
@@ -822,13 +822,19 @@ public class WorkerBindingResolverTests
                 OriginatingPullRequestOwnership: ownership);
             var config = new Dictionary<string, WorkerBindingConfigEntry> { ["implement"] = entry };
 
+            // A worker can duplicate or edit room-local state; agreement between two files in the
+            // same room is not independent provenance and must mint nothing.
+            await File.WriteAllTextAsync(
+                Path.Combine(room, "originating-pr-provenance.json"),
+                System.Text.Json.JsonSerializer.Serialize(ownership),
+                TestContext.Current.CancellationToken);
             var withoutProvenance = new InvocationCapturingAdapter();
             WorkerBindingResolver.Resolve(
                 config, new Dictionary<string, IWorkerAdapter> { ["capture"] = withoutProvenance },
                 bindingsFileDirectory: room);
             Assert.Null(withoutProvenance.Invocation!.OriginatingPullRequestOwnership);
 
-            await OriginatingPullRequestOwnership.WriteProvenanceAsync(
+            await OriginatingPullRequestAuthorityStore.WriteAsync(
                 ownership, room, TestContext.Current.CancellationToken);
             var matching = new InvocationCapturingAdapter();
             WorkerBindingResolver.Resolve(
@@ -851,6 +857,8 @@ public class WorkerBindingResolverTests
         }
         finally
         {
+            await OriginatingPullRequestAuthorityStore.WriteAsync(
+                null, room, TestContext.Current.CancellationToken);
             DirectoryCleanup.DeleteRecursively(room);
         }
     }

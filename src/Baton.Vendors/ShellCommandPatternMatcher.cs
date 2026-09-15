@@ -774,7 +774,9 @@ public static class ShellCommandPatternMatcher
         int maxStart = anyOffset ? tokens.Length - 1 : 0;
         for (int start = 0; start <= maxStart; start++)
         {
-            int denyLength = LongestTokenizedMatch(tokens, start, deniedPatterns, StringComparison.OrdinalIgnoreCase);
+            int denyLength = LongestTokenizedMatch(
+                tokens, start, deniedPatterns, StringComparison.OrdinalIgnoreCase,
+                normalizeExecutableHead: true);
             if (denyLength == 0)
             {
                 continue;
@@ -797,7 +799,7 @@ public static class ShellCommandPatternMatcher
     /// </summary>
     private static int LongestTokenizedMatch(
         string[] tokens, int start, IReadOnlyList<string>? patterns, StringComparison comparison,
-        bool exactUnlessWildcard = false)
+        bool exactUnlessWildcard = false, bool normalizeExecutableHead = false)
     {
         if (patterns is null)
         {
@@ -828,7 +830,10 @@ public static class ShellCommandPatternMatcher
             bool matches = true;
             for (int i = 0; i < patternTokens.Length; i++)
             {
-                if (!tokens[start + i].Equals(patternTokens[i], comparison))
+                var candidate = normalizeExecutableHead && i == 0
+                    ? NormalizeExecutableHead(tokens[start + i])
+                    : tokens[start + i];
+                if (!candidate.Equals(patternTokens[i], comparison))
                 {
                     matches = false;
                     break;
@@ -842,6 +847,26 @@ public static class ShellCommandPatternMatcher
         }
 
         return longest;
+    }
+
+    /// <summary>
+    /// A standing command-family deny binds the executable, not the spelling used to reach it.
+    /// Normalize only the candidate command head on the deny side: doing the same to an exception
+    /// would silently widen a narrow read exception to path-qualified invocations it never granted.
+    /// </summary>
+    private static string NormalizeExecutableHead(string token)
+    {
+        var name = token.Replace('\\', '/');
+        name = name[(name.LastIndexOf('/') + 1)..];
+        foreach (var suffix in new[] { ".exe", ".com", ".cmd", ".bat" })
+        {
+            if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return name[..^suffix.Length];
+            }
+        }
+
+        return name;
     }
 
     /// <summary>

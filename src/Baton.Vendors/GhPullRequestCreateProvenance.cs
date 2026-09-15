@@ -199,9 +199,9 @@ public static class GhPullRequestCreateProvenanceResolver
     }
 }
 
-internal static class OutsideWorkspaceExecutableResolver
+public static class OutsideWorkspaceExecutableResolver
 {
-    internal static string? TryValidateAbsolute(
+    public static string? TryValidateAbsolute(
         string candidate, string workspaceRoot, string executableName, bool isWindows,
         bool requireFileName = true)
     {

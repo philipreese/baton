@@ -591,6 +591,7 @@ public static class QueueLauncher
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
         Add("--originating-pr", options.OriginatingPullRequest);
+        Add("--originating-pr-branch", options.OriginatingPullRequestBranch);
         if (options.DeclaredTaskSize is { } declaredSize)
         {
             Add("--declared-size", declaredSize.Size.ToString().ToLowerInvariant());
@@ -951,10 +952,11 @@ public static class QueueLauncher
         var item = request.Item;
         var tier = request.Tier;
         var followOn = item.Stage is WorkStage.Continue or WorkStage.Fix;
-        if (followOn && (item.Repository is not { Length: > 0 } || item.PullRequest is null))
+        if (followOn && (item.Repository is not { Length: > 0 } || item.PullRequest is null
+            || item.Branch is not { Length: > 0 }))
         {
             throw new CliArgumentException(
-                $"Queue {WorkStages.Token(item.Stage!.Value)} cannot launch without its canonical repository and tracked open PR.");
+                $"Queue {WorkStages.Token(item.Stage!.Value)} cannot launch without its canonical repository, recorded branch, and tracked open PR.");
         }
 
         return new DispatchOptions(
@@ -986,7 +988,8 @@ public static class QueueLauncher
                 && item.Repository is { Length: > 0 } repository
                 && item.PullRequest is { } pullRequest
                 ? OriginatingPullRequestVerifier.CanonicalReference(repository, pullRequest)
-                : null);
+                : null,
+            OriginatingPullRequestBranch: followOn ? item.Branch : null);
     }
 
     /// <summary>

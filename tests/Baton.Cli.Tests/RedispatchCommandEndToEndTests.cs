@@ -73,6 +73,79 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Redispatch_drops_originating_PR_data_forged_only_in_the_worker_room()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-origin-authority-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Continue the fix.");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            var forged = new OriginatingPullRequestOwnership(
+                "aer-works/baton", 2304, "2178-lane", "0123456789abcdef0123456789abcdef01234567");
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["advise"] = parentBindings["advise"] with { OriginatingPullRequestOwnership = forged },
+                },
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(parentRoom, "originating-pr-provenance.json"),
+                JsonSerializer.Serialize(forged), TestContext.Current.CancellationToken);
+
+            var childRoom = Path.Combine(testRoot, "child");
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, childRoom), Adapters, TestContext.Current.CancellationToken);
+
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Null(childBindings["advise"].OriginatingPullRequestOwnership);
+            Assert.Null(OriginatingPullRequestAuthorityStore.Read(childRoom));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Ordinary_redispatch_retains_a_matching_Baton_authorized_originating_PR()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-origin-retain-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Continue the fix.");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            var ownership = new OriginatingPullRequestOwnership(
+                "aer-works/baton", 2304, "2178-lane", "0123456789abcdef0123456789abcdef01234567");
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["advise"] = parentBindings["advise"] with { OriginatingPullRequestOwnership = ownership },
+                },
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            await OriginatingPullRequestAuthorityStore.WriteAsync(
+                ownership, parentRoom, TestContext.Current.CancellationToken);
+
+            var childRoom = Path.Combine(testRoot, "child");
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, childRoom), Adapters, TestContext.Current.CancellationToken);
+
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Equal(ownership, childBindings["advise"].OriginatingPullRequestOwnership);
+            Assert.Equal(ownership, OriginatingPullRequestAuthorityStore.Read(childRoom));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     /// <summary>
     /// Redispatch builds its inherited binding outside DispatchCommand.  A conductor model override
     /// must therefore refuse before the child room, lineage marker, or bindings snapshot is written.

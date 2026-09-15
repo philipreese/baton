@@ -217,7 +217,9 @@ public static class DispatchCommand
         {
             if (bindings.Count != 1)
                 throw new CliArgumentException("'--originating-pr' applies to one direct role dispatch, not a workflow template.");
-            var ownership = await OriginatingPullRequestVerifier.VerifyAsync(options.OriginatingPullRequest, workspace, cancellationToken).ConfigureAwait(false);
+            var ownership = await OriginatingPullRequestVerifier.VerifyAsync(
+                options.OriginatingPullRequest, workspace, cancellationToken,
+                options.OriginatingPullRequestBranch).ConfigureAwait(false);
             bindings = bindings.ToDictionary(pair => pair.Key, pair => pair.Value with { OriginatingPullRequestOwnership = ownership }, StringComparer.Ordinal);
         }
 
@@ -480,7 +482,7 @@ public static class DispatchCommand
         var bindingsFilePath = Path.Combine(options.RoomDirectoryPath, BindingsFileName);
         await WorkflowDefinitionWriter.SaveToFileAsync(definition, workflowFilePath, cancellationToken).ConfigureAwait(false);
         await WorkerBindingConfigWriter.SaveToFileAsync(bindings, bindingsFilePath, cancellationToken).ConfigureAwait(false);
-        await OriginatingPullRequestOwnership.WriteProvenanceAsync(
+        await OriginatingPullRequestAuthorityStore.WriteAsync(
             originatingPullRequests.SingleOrDefault(),
             options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
@@ -1095,7 +1097,7 @@ public static class DispatchCommand
     /// <c>OutcomeClassifier</c>'s worktree-cleanliness audit. Do not restate the two mechanisms here
     /// beyond naming them (record-once); the citations above are the source, this line is the gloss.
     /// </remarks>
-    private static string DescribeGrant(WorkerBindingConfigEntry binding)
+    internal static string DescribeGrant(WorkerBindingConfigEntry binding)
     {
         var grant = binding.PermissionGrant;
         if (grant is null)
@@ -1123,7 +1125,11 @@ public static class DispatchCommand
             grant.ReadFiles ? "read" : "no-read",
             write,
             shell,
-            grant.NetworkAccess ? "network" : "no-network");
+            grant.NetworkAccess ? "network" : "no-network")
+            + (binding.OriginatingPullRequestOwnership is { } origin
+                ? $", originating-pr {origin.Repository}#{origin.Number} "
+                    + $"(conductor-verified: {origin.HeadBranch}@{origin.LaunchHead})"
+                : string.Empty);
     }
 
     private static async Task<(WorkflowDefinition Definition, IReadOnlyDictionary<string, WorkerBindingConfigEntry> Bindings)>
@@ -1628,6 +1634,11 @@ public static class DispatchCommand
             ResumeSession = true,
             // #2190: continuing a worker-controlled workspace must never re-probe its mutable remote.
             PullRequestCreateIdentity = parentEntry.PullRequestCreateIdentity,
+            OriginatingPullRequestOwnership =
+                OriginatingPullRequestAuthorityStore.Read(continueFromRoomDirectoryPath) ==
+                    parentEntry.OriginatingPullRequestOwnership
+                    ? parentEntry.OriginatingPullRequestOwnership
+                    : null,
         };
         var provenance = new ContinuationProvenance(continueFromRoomDirectoryPath, parentExecutionId, parentEntry.SessionId);
         return (resumedEntry, provenance);

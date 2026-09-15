@@ -737,21 +737,25 @@ public sealed class QueueLauncherTests : IDisposable
             Stage = stage,
             Repository = "github.com/aer-works/baton",
             PullRequest = 2304,
+            Branch = "2178-lane",
         };
         var tier = new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null);
         var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(item, tier, @"C:\rooms\next"));
         var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
 
         Assert.Equal("aer-works/baton#2304", options.OriginatingPullRequest);
+        Assert.Equal("2178-lane", options.OriginatingPullRequestBranch);
         Assert.Equal(options.OriginatingPullRequest, parsed.OriginatingPullRequest);
+        Assert.Equal(options.OriginatingPullRequestBranch, parsed.OriginatingPullRequestBranch);
     }
 
     [Theory]
-    [InlineData(WorkStage.Continue, null, 2304)]
-    [InlineData(WorkStage.Continue, "github.com/aer-works/baton", null)]
-    [InlineData(WorkStage.Fix, null, null)]
+    [InlineData(WorkStage.Continue, null, 2304, "2178-lane")]
+    [InlineData(WorkStage.Continue, "github.com/aer-works/baton", null, "2178-lane")]
+    [InlineData(WorkStage.Continue, "github.com/aer-works/baton", 2304, null)]
+    [InlineData(WorkStage.Fix, null, null, null)]
     public void A_follow_on_lane_without_canonical_repository_and_PR_provenance_is_refused(
-        WorkStage stage, string? repository, int? pullRequest)
+        WorkStage stage, string? repository, int? pullRequest, string? branch)
     {
         var item = new QueueItem
         {
@@ -762,6 +766,7 @@ public sealed class QueueLauncherTests : IDisposable
             Stage = stage,
             Repository = repository,
             PullRequest = pullRequest,
+            Branch = branch,
         };
         var tier = new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null);
 

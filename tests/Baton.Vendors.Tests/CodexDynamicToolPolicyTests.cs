@@ -1839,12 +1839,15 @@ public sealed class CodexDynamicToolPolicyTests
             new { command = "gh pr edit 2304 --add-label operator-merge" });
         var merge = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = "gh pr merge 2304 --squash" });
+        var relativeMerge = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = @".\gh pr merge 2304 --squash" });
 
         Assert.True(own.Success, own.Text);
         Assert.False(sibling.Success);
         Assert.Contains("This room opened aer-works/baton#2304", sibling.Text, StringComparison.Ordinal);
         Assert.False(labels.Success);
         Assert.False(merge.Success);
+        Assert.False(relativeMerge.Success);
         Assert.Contains(GrantRefusal.Marker, labels.Text);
         Assert.Contains(GrantRefusal.Marker, merge.Text);
     }

@@ -1,5 +1,8 @@
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using Baton.Status;
 
 namespace Baton.Vendors;
 
@@ -92,32 +95,86 @@ public sealed record OriginatingPullRequestOwnership(
             : null;
     }
 
-    internal const string ProvenanceFileName = "originating-pr-provenance.json";
+}
 
-    internal bool IsVerifiedForBindingsDirectory(string? bindingsFileDirectory)
+/// <summary>
+/// Baton-owned authority for originating-PR grants. The binding is the worker-facing projection;
+/// this record lives under <see cref="BatonPaths.Root"/>, outside the room and workspace, so editing
+/// room files cannot mint or alter the authority consumed at launch. This follows the same trust
+/// boundary as Baton's project ceiling: roles are cooperative processes rather than an OS sandbox,
+/// but worker-authored room state is never itself an authority source.
+/// </summary>
+public static class OriginatingPullRequestAuthorityStore
+{
+    private const string DirectoryName = "originating-pr-authority";
+    private sealed record AuthorityRecord(string RoomDirectory, OriginatingPullRequestOwnership Ownership);
+
+    public static OriginatingPullRequestOwnership? Read(string? roomDirectory)
     {
-        if (string.IsNullOrWhiteSpace(bindingsFileDirectory)) return false;
+        var identity = RoomIdentity(roomDirectory);
+        if (identity is null) return null;
         try
         {
-            var path = Path.Combine(bindingsFileDirectory, ProvenanceFileName);
+            var path = RecordPath(identity);
             var recorded = File.Exists(path)
-                ? JsonSerializer.Deserialize<OriginatingPullRequestOwnership>(File.ReadAllText(path))
+                ? JsonSerializer.Deserialize<AuthorityRecord>(File.ReadAllText(path))
                 : null;
             return recorded is not null
-                && string.Equals(recorded.Repository, Repository, StringComparison.Ordinal)
-                && recorded.Number == Number
-                && string.Equals(recorded.HeadBranch, HeadBranch, StringComparison.Ordinal)
-                && string.Equals(recorded.LaunchHead, LaunchHead, StringComparison.OrdinalIgnoreCase);
+                && BatonPaths.RecordKeyComparer.Equals(recorded.RoomDirectory, identity)
+                    ? recorded.Ownership
+                    : null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            return false;
+            return null;
         }
     }
 
-    public static Task WriteProvenanceAsync(OriginatingPullRequestOwnership? ownership, string roomDirectory, CancellationToken cancellationToken) =>
-        ownership is null ? Task.CompletedTask : File.WriteAllTextAsync(
-            Path.Combine(roomDirectory, ProvenanceFileName), JsonSerializer.Serialize(ownership), cancellationToken);
+    public static async Task WriteAsync(
+        OriginatingPullRequestOwnership? ownership, string roomDirectory, CancellationToken cancellationToken)
+    {
+        var identity = RoomIdentity(roomDirectory)
+            ?? throw new ArgumentException("The room directory must be an absolute path.", nameof(roomDirectory));
+        var path = RecordPath(identity);
+        if (ownership is null)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await File.WriteAllTextAsync(
+                temporary, JsonSerializer.Serialize(new AuthorityRecord(identity, ownership)), cancellationToken)
+                .ConfigureAwait(false);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private static string? RoomIdentity(string? roomDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(roomDirectory) || !Path.IsPathFullyQualified(roomDirectory)) return null;
+        try
+        {
+            return BatonPaths.RecordKey(Path.GetFullPath(roomDirectory));
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private static string RecordPath(string roomIdentity)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(roomIdentity))).ToLowerInvariant();
+        return Path.Combine(BatonPaths.Root, DirectoryName, $"{digest}.json");
+    }
 }
 
 internal static class GitHubRepository

@@ -546,6 +546,8 @@ public class HookCheckCommandTests
     [InlineData("gh pr list", HookCheckCommand.DeniedExitCode)]
     [InlineData("gh pr edit 2304 --add-label operator-merge", HookCheckCommand.DeniedExitCode)]
     [InlineData("gh pr merge 2304 --squash", HookCheckCommand.DeniedExitCode)]
+    [InlineData(@".\gh pr merge 2304 --squash", HookCheckCommand.DeniedExitCode)]
+    [InlineData("./gh pr merge 2304 --squash", HookCheckCommand.DeniedExitCode)]
     public void An_originating_PR_grant_is_exact_and_does_not_widen_other_PR_authority(
         string command, int expectedExitCode)
     {

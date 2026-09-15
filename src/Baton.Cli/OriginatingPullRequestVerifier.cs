@@ -10,14 +10,18 @@ internal static class OriginatingPullRequestVerifier
 {
     private static readonly TimeSpan GhVerificationTimeout = TimeSpan.FromSeconds(20);
 
-    public static async Task<OriginatingPullRequestOwnership> VerifyAsync(string reference, string workspace, CancellationToken cancellationToken)
+    public static async Task<OriginatingPullRequestOwnership> VerifyAsync(
+        string reference, string workspace, CancellationToken cancellationToken, string? expectedBranch = null)
     {
         var (repository, number) = ParseReference(reference);
         var identity = GhPullRequestCreateProvenanceResolver.TryCaptureIdentity(workspace);
         var launchHead = await WorkspaceHead.TryCaptureAsync(workspace, cancellationToken).ConfigureAwait(false);
         if (identity is null || launchHead is null || identity.Repository != repository)
             throw new CliArgumentException("The workspace repository and launch HEAD must be readable before originating PR ownership can be granted.");
-        var start = ChildProcessStartInfo.Create("gh", info =>
+        ValidateExpectedBranch(identity, expectedBranch);
+
+        var gh = ResolveExecutable(workspace, Environment.GetEnvironmentVariable("PATH"), OperatingSystem.IsWindows());
+        var start = ChildProcessStartInfo.Create(gh, info =>
         {
             info.WorkingDirectory = workspace;
             info.RedirectStandardOutput = true;
@@ -59,6 +63,21 @@ internal static class OriginatingPullRequestVerifier
         var output = await stdoutTask.ConfigureAwait(false);
         _ = await stderrTask.ConfigureAwait(false);
         return ValidateResponse(repository, number, identity, launchHead, process.ExitCode, output);
+    }
+
+    internal static string ResolveExecutable(string workspace, string? searchPath, bool isWindows) =>
+        OutsideWorkspaceExecutableResolver.TryResolve(searchPath, workspace, "gh", isWindows)
+        ?? throw new CliArgumentException(
+            "Could not resolve an absolute, link-free gh executable outside the worker workspace; '--originating-pr' was not verified.");
+
+    internal static void ValidateExpectedBranch(GhPullRequestCreateIdentity identity, string? expectedBranch)
+    {
+        if (expectedBranch is not null
+            && !string.Equals(identity.HeadBranch, expectedBranch, StringComparison.Ordinal))
+        {
+            throw new CliArgumentException(
+                "The queue's recorded branch does not match the workspace branch; originating PR ownership was refused before launch.");
+        }
     }
 
     internal static (string Repository, int Number) ParseReference(string reference)
