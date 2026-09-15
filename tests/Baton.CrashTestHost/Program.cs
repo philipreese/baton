@@ -63,6 +63,14 @@ if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER"
     return 0;
 }
 if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
+    && args is ["-c", "credential.interactive=false", "ls-remote", "--heads", "origin", "2190-verified-pr-ownership"])
+{
+    // The delivery stamp makes a second, separate remote-head observation after the check.
+    // Keep that positive provenance control truthful without launching another sleeper.
+    await Console.Out.WriteLineAsync($"{HermeticHead}\trefs/heads/2190-verified-pr-ownership");
+    return 0;
+}
+if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
     && (args is ["-c", "credential.interactive=false", "fetch", "origin", "+refs/heads/2190-verified-pr-ownership:refs/remotes/origin/2190-verified-pr-ownership"]
         or ["merge-base", "--is-ancestor", "HEAD", "origin/2190-verified-pr-ownership"]))
 {
