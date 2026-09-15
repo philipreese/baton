@@ -1,7 +1,10 @@
+using Baton.Cli.Tests.TestSupport;
+using Baton.CrashTestHost;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
 
+[Collection(SerializedEnvironmentCollection.Name)]
 public sealed class OriginatingPullRequestVerifierTests
 {
     private const string Head = "0123456789abcdef0123456789abcdef01234567";
@@ -101,6 +104,85 @@ public sealed class OriginatingPullRequestVerifierTests
         finally
         {
             DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task Verification_spawns_the_external_gh_and_never_the_workspace_fake()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-origin-gh-spawn-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(root, "workspace");
+        var outside = Path.Combine(root, "trusted-bin");
+        var marker = Path.Combine(root, "launched-gh.txt");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(outside);
+        CopyHermeticProbeHost(outside);
+        var suffix = OperatingSystem.IsWindows() ? ".exe" : string.Empty;
+        var appHost = Path.Combine(outside, "Baton.CrashTestHost" + suffix);
+        var externalGit = Path.Combine(outside, "git" + suffix);
+        var externalGh = Path.Combine(outside, "gh" + suffix);
+        File.Copy(appHost, externalGit);
+        File.Copy(appHost, externalGh);
+        MakeExecutable(externalGit);
+        MakeExecutable(externalGh);
+
+        // If VerifyAsync ever regresses to Process.Start("gh"), PATH selects this invalid worker
+        // executable first: the spawn fails and the external marker never lands.
+        var workspaceGh = Path.Combine(workspace, "gh" + suffix);
+        File.WriteAllText(
+            workspaceGh,
+            OperatingSystem.IsWindows()
+                ? "worker-controlled fake; must not launch"
+                : "#!/bin/sh\nexit 99\n");
+        MakeExecutable(workspaceGh);
+
+        var oldPath = Environment.GetEnvironmentVariable("PATH");
+        var oldMarker = Environment.GetEnvironmentVariable("BATON_CRASH_TEST_GH_MARKER");
+        try
+        {
+            Environment.SetEnvironmentVariable(
+                "PATH", string.Join(Path.PathSeparator, workspace, outside, oldPath));
+            Environment.SetEnvironmentVariable("BATON_CRASH_TEST_GH_MARKER", marker);
+
+            var ownership = await OriginatingPullRequestVerifier.VerifyAsync(
+                "aer-works/baton#2304", workspace, TestContext.Current.CancellationToken,
+                "2190-verified-pr-ownership");
+
+            Assert.Equal(new OriginatingPullRequestOwnership(
+                "aer-works/baton", 2304, "2190-verified-pr-ownership", Head), ownership);
+            Assert.Equal(
+                Path.GetFullPath(externalGh),
+                Path.GetFullPath(await File.ReadAllTextAsync(marker, TestContext.Current.CancellationToken)),
+                ignoreCase: OperatingSystem.IsWindows());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", oldPath);
+            Environment.SetEnvironmentVariable("BATON_CRASH_TEST_GH_MARKER", oldMarker);
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    private static void CopyHermeticProbeHost(string destination)
+    {
+        var sourceDirectory = Path.GetDirectoryName(typeof(Scenarios).Assembly.Location)!;
+        const string hostPrefix = "Baton.CrashTestHost";
+        foreach (var source in Directory.EnumerateFiles(sourceDirectory))
+        {
+            var name = Path.GetFileName(source);
+            if (name.StartsWith(hostPrefix, StringComparison.Ordinal)
+                || name.Equals("Baton.dll", StringComparison.Ordinal))
+            {
+                File.Copy(source, Path.Combine(destination, name));
+            }
+        }
+    }
+
+    private static void MakeExecutable(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, File.GetUnixFileMode(path) | UnixFileMode.UserExecute);
         }
     }
 }

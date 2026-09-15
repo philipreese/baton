@@ -665,6 +665,29 @@ public class ShellCommandPatternMatcherTests
     }
 
     [Theory]
+    [InlineData(@".\gh.exe label create x")]
+    [InlineData("./gh.com label create x")]
+    [InlineData(@"C:\tools\gh.cmd label create x")]
+    [InlineData(@"C:\tools\gh.bat label create x")]
+    public void A_path_qualified_platform_suffix_cannot_escape_an_executable_family_deny(string command)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(command, null, ["gh label*"]);
+
+        Assert.False(result.IsAllowed);
+    }
+
+    [Theory]
+    [InlineData(@".\baton.exe status room-1")]
+    [InlineData("./baton status room-1")]
+    public void A_path_qualified_denied_family_does_not_inherit_a_bare_executable_exception(string command)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(
+            command, null, ["baton *"], ["baton status*"]);
+
+        Assert.False(result.IsAllowed);
+    }
+
+    [Theory]
     [InlineData("baton trust --list", true)]
     [InlineData("baton trust --list --revoke C:/repo", false)]
     [InlineData("baton trust --list --ceiling all C:/repo", false)]

@@ -723,6 +723,8 @@ public class AgyHookCheckCommandTests
     // #2001: respelled selectorless for the reason HookCheckCommandTests' equivalent rows state.
     [InlineData("implement", "gh pr edit --body-file y", "allow")]
     [InlineData("implement", "gh label create x", "deny")]
+    [InlineData("implement", @"C:\tools\gh.exe label create x", "deny")]
+    [InlineData("implement", @"C:\tools\baton.exe status room-1", "deny")]
     [InlineData("implement", "gh pr edit --add-label x", "deny")]
     [InlineData("implement", "gh pr edit --remove-label x", "deny")]
     // Found-while-fixing, same PR: `--label` at creation time attaches a label too, and was never

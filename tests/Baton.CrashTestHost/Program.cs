@@ -23,6 +23,7 @@ using Baton.Store;
 // for a diff probe which exits after starting a sleeper that inherits its process handles; the PID
 // file named by BATON_CRASH_TEST_SLEEPER_PID_FILE lets the E2E prove the descendant is gone. No shell
 // or callback seam is involved: production starts the copied apphost directly.
+const string HermeticHead = "0123456789abcdef0123456789abcdef01234567";
 if (args is ["config", "--get", "remote.origin.url"])
 {
     await Console.Out.WriteLineAsync("https://github.com/aer-works/baton.git");
@@ -33,9 +34,24 @@ if (args is ["rev-parse", "--abbrev-ref", "HEAD"])
     await Console.Out.WriteLineAsync("2190-verified-pr-ownership");
     return 0;
 }
+if (args is ["rev-parse", "HEAD"])
+{
+    await Console.Out.WriteLineAsync(HermeticHead);
+    return 0;
+}
 if (args is ["rev-parse", "--path-format=absolute", "--git-common-dir"])
 {
     await Console.Out.WriteLineAsync("C:\\fixture\\.git");
+    return 0;
+}
+if (args is ["pr", "view", "2304", "--repo", "aer-works/baton", "--json", "state,headRefName,headRefOid"])
+{
+    if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_GH_MARKER") is { Length: > 0 } marker)
+    {
+        await File.WriteAllTextAsync(marker, Environment.ProcessPath ?? string.Empty);
+    }
+    await Console.Out.WriteLineAsync(
+        $$"""{"state":"OPEN","headRefName":"2190-verified-pr-ownership","headRefOid":"{{HermeticHead}}"}""");
     return 0;
 }
 if (args.Contains("diff", StringComparer.Ordinal))

@@ -420,6 +420,8 @@ public class HookCheckCommandTests
     // for two reasons now, and would pass this theory with the option-token channel switched off.
     [InlineData("implement", "gh pr edit --body-file y", HookCheckCommand.AllowedExitCode)]
     [InlineData("implement", "gh label create x", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", @"C:\tools\gh.exe label create x", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", @"C:\tools\baton.exe status room-1", HookCheckCommand.DeniedExitCode)]
     [InlineData("implement", "gh pr edit --add-label x", HookCheckCommand.DeniedExitCode)]
     [InlineData("implement", "gh pr edit --remove-label x", HookCheckCommand.DeniedExitCode)]
     // Found-while-fixing, same PR (spec/baton.md §9 has the full "why"): `--label` at PR/issue
