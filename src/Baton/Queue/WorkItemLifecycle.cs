@@ -30,8 +30,8 @@ namespace Baton.Queue;
 /// spec/baton.md §13 has the argument. What it means for the code below: nothing reads
 /// <c>WorkflowOutcome</c> beyond <see cref="Status.WorkflowOutcome.IsSucceededShaped"/> — the membership
 /// test that owns both succeeded-shaped words — and <see cref="IsPushed"/> is the whole discriminator
-/// for work that reached a PR. Positive zero-step terminal evidence separately stops an unpushed,
-/// PR-less attempt before it could buy a continuation to recover nonexistent work.
+/// for work that reached a PR. Every incomplete PR-less lane stops before it could buy a continuation
+/// that admission is known to refuse; positive zero-step evidence is not a substitute for forge identity.
 /// </para>
 /// <para>
 /// <b>Every dispatch is counted and bounded</b> (<see cref="WorkStages.MaxRounds"/>). Two of the arms
@@ -295,6 +295,20 @@ public static class WorkItemLifecycle
     /// </summary>
     private static WorkItemTransition DecideAfterIncompleteLane(WorkItemObservation observation)
     {
+        // A pushed branch cannot stand in for the open PR QueueLauncher requires before it can make
+        // a continuation room. Positive, absent, and unknown step evidence are all evidence about
+        // worker activity, not forge identity. Keep the terminal room and let the advancer reconcile
+        // this exact branch after an operator opens a draft PR; never spend a follow-on that admission
+        // is known to refuse.
+        if (observation.PullRequest is null)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} but no verified "
+                + $"open pull request is bound to '{observation.Branch}' — a pushed branch is not a pull request; "
+                + "open the exact draft PR and Baton will reconcile this retained terminal row",
+                QueueReconciliationKind.AwaitingVerifiedPullRequest);
+        }
+
         if (IsPushed(observation))
         {
             return EnsureDraft(observation, Dispatch(
@@ -322,17 +336,6 @@ public static class WorkItemLifecycle
                     $"the {WorkStages.Token(observation.Stage)} lane was arrested but workspace change was unmeasurable — " +
                     "the queue will not spend an automatic continuation without observed work; " + Recovery(observation.Stage))),
             };
-        }
-
-        // Protected invariant: a settled lane with positively recorded zero worker steps and no PR
-        // has no worker work to recover. Do not mint a paid continuation or clear its terminal room.
-        // Unknown step evidence is not proof of zero steps; preserve the existing reconciliation arm.
-        if (observation.PullRequest is null && observation.WorkerStepsRecorded == false)
-        {
-            return WorkItemTransition.NeedsOperator(
-                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} "
-                + "with zero worker steps and no pull request — there is no observed work for an "
-                + "automatic continuation to recover; " + Recovery(observation.Stage));
         }
 
         return EnsureDraft(observation, Dispatch(
@@ -513,7 +516,8 @@ public sealed record WorkItemTransition(
     int Round,
     string Reason,
     bool UsesAutomaticFix = false,
-    PullRequestReadinessAction PullRequestAction = PullRequestReadinessAction.None)
+    PullRequestReadinessAction PullRequestAction = PullRequestReadinessAction.None,
+    QueueReconciliationKind? ReconciliationKind = null)
 {
     internal static WorkItemTransition None(string reason) =>
         new(WorkItemTransitionKind.None, null, 0, reason);
@@ -526,8 +530,10 @@ public sealed record WorkItemTransition(
         PullRequestReadinessAction pullRequestAction = PullRequestReadinessAction.None) =>
         new(WorkItemTransitionKind.Stop, stage, 0, reason, PullRequestAction: pullRequestAction);
 
-    internal static WorkItemTransition NeedsOperator(string reason) =>
-        new(WorkItemTransitionKind.NeedsOperator, null, 0, reason);
+    internal static WorkItemTransition NeedsOperator(
+        string reason, QueueReconciliationKind? reconciliationKind = null) =>
+        new(WorkItemTransitionKind.NeedsOperator, null, 0, reason,
+            ReconciliationKind: reconciliationKind);
 }
 
 /// <summary>

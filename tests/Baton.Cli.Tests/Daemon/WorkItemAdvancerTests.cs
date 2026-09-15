@@ -1491,7 +1491,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueItemState.Failed, item.State);
             Assert.True(item.Halted);
             Assert.Equal(room, item.RoomDirectory);
-            Assert.Contains("zero worker steps", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("no verified open pull request", item.Error!, StringComparison.Ordinal);
 
             await QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Retire, Tag: item.Tag, Reason: "terminal prelaunch refusal"),
@@ -1505,7 +1505,7 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
-    public async Task An_incomplete_terminal_without_steps_is_unknown_not_positive_zero_step_evidence()
+    public async Task An_incomplete_terminal_without_steps_requires_pr_reconciliation()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -1519,10 +1519,115 @@ public sealed class WorkItemAdvancerTests
 
             var fact = Assert.Single(await Advancer(new FakeGh("[]"),
                 (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
-            Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
             var item = await ReadBackAsync();
-            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Contains("no verified open pull request", item.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Missing_pr_halt_survives_forge_outage_and_resumes_only_on_exact_open_draft()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var head = new Func<string, CancellationToken, Task<string?>>(
+                (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var first = Assert.Single(await Advancer(new FakeGh("[]"), head).AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, first.Decision);
+            var halted = await ReadBackAsync();
+            Assert.True(halted.Halted);
+            Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, halted.ReconciliationKind);
+            Assert.Null(halted.PullRequest);
+
+            // An unavailable lookup is not a new delivery failure. Neither it nor a successful
+            // empty lookup may rewrite the original halt or emit another Failed fact.
+            Assert.Empty(await Advancer(new FakeGh("[]", exitCode: 1), head)
+                .AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
+            Assert.Empty(await Advancer(new FakeGh("[]"), head)
+                .AdvanceAsync(Now.AddMinutes(2), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
+
+            // An open but already-ready PR is not the operator's promised draft recovery object.
+            // Keep the halt rather than mutating an unreviewed visible readiness signal.
+            var readyGh = new FakeGh(PrJson(77, PushedSha, isDraft: false));
+            Assert.Empty(await Advancer(readyGh, head)
+                .AdvanceAsync(Now.AddMinutes(3), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
+            Assert.DoesNotContain(readyGh.Calls, args => args is ["pr", "ready", ..]);
+
+            var draftWithNoRequiredChecks = new DelegateGh((_, args, _) => Task.FromResult(
+                new GhCliResult(true, 0, args is ["pr", "checks", ..] ? "[]"
+                    : args is ["pr", "view", ..] ? PrObject(77, PushedSha)
+                    : PrJson(77, PushedSha), string.Empty)));
+            var recovered = Assert.Single(await Advancer(draftWithNoRequiredChecks, head)
+                .AdvanceAsync(Now.AddMinutes(4), Ct));
+            Assert.Equal(QueueDecisionEntry.Advanced, recovered.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.ReReview, item.Stage);
             Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(77, item.PullRequest);
+            Assert.False(item.Halted);
+            Assert.Null(item.ReconciliationKind);
+            Assert.Null(item.Error);
+            Assert.Null(item.RequiredCheckEvidenceWait);
+            Assert.Equal(room, halted.RoomDirectory);
+            Assert.Null(item.RoomDirectory);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Implement, null)]
+    [InlineData(WorkStage.Implement, "")]
+    [InlineData(WorkStage.Fix, null)]
+    [InlineData(WorkStage.Fix, "")]
+    public async Task Missing_repository_identity_ends_a_halted_pr_recovery_without_repeating_failure(
+        WorkStage stage, string? repository)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            var seeded = await SeedAsync(home, stage, room, QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [seeded with
+                {
+                    Repository = repository,
+                    Halted = true,
+                    ReconciliationKind = QueueReconciliationKind.AwaitingVerifiedPullRequest,
+                    Error = "original missing-PR delivery halt",
+                }],
+            }, Ct);
+            var advancer = Advancer(new FakeGh("[]"), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var first = Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, first.Decision);
+            var halted = await ReadBackAsync();
+            Assert.Contains("no trusted repository identity", halted.Error!, StringComparison.Ordinal);
+            Assert.True(halted.Halted);
+            Assert.Null(halted.ReconciliationKind);
+            Assert.Equal(room, halted.RoomDirectory);
+
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
         }
         finally
         {
@@ -1665,9 +1770,8 @@ public sealed class WorkItemAdvancerTests
             Assert.True(item.Halted);
             Assert.Equal(WorkStage.Implement, item.Stage);
             Assert.Contains("no pull request is open", item.Error!, StringComparison.Ordinal);
-            // The recovery the message names has to be one the code actually allows: an item still at
-            // implement IS replaceable by a re-add (QueueCommand.RefuseIfNotReplaceable).
-            Assert.Contains("baton queue add", item.Error!, StringComparison.Ordinal);
+            // This row has no branch identity, so it cannot use the exact-branch PR reconciliation
+            // seam and remains an ordinary halted operator obligation.
             // The room survives the failure, which is what the operator has to read (spec/baton.md §13).
             Assert.Equal(room, item.RoomDirectory);
 
