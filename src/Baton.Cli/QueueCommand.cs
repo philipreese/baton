@@ -3,6 +3,7 @@ using System.Text.Json;
 using Baton.Accounting;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
 using Baton.Vendors;
 
 namespace Baton.Cli;
@@ -636,8 +637,8 @@ public static class QueueCommand
                 && observation.State == PullRequestObservationStates.Closed
                 && observation.ObservedAt is not null
                 && observation.Error is null) == true;
-        var terminalRoomProof = await HasTerminalRoomProofAsync(observed, cancellationToken).ConfigureAwait(false);
-        if ((observed.State != QueueItemState.Failed || !terminalRoomProof) && !readyClosed)
+        var terminalRoomProof = await ReadTerminalRoomProofAsync(observed, cancellationToken).ConfigureAwait(false);
+        if ((observed.State != QueueItemState.Failed || !terminalRoomProof.IsProven) && !readyClosed)
         {
             throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement.");
         }
@@ -669,7 +670,7 @@ public static class QueueCommand
                 || current.State == QueueItemState.Launched
                 || current.RoomDirectory != observed.RoomDirectory
                 || (current.State != QueueItemState.Failed
-                    || !HasTerminalRoomProofAtMutation(current))
+                    || !HasTerminalRoomProofAtMutation(current, terminalRoomProof))
                     && !currentReadyClosed)
             {
                 return snapshot;
@@ -756,16 +757,65 @@ public static class QueueCommand
         return 0;
     }
 
-    private static async Task<bool> HasTerminalRoomProofAsync(QueueItem item, CancellationToken cancellationToken)
+    internal sealed record TerminalRoomProof(bool FromSentinel, RoomJournalStamp? Journal)
+    {
+        public bool IsProven => FromSentinel || Journal is not null;
+    }
+
+    internal sealed record RoomJournalStamp(long LogLength, DateTime LogModifiedUtc,
+        long SnapshotLength, DateTime SnapshotModifiedUtc);
+
+    private static RoomJournalStamp? ReadRoomJournalStamp(string room)
+    {
+        try
+        {
+            var log = new FileInfo(Path.Combine(room, BatonPaths.FlowLogFileName));
+            var snapshot = new FileInfo(Path.Combine(room, BatonPaths.SnapshotFileName));
+            return log.Exists && snapshot.Exists
+                ? new RoomJournalStamp(log.Length, log.LastWriteTimeUtc, snapshot.Length, snapshot.LastWriteTimeUtc)
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    internal static async Task<TerminalRoomProof> ReadTerminalRoomProofAsync(
+        QueueItem item, CancellationToken cancellationToken)
     {
         if (item.RoomDirectory is not { Length: > 0 } room)
         {
             // A roomless timeout can mark the row failed before a late launcher persists its room.
             // No directory is absence of proof, never proof that a live room cannot exist.
-            return false;
+            return new TerminalRoomProof(false, null);
         }
 
-        return await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false) is not null;
+        if (await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false) is not null)
+        {
+            return new TerminalRoomProof(true, null);
+        }
+
+        // A dead-pump probe deliberately writes only a journal fact, never terminal.json. Use the
+        // same read-only terminal projector as baton status, and accept it only if no journal or
+        // snapshot change raced that read. Missing/malformed evidence cannot widen this guard.
+        var before = ReadRoomJournalStamp(room);
+        if (before is null)
+        {
+            return new TerminalRoomProof(false, null);
+        }
+        try
+        {
+            var projected = await WorkflowTerminalProbe.ProbeAsync(room, cancellationToken).ConfigureAwait(false);
+            var after = ReadRoomJournalStamp(room);
+            return projected.IsTerminal && before == after
+                ? new TerminalRoomProof(false, after)
+                : new TerminalRoomProof(false, null);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException or JsonException)
+        {
+            return new TerminalRoomProof(false, null);
+        }
     }
 
     /// <summary>
@@ -773,11 +823,18 @@ public static class QueueCommand
     /// synchronous file I/O: scheduling an asynchronous read and blocking for it would strand the
     /// thread-affine queue mutex when the thread pool is saturated.
     /// </summary>
-    private static bool HasTerminalRoomProofAtMutation(QueueItem item)
+    internal static bool HasTerminalRoomProofAtMutation(QueueItem item, TerminalRoomProof proof)
     {
         if (item.RoomDirectory is not { Length: > 0 } room)
         {
             return false;
+        }
+
+        // Protected invariant: a late journal append or snapshot rebind must invalidate a
+        // missing-sentinel retirement proof before the queue CAS records the disposition.
+        if (proof.Journal is { } journal)
+        {
+            return ReadRoomJournalStamp(room) == journal;
         }
 
         var path = Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName);
