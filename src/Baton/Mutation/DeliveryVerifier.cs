@@ -39,7 +39,10 @@ public sealed record DeliveryCheckOutcome(
     string? Tail = null,
     string? NotRunReason = null,
     string? CheckedLocalHead = null,
-    string? CheckedRemoteHead = null)
+    string? CheckedRemoteHead = null,
+    bool CheckedPullRequestOpen = false,
+    int? CheckedPullRequestNumber = null,
+    string? CheckedPullRequestHead = null)
 {
     public static readonly DeliveryCheckOutcome Pass = new(DeliveryCheckStatus.Passed);
     public static readonly DeliveryCheckOutcome CancelledOutcome = new(DeliveryCheckStatus.Cancelled);
@@ -175,6 +178,7 @@ public static class DeliveryVerifier
         string? branch = null, localHead = null, remoteHead = null, observationProblem = null;
         int? pullRequestNumber = null;
         string? pullRequestHead = null;
+        OpenPullRequestReading? finalPullRequest = null;
         if (string.IsNullOrWhiteSpace(workingDirectory)) observationProblem = "no working directory for this execution";
         else
         {
@@ -189,18 +193,83 @@ public static class DeliveryVerifier
                 remoteHead = remote.Spawned && remote.ExitCode == 0 ? remote.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() : null;
                 if (expectPr)
                 {
-                    var pullRequest = await ReadOpenPullRequestAsync(workingDirectory, branch, ghProgram, cancellationToken)
+                    finalPullRequest = await ReadOpenPullRequestAsync(workingDirectory, branch, ghProgram, cancellationToken)
                         .ConfigureAwait(false);
-                    pullRequestNumber = pullRequest.Number;
-                    pullRequestHead = pullRequest.Head;
+                    pullRequestNumber = finalPullRequest.Number;
+                    pullRequestHead = finalPullRequest.Head;
                 }
             }
         }
-        return new DeliveryEvidence(
+        var evidence = new DeliveryEvidence(
             DateTimeOffset.UtcNow.ToString("O"), localHead, branch, remoteHead, pullRequestNumber,
             deliveryOutcome.Status, deliveryOutcome.FailingMembers,
             deliveryOutcome.Tail ?? deliveryOutcome.NotRunReason, observationProblem, pullRequestHead);
+        return deliveryOutcome.Status == DeliveryCheckStatus.Passed && expectPr
+            ? ReconcileExpectedPullRequest(evidence, deliveryOutcome, finalPullRequest)
+            : evidence;
     }
+
+    /// <summary>
+    /// Protected invariant (#2309): an earlier open PR cannot certify its own later forge state.
+    /// A passing expected-PR check applies only while that same readable PR identity/head remains
+    /// open at the engine's final observation; absence or a changed head never inherits the pass.
+    /// </summary>
+    private static DeliveryEvidence ReconcileExpectedPullRequest(
+        DeliveryEvidence evidence, DeliveryCheckOutcome checkedOutcome, OpenPullRequestReading? finalPullRequest)
+    {
+        if (!checkedOutcome.CheckedPullRequestOpen || finalPullRequest?.AnyOpen is null)
+        {
+            var reason = finalPullRequest?.NotRunReason
+                ?? "passing delivery check did not retain its expected PR reading";
+            return evidence with
+            {
+                Verification = DeliveryCheckStatus.NotRun,
+                VerificationReason = $"final expected PR observation could not be confirmed: {reason}",
+                ObservationProblem = reason,
+            };
+        }
+
+        if (finalPullRequest.AnyOpen is false)
+        {
+            return FailExpectedPullRequest(evidence,
+                "the PR open during delivery verification is no longer open at final observation");
+        }
+
+        if (checkedOutcome.CheckedPullRequestNumber is { } checkedNumber)
+        {
+            if (finalPullRequest.Number is null)
+                return UnknownExpectedPullRequest(evidence, "the final open PR number could not be read");
+            if (finalPullRequest.Number != checkedNumber)
+                return FailExpectedPullRequest(evidence, "the final open PR number differs from the checked PR");
+        }
+
+        if (checkedOutcome.CheckedPullRequestHead is { } checkedHead)
+        {
+            if (!IsObjectId(finalPullRequest.Head))
+                return UnknownExpectedPullRequest(evidence, "the final open PR head could not be read");
+            if (!string.Equals(finalPullRequest.Head, checkedHead, StringComparison.OrdinalIgnoreCase))
+                return FailExpectedPullRequest(evidence, "the final open PR head differs from the checked PR head");
+        }
+
+        return evidence;
+    }
+
+    private static DeliveryEvidence UnknownExpectedPullRequest(DeliveryEvidence evidence, string reason) =>
+        evidence with
+        {
+            Verification = DeliveryCheckStatus.NotRun,
+            VerificationReason = reason,
+            ObservationProblem = reason,
+        };
+
+    private static DeliveryEvidence FailExpectedPullRequest(DeliveryEvidence evidence, string reason) =>
+        evidence with
+        {
+            Verification = DeliveryCheckStatus.Failed,
+            FailingMembers = ["pr-not-open"],
+            VerificationReason = $"pr-not-open: {reason}",
+            ObservationProblem = reason,
+        };
 
     /// <summary>
     /// A convenience projection of an already-journalled observation for a human holding only the
@@ -347,6 +416,7 @@ public static class DeliveryVerifier
         var tailLines = new List<string>();
         var notRunReasons = new List<string>();
         DeliveryCheckOutcome? checkedPush = null;
+        OpenPullRequestReading? checkedPr = null;
 
         var lsRemoteResult = await RunNetworkAsync(
             gitProgram, ["ls-remote", "--exit-code", "--heads", "origin", branch], workingDirectory, cancellationToken)
@@ -398,6 +468,7 @@ public static class DeliveryVerifier
                 failingMembers.Add("pr-not-open");
                 tailLines.Add($"pr-not-open: no open PR found for branch '{branch}' — open one before this lane can settle Succeeded.");
             }
+            else checkedPr = pr;
         }
 
         if (failingMembers.Count > 0)
@@ -410,8 +481,15 @@ public static class DeliveryVerifier
             return new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun, NotRunReason: string.Join("; ", notRunReasons));
         }
 
-        return checkedPush ?? new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
-            NotRunReason: "delivery push check supplied no exact checked heads");
+        return checkedPush is null
+            ? new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
+                NotRunReason: "delivery push check supplied no exact checked heads")
+            : checkedPush with
+            {
+                CheckedPullRequestOpen = checkedPr?.AnyOpen == true,
+                CheckedPullRequestNumber = checkedPr?.Number,
+                CheckedPullRequestHead = checkedPr?.Head,
+            };
     }
 
     /// <summary>

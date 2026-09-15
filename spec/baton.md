@@ -1718,6 +1718,11 @@ For a passing exit-0 assertion, the ancestry check names the exact local and fet
 instead of movable symbolic refs. The later stamp observation must report those same IDs; a readable
 different head is recorded as a failed delivery fact, and missing/incomplete provenance remains unknown.
 Neither case may inherit the earlier pass or advance the lane.
+When a PR is expected, the check also retains its positive open reading and any readable PR number/head.
+The final stamp re-reads the PR: a positive absence or a different readable number/head fails
+`pr-not-open` for that checked PR, while an unreadable final lookup becomes `NotRun`. The same earlier
+PR reading cannot certify a later close or force-push. Fields that were not readable in the first
+reading remain unknown rather than being invented for a comparison.
 
 A failure appends `FlowEvent.VerifyFailed` with `VerifyFailedKind.DeliveryFailed` and `FailingMembers`
 naming exactly which of the two is missing — `branch-not-pushed`, `pr-not-open`, or both — settling

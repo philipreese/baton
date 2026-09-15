@@ -444,6 +444,64 @@ public sealed class DeliveryVerifierTests
         finally { Cleanup(workspace, origin); }
     }
 
+    [Theory]
+    [InlineData("closed")]
+    [InlineData("head-changed")]
+    public async Task An_expected_PR_changed_after_a_passing_check_cannot_keep_the_old_delivery_pass(string change)
+    {
+        var (workspace, origin) = CreatePushedWorkspace($"feature-pr-race-{change}");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var first = $$"""[{"number":2309,"headRefOid":"{{head}}"}]""";
+            var second = change == "closed"
+                ? "[]"
+                : $$"""[{"number":2309,"headRefOid":"{{new string('b', 40)}}"}]""";
+            var (gh, marker) = WriteSequentialFakeGh(workspace, first, second);
+
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(DeliveryCheckStatus.Passed, check.Status); // The first PR reading really admitted.
+
+            var final = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(2, File.ReadAllLines(marker).Length); // Both fake-gh child invocations entered.
+            Assert.Equal(head, final.LocalHead);
+            Assert.Equal(head, final.RemoteHead); // Only the PR changed; Git provenance stayed valid.
+            Assert.Equal(DeliveryCheckStatus.Failed, final.Verification);
+            Assert.Equal(["pr-not-open"], final.FailingMembers);
+            Assert.Equal(DeliveryCheckStatus.Failed,
+                DeliveryVerifier.ReadRecordedEvidence(final.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-race")))
+                    .Evidence?.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
+    }
+
+    [Fact]
+    public async Task An_unreadable_final_expected_PR_lookup_cannot_inherit_an_earlier_pass()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-race-unreadable");
+        try
+        {
+            var head = GitRevParseHead(workspace);
+            var first = $$"""[{"number":2309,"headRefOid":"{{head}}"}]""";
+            var (gh, marker) = WriteSequentialFakeGh(workspace, first, "not-json");
+            var check = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(DeliveryCheckStatus.Passed, check.Status);
+
+            var final = await DeliveryVerifier.ObserveAsync(
+                workspace, expectPr: true, check, TestContext.Current.CancellationToken, ghProgram: gh);
+            Assert.Equal(2, File.ReadAllLines(marker).Length);
+            Assert.Equal(DeliveryCheckStatus.NotRun, final.Verification);
+            Assert.Contains("final expected PR observation", final.VerificationReason, StringComparison.Ordinal);
+            Assert.Equal(DeliveryCheckStatus.NotRun,
+                DeliveryVerifier.ReadRecordedEvidence(final.ToRecordedEvent(new Baton.Domain.ExecutionId("exec-pr-unreadable")))
+                    .Evidence?.ToOutcome().Status);
+        }
+        finally { Cleanup(workspace, origin); }
+    }
+
     [Fact]
     public async Task ReadOpenPullRequestAsync_reports_no_open_PR_without_fabricating_a_number()
     {
@@ -495,6 +553,16 @@ public sealed class DeliveryVerifierTests
         var path = Path.Combine(directory, $"fake-gh-{Guid.NewGuid():N}.cmd");
         File.WriteAllText(path, $"@echo off\necho {jsonOutput}\nexit /b 0\n");
         return path;
+    }
+
+    private static (string Script, string Marker) WriteSequentialFakeGh(string directory, string first, string second)
+    {
+        var marker = Path.Combine(directory, $"fake-gh-entered-{Guid.NewGuid():N}.txt");
+        var script = Path.Combine(directory, $"fake-gh-sequence-{Guid.NewGuid():N}.cmd");
+        File.WriteAllText(script,
+            $"@echo off\nif exist \"{marker}\" goto second\necho first>\"{marker}\"\necho {first}\nexit /b 0\n"
+            + $":second\necho second>>\"{marker}\"\necho {second}\nexit /b 0\n");
+        return (script, marker);
     }
 
     private static string GitRevParseHead(string workspace) =>
