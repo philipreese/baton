@@ -7325,8 +7325,12 @@ WIP-cap-blocked round-zero head. The scheduler records its chosen tag and band, 
 new-work head, the three counts, the new-work head's cap wait, and the occupying lifecycle tags
 (oldest first, including ready and halted) once in the decision ledger. Queue CLI and Fleet Glass
 project that recorded decision rather than independently selecting
-a contradictory next row. The first eligible item in the highest occupied finish-first band may pass
-an operator-ordered new-work head; within each band operator order remains intact. With no existing
+a contradictory next row. Wait facts record the selection-time WIP image; a successful
+launch fact records counts and occupants from the exact post-claim queue mutation, while its chosen
+band and head-cap explanation remain selection-time facts. It must not show zero active for a first
+life-cycle whose claim has already been committed. The first eligible item in the highest occupied
+finish-first band may pass an operator-ordered new-work head; within each band operator order remains
+intact. With no existing
 lifecycle transition eligible, standalone and first-launch lifecycle rows keep mutual operator order.
 A later new-work row never passes a cap-blocked new-work head. Reviews still bypass mutating live weight
 and the memory floor, but not `hold`, gap, runway, vendor concurrency, or the review cap. The queue

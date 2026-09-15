@@ -1283,6 +1283,38 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task First_lifecycle_launch_records_post_claim_wip_without_changing_selection_context()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                state => state with { Items = [Item("first") with { Stage = WorkStage.Implement }] }, Ct);
+            var service = Service((request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Launched, item.State);
+            Assert.NotNull(item.AttemptId);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Launched, fact.Decision);
+            Assert.Equal(1, fact.ActiveLifecycles);
+            Assert.Equal(1, fact.PrePullRequestLifecycles);
+            Assert.Equal(0, fact.LiveReviews);
+            Assert.Equal(["first"], fact.ConsumingLifecycles);
+            Assert.Equal("first", fact.OldestOccupyingLifecycle);
+            Assert.Equal("newwork", fact.PriorityBand);
+            Assert.False(fact.PassedNewWorkHead);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task Admission_and_attempt_start_share_the_producer_owned_attempt_id()
     {
         var home = CreateTempHome();

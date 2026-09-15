@@ -223,6 +223,25 @@ public static class QueueScheduler
             || item.Round != 0
             || item.State is QueueItemState.Launched or QueueItemState.Done or QueueItemState.Failed);
 
+    /// <summary>
+    /// Records the WIP *after* a launch claim without changing the policy decision that authorized
+    /// it. The selected band and head-cap explanation remain decision-time facts; counts and
+    /// occupants describe the queue state committed by the claim.
+    /// </summary>
+    public static QueueDecisionContext ContextAfterLaunchClaim(
+        QueueDecisionContext selected, IReadOnlyList<QueueItem> claimedItems)
+    {
+        ArgumentNullException.ThrowIfNull(selected);
+        ArgumentNullException.ThrowIfNull(claimedItems);
+        return selected with
+        {
+            Portfolio = QueuePortfolio.From(claimedItems),
+            ConsumingLifecycleTags = claimedItems.Where(IsActiveLifecycle)
+                .OrderBy(item => item.LaunchedAt ?? DateTimeOffset.MaxValue)
+                .Select(item => item.Tag).ToList(),
+        };
+    }
+
     internal static bool IsNewLifecycle(QueueItem item) => item.Stage is not null && !IsActiveLifecycle(item);
 
     private static bool IsReview(QueueItem item) => item.Stage is WorkStage.Review or WorkStage.ReReview;
