@@ -289,7 +289,11 @@ public sealed class WorkItemAdvancer
         }
 
         // An empty required set for this exact open head is neither green nor a failed worker.
-        if (pr is { Succeeded: true, Number: { } number, HeadSha: { Length: > 0 } headSha, IsOpen: true }
+        // Exception: a verified open draft resolves the one halted no-PR delivery identity. Review
+        // may proceed without required-check evidence; trapping this recovery in the readiness wait
+        // would overwrite its original halt and eventually emit a second failure fact.
+        if (!awaitingMissingPullRequest
+            && pr is { Succeeded: true, Number: { } number, HeadSha: { Length: > 0 } headSha, IsOpen: true }
             && pr.RequiredChecks == PullRequestChecks.None)
         {
             var prior = item.RequiredCheckEvidenceWait;
@@ -658,6 +662,7 @@ public sealed class WorkItemAdvancer
             State = stage == WorkStage.Ready ? QueueItemState.Queued : QueueItemState.Failed,
             Error = reason,
             Halted = true,
+            ReconciliationKind = null,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 

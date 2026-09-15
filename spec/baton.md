@@ -7489,6 +7489,10 @@ draft PR releases normal re-review or continuation routing. It never infers that
 The recovery allowance is a persisted, closed reconciliation kind on the queue item, not a substring of
 the operator-facing error. Failed or empty GitHub observations preserve the original halt, room, and
 reason without adding another failure fact; every other halted item remains terminal.
+An exact open draft PR releases this delivery-identity halt even when the valid required-check set is
+empty; required checks gate readiness approval, not dispatch into review. A later missing trusted
+repository identity clears the recovery allowance and becomes a terminal operator halt, not a
+repeated reconciliation tick.
 
 **Draft is the lifecycle's visible readiness signal, not merge authority.** Every open PR with an
 unfinished review, fix, continuation, stale-approval, or required-check obligation is reconciled to draft.

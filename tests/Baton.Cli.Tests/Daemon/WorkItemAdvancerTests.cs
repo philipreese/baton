@@ -1568,7 +1568,11 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(halted, await ReadBackAsync());
             Assert.DoesNotContain(readyGh.Calls, args => args is ["pr", "ready", ..]);
 
-            var recovered = Assert.Single(await Advancer(new FakeGh(PrJson(77, PushedSha)), head)
+            var draftWithNoRequiredChecks = new DelegateGh((_, args, _) => Task.FromResult(
+                new GhCliResult(true, 0, args is ["pr", "checks", ..] ? "[]"
+                    : args is ["pr", "view", ..] ? PrObject(77, PushedSha)
+                    : PrJson(77, PushedSha), string.Empty)));
+            var recovered = Assert.Single(await Advancer(draftWithNoRequiredChecks, head)
                 .AdvanceAsync(Now.AddMinutes(4), Ct));
             Assert.Equal(QueueDecisionEntry.Advanced, recovered.Decision);
             var item = await ReadBackAsync();
@@ -1578,8 +1582,47 @@ public sealed class WorkItemAdvancerTests
             Assert.False(item.Halted);
             Assert.Null(item.ReconciliationKind);
             Assert.Null(item.Error);
+            Assert.Null(item.RequiredCheckEvidenceWait);
             Assert.Equal(room, halted.RoomDirectory);
             Assert.Null(item.RoomDirectory);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Missing_repository_identity_ends_a_halted_pr_recovery_without_repeating_failure()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [seeded with
+                {
+                    Repository = null,
+                    Halted = true,
+                    ReconciliationKind = QueueReconciliationKind.AwaitingVerifiedPullRequest,
+                    Error = "original missing-PR delivery halt",
+                }],
+            }, Ct);
+            var advancer = Advancer(new FakeGh("[]"), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var first = Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, first.Decision);
+            var halted = await ReadBackAsync();
+            Assert.Contains("no trusted repository identity", halted.Error!, StringComparison.Ordinal);
+            Assert.True(halted.Halted);
+            Assert.Null(halted.ReconciliationKind);
+            Assert.Equal(room, halted.RoomDirectory);
+
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
         }
         finally
         {
