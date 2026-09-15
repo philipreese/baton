@@ -163,7 +163,7 @@ REPLAY_ALLOWLIST = {
      "python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1"),
     ("test-no-build",
      "python tools/buildlock.py --replay dotnet test --no-build "
-     "--max-parallel-test-modules 1 --minimum-expected-tests 1"),
+     "--max-parallel-test-modules 3 --minimum-expected-tests 1"),
     ("fmt-check",
      "python tools/buildlock.py --replay dotnet format --verify-no-changes"),
 }
