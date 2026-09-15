@@ -1592,15 +1592,18 @@ public sealed class WorkItemAdvancerTests
         }
     }
 
-    [Fact]
-    public async Task Missing_repository_identity_ends_a_halted_pr_recovery_without_repeating_failure()
+    [Theory]
+    [InlineData(WorkStage.Implement)]
+    [InlineData(WorkStage.Fix)]
+    public async Task Missing_repository_identity_ends_a_halted_pr_recovery_without_repeating_failure(
+        WorkStage stage)
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
-            var seeded = await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            var seeded = await SeedAsync(home, stage, room, QueueItemState.Failed);
             await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
             {
                 Items = [seeded with

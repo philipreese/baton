@@ -151,7 +151,8 @@ public sealed class WorkItemAdvancer
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var stage = item.Stage!.Value;
-        if (item.Repository is null && stage != WorkStage.Implement)
+        if (item.Repository is null
+            && (stage != WorkStage.Implement || IsAwaitingMissingPullRequestReconciliation(item)))
         {
             return await HaltLegacyRepositoryAsync(item, stage, now).ConfigureAwait(false);
         }
