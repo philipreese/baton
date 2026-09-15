@@ -363,28 +363,28 @@ public sealed class WorkItemLifecycleTests
     [InlineData(WorkStage.Implement)]
     [InlineData(WorkStage.Fix)]
     [InlineData(WorkStage.Continue)]
-    public void A_zero_step_failed_mutating_lane_with_no_pr_stops_without_a_continuation(WorkStage stage)
+    public void A_zero_step_failed_mutating_lane_with_no_pr_stops_for_pr_reconciliation(WorkStage stage)
     {
         var transition = WorkItemLifecycle.Decide(At(stage, outcome: WorkflowOutcome.Failed,
             pr: null, prHead: null, workerStepsRecorded: false));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
         Assert.Null(transition.NextStage);
-        Assert.Contains("zero worker steps", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("no verified open pull request", transition.Reason, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData(true)]
     [InlineData(null)]
-    public void Worker_steps_or_unreadable_step_evidence_do_not_mint_a_zero_step_refusal(
+    public void Worker_steps_or_unreadable_step_evidence_also_require_a_verified_pr(
         bool? workerStepsRecorded)
     {
         var transition = WorkItemLifecycle.Decide(At(WorkStage.Implement,
             outcome: WorkflowOutcome.Failed, pr: null, prHead: null,
             workerStepsRecorded: workerStepsRecorded));
 
-        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
-        Assert.Equal(WorkStage.Continue, transition.NextStage);
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
     }
 
     [Theory]
@@ -651,13 +651,32 @@ public sealed class WorkItemLifecycleTests
             transition.Reason, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Timeout_behavior_remains_unchanged_without_an_arrest_producer()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(null)]
+    [InlineData(false)]
+    public void An_incomplete_mutating_lane_without_a_verified_pr_needs_operator_regardless_of_step_evidence(
+        bool? workerStepsRecorded)
     {
         var timeout = WorkItemLifecycle.Decide(At(
-            WorkStage.Implement, outcome: WorkflowOutcome.Failed, workspaceHead: "0000111122223333"));
+            WorkStage.Implement, outcome: WorkflowOutcome.Failed, pr: null, prHead: null,
+            workspaceHead: "0000111122223333", workerStepsRecorded: workerStepsRecorded));
 
-        Assert.Equal(WorkStage.Continue, timeout.NextStage);
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, timeout.Kind);
+        Assert.Contains("no verified open pull request", timeout.Reason, StringComparison.Ordinal);
+        Assert.Contains("pushed branch is not a pull request", timeout.Reason, StringComparison.Ordinal);
+        Assert.Contains("open the exact draft PR", timeout.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_incomplete_mutating_lane_with_a_verified_draft_pr_can_continue()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, outcome: WorkflowOutcome.Failed,
+            workspaceHead: PreviousHead, prHead: CurrentHead, prDraft: true));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.Continue, transition.NextStage);
     }
 
     [Fact]

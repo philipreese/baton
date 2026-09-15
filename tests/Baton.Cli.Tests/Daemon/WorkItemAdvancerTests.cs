@@ -1491,7 +1491,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueItemState.Failed, item.State);
             Assert.True(item.Halted);
             Assert.Equal(room, item.RoomDirectory);
-            Assert.Contains("zero worker steps", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("no verified open pull request", item.Error!, StringComparison.Ordinal);
 
             await QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Retire, Tag: item.Tag, Reason: "terminal prelaunch refusal"),
@@ -1505,7 +1505,7 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
-    public async Task An_incomplete_terminal_without_steps_is_unknown_not_positive_zero_step_evidence()
+    public async Task An_incomplete_terminal_without_steps_requires_pr_reconciliation()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -1519,10 +1519,12 @@ public sealed class WorkItemAdvancerTests
 
             var fact = Assert.Single(await Advancer(new FakeGh("[]"),
                 (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
-            Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
             var item = await ReadBackAsync();
-            Assert.Equal(WorkStage.Continue, item.Stage);
-            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Contains("no verified open pull request", item.Error!, StringComparison.Ordinal);
         }
         finally
         {
@@ -1665,9 +1667,8 @@ public sealed class WorkItemAdvancerTests
             Assert.True(item.Halted);
             Assert.Equal(WorkStage.Implement, item.Stage);
             Assert.Contains("no pull request is open", item.Error!, StringComparison.Ordinal);
-            // The recovery the message names has to be one the code actually allows: an item still at
-            // implement IS replaceable by a re-add (QueueCommand.RefuseIfNotReplaceable).
-            Assert.Contains("baton queue add", item.Error!, StringComparison.Ordinal);
+            // This row has no branch identity, so it cannot use the exact-branch PR reconciliation
+            // seam and remains an ordinary halted operator obligation.
             // The room survives the failure, which is what the operator has to read (spec/baton.md §13).
             Assert.Equal(room, item.RoomDirectory);
 

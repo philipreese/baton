@@ -295,6 +295,19 @@ public static class WorkItemLifecycle
     /// </summary>
     private static WorkItemTransition DecideAfterIncompleteLane(WorkItemObservation observation)
     {
+        // A pushed branch cannot stand in for the open PR QueueLauncher requires before it can make
+        // a continuation room. Positive, absent, and unknown step evidence are all evidence about
+        // worker activity, not forge identity. Keep the terminal room and let the advancer reconcile
+        // this exact branch after an operator opens a draft PR; never spend a follow-on that admission
+        // is known to refuse.
+        if (observation.PullRequest is null)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} but no verified "
+                + $"open pull request is bound to '{observation.Branch}' — a pushed branch is not a pull request; "
+                + "open the exact draft PR and Baton will reconcile this retained terminal row");
+        }
+
         if (IsPushed(observation))
         {
             return EnsureDraft(observation, Dispatch(
@@ -322,17 +335,6 @@ public static class WorkItemLifecycle
                     $"the {WorkStages.Token(observation.Stage)} lane was arrested but workspace change was unmeasurable — " +
                     "the queue will not spend an automatic continuation without observed work; " + Recovery(observation.Stage))),
             };
-        }
-
-        // Protected invariant: a settled lane with positively recorded zero worker steps and no PR
-        // has no worker work to recover. Do not mint a paid continuation or clear its terminal room.
-        // Unknown step evidence is not proof of zero steps; preserve the existing reconciliation arm.
-        if (observation.PullRequest is null && observation.WorkerStepsRecorded == false)
-        {
-            return WorkItemTransition.NeedsOperator(
-                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} "
-                + "with zero worker steps and no pull request — there is no observed work for an "
-                + "automatic continuation to recover; " + Recovery(observation.Stage));
         }
 
         return EnsureDraft(observation, Dispatch(

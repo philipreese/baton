@@ -112,7 +112,9 @@ public sealed class WorkItemAdvancer
                         && (i.RoomDirectory is { Length: > 0 }
                             // A refusal is recorded before a launch can create a room, so unlike a
                             // roomless failure it is durable proof there is no late live room.
-                            || IsAdmissionRefusedRoomlessFailure(i))))
+                            || IsAdmissionRefusedRoomlessFailure(i))
+                        && (!i.Halted || i.Branch is { Length: > 0 }
+                            && IsAwaitingMissingPullRequestReconciliation(i))))
             .ToList();
         if (candidates.Count == 0)
         {
@@ -139,6 +141,11 @@ public sealed class WorkItemAdvancer
             RoomDirectory: null,
             LastAdmission.Result: TaskRequirementAdmission.Refused,
         };
+
+    // The lifecycle pins this wording because it is the durable marker for the one halted state
+    // whose stated recovery is a later exact draft-PR observation. Other halted rows remain terminal.
+    private static bool IsAwaitingMissingPullRequestReconciliation(QueueItem item) =>
+        item.Error?.Contains("no verified open pull request is bound", StringComparison.Ordinal) == true;
 
     private async Task<QueueDecisionEntry?> AdvanceOneAsync(
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
@@ -240,7 +247,16 @@ public sealed class WorkItemAdvancer
 
         // A halted item remains available only for the trusted-merge retirement above. Its halt
         // still forbids every ordinary lifecycle transition and retry.
-        if (item.Halted)
+        var awaitingMissingPullRequest = IsAwaitingMissingPullRequestReconciliation(item);
+        if (item.Halted && !awaitingMissingPullRequest)
+        {
+            return null;
+        }
+
+        // Preserve the original delivery failure and terminal room while the operator has not yet
+        // supplied the exact forge object. Re-observation is the supported recovery seam; it does
+        // not infer a PR from a branch or manufacture another failure fact each scheduler tick.
+        if (awaitingMissingPullRequest && pr.Succeeded && pr.Number is null)
         {
             return null;
         }
@@ -520,6 +536,7 @@ public sealed class WorkItemAdvancer
             AttemptId = null,
             AttemptBaseRevision = null,
             Error = null,
+            Halted = false,
             ReadinessMutationClaim = null,
         }, () =>
         {
