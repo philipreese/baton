@@ -1,19 +1,19 @@
 {
-  "RanAt": "2026-09-08T15:09:29.2883933-04:00",
+  "RanAt": "2026-09-15T17:20:47.6183572-04:00",
   "Host": "Microsoft Windows NT 10.0.26200.0",
   "Findings": [
     {
       "Capability": "plan usage \u0026 reset",
       "Vendor": "claude",
       "Evidence": "Observed",
-      "Value": "\u0060/usage\u0060 \u2014 72% used, with reset times",
+      "Value": "\u0060/usage\u0060 \u2014 10% used, with reset times",
       "SurfacesConsulted": [
         "--help",
         "subcommand list",
         "in-session slash command"
       ],
-      "Detail": "\u0060claude -p \u0022/usage\u0022\u0060 reported a live percentage and a reset instant (\u0022Sep 8, 3:19pm (America/New_York)\u0022). Note the vendor\u0027s own caveat where present: the figure may be machine-local.",
-      "VendorVersion": "2.1.263 (Claude Code)"
+      "Detail": "\u0060claude -p \u0022/usage\u0022\u0060 reported a live percentage and a reset instant (\u0022Sep 15, 6:30pm (America/New_York)\u0022). Note the vendor\u0027s own caveat where present: the figure may be machine-local.",
+      "VendorVersion": "2.1.265 (Claude Code)"
     },
     {
       "Capability": "per-turn cost",
@@ -24,8 +24,8 @@
         "structured output stream",
         "--help"
       ],
-      "Detail": "Observed $0.246613 on a trivial turn, alongside cache_creation_input_tokens, cache_read_input_tokens, input_tokens, output_tokens. The CLI computes the figure, so there is no price table to maintain and no drift to chase.",
-      "VendorVersion": "2.1.263 (Claude Code)"
+      "Detail": "Observed $0.28056 on a trivial turn, alongside cache_creation_input_tokens, cache_read_input_tokens, input_tokens, output_tokens. The CLI computes the figure, so there is no price table to maintain and no drift to chase.",
+      "VendorVersion": "2.1.265 (Claude Code)"
     },
     {
       "Capability": "structured output",
@@ -38,7 +38,7 @@
         "local RPC server"
       ],
       "Detail": "Emitted 6 JSON lines on a trivial turn.",
-      "VendorVersion": "2.1.263 (Claude Code)"
+      "VendorVersion": "2.1.265 (Claude Code)"
     },
     {
       "Capability": "--permission-prompt-tool",
@@ -52,7 +52,7 @@
         "structured output stream"
       ],
       "Detail": "Documented in \u0060--help\u0060. Honoured, not merely parsed: on a turn requiring a Write permission the CLI reported \u0022aer_probe_no_such_tool (passed via --permission-prompt-tool)\u0022, naming the tool it tried to consult. The flag therefore routes permission decisions to an **MCP tool**, which is the same mechanism 0015 already chose \u2014 but as the vendor\u0027s designated entry point, consulted for every decision, rather than a tool the model must elect to call. Established with a name (\u0060aer_probe_no_such_tool\u0060) that exists nowhere, so it could not have come from anywhere but the flag.",
-      "VendorVersion": "2.1.263 (Claude Code)"
+      "VendorVersion": "2.1.265 (Claude Code)"
     },
     {
       "Capability": "effort",
@@ -63,7 +63,7 @@
         "--help"
       ],
       "Detail": "Read from help: \u0022--effort \u003Clevel\u003E Effort level for the current session (low, medium, high, xhigh, max)\u0022. Help names the accepted values, but naming is not behaviour: 0023 declines to assert a mapping until each value is shown to be accepted AND to behave distinctly.",
-      "VendorVersion": "2.1.263 (Claude Code)"
+      "VendorVersion": "2.1.265 (Claude Code)"
     },
     {
       "Capability": "extra directories",
@@ -74,7 +74,7 @@
         "--help"
       ],
       "Detail": "Read from help. On \u0060agy\u0060 this is load-bearing rather than optional: \u0060-p\u0060 ignores the process working directory entirely (#491), so the room\u0027s folder must be bound explicitly.",
-      "VendorVersion": "2.1.263 (Claude Code)"
+      "VendorVersion": "2.1.265 (Claude Code)"
     },
     {
       "Capability": "plan usage \u0026 reset",
@@ -87,7 +87,7 @@
         "in-session slash command"
       ],
       "Detail": "\u0060--help\u0060 carries no usage/quota flag, no such subcommand exists, and \u0060agy -p \u0022/usage\u0022\u0060 produced no percentage \u2014 the model answered conversationally rather than the CLI reporting. Help mentioned \u0027usage\u0027 1 time(s), all of them the synopsis line.",
-      "VendorVersion": "1.1.27"
+      "VendorVersion": "1.2.3"
     },
     {
       "Capability": "per-turn cost",
@@ -99,7 +99,7 @@
         "--help"
       ],
       "Detail": "No \u0060total_cost_usd\u0060 in a \u0060stream-json\u0060 run, and no cost flag in \u0060--help\u0060. The run streamed a \u0060result\u0060 event carrying per-turn **token** usage (the \u0060usage\u0060 object), but no dollar cost field \u2014 token-denominated, not dollars.",
-      "VendorVersion": "1.1.27"
+      "VendorVersion": "1.2.3"
     },
     {
       "Capability": "structured output",
@@ -112,7 +112,7 @@
         "local RPC server"
       ],
       "Detail": "Emitted 4 JSON lines on a trivial turn.",
-      "VendorVersion": "1.1.27"
+      "VendorVersion": "1.2.3"
     },
     {
       "Capability": "--permission-prompt-tool",
@@ -126,7 +126,7 @@
         "structured output stream"
       ],
       "Detail": "**Undocumented in \u0060--help\u0060** \u2014 which is why help text alone was never enough. Rejected: exit 2, \u0022flags provided but not defined: -permission-prompt-tool\u0022. The control flag exits 2, so this CLI does discriminate \u2014 the rejection is real.",
-      "VendorVersion": "1.1.27"
+      "VendorVersion": "1.2.3"
     },
     {
       "Capability": "effort",
@@ -137,7 +137,7 @@
         "--help"
       ],
       "Detail": "Read from help: \u0022--effort Reasoning effort for the current CLI session (low|medium|high)\u0022. Help names the accepted values, but naming is not behaviour: 0023 declines to assert a mapping until each value is shown to be accepted AND to behave distinctly.",
-      "VendorVersion": "1.1.27"
+      "VendorVersion": "1.2.3"
     },
     {
       "Capability": "extra directories",
@@ -148,7 +148,7 @@
         "--help"
       ],
       "Detail": "Read from help. On \u0060agy\u0060 this is load-bearing rather than optional: \u0060-p\u0060 ignores the process working directory entirely (#491), so the room\u0027s folder must be bound explicitly.",
-      "VendorVersion": "1.1.27"
+      "VendorVersion": "1.2.3"
     },
     {
       "Capability": "subscription authentication",
@@ -165,7 +165,7 @@
       "Capability": "plan usage \u0026 reset",
       "Vendor": "codex",
       "Evidence": "Observed",
-      "Value": "\u0060account/rateLimits/read\u0060 \u2014 25% used, resets 2026-09-15T01:46:38.0000000\u002B00:00, 0% used, resets 2026-09-09T00:09:29.0000000\u002B00:00, 0% used, resets 2026-09-15T19:09:29.0000000\u002B00:00",
+      "Value": "\u0060account/rateLimits/read\u0060 \u2014 51% used, resets 2026-09-19T08:15:29.0000000\u002B00:00, 0% used, resets 2026-09-16T02:20:47.0000000\u002B00:00, 12% used, resets 2026-09-20T05:05:40.0000000\u002B00:00",
       "SurfacesConsulted": [
         "app-server JSON-RPC"
       ],
@@ -225,7 +225,7 @@
       "SurfacesConsulted": [
         "app-server JSON-RPC"
       ],
-      "Detail": "The visible model catalog reported these model/effort pairs: gpt-6-astra[low/medium/high/xhigh/max/ultra], gpt-5.6-sol[low/medium/high/xhigh/max/ultra], gpt-5.6-terra[low/medium/high/xhigh/max/ultra], gpt-5.6-luna[low/medium/high/xhigh/max], gpt-5.5[low/medium/high/xhigh], gpt-5.3-codex-spark[low/medium/high/xhigh].",
+      "Detail": "The visible model catalog reported these model/effort pairs: gpt-5.6-sol[low/medium/high/xhigh/max/ultra], gpt-6-astra[low/medium/high/xhigh/max/ultra], gpt-5.6-terra[low/medium/high/xhigh/max/ultra], gpt-5.6-luna[low/medium/high/xhigh/max], gpt-5.5[low/medium/high/xhigh].",
       "VendorVersion": "codex-cli 0.153.2"
     },
     {
@@ -247,7 +247,7 @@
       "SurfacesConsulted": [
         "app-server JSON-RPC"
       ],
-      "Detail": "The account-sensitive app-server catalog reported: gpt-6-astra[low/medium/high/xhigh/max/ultra], gpt-5.6-sol[low/medium/high/xhigh/max/ultra], gpt-5.6-terra[low/medium/high/xhigh/max/ultra], gpt-5.6-luna[low/medium/high/xhigh/max], gpt-5.5[low/medium/high/xhigh], gpt-5.3-codex-spark[low/medium/high/xhigh].",
+      "Detail": "The account-sensitive app-server catalog reported: gpt-5.6-sol[low/medium/high/xhigh/max/ultra], gpt-6-astra[low/medium/high/xhigh/max/ultra], gpt-5.6-terra[low/medium/high/xhigh/max/ultra], gpt-5.6-luna[low/medium/high/xhigh/max], gpt-5.5[low/medium/high/xhigh]. WARN RECORDING-DRIFT: catalog has drifted from embedded recording (Baton.Vendors.codex-model-list-2026-09-08.jsonl): dropped: gpt-5.3-codex-spark. Re-record snapshot to restore alignment.",
       "VendorVersion": "codex-cli 0.153.2"
     }
   ]

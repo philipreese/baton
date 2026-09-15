@@ -1,6 +1,6 @@
-| | `claude` 2.1.263 (Claude Code) | `agy` 1.1.27 | `codex` codex-cli 0.153.2 |
+| | `claude` 2.1.265 (Claude Code) | `agy` 1.2.3 | `codex` codex-cli 0.153.2 |
 |---|---|---|---|
-| plan usage & reset | **`/usage` — 72% used, with reset times** | not found on: --help, subcommand list, in-session slash command | **`account/rateLimits/read` — 25% used, resets 2026-09-15T01:46:38.0000000+00:00, 0% used, resets 2026-09-09T00:09:29.0000000+00:00, 0% used, resets 2026-09-15T19:09:29.0000000+00:00** |
+| plan usage & reset | **`/usage` — 10% used, with reset times** | not found on: --help, subcommand list, in-session slash command | **`account/rateLimits/read` — 51% used, resets 2026-09-19T08:15:29.0000000+00:00, 0% used, resets 2026-09-16T02:20:47.0000000+00:00, 12% used, resets 2026-09-20T05:05:40.0000000+00:00** |
 | per-turn cost | **`total_cost_usd` in every result event** | not found on: structured output stream, --help | not found on: structured output stream |
 | structured output | **`--output-format stream-json --verbose`** | **`--output-format stream-json`** | **`codex exec --json` JSONL** |
 | --permission-prompt-tool | **`--permission-prompt-tool <mcp-tool>` — consulted for permission decisions** | not found on: --help, stderr, flag acceptance vs. a control flag, structured output stream | not found on: exec --help |
