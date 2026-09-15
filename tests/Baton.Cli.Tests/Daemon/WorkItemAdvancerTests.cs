@@ -1036,7 +1036,12 @@ public sealed class WorkItemAdvancerTests
             Assert.Contains("approval is stale", Assert.Single(changedFacts).Reason!, StringComparison.Ordinal);
             Assert.Equal(WorkStage.ReReview, item.Stage);
             Assert.Contains(changedGh.Calls, args => args is ["pr", "ready", "77", "--undo", "--repo", Repository]);
-            Assert.Contains(newHead, await File.ReadAllTextAsync(item.SpecFile, Ct), StringComparison.Ordinal);
+            var reReviewBrief = await File.ReadAllTextAsync(item.SpecFile, Ct);
+            Assert.Contains(newHead, reReviewBrief, StringComparison.Ordinal);
+            Assert.Contains("Set `reviewedRef` to", reReviewBrief, StringComparison.Ordinal);
+            Assert.Contains(
+                $"`{newHead}` exactly, with no PR label, branch, prefix, suffix, or whitespace.",
+                reReviewBrief, StringComparison.Ordinal);
         }
         finally
         {

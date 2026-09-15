@@ -151,6 +151,49 @@ public sealed class QueueBriefTemplatesTests
         Assert.Contains("this item for a person rather than carrying the round", brief, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(WorkStage.Review, null)]
+    [InlineData(WorkStage.ReReview, @"C:\baton\rooms\queue-1934-abcd\verdict.json")]
+    public void Both_lifecycle_review_briefs_append_the_engine_owned_current_head_requirement(
+        WorkStage stage, string? lastVerdict)
+    {
+        using var templates = new TempDirectory("baton_templates_");
+        var templateName = lastVerdict is null ? QueueBriefTemplates.Review : QueueBriefTemplates.ReReview;
+        var operatorTemplate = "# Operator review instructions\n\nWrite a verdict when you are done.";
+        File.WriteAllText(Path.Combine(templates.Path, $"{templateName}.md"), operatorTemplate);
+        const string head = "0123456789abcdef0123456789abcdef01234567";
+
+        var brief = QueueBriefTemplates.Compose(
+            stage, Item() with { Stage = stage, LastVerdict = lastVerdict },
+            new QueueBriefTemplates.BriefContext(PullRequest: 1941, HeadSha: head, Round: 2), templates.Path);
+
+        Assert.Contains(operatorTemplate, brief, StringComparison.Ordinal);
+        Assert.Contains("verdict.json", brief, StringComparison.Ordinal);
+        Assert.Contains("Set `reviewedRef` to", brief, StringComparison.Ordinal);
+        Assert.Contains($"`{head}` exactly, with no PR label, branch, prefix, suffix, or whitespace.", brief, StringComparison.Ordinal);
+        Assert.EndsWith("This field is machine-checked readiness evidence.", brief.TrimEnd(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_contradictory_operator_reviewed_ref_example_cannot_override_the_final_requirement()
+    {
+        using var templates = new TempDirectory("baton_templates_");
+        File.WriteAllText(
+            Path.Combine(templates.Path, "review.md"),
+            "Write `reviewedRef` as `PR #1941 at any commit`.");
+        const string head = "0123456789abcdef0123456789abcdef01234567";
+
+        var brief = QueueBriefTemplates.Compose(
+            WorkStage.Review, Item() with { Stage = WorkStage.Review, LastVerdict = null },
+            new QueueBriefTemplates.BriefContext(PullRequest: 1941, HeadSha: head, Round: 1), templates.Path);
+
+        var contradictory = brief.IndexOf("PR #1941 at any commit", StringComparison.Ordinal);
+        var requirement = brief.LastIndexOf($"`{head}` exactly", StringComparison.Ordinal);
+        Assert.True(contradictory >= 0);
+        Assert.True(requirement > contradictory);
+        Assert.EndsWith("This field is machine-checked readiness evidence.", brief.TrimEnd(), StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The unreadable-verdict sentence <c>Compose</c> renders in place of the hollow fallback — its
     /// own comment has the gap this closes and why no path is named.
