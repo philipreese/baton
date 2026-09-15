@@ -27,6 +27,12 @@ public sealed record QueueSettings
     /// </summary>
     public double MaxLiveWeight { get; init; } = DefaultMaxLiveWeight;
 
+    public int MaxActiveLifecycles { get; init; } = DefaultMaxActiveLifecycles;
+
+    public int MaxPrePullRequestLifecycles { get; init; } = DefaultMaxPrePullRequestLifecycles;
+
+    public int MaxLiveReviews { get; init; } = DefaultMaxLiveReviews;
+
     /// <summary>Free-physical-memory floor, in GiB, during the day band (see <see cref="NightStartHour"/>).</summary>
     public double FloorGbDay { get; init; } = DefaultFloorGbDay;
 
@@ -84,6 +90,16 @@ public sealed record QueueSettings
     public double EffectiveMaxLiveWeight => MaxLiveWeight > 0 ? MaxLiveWeight : DefaultMaxLiveWeight;
 
     [JsonIgnore]
+    public int EffectiveMaxActiveLifecycles => MaxActiveLifecycles > 0 ? MaxActiveLifecycles : DefaultMaxActiveLifecycles;
+
+    [JsonIgnore]
+    public int EffectiveMaxPrePullRequestLifecycles =>
+        MaxPrePullRequestLifecycles > 0 ? MaxPrePullRequestLifecycles : DefaultMaxPrePullRequestLifecycles;
+
+    [JsonIgnore]
+    public int EffectiveMaxLiveReviews => MaxLiveReviews > 0 ? MaxLiveReviews : DefaultMaxLiveReviews;
+
+    [JsonIgnore]
     public double EffectiveFloorGbDay => FloorGbDay >= 0 ? FloorGbDay : DefaultFloorGbDay;
 
     [JsonIgnore]
@@ -132,6 +148,9 @@ public sealed record QueueSettings
     }
 
     public const double DefaultMaxLiveWeight = 4.0;
+    public const int DefaultMaxActiveLifecycles = 4;
+    public const int DefaultMaxPrePullRequestLifecycles = 2;
+    public const int DefaultMaxLiveReviews = 2;
     public const double DefaultFloorGbDay = 2.0;
     public const double DefaultFloorGbNight = 1.2;
     public const int DefaultNightStartHour = 20;

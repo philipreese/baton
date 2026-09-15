@@ -88,6 +88,33 @@ public sealed class QueueBoardTests
     }
 
     [Fact]
+    public void Wip_projection_uses_only_a_recorded_scheduler_decision_and_keeps_absence_unknown()
+    {
+        var start = Item("start", stage: WorkStage.Implement);
+        var fix = Item("fix", stage: WorkStage.Fix, round: 1);
+        var absent = Project([start, fix]);
+        var recorded = new QueueDecisionEntry(DateTimeOffset.UtcNow, "fix",
+            QueueDecisionEntry.Launched, null, 0, 8, 2,
+            ActiveLifecycles: 1, PrePullRequestLifecycles: 1, LiveReviews: 0,
+            PriorityBand: "repair", PassedNewWorkHead: true,
+            OldestOccupyingLifecycle: "fix", ConsumingLifecycles: ["fix"],
+            NewWorkHeadCap: "pre-pr-cap");
+        var board = Project([start, fix], lastDecision: recorded);
+
+        Assert.Null(absent.LifecycleSlots);
+        Assert.Null(absent.FlowDecision);
+        Assert.Equal(1, board.LifecycleSlots!.Active);
+        Assert.Equal(1, board.LifecycleSlots.PrePullRequest);
+        Assert.Equal(["fix"], board.LifecycleSlots.ConsumingTags);
+        Assert.Equal("fix", board.FlowDecision!.Tag);
+        Assert.Equal("repair", board.FlowDecision.PriorityBand);
+        Assert.True(board.FlowDecision.PassedNewWorkHead);
+        Assert.Equal("pre-pr-cap", board.FlowDecision.NewWorkHeadCap);
+        Assert.True(board.Pending.Single(row => row.Tag == "fix").IsNext);
+        Assert.Equal("pre-pr-cap", board.Pending.Single(row => row.Tag == "start").Reason);
+    }
+
+    [Fact]
     public void Every_queue_item_projection_carries_the_complete_declaration_and_legacy_unknown()
     {
         var declaration = new TaskSizeDeclaration(DeclaredTaskSize.Medium, "one durable seam");
@@ -200,35 +227,37 @@ public sealed class QueueBoardTests
     }
 
     /// <summary>
-    /// #2136: at a full cap the review behind an implement head is what launches next, and the board
-    /// says so — while the head keeps the `slots` reason the ledger recorded against it.
+    /// An existing-lifecycle review finishes first behind a new-work head even at full mutating
+    /// weight; a new-work review does not pass that head merely because it is weightless.
     /// </summary>
     [Fact]
-    public void The_next_mark_moves_to_the_review_a_slot_blocked_head_lets_pass_and_the_head_keeps_its_reason()
+    public void An_existing_review_is_next_at_full_mutating_weight_and_new_work_remains_fifo()
     {
         var head = Item("head", stage: WorkStage.Implement, issue: 1);
-        var review = Item("rev", stage: WorkStage.Review, issue: 2);
+        var review = Item("rev", stage: WorkStage.Review, issue: 2, pr: 2029);
         var ledger = new QueueDecisionEntry(
-            DateTimeOffset.UtcNow, "head", QueueDecisionEntry.Waited,
-            QueueWaitReasons.Token(QueueWaitReason.Slots), LiveWeight: 4, FreeGb: 8, FloorGb: 2);
+            DateTimeOffset.UtcNow, "rev", QueueDecisionEntry.Launched,
+            null, LiveWeight: 4, FreeGb: 8, FloorGb: 2,
+            PriorityBand: "review", PassedNewWorkHead: true);
 
         var board = Project([head, review], lanes: AtCap(), lastDecision: ledger);
 
-        Assert.Equal("slots", board.Pending[0].Reason);
+        Assert.Equal(QueueBoardWaitReasons.FinishFirst, board.Pending[0].Reason);
         Assert.False(board.Pending[0].IsNext);
         Assert.True(board.Pending[1].IsNext);
         Assert.Equal(QueueBoardWaitReasons.Next, board.Pending[1].Reason);
 
-        // Control: below the cap the head is next and the review is merely behind it.
-        var roomy = Project([head, review], lastDecision: ledger);
-        Assert.True(roomy.Pending[0].IsNext);
-        Assert.False(roomy.Pending[1].IsNext);
-        Assert.Equal(QueueBoardWaitReasons.Behind, roomy.Pending[1].Reason);
+        // Control: an untouched round-zero review is new work, not a finish-first transition.
+        var newWorkReview = Item("new-review", stage: WorkStage.Review, issue: 2);
+        var fifo = Project([head, newWorkReview], lanes: AtCap());
+        Assert.True(fifo.Pending[0].IsNext);
+        Assert.False(fifo.Pending[1].IsNext);
+        Assert.Equal(QueueBoardWaitReasons.Behind, fifo.Pending[1].Reason);
 
-        // With nothing in the ledger about the head, its reason is still `slots` — the token `next`
-        // belongs to the passer alone (the rule and its reason live at QueueBoard.WaitReasonFor).
+        // Without a recorded pass, the head still visibly waits for finish-first; only the
+        // selected review gets `next` (the rule and its reason live at QueueBoard.WaitReasonFor).
         var unlogged = Project([head, review], lanes: AtCap(), lastDecision: null);
-        Assert.Equal("slots", unlogged.Pending[0].Reason);
+        Assert.Equal(QueueBoardWaitReasons.FinishFirst, unlogged.Pending[0].Reason);
         Assert.False(unlogged.Pending[0].IsNext);
         Assert.Equal(QueueBoardWaitReasons.Next, unlogged.Pending[1].Reason);
         Assert.True(unlogged.Pending[1].IsNext);
@@ -436,7 +465,7 @@ public sealed class QueueBoardTests
     [InlineData("nothing-eligible")]
     public void The_row_marked_next_is_the_item_the_scheduler_itself_would_pick(string shape)
     {
-        // #2136: the one shape where next is not the head. The live tally is handed to both sides
+        // Finish-first: the existing review shape is where next is not the new-work head. The live tally is handed to both sides
         // the same way the daemon and the projection writer would hand it.
         var lanes = shape == "slot-blocked-head" ? AtCap() : [];
         QueueItem[] items = shape switch
@@ -444,7 +473,7 @@ public sealed class QueueBoardTests
             "slot-blocked-head" =>
             [
                 Item("head", stage: WorkStage.Implement, issue: 1),
-                Item("rev", stage: WorkStage.Review, issue: 2),
+                Item("rev", stage: WorkStage.Review, issue: 2, pr: 2029),
             ],
             "plain" =>
             [

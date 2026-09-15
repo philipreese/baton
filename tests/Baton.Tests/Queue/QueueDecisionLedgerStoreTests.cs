@@ -71,6 +71,42 @@ public sealed class QueueDecisionLedgerStoreTests
     }
 
     [Fact]
+    public async Task A_wip_change_is_recorded_even_when_the_wait_reason_and_candidate_do_not_change()
+    {
+        var path = TempLedgerPath();
+        try
+        {
+            var full = Wait("next", QueueWaitReason.LifecycleCap) with
+            {
+                ActiveLifecycles = 4,
+                PrePullRequestLifecycles = 2,
+                LiveReviews = 0,
+                PriorityBand = "new-work",
+                ConsumingLifecycles = ["old", "other"],
+            };
+            var retired = full with
+            {
+                ActiveLifecycles = 3,
+                PrePullRequestLifecycles = 1,
+                ConsumingLifecycles = ["other"],
+            };
+            var key = await QueueDecisionLedgerStore.AppendAsync(full, null, path, Ct);
+            key = await QueueDecisionLedgerStore.AppendAsync(full with { LiveWeight = 2.5 }, key, path, Ct);
+            Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(path, Ct));
+
+            await QueueDecisionLedgerStore.AppendAsync(retired, key, path, Ct);
+            var rows = await QueueDecisionLedgerStore.ReadAllAsync(path, Ct);
+            Assert.Equal(2, rows.Count);
+            Assert.Equal(3, rows[^1].ActiveLifecycles);
+            Assert.Equal(["other"], rows[^1].ConsumingLifecycles);
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task A_different_tag_with_the_same_reason_is_a_new_fact()
     {
         var path = TempLedgerPath();

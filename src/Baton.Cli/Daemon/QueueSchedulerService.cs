@@ -211,7 +211,15 @@ public sealed class QueueSchedulerService : BackgroundService
                     new QueueDecisionEntry(
                         now, decision.Item?.Tag, QueueDecisionEntry.Waited,
                         QueueWaitReasons.Token(decision.WaitReason!.Value),
-                        decision.LiveWeight, decision.FreeGb, decision.FloorGb),
+                        decision.LiveWeight, decision.FreeGb, decision.FloorGb,
+                        ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
+                        PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
+                        LiveReviews: decision.Context?.Portfolio.LiveReviews,
+                        PriorityBand: decision.Context?.SelectedBand?.ToString().ToLowerInvariant(),
+                        PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
+                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag,
+                        ConsumingLifecycles: decision.Context?.ConsumingLifecycleTags,
+                        NewWorkHeadCap: decision.Context?.NewWorkHeadCapToken),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -376,6 +384,7 @@ public sealed class QueueSchedulerService : BackgroundService
             // tick read above: `baton queue cancel` owns the same seam. A cancellation that gets there
             // first wins and this scheduler never starts a lane from its stale candidate.
             var launchClaimed = false;
+            IReadOnlyList<QueueItem>? claimedItems = null;
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
@@ -387,18 +396,19 @@ public sealed class QueueSchedulerService : BackgroundService
                 }
 
                 launchClaimed = true;
+                claimedItems = Replace(snapshot.Items, item.Tag, existing => existing with
+                {
+                    State = QueueItemState.Launched,
+                    RoomDirectory = roomDirectory,
+                    LaunchedAt = now,
+                    Error = null,
+                    LastAdmission = admission,
+                    AttemptId = attemptId,
+                    AttemptBaseRevision = attemptBaseRevision,
+                });
                 return snapshot with
                 {
-                    Items = Replace(snapshot.Items, item.Tag, existing => existing with
-                    {
-                        State = QueueItemState.Launched,
-                        RoomDirectory = roomDirectory,
-                        LaunchedAt = now,
-                        Error = null,
-                        LastAdmission = admission,
-                        AttemptId = attemptId,
-                        AttemptBaseRevision = attemptBaseRevision,
-                    }),
+                    Items = claimedItems,
                 };
             }, CancellationToken.None).ConfigureAwait(false);
 
@@ -410,6 +420,14 @@ public sealed class QueueSchedulerService : BackgroundService
                 // once. Continuing cancellation churn is reconsidered by the next daemon tick.
                 continue;
             }
+
+            // The original decision context is the pre-claim admission snapshot. A launched fact
+            // is also the board's durable WIP reading, so record the exact post-claim queue image
+            // instead of saying "zero active" while this first lifecycle is already running.
+            var recordedDecision = decision with
+            {
+                Context = QueueScheduler.ContextAfterLaunchClaim(decision.Context!, claimedItems!),
+            };
 
             _lastLaunchAt = now;
 
@@ -430,7 +448,7 @@ public sealed class QueueSchedulerService : BackgroundService
                     AttemptRefusedEvent(item, tier, attemptId, now, shutdownFailure), CancellationToken.None)
                     .ConfigureAwait(false);
                 await FailAsync(
-                    item, shutdownFailure, roomDirectory, now, decision, tier,
+                    item, shutdownFailure, roomDirectory, now, recordedDecision, tier,
                     CancellationToken.None).ConfigureAwait(false);
                 return interval;
             }
@@ -446,7 +464,7 @@ public sealed class QueueSchedulerService : BackgroundService
                     .ConfigureAwait(false);
                 await FailAsync(
                     item, launchFailure,
-                    Directory.Exists(roomDirectory) ? roomDirectory : null, now, decision, tier,
+                    Directory.Exists(roomDirectory) ? roomDirectory : null, now, recordedDecision, tier,
                     CancellationToken.None).ConfigureAwait(false);
                 return interval;
             }
@@ -474,7 +492,15 @@ public sealed class QueueSchedulerService : BackgroundService
                         QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
                         decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                         tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                        SelectionSource: tier.SelectionSource, Admission: admission),
+                        SelectionSource: tier.SelectionSource, Admission: admission,
+                        ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
+                        PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
+                        LiveReviews: decision.Context?.Portfolio.LiveReviews,
+                        PriorityBand: decision.Context?.SelectedBand?.ToString().ToLowerInvariant(),
+                        PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
+                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag,
+                        ConsumingLifecycles: decision.Context?.ConsumingLifecycleTags,
+                        NewWorkHeadCap: decision.Context?.NewWorkHeadCapToken),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -487,7 +513,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 // outcome.RoomDirectory, not the path above: the launcher reports it only when the dispatch
                 // actually provisioned the room, and a refusal that never got that far must leave the item
                 // pointing at nothing rather than at a directory that does not exist.
-                await FailAsync(item, error, outcome.RoomDirectory, now, decision, tier, CancellationToken.None)
+                await FailAsync(item, error, outcome.RoomDirectory, now, recordedDecision, tier, CancellationToken.None)
                     .ConfigureAwait(false);
                 return interval;
             }
@@ -500,9 +526,17 @@ public sealed class QueueSchedulerService : BackgroundService
             await RecordIfNotRetiredAsync(item.Tag,
                 new QueueDecisionEntry(
                     now, item.Tag, QueueDecisionEntry.Launched, null,
-                    decision.LiveWeight, decision.FreeGb, decision.FloorGb,
+                    recordedDecision.LiveWeight, recordedDecision.FreeGb, recordedDecision.FloorGb,
                     tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource, admission),
+                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource, admission,
+                    ActiveLifecycles: recordedDecision.Context?.Portfolio.ActiveLifecycles,
+                    PrePullRequestLifecycles: recordedDecision.Context?.Portfolio.PrePullRequestLifecycles,
+                    LiveReviews: recordedDecision.Context?.Portfolio.LiveReviews,
+                    PriorityBand: recordedDecision.Context?.SelectedBand?.ToString().ToLowerInvariant(),
+                    PassedNewWorkHead: recordedDecision.Context?.PassedNewWorkHead,
+                    OldestOccupyingLifecycle: recordedDecision.Context?.OldestOccupyingLifecycleTag,
+                    ConsumingLifecycles: recordedDecision.Context?.ConsumingLifecycleTags,
+                    NewWorkHeadCap: recordedDecision.Context?.NewWorkHeadCapToken),
                 CancellationToken.None).ConfigureAwait(false);
 
             return interval;

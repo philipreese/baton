@@ -1257,6 +1257,48 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task List_shows_recorded_wip_and_flow_selection_not_a_recomputed_count()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var at = new DateTimeOffset(2026, 9, 6, 1, 30, 0, TimeSpan.Zero);
+            await QueueDecisionLedgerStore.AppendAsync(
+                new QueueDecisionEntry(at, "fix", QueueDecisionEntry.Launched, null, 0, 8, 2,
+                    ActiveLifecycles: 2, PrePullRequestLifecycles: 1, LiveReviews: 0,
+                    PriorityBand: "repair", PassedNewWorkHead: true,
+                    ConsumingLifecycles: ["old", "fix"], NewWorkHeadCap: "lifecycle-cap"),
+                previousVerdictKey: null, BatonPaths.QueueDecisionLedgerFile, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "fix", Role = "implement", Stage = WorkStage.Ready,
+                        Workspace = home, SpecFile = Path.Combine(home, "fix.md"),
+                        State = QueueItemState.Done,
+                    },
+                ],
+            }, Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
+
+            var printed = output.ToString();
+            Assert.Contains("active 2 / 4; pre-PR 1 / 2; live reviews 0 / 2", printed, StringComparison.Ordinal);
+            Assert.Contains("oldest first: old, fix", printed, StringComparison.Ordinal);
+            Assert.Contains("last scheduler selection: fix (repair); passed new-work head; new head held by lifecycle-cap",
+                printed, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     /// <summary>
     /// The two tokens the line is suppressed for, and why — <c>QueueCommand.PrintWaitAsync</c>'s own
     /// remarks. Both are things this listing already says, one of them on the line directly above.
@@ -1559,6 +1601,8 @@ public sealed class QueueCommandTests
                 {
                     Tag = "2159-lane",
                     Role = "implement",
+                    Stage = WorkStage.Implement,
+                    Issue = 2159,
                     Workspace = workspace,
                     SpecFile = spec,
                 }],
@@ -1796,6 +1840,56 @@ public sealed class QueueCommandTests
 
             Assert.Contains("does not exist", refusal.Message, StringComparison.Ordinal);
             Assert.False(File.Exists(BatonPaths.QueueDecisionLedgerFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_refuses_a_queued_but_started_lifecycle_without_freeing_its_wip_slot()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var started = new QueueItem
+            {
+                Tag = "started",
+                Role = "implement",
+                Stage = WorkStage.Ready,
+                Issue = 2314,
+                AttemptId = FleetAttemptId.New(),
+                State = QueueItemState.Queued,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "started.md"),
+            };
+            var next = new QueueItem
+            {
+                Tag = "new",
+                Role = "implement",
+                Stage = WorkStage.Implement,
+                Issue = 2315,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "new.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                snapshot => snapshot with { Items = [started, next] }, Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "started"), TextWriter.Null, Ct));
+            Assert.Contains("already-started lifecycle", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("queue retire", refusal.TryInvocation, StringComparison.Ordinal);
+
+            var retained = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.Equal(QueueItemState.Queued, retained.Items[0].State);
+            Assert.Null(retained.Items[0].CancelledAt);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            var decision = QueueScheduler.Decide(DateTimeOffset.UtcNow, retained.Items, 0, 8,
+                new QueueSettings { MaxActiveLifecycles = 1 }, null, held: false);
+            Assert.Equal(QueueWaitReason.LifecycleCap, decision.WaitReason);
+            Assert.Equal(1, decision.Context!.Portfolio.ActiveLifecycles);
         }
         finally
         {

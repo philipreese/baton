@@ -1,3 +1,4 @@
+using Baton.Domain;
 using Baton.Queue;
 
 namespace Baton.Tests.Queue;
@@ -72,6 +73,239 @@ public sealed class QueueSchedulerTests
 
         Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
         Assert.Null(decision.Item!.Stage);
+    }
+
+    [Fact]
+    public void Active_lifecycles_hold_a_new_start_after_processes_settle()
+    {
+        var active = Enumerable.Range(1, 4)
+            .Select(n => Item($"active-{n}") with { Stage = WorkStage.Review, Round = 1, State = QueueItemState.Done })
+            .ToArray();
+        var next = Item("new") with { Stage = WorkStage.Implement };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [.. active, next], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, decision.WaitReason);
+        Assert.Equal("new", decision.Item!.Tag);
+    }
+
+    [Fact]
+    public void Existing_fix_passes_a_new_work_head_while_pre_pr_capacity_is_full()
+    {
+        var active = new[]
+        {
+            Item("active-1") with { Stage = WorkStage.Review, Round = 1, State = QueueItemState.Done },
+            Item("active-2") with { Stage = WorkStage.Review, Round = 1, State = QueueItemState.Done },
+        };
+        var fix = Item("fix") with { Stage = WorkStage.Fix, Round = 1 };
+        var start = Item("start") with { Stage = WorkStage.Implement };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [start, .. active, fix], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("fix", decision.Item!.Tag);
+    }
+
+    [Fact]
+    public void Live_reviews_are_bounded_without_spending_mutating_weight()
+    {
+        var live = new[]
+        {
+            Item("live-1") with { Stage = WorkStage.Review, State = QueueItemState.Launched, Round = 1 },
+            Item("live-2") with { Stage = WorkStage.ReReview, State = QueueItemState.Launched, Round = 1 },
+        };
+        var review = Item("review") with { Stage = WorkStage.Review, Round = 1 };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [.. live, review], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueWaitReason.ReviewCap, decision.WaitReason);
+        Assert.Equal("review", decision.Item!.Tag);
+    }
+
+    [Fact]
+    public void A_review_cap_blocked_review_does_not_block_an_independently_launchable_fix()
+    {
+        var live = new[]
+        {
+            Item("live-1") with { Stage = WorkStage.Review, State = QueueItemState.Launched, Round = 1 },
+            Item("live-2") with { Stage = WorkStage.ReReview, State = QueueItemState.Launched, Round = 1 },
+        };
+        var blockedReview = Item("review") with { Stage = WorkStage.Review, Round = 1, AttemptId = FleetAttemptId.New() };
+        var fix = Item("fix") with { Stage = WorkStage.Fix, Round = 1, AttemptId = FleetAttemptId.New() };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [.. live, blockedReview, fix], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("fix", decision.Item!.Tag);
+        Assert.Equal(QueuePriorityBand.Repair, decision.Context!.SelectedBand);
+    }
+
+    [Fact]
+    public void A_round_zero_cancellation_is_not_an_active_lifecycle()
+    {
+        var cancelled = Item("cancelled") with { Stage = WorkStage.Implement, State = QueueItemState.Cancelled };
+        var newWork = Item("new") with { Stage = WorkStage.Implement };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [cancelled, newWork], 0, 8.0,
+            new QueueSettings { MaxActiveLifecycles = 1 }, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("new", decision.Item!.Tag);
+        Assert.Equal(0, decision.Context!.Portfolio.ActiveLifecycles);
+    }
+
+    [Fact]
+    public void A_cancelled_row_with_prior_launch_proof_still_consumes_wip_until_retirement()
+    {
+        var malformed = Item("prior") with
+        {
+            Stage = WorkStage.Ready,
+            State = QueueItemState.Cancelled,
+            AttemptId = FleetAttemptId.New(),
+        };
+        var next = Item("next") with { Stage = WorkStage.Implement };
+        var settings = new QueueSettings { MaxActiveLifecycles = 1 };
+        var blocked = QueueScheduler.Decide(LocalAt(12), [malformed, next], 0, 8,
+            settings, null, held: false);
+        var retired = malformed with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, LocalAt(11), "resolved"),
+        };
+        var admitted = QueueScheduler.Decide(LocalAt(12), [retired, next], 0, 8,
+            settings, null, held: false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, blocked.WaitReason);
+        Assert.Equal(1, blocked.Context!.Portfolio.ActiveLifecycles);
+        Assert.Equal(QueueDecisionKind.Launch, admitted.Kind);
+    }
+
+    [Fact]
+    public void Legacy_lifecycle_evidence_counts_but_an_untouched_round_zero_row_does_not()
+    {
+        var legacyStarted = Item("legacy") with { Stage = WorkStage.Implement, RoomDirectory = "C:\\room" };
+        var untouched = Item("untouched") with { Stage = WorkStage.Implement };
+
+        Assert.True(QueueScheduler.IsActiveLifecycle(legacyStarted));
+        Assert.False(QueueScheduler.IsActiveLifecycle(untouched));
+    }
+
+    [Fact]
+    public void Retirement_replenishes_one_slot_and_one_tick_selects_only_one_new_start()
+    {
+        var active = Enumerable.Range(1, 4)
+            .Select(n => Item($"active-{n}") with { Stage = WorkStage.Ready, Round = 1, PullRequest = 100 + n })
+            .ToArray();
+        var starts = new[]
+        {
+            Item("first") with { Stage = WorkStage.Implement },
+            Item("second") with { Stage = WorkStage.Implement },
+        };
+        var full = QueueScheduler.Decide(LocalAt(12), [.. active, .. starts], 0, 8, Defaults, null, false);
+        var retired = active[0] with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, LocalAt(11), "resolved"),
+        };
+        var oneSlot = QueueScheduler.Decide(LocalAt(12), [retired, .. active[1..], .. starts],
+            0, 8, Defaults, null, false);
+        var claimed = starts[0] with { AttemptId = FleetAttemptId.New(), State = QueueItemState.Done };
+        var fullAgain = QueueScheduler.Decide(LocalAt(12), [retired, .. active[1..], claimed, starts[1]],
+            0, 8, Defaults, null, false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, full.WaitReason);
+        Assert.Equal(QueueDecisionKind.Launch, oneSlot.Kind);
+        Assert.Equal("first", oneSlot.Item!.Tag);
+        Assert.Equal(3, oneSlot.Context!.Portfolio.ActiveLifecycles);
+        Assert.Equal(QueueWaitReason.LifecycleCap, fullAgain.WaitReason);
+        Assert.Equal("second", fullAgain.Item!.Tag);
+    }
+
+    [Fact]
+    public void Halted_and_unobserved_pr_lifecycles_hold_capacity_until_trusted_retirement()
+    {
+        var ready = Item("ready") with { Stage = WorkStage.Ready, AttemptId = FleetAttemptId.New() };
+        var halted = Item("halted") with
+        {
+            Stage = WorkStage.Fix,
+            State = QueueItemState.Failed,
+            Halted = true,
+            AttemptId = FleetAttemptId.New(),
+            PullRequest = null,
+        };
+        var newWork = Item("new") with { Stage = WorkStage.Implement };
+        var settings = new QueueSettings { MaxActiveLifecycles = 2, MaxPrePullRequestLifecycles = 2 };
+        var blocked = QueueScheduler.Decide(LocalAt(12), [ready, halted, newWork], 0, 8,
+            settings, null, false);
+        var retired = halted with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, LocalAt(11), "resolved"),
+        };
+        var admitted = QueueScheduler.Decide(LocalAt(12), [ready, retired, newWork], 0, 8,
+            settings, null, false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, blocked.WaitReason);
+        Assert.Equal(2, blocked.Context!.Portfolio.PrePullRequestLifecycles);
+        Assert.Equal("ready", blocked.Context.OldestOccupyingLifecycleTag);
+        Assert.Equal(QueueDecisionKind.Launch, admitted.Kind);
+    }
+
+    [Fact]
+    public void Finish_first_bands_pass_new_work_but_keep_operator_order_within_each_band()
+    {
+        var start = Item("start") with { Stage = WorkStage.Implement };
+        var fix1 = Item("fix-1") with { Stage = WorkStage.Fix, Round = 1 };
+        var fix2 = Item("fix-2") with { Stage = WorkStage.Continue, Round = 1 };
+        var review1 = Item("review-1") with { Stage = WorkStage.Review, Round = 1 };
+        var review2 = Item("review-2") with { Stage = WorkStage.ReReview, Round = 1 };
+        var first = QueueScheduler.Decide(LocalAt(12), [start, fix1, review1, review2, fix2],
+            0, 8, Defaults, null, false);
+        var second = QueueScheduler.Decide(LocalAt(12), [start, fix1, review2, fix2],
+            0, 8, Defaults, null, false);
+        var repair = QueueScheduler.Decide(LocalAt(12), [start, fix1, fix2],
+            0, 8, Defaults, null, false);
+
+        Assert.Equal("review-1", first.Item!.Tag);
+        Assert.Equal("review-2", second.Item!.Tag);
+        Assert.Equal("fix-1", repair.Item!.Tag);
+        Assert.Equal(QueuePriorityBand.Repair, repair.Context!.SelectedBand);
+        Assert.True(repair.Context.PassedNewWorkHead);
+    }
+
+    [Fact]
+    public void Round_zero_and_standalone_new_work_keep_fifo_even_when_head_is_cap_blocked()
+    {
+        var active = Item("active") with { Stage = WorkStage.Ready, Round = 1 };
+        var start = Item("start") with { Stage = WorkStage.Implement };
+        var standalone = Item("standalone");
+        var settings = new QueueSettings { MaxActiveLifecycles = 1 };
+        var blocked = QueueScheduler.Decide(LocalAt(12), [active, start, standalone],
+            0, 8, settings, null, false);
+        var firstStandalone = QueueScheduler.Decide(LocalAt(12), [active, standalone, start],
+            0, 8, settings, null, false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, blocked.WaitReason);
+        Assert.Equal("start", blocked.Item!.Tag);
+        Assert.Equal(QueuePriorityBand.NewWork, blocked.Context!.SelectedBand);
+        Assert.Equal(QueueDecisionKind.Launch, firstStandalone.Kind);
+        Assert.Equal("standalone", firstStandalone.Item!.Tag);
+    }
+
+    [Fact]
+    public void Partial_or_invalid_wip_settings_keep_every_other_positive_shipped_default()
+    {
+        var partial = new QueueSettings { MaxActiveLifecycles = 3 };
+        var invalid = new QueueSettings
+        {
+            MaxActiveLifecycles = 0,
+            MaxPrePullRequestLifecycles = -1,
+            MaxLiveReviews = 0,
+        };
+
+        Assert.Equal(3, partial.EffectiveMaxActiveLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxPrePullRequestLifecycles, partial.EffectiveMaxPrePullRequestLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxLiveReviews, partial.EffectiveMaxLiveReviews);
+        Assert.Equal(QueueSettings.DefaultMaxActiveLifecycles, invalid.EffectiveMaxActiveLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxPrePullRequestLifecycles, invalid.EffectiveMaxPrePullRequestLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxLiveReviews, invalid.EffectiveMaxLiveReviews);
     }
 
     [Fact]
@@ -212,14 +446,14 @@ public sealed class QueueSchedulerTests
     /// behind it, neither of which launched for the whole wait.
     /// </summary>
     [Fact]
-    public void A_review_behind_a_slot_blocked_implement_head_launches_instead_of_starving()
+    public void A_standalone_review_does_not_pass_a_slot_blocked_new_work_head()
     {
         var items = new[] { Item("head"), Item("rev-1", role: "review"), Item("rev-2", role: "review") };
 
         var atCap = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, 8.0, Defaults, null, held: false);
 
-        Assert.Equal(QueueDecisionKind.Launch, atCap.Kind);
-        Assert.Equal("rev-1", atCap.Item!.Tag);
+        Assert.Equal(QueueWaitReason.Slots, atCap.WaitReason);
+        Assert.Equal("head", atCap.Item!.Tag);
 
         // Control: the same queue with room for the head launches the head, so the arm above is about
         // the pass-through and not about review always winning.
@@ -228,17 +462,15 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
-    public void A_review_behind_two_slot_blocked_implements_still_passes_both()
+    public void A_standalone_review_does_not_pass_multiple_slot_blocked_new_work_rows()
     {
-        // The pass-through walks the whole tail, not just the item behind the head: a refactor that
-        // looked only one row back (or stopped at the first weighted item) would re-open #2136's
-        // starvation while every other arm in this file stayed green.
+        // Standalone work stays in operator order even when its role is review.
         var items = new[] { Item("head"), Item("second"), Item("rev", role: "review") };
 
         var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, 8.0, Defaults, null, held: false);
 
-        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
-        Assert.Equal("rev", decision.Item!.Tag);
+        Assert.Equal(QueueWaitReason.Slots, decision.WaitReason);
+        Assert.Equal("head", decision.Item!.Tag);
     }
 
     [Fact]
@@ -273,7 +505,7 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
-    public void A_review_behind_a_slot_blocked_head_still_honours_the_hold_and_the_gap()
+    public void A_standalone_review_behind_a_new_work_head_preserves_new_work_order()
     {
         var now = LocalAt(12);
         var items = new[] { Item("head"), Item("rev", role: "review") };
@@ -285,14 +517,14 @@ public sealed class QueueSchedulerTests
         Assert.Equal(QueueWaitReason.Gap, inGap.WaitReason);
         Assert.Equal("head", inGap.Item!.Tag);
 
-        // Control: the identical inputs with the gap elapsed DO launch the review.
+        // Control: elapsed gap preserves the same new-work head; only an existing lifecycle may pass it.
         var afterGap = QueueScheduler.Decide(
             now, items, liveWeight: 4.0, 8.0, Defaults, now - TimeSpan.FromSeconds(Defaults.EffectiveGapSeconds), held: false);
-        Assert.Equal("rev", afterGap.Item!.Tag);
+        Assert.Equal("head", afterGap.Item!.Tag);
     }
 
     [Fact]
-    public void Only_an_eligible_review_passes_a_slot_blocked_head()
+    public void A_standalone_review_never_passes_a_slot_blocked_new_work_head()
     {
         // The same candidacy predicate the head is chosen by: an external, a launched and a `ready`
         // review are all skipped, and the first eligible one after them is the passer.
@@ -307,10 +539,10 @@ public sealed class QueueSchedulerTests
 
         var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, 8.0, Defaults, null, held: false);
 
-        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
-        Assert.Equal("rev", decision.Item!.Tag);
+        Assert.Equal(QueueWaitReason.Slots, decision.WaitReason);
+        Assert.Equal("head", decision.Item!.Tag);
 
-        // Control: with no eligible review behind it the head's own slots wait is what is recorded.
+        // Control: removing the standalone review leaves the same head-of-line wait.
         var nonePass = QueueScheduler.Decide(LocalAt(12), items[..4], liveWeight: 4.0, 8.0, Defaults, null, held: false);
         Assert.Equal(QueueWaitReason.Slots, nonePass.WaitReason);
         Assert.Equal("head", nonePass.Item!.Tag);

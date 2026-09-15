@@ -470,7 +470,8 @@ public sealed class FleetProjectionWriter : BackgroundService
 
         // Write order, not `At` order: the ledger is what the scheduler appended, and re-sorting it
         // would let a row written under a clock adjustment displace the verdict actually in force.
-        var newest = entries.Count == 0 ? null : entries[^1];
+        var newest = entries.LastOrDefault(entry => entry.Decision is
+            QueueDecisionEntry.Waited or QueueDecisionEntry.Launched);
         _newestDecision = new NewestDecisionCacheEntry(file.LastWriteTimeUtc, file.Length, newest);
         return newest;
     }

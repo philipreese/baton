@@ -165,10 +165,27 @@ check("(control) a present-but-empty queue section DOES render a board -- 'no qu
   check("the slot line shows live / cap", out.includes("3.5 / 4 weighted slots"));
   check("the slot line shows free memory against the floor", out.includes("6.4 GiB free, floor 1.2 GiB"));
   check("the slot line names which floor band is in force", out.includes("night band"));
-  check("the slot line says a review lane starts even at the cap -- the cap is not a promise nothing else can start",
-        out.includes("review lanes weigh 0 and start even at the cap"));
+  check("the slot line distinguishes weightless reviews from the separate review cap",
+        out.includes("review lanes weigh 0 against mutating slots, but respect the live-review cap"));
   check("(control) a day-band projection says day band, not night",
         queueSlotsLineHtml({ slots: { ...q.slots, nightBand: false } }).includes("day band"));
+}
+{
+  const base = { slots: { cap: 4, live: 0, floorGb: 2, nightBand: false, lanes: [] }, pending: [], pullRequests: [] };
+  const recorded = queueBoardHtml({ ...base,
+    lifecycleSlots: { active: 4, activeCap: 4, prePr: 2, prePrCap: 2, liveReviews: 1,
+      reviewCap: 2, consumingTags: ["ready-old", "halted-old", "live"] },
+    flowDecision: { tag: "fix-existing", priorityBand: "repair", passedNewWorkHead: true,
+      newWorkHeadCap: "lifecycle-cap" } });
+  check("the three WIP caps and old ready/halted occupants render together from recorded fields",
+        recorded.includes("4 / 4 active lifecycles") && recorded.includes("2 / 2 pre-PR")
+        && recorded.includes("1 / 2 live reviews") && recorded.includes("ready-old, halted-old, live"));
+  check("recorded selection shows band, pass-through, and holding cap",
+        recorded.includes("fix-existing (repair)") && recorded.includes("passed new-work head")
+        && recorded.includes("new-work head held by lifecycle-cap"));
+  const unknown = queueBoardHtml(base);
+  check("missing decision stays unknown rather than showing fabricated zero WIP",
+        unknown.includes("WIP counts unrecorded") && !unknown.includes("0 / 4 active lifecycles"));
 }
 check("an unmeasured free-memory reading says so rather than printing a stand-in number",
       queueSlotsLineHtml({ slots: { cap: 4, live: 0, floorGb: 2, nightBand: false } }).includes("memory unmeasured"));

@@ -69,7 +69,24 @@ public sealed record QueueDecisionEntry(
     QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault,
     [property: JsonPropertyName("admission")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    TaskRequirementAdmission? Admission = null)
+    TaskRequirementAdmission? Admission = null,
+    [property: JsonPropertyName("activeLifecycles")]
+    int? ActiveLifecycles = null,
+    [property: JsonPropertyName("prePullRequestLifecycles")]
+    int? PrePullRequestLifecycles = null,
+    [property: JsonPropertyName("liveReviews")]
+    int? LiveReviews = null,
+    [property: JsonPropertyName("priorityBand")]
+    string? PriorityBand = null,
+    [property: JsonPropertyName("passedNewWorkHead")]
+    bool? PassedNewWorkHead = null,
+    [property: JsonPropertyName("oldestOccupyingLifecycle")]
+    string? OldestOccupyingLifecycle = null,
+    [property: JsonPropertyName("consumingLifecycles")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? ConsumingLifecycles = null,
+    [property: JsonPropertyName("newWorkHeadCap")]
+    string? NewWorkHeadCap = null)
 {
     public const string Launched = "launched";
     public const string Waited = "waited";
@@ -96,12 +113,19 @@ public sealed record QueueDecisionEntry(
     /// <summary>
     /// The identity a repeated verdict is collapsed on — see
     /// <see cref="QueueDecisionLedgerStore.AppendAsync"/> for what that collapse is and is not.
-    /// Deliberately excludes the counters: a wait that is still "slots" with a live weight of 3.0
-    /// instead of 2.0 is the same standing verdict, and re-recording it every tick would bury the
-    /// launches in a heartbeat log nobody can read.
+    /// Deliberately excludes host counters: a wait that is still "slots" with a live weight of 3.0
+    /// instead of 2.0 is the same standing verdict. WIP counts, occupants and flow selection are
+    /// included when recorded: otherwise a retirement behind the same wait reason would silently
+    /// leave the CLI and Fleet Glass showing stale lifecycle capacity.
     /// </summary>
     [JsonIgnore]
-    public string VerdictKey => $"{Decision}|{Reason}|{Tag}";
+    public string VerdictKey => ActiveLifecycles is null && PrePullRequestLifecycles is null
+        && LiveReviews is null
+        ? $"{Decision}|{Reason}|{Tag}"
+        : $"{Decision}|{Reason}|{Tag}|wip:{ActiveLifecycles},{PrePullRequestLifecycles},"
+            + $"{LiveReviews}|band:{PriorityBand}|pass:{PassedNewWorkHead}|head:{NewWorkHeadCap}"
+            + $"|occupants:{string.Join(',', (ConsumingLifecycles ?? [])
+                .Select(tag => $"{tag.Length}:{tag}"))}";
 
     /// <summary>
     /// The one decision kind whose persisted queue state promises a matching ledger fact. Other

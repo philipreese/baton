@@ -1550,7 +1550,7 @@ function queueSlotsLineHtml(q){
   const band = s.nightBand ? "night band" : "day band";
   // The cap is not a promise that nothing else can start: QueueWeights.BypassesCap admits a review
   // lane at the cap, and a bare "4 / 4" would read as a guarantee the mechanism does not give.
-  const caveat = "review lanes weigh 0 and start even at the cap";
+  const caveat = "review lanes weigh 0 against mutating slots, but respect the live-review cap";
   const held = q.held ? " · QUEUE HELD" : "";
   const control = (typeof DAEMON_SERVED !== "undefined" && DAEMON_SERVED)
     ? `<button class="glasswrite" data-glass-route="/queue/${q.held ? "resume" : "hold"}">${q.held ? "resume queue" : "hold queue"}</button>`
@@ -1558,6 +1558,21 @@ function queueSlotsLineHtml(q){
   return `<div class="queueboard-head">${esc(slots)} · ${esc(mem)} (${esc(band)})${esc(held)}</div>`
     + (control ? `<div class="verbs">${control}</div>` : "")
     + `<div class="queueboard-note">${esc(caveat)}</div>`;
+}
+function queueFlowLineHtml(q){
+  const w = q.lifecycleSlots || null;
+  const d = q.flowDecision || null;
+  if(!w) return `<div class="queueboard-note">Lifecycle WIP counts unrecorded; waiting for a scheduler decision.</div>`;
+  const counts = `${w.active} / ${w.activeCap} active lifecycles · ${w.prePr} / ${w.prePrCap} pre-PR · ${w.liveReviews} / ${w.reviewCap} live reviews`;
+  const occupying = Array.isArray(w.consumingTags) && w.consumingTags.length
+    ? `occupying, oldest first: ${w.consumingTags.join(", ")}` : "no lifecycle occupying a slot";
+  const selected = d && d.tag ? `last selected ${d.tag} (${d.priorityBand || "band unrecorded"})`
+    : "no selected work recorded";
+  const pass = d && d.passedNewWorkHead ? " · passed new-work head" : "";
+  const wait = d && d.waitReason ? ` · waiting on ${d.waitReason}` : "";
+  const headCap = d && d.newWorkHeadCap ? ` · new-work head held by ${d.newWorkHeadCap}` : "";
+  return `<div class="queueboard-head">${esc(counts)}</div>`
+    + `<div class="queueboard-note">${esc(occupying)} · ${esc(selected + pass + wait + headCap)}</div>`;
 }
 function queueLanesTableHtml(q){
   const lanes = (q.slots && Array.isArray(q.slots.lanes)) ? q.slots.lanes : [];
@@ -1687,6 +1702,7 @@ function queueBoardHtml(q, unavailableReason){
     : `last scheduling decision ${decided} ago`;
   return `<div class="queueboard">`
     + queueSlotsLineHtml(q)
+    + queueFlowLineHtml(q)
     + queueLanesTableHtml(q)
     + queuePendingTableHtml(q)
     + queuePrTableHtml(q)
