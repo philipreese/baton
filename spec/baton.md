@@ -6594,6 +6594,18 @@ running serialized. MTP's own equivalent, `--max-parallel-test-modules 1`, was M
 one-project-at-a-time shape this entry describes (durations summed, not overlapped) — `pixi.toml`'s `test-no-build`
 carries it now; the measurement and the trade-off accepted above are otherwise unchanged.
 
+**Amended #2340 on the 32 GB host.** The one-project limit above was a memory protection measured
+on the former 15.7 GB host, not a correctness requirement for test discovery. On 2026-09-15 a
+controlled full-suite `dotnet test --no-build --max-parallel-test-modules 3 --minimum-expected-tests 1`
+run under the ordinary machine-wide build lock started three project hosts together, passed 6,784
+tests with one fixture-dependent skip, and completed in 4m21s. Available physical memory sampled
+while three hosts were active was about 14.8 GB. This is one clean measurement, not proof that the
+intermittent Windows file-move AccessDenied failures seen even under project serialization are fixed.
+`test-no-build` now permits three project hosts; `test`, the zero-test guard, in-assembly xUnit
+parallelism, and the global MSBuild exclusion remain unchanged. Repeatable test-host collisions,
+corrupted output, or memory pressure under this fan-out require restoring one project at a time,
+not bypassing a red gate.
+
 **`buildlock` already covered `dotnet test`/`test-no-build`.** `tools/buildlock.py` (#1402) wraps
 every MSBuild-owning pixi task; `test`, `test-no-build`, `test-flow`, and `test-other` were all
 already invoked through it before this issue, so at most one MSBuild tree exists machine-wide
