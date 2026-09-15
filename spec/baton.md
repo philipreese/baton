@@ -7458,7 +7458,13 @@ evidence. Missing, malformed, partial, future-dated, or identity-mismatched evid
 in current follow-up, so unknown work is never concealed. `closed` is never cached forever because it is
 still re-read after the retry window, and a confirmed reopened PR returns to follow-up. Stale terminal
 evidence is presentation history only: it is never current proof for readiness, merge, deployment, or any
-external action. A structurally complete current successful `merged` read may, in the same locked observation mutation, retire matching staged rows that are queued or failed, roomless, unclaimed, and not already retired. This is safe external-delivery reconciliation rather than a lane outcome: it preserves lifecycle evidence and records the durable retirement disposition while the lock re-proves that no worker or readiness mutation is live. The observation otherwise changes neither item state, stage, round, cancellation history, dispatch,
+external action. A structurally complete current successful `merged` read may, in the same locked
+observation mutation, retire matching staged rows that are queued or failed, roomless, unclaimed, and
+not already retired; a failed row additionally requires a durable explicitly `refused` admission, as
+the retirement rule above requires. This is safe external-delivery reconciliation rather than a lane
+outcome: it preserves lifecycle evidence and records the durable retirement disposition while the lock
+re-proves that no worker or readiness mutation is live. The observation otherwise changes neither item
+state, stage, round, cancellation history, dispatch,
 readiness, merge/close state, nor deployment state. Deployment therefore reads “not recorded”, never
 “none”. Each historical checks word remains attached to its lane and to
 `checksHeadSha`; a legacy row without that field renders “commit unknown” rather than borrowing the

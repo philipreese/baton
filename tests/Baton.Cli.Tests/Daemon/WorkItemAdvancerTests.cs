@@ -2609,6 +2609,8 @@ public sealed class WorkItemAdvancerTests
                 {
                     Tag = "failed-ready", Role = "ready", Stage = WorkStage.Ready,
                     State = QueueItemState.Failed, Halted = true, Repository = Repository, PullRequest = 2307,
+                    LastAdmission = new TaskRequirementAdmission([], ["repository-read"],
+                        TaskRequirementAdmission.Refused),
                     Workspace = home, SpecFile = Path.Combine(home, "failed-ready.md"),
                 },
                 new QueueItem
@@ -2641,6 +2643,54 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueItemState.Queued, review.State);
             Assert.Equal(2, review.Round);
             Assert.Null(Assert.Single(updated, item => item.Tag == "live-sibling").Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(TaskRequirementAdmission.Admitted)]
+    [InlineData(TaskRequirementAdmission.Unknown)]
+    public async Task Current_merged_observation_preserves_roomless_failed_rows_without_refused_admission(
+        string? admissionResult)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var item = new QueueItem
+            {
+                Tag = "failed-with-possible-late-room",
+                Role = "ready",
+                Stage = WorkStage.Ready,
+                State = QueueItemState.Failed,
+                Halted = true,
+                Repository = Repository,
+                PullRequest = 2307,
+                LastAdmission = admissionResult is null ? null
+                    : new TaskRequirementAdmission([], ["repository-read"], admissionResult),
+                Workspace = home,
+                SpecFile = Path.Combine(home, "failed-with-possible-late-room.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Items = [item] }, Ct);
+
+            await new WorkItemAdvancer(new ObservationGh(), (_, _) => Task.FromResult<string?>(null))
+                .RefreshPullRequestObservationsAsync(Now, Ct);
+
+            var updated = await ReadBackAsync();
+            Assert.Null(updated.Retirement);
+            Assert.Empty(updated.DispositionOutbox);
+            Assert.Equal(admissionResult, updated.LastAdmission?.Result);
+            var ledger = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.DoesNotContain(ledger, entry => entry is
+            {
+                Decision: QueueDecisionEntry.Retired,
+                Tag: "failed-with-possible-late-room"
+            });
         }
         finally
         {

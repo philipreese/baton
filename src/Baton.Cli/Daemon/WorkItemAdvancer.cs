@@ -860,6 +860,8 @@ public sealed class WorkItemAdvancer
             CancellationToken.None).ConfigureAwait(false);
     }
 
+    // A roomless failed row is not proof of no launch: its room may have been created but not
+    // persisted. Only a durable refused admission proves that no worker was admitted.
     private static bool IsEligibleForMergedObservationRetirement(QueueItem item, QualifiedPullRequest observation) =>
         item is
         {
@@ -871,6 +873,8 @@ public sealed class WorkItemAdvancer
             PullRequest: not null,
             Repository: not null,
         }
+        && (item.State != QueueItemState.Failed
+            || item.LastAdmission?.Result == TaskRequirementAdmission.Refused)
         && item.PullRequest == observation.PullRequest
         && string.Equals(item.Repository, observation.Repository, StringComparison.Ordinal);
 
