@@ -7143,6 +7143,9 @@ and `attemptSettled` events for one room whose terminal sentinel agrees with the
 One correctly keyed, roomless `admissionDecided` permission fact may precede the exact refusal;
 `admitted` is not a launch. A conflicting admission identity or any other current-attempt event
 forbids retirement.
+The scheduler's `launchedAt` may be a pre-room claim rather than a worker start. A non-null stamp on
+that roomless refused row is permitted only when it equals the sole exact retained refusal's time;
+a different stamp or any current-attempt launch event refuses. Mutation-time CAS rechecks that stamp.
 An older `Cancelled` next-stage row may likewise be operator-retired only when it has no claimed
 current attempt or room, its exact parent has that same settled-room proof, every recorded prior
 launched room has a terminal sentinel, and an exact keyed

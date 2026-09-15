@@ -1991,6 +1991,7 @@ public sealed class QueueCommandTests
                     Tag = tag, Role = "implement", Workspace = home,
                     SpecFile = BatonPaths.QueueSpecFile(tag), Stage = WorkStage.Continue,
                     State = QueueItemState.Failed, AttemptId = current, ParentAttemptId = parent,
+                    LaunchedAt = at.AddMinutes(2),
                     LastAdmission = new TaskRequirementAdmission(
                         [], ["repository-read"], TaskRequirementAdmission.Admitted),
                 }],
@@ -2143,6 +2144,7 @@ public sealed class QueueCommandTests
     [InlineData("valid-plus-wrong-parent")]
     [InlineData("valid-plus-wrong-work-tag")]
     [InlineData("valid-plus-wrong-admission")]
+    [InlineData("valid-plus-wrong-launch-timestamp")]
     [InlineData("nonterminal-parent")]
     public async Task Retire_refuses_legacy_proof_with_a_live_attempt_or_broken_parent(string brokenProof)
     {
@@ -2174,11 +2176,12 @@ public sealed class QueueCommandTests
                     $"attempt-refused:{current.Value}", at.AddMinutes(2), AttemptId: current,
                     ParentAttemptId: parent, WorkId: new FleetWorkId(tag)), Ct);
             }
-            if (brokenProof == "valid-plus-wrong-admission")
+            if (brokenProof is "valid-plus-wrong-admission" or "valid-plus-wrong-launch-timestamp")
             {
                 await log.Append(new FleetEventDraft(FleetEventKind.AdmissionDecided,
                     $"admission:{current.Value}:conflict", at.AddMinutes(2), AttemptId: current,
-                    ParentAttemptId: new FleetAttemptId("some-other-parent"),
+                    ParentAttemptId: brokenProof == "valid-plus-wrong-admission"
+                        ? new FleetAttemptId("some-other-parent") : parent,
                     WorkId: new FleetWorkId(tag),
                     AdmissionDecision: TaskRequirementAdmission.Admitted), Ct);
             }
@@ -2205,6 +2208,12 @@ public sealed class QueueCommandTests
                     Tag = tag, Role = "implement", Workspace = home,
                     SpecFile = BatonPaths.QueueSpecFile(tag), Stage = WorkStage.Continue,
                     State = QueueItemState.Failed, AttemptId = current, ParentAttemptId = parent,
+                    LaunchedAt = brokenProof switch
+                    {
+                        "valid-plus-wrong-launch-timestamp" => at.AddMinutes(3),
+                        "started-current" => at.AddMinutes(2),
+                        _ => null,
+                    },
                 }],
             }, Ct);
 
@@ -2238,6 +2247,8 @@ public sealed class QueueCommandTests
             observed with { AttemptId = new FleetAttemptId("late-launch") }));
         Assert.False(QueueCommand.SameRetirementAttempt(observed,
             observed with { RoomDirectory = "late-room" }));
+        Assert.False(QueueCommand.SameRetirementAttempt(observed,
+            observed with { LaunchedAt = DateTimeOffset.Parse("2026-09-15T14:00:00Z") }));
         Assert.False(QueueCommand.SameRetirementAttempt(observed,
             observed with { Stage = WorkStage.Review }));
     }
