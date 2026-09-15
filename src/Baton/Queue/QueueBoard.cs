@@ -78,22 +78,30 @@ public static class QueueBoard
             FreeGb: freeGb is { } gb ? Math.Round(gb, 1) : null,
             NightBand: settings.IsNightBand(localNow),
             Lanes: liveLanes);
-        var lifecycle = QueuePortfolio.From(items);
-        var lifecycleSlots = new QueueLifecycleSlotsView(
-            lifecycle.ActiveLifecycles,
-            settings.EffectiveMaxActiveLifecycles,
-            lifecycle.PrePullRequestLifecycles,
-            settings.EffectiveMaxPrePullRequestLifecycles,
-            lifecycle.LiveReviews,
-            settings.EffectiveMaxLiveReviews,
-            items.Where(QueueScheduler.IsActiveLifecycle).Select(item => item.Tag).ToList());
+        // WIP facts come from the scheduler's durable decision, not a second policy evaluation in
+        // Fleet Glass. An old/missing ledger row is unknown, never a fabricated zero count.
+        var lifecycleSlots = lastDecision is
+        {
+            ActiveLifecycles: { } active,
+            PrePullRequestLifecycles: { } prePr,
+            LiveReviews: { } reviews,
+            ConsumingLifecycles: { } occupying,
+        }
+            ? new QueueLifecycleSlotsView(active, settings.EffectiveMaxActiveLifecycles,
+                prePr, settings.EffectiveMaxPrePullRequestLifecycles,
+                reviews, settings.EffectiveMaxLiveReviews, occupying)
+            : null;
+        var flowDecision = lastDecision is { Decision: QueueDecisionEntry.Waited or QueueDecisionEntry.Launched }
+            ? new QueueFlowDecisionView(lastDecision.Tag, lastDecision.PriorityBand,
+                lastDecision.PassedNewWorkHead, lastDecision.Decision == QueueDecisionEntry.Waited
+                    ? lastDecision.Reason : null, lastDecision.NewWorkHeadCap)
+            : null;
 
         // The scheduler's OWN pick, called rather than re-spelled -- QueueScheduler.Candidate's remarks
         // are why it is exposed at all. The row the panel marks `next` is therefore the row the
         // scheduler would launch by construction, not by two copies of a predicate agreeing today.
-        // Two answers off the one picker (#2136): the head, whose own ledger reason is what a person
-        // wants explained, and the item that will actually go next -- the head, or the one review
-        // spec/baton.md §13 lets pass a head blocked on slots alone. The live tally handed in is the
+        // Two answers off the one picker: the operator-ordered new-work head, and the item selected
+        // by finish-first priority. The live tally handed in is the
         // unrounded sum, the same arithmetic the scheduler's gate sees; `slots.Live` is the display copy.
         var head = QueueScheduler.Candidate(items);
         var next = QueueScheduler.Candidate(items, liveLanes.Sum(l => l.Weight), freeGb, slots.FloorGb, settings, held);
@@ -263,6 +271,7 @@ public static class QueueBoard
             Slots: slots,
             LifecycleSlots: lifecycleSlots,
             LastDecisionAt: lastDecision?.At,
+            FlowDecision: flowDecision,
             Pending: pending,
             PullRequests: pullRequests,
             PullRequestHistory: pullRequestHistory,
@@ -275,11 +284,9 @@ public static class QueueBoard
     /// <remarks>
     /// <para>
     /// <b>Only the head and the item going next get the scheduler's own verdict.</b> Those are the only
-    /// rows the scheduler evaluates — the head always, and the one review spec/baton.md §13 lets pass a
-    /// slot-blocked head (#2136), which is usually the head itself — so reporting a gate token on any other row
-    /// would be a verdict nothing produced. <see cref="QueueBoardWaitReasons.Behind"/> is the honest
-    /// word. The head keeps its own reason while a passer goes ahead of it: the ledger row about the
-    /// head is still about the head.
+    /// rows the scheduler evaluates — a finish-first candidate or the new-work head. Reporting a
+    /// gate token on another row would be a verdict nothing produced; `behind` is the honest word.
+    /// A bypassed head gets the decision's recorded WIP cap if present, otherwise `finish-first`.
     /// </para>
     /// <para>
     /// The three answers ahead of the ledger's are ones the ledger cannot carry: <c>halted</c> and
@@ -330,13 +337,13 @@ public static class QueueBoard
             return reason;
         }
 
-        // A head that a passer has gone past is, by the picker's own rule (spec/baton.md §13), blocked
-        // on slots and nothing else — so when the ledger has no row about it (fresh daemon, or the newest
-        // row is the passer's launch) the panel says `slots`, not `next`: `next` is the passer's word,
-        // and two rows wearing it would make the token's own definition false (#2137 review).
+        // Finish-first work may pass a new-work head that is not slot-blocked. Only a matching
+        // scheduler decision may attribute a specific WIP cap to that head.
         if (ReferenceEquals(item, head) && next is not null && !ReferenceEquals(head, next))
         {
-            return QueueWaitReasons.Token(QueueWaitReason.Slots);
+            return lastDecision is { NewWorkHeadCap: { Length: > 0 } cap }
+                && string.Equals(lastDecision.Tag, next.Tag, StringComparison.Ordinal)
+                ? cap : QueueBoardWaitReasons.FinishFirst;
         }
 
         return QueueBoardWaitReasons.Next;
@@ -416,6 +423,8 @@ public static class QueueBoard
 /// </summary>
 public static class QueueBoardWaitReasons
 {
+    /// <summary>A started lifecycle transition took priority over this new-work head.</summary>
+    public const string FinishFirst = "finish-first";
     /// <summary>The head or the item going next, with no gate shut against it as of the last recorded evaluation.</summary>
     public const string Next = "next";
 
@@ -476,6 +485,14 @@ public sealed record QueueLifecycleSlotsView(
     [property: JsonPropertyName("liveReviews")] int LiveReviews,
     [property: JsonPropertyName("reviewCap")] int ReviewCap,
     [property: JsonPropertyName("consumingTags")] IReadOnlyList<string> ConsumingTags);
+
+/// <summary>The scheduler's last recorded selection; not a fresh prediction after queue mutation.</summary>
+public sealed record QueueFlowDecisionView(
+    [property: JsonPropertyName("tag")] string? Tag,
+    [property: JsonPropertyName("priorityBand")] string? PriorityBand,
+    [property: JsonPropertyName("passedNewWorkHead")] bool? PassedNewWorkHead,
+    [property: JsonPropertyName("waitReason")] string? WaitReason,
+    [property: JsonPropertyName("newWorkHeadCap")] string? NewWorkHeadCap);
 
 /// <summary>One pending row.</summary>
 /// <param name="Reason">A <see cref="QueueWaitReasons"/> token or a <see cref="QueueBoardWaitReasons"/> one.</param>
@@ -651,10 +668,15 @@ public static class QueueDeploymentStates
 public sealed record QueueBoardView(
     [property: JsonPropertyName("held")] bool Held,
     [property: JsonPropertyName("slots")] QueueSlotsView Slots,
-    [property: JsonPropertyName("lifecycleSlots")] QueueLifecycleSlotsView LifecycleSlots,
+    [property: JsonPropertyName("lifecycleSlots")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    QueueLifecycleSlotsView? LifecycleSlots,
     [property: JsonPropertyName("lastDecisionAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     DateTimeOffset? LastDecisionAt,
+    [property: JsonPropertyName("flowDecision")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    QueueFlowDecisionView? FlowDecision,
     [property: JsonPropertyName("pending")] IReadOnlyList<QueuePendingView> Pending,
     [property: JsonPropertyName("pullRequests")] IReadOnlyList<QueuePullRequestView> PullRequests,
     [property: JsonPropertyName("pullRequestHistory")] IReadOnlyList<QueuePullRequestView> PullRequestHistory,

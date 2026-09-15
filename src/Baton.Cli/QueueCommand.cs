@@ -414,7 +414,7 @@ public static class QueueCommand
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var items = active ? snapshot.Items.Where(IsActive).ToList() : snapshot.Items;
-        var settings = items.Any(i => i.Stage is not null)
+        var settings = snapshot.Items.Any(i => i.Stage is not null)
             ? (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false)).Queue
             : null;
         if (snapshot.Held)
@@ -423,6 +423,40 @@ public static class QueueCommand
         }
 
         await PrintWaitAsync(output, cancellationToken).ConfigureAwait(false);
+
+        if (settings is not null)
+        {
+            var decisions = await QueueDecisionLedgerStore
+                .ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+            var recorded = decisions.LastOrDefault(entry => entry.Decision is
+                QueueDecisionEntry.Waited or QueueDecisionEntry.Launched);
+            if (recorded is
+                {
+                    ActiveLifecycles: { } activeCount,
+                    PrePullRequestLifecycles: { } prePrCount,
+                    LiveReviews: { } reviewCount,
+                    ConsumingLifecycles: { } occupants,
+                })
+            {
+                output.WriteLine($"Lifecycle WIP (recorded {recorded.At:O}): active {activeCount} / "
+                    + $"{settings.EffectiveMaxActiveLifecycles}; pre-PR {prePrCount} / "
+                    + $"{settings.EffectiveMaxPrePullRequestLifecycles}; live reviews {reviewCount} / "
+                    + $"{settings.EffectiveMaxLiveReviews}");
+                output.WriteLine($"  occupying lifecycles, oldest first: "
+                    + (occupants.Count == 0 ? "none" : string.Join(", ", occupants)));
+                if (recorded.Tag is { Length: > 0 } selected)
+                {
+                    output.WriteLine($"  last scheduler selection: {selected} "
+                        + $"({recorded.PriorityBand ?? "band unrecorded"})"
+                        + (recorded.PassedNewWorkHead == true ? "; passed new-work head" : string.Empty)
+                        + (recorded.NewWorkHeadCap is { Length: > 0 } cap ? $"; new head held by {cap}" : string.Empty));
+                }
+            }
+            else
+            {
+                output.WriteLine("Lifecycle WIP: scheduler decision not recorded; counts unavailable.");
+            }
+        }
 
         if (items.Count == 0)
         {

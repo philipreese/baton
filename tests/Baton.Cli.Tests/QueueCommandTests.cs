@@ -1255,6 +1255,48 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task List_shows_recorded_wip_and_flow_selection_not_a_recomputed_count()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var at = new DateTimeOffset(2026, 9, 6, 1, 30, 0, TimeSpan.Zero);
+            await QueueDecisionLedgerStore.AppendAsync(
+                new QueueDecisionEntry(at, "fix", QueueDecisionEntry.Launched, null, 0, 8, 2,
+                    ActiveLifecycles: 2, PrePullRequestLifecycles: 1, LiveReviews: 0,
+                    PriorityBand: "repair", PassedNewWorkHead: true,
+                    ConsumingLifecycles: ["old", "fix"], NewWorkHeadCap: "lifecycle-cap"),
+                previousVerdictKey: null, BatonPaths.QueueDecisionLedgerFile, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "fix", Role = "implement", Stage = WorkStage.Ready,
+                        Workspace = home, SpecFile = Path.Combine(home, "fix.md"),
+                        State = QueueItemState.Done,
+                    },
+                ],
+            }, Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
+
+            var printed = output.ToString();
+            Assert.Contains("active 2 / 4; pre-PR 1 / 2; live reviews 0 / 2", printed, StringComparison.Ordinal);
+            Assert.Contains("oldest first: old, fix", printed, StringComparison.Ordinal);
+            Assert.Contains("last scheduler selection: fix (repair); passed new-work head; new head held by lifecycle-cap",
+                printed, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     /// <summary>
     /// The two tokens the line is suppressed for, and why — <c>QueueCommand.PrintWaitAsync</c>'s own
     /// remarks. Both are things this listing already says, one of them on the line directly above.

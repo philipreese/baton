@@ -28,10 +28,8 @@ public static class QueueScheduler
     /// is what picks the memory floor's hour band; <c>QueueSettings.FloorGbAt</c>'s own remarks state
     /// why that must not be UTC.
     /// </param>
-    /// <param name="items">The queue, in operator order. The first <see cref="QueueItemState.Queued"/>,
-    /// non-<see cref="QueueItem.External"/> item is the head; nothing reorders weighted items, and the one
-    /// thing that may pass the head is stated on the <see cref="Candidate(IReadOnlyList{QueueItem}, double, double?, double, QueueSettings, bool)"/>
-    /// overload (#2136).</param>
+    /// <param name="items">The queue in operator order. Existing-lifecycle transitions may pass a
+    /// new-work head; operator order holds within each priority band (spec/baton.md §13).</param>
     /// <param name="liveWeight">The tally over rooms already running, built with <see cref="QueueWeights.For"/>.</param>
     /// <param name="freeGb">
     /// Free physical memory in GiB. <b>Null does not block</b> — the floor is skipped and the null is
@@ -55,34 +53,41 @@ public static class QueueScheduler
 
         var localNow = now.LocalDateTime;
         var floorGb = settings.FloorGbAt(localNow);
+        var portfolio = QueuePortfolio.From(items);
+        var consumingTags = items.Where(IsActiveLifecycle)
+            .OrderBy(item => item.LaunchedAt ?? DateTimeOffset.MaxValue)
+            .Select(item => item.Tag).ToList();
+        var noSelectionContext = new QueueDecisionContext(portfolio, null, false, consumingTags, null);
 
         if (held)
         {
-            return QueueDecision.Wait(QueueWaitReason.Hold, null, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.Hold, null, liveWeight, freeGb, floorGb, noSelectionContext);
         }
 
         var head = Candidate(items);
         if (head is null)
         {
-            return QueueDecision.Wait(QueueWaitReason.NoItems, null, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.NoItems, null, liveWeight, freeGb, floorGb, noSelectionContext);
         }
+
+        var candidate = Candidate(items, liveWeight, freeGb, floorGb, settings, held)!;
+        var selectedBand = PriorityBandFor(candidate);
+        var passedNewWorkHead = !ReferenceEquals(head, candidate)
+            && PriorityBandFor(head) == QueuePriorityBand.NewWork;
+        QueueWaitReason? newWorkHeadCap = IsNewLifecycle(head)
+            ? portfolio.ActiveLifecycles >= settings.EffectiveMaxActiveLifecycles
+                ? QueueWaitReason.LifecycleCap
+                : portfolio.PrePullRequestLifecycles >= settings.EffectiveMaxPrePullRequestLifecycles
+                    ? QueueWaitReason.PrePullRequestCap
+                    : null
+            : null;
+        var decisionContext = new QueueDecisionContext(portfolio, selectedBand, passedNewWorkHead,
+            consumingTags, newWorkHeadCap);
 
         if (lastLaunchAt is { } last && now - last < TimeSpan.FromSeconds(settings.EffectiveGapSeconds))
         {
-            return QueueDecision.Wait(QueueWaitReason.Gap, head, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.Gap, candidate, liveWeight, freeGb, floorGb, decisionContext);
         }
-
-        // The head, or the one item spec/baton.md §13 lets pass it (#2136). The overload's remarks cite
-        // where that rule lives; the gates below are then applied to whatever it picked, which for a
-        // passer means neither shuts (it bypasses both by construction) and for the head means exactly
-        // what they meant before.
-        var portfolio = QueuePortfolio.From(items);
-        var candidate = Candidate(items, liveWeight, freeGb, floorGb, settings, held)!;
-        var selectedBand = PriorityBandFor(candidate);
-        var passedNewWorkHead = head is not null && !ReferenceEquals(head, candidate)
-            && PriorityBandFor(head) == QueuePriorityBand.NewWork;
-        var decisionContext = new QueueDecisionContext(portfolio, selectedBand, passedNewWorkHead,
-            items.FirstOrDefault(IsActiveLifecycle)?.Tag);
 
         // One predicate for both bypasses (spec/baton.md §13), hoisted above the floor rather than
         // repeated in each condition, so the two can never diverge into a lane that skips one gate and
@@ -118,15 +123,12 @@ public static class QueueScheduler
     }
 
     /// <summary>
-    /// The item that will actually launch once the gap clears — or, while the queue is held, the head:
-    /// the head from <see cref="Candidate(IReadOnlyList{QueueItem})"/>, or — when <b>only the slot
-    /// gate</b> is shut against that head — the earliest <see cref="IsEligible"/> item after it whose
-    /// role <see cref="QueueWeights.BypassesCap"/>, falling back to the head when there is none.
+    /// The item selected by finish-first flow priority, or the operator-ordered new-work head when
+    /// no eligible existing-lifecycle transition is waiting. A held queue names only its head.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>The rule — what may pass a blocked head and what may not — is spec/baton.md §13's "Operator
-    /// order is the launch order" paragraph (#2136), stated there and not here.</b> Two consequences
+    /// <b>The finish-first bands and new-work FIFO are specified in spec/baton.md §13.</b> Two consequences
     /// are worth reading off the code, and they are deliberately asymmetric: a HELD queue returns the
     /// head, so the board keeps marking the head — a hold is indefinite and operator-set, and naming a
     /// passer that is not going anywhere either would be a promise; the GAP is seconds and is not an
@@ -134,11 +136,11 @@ public static class QueueScheduler
     /// already names the item that launches when the gap elapses.
     /// </para>
     /// <para>
-    /// This is the same picker as the one-argument form, extended rather than a second predicate beside
-    /// it, for the #1912 reason the one-argument form is <c>internal</c>: <c>QueueBoard.Project</c> marks
+    /// This extends the one-argument head picker, rather than repeating eligibility beside it, for
+    /// the #1912 reason the one-argument form is <c>internal</c>: <c>QueueBoard.Project</c> marks
     /// <c>isNext</c> by calling this, so the row a person sees marked is the row the scheduler launches,
-    /// by construction. The head stays the head — the board reads the head's own ledger reason off the
-    /// one-argument form — and this only says which item goes next.
+    /// by construction. The head stays the head for FIFO and reason projection; this only says which
+    /// item goes next.
     /// </para>
     /// </remarks>
     internal static QueueItem? Candidate(
@@ -170,11 +172,11 @@ public static class QueueScheduler
         return Candidate(items);
     }
 
-    /// <summary>The floor gate, spelled once for <see cref="Decide"/> and the pass-through pick.</summary>
+    /// <summary>The floor gate for <see cref="Decide"/>.</summary>
     private static bool BelowFloor(double? freeGb, double floorGb) =>
         freeGb is { } free && free < floorGb;
 
-    /// <summary>The slot gate, spelled once for <see cref="Decide"/> and the pass-through pick. The cap
+    /// <summary>The slot gate for <see cref="Decide"/>. The cap
     /// is a ceiling, not a strict bound: landing exactly on it fits.</summary>
     private static bool OverCap(QueueItem item, double liveWeight, QueueSettings settings) =>
         liveWeight + QueueWeights.For(item.Role, item.Adapter) > settings.EffectiveMaxLiveWeight;
@@ -200,7 +202,7 @@ public static class QueueScheduler
     /// </para>
     /// <para>
     /// This is the <b>head</b>. The item that launches next is usually the head and is sometimes the
-    /// one item allowed past it — the five-argument overload is that answer, and it is the same picker
+    /// an existing-lifecycle transition selected first — the full overload is that answer, and it is the same picker
     /// extended, not a second one.
     /// </para>
     /// </remarks>
@@ -282,9 +284,15 @@ public sealed record QueueDecision(
 
 public sealed record QueueDecisionContext(
     QueuePortfolio Portfolio,
-    QueuePriorityBand SelectedBand,
+    QueuePriorityBand? SelectedBand,
     bool PassedNewWorkHead,
-    string? OldestOccupyingLifecycleTag);
+    IReadOnlyList<string> ConsumingLifecycleTags,
+    QueueWaitReason? NewWorkHeadCap)
+{
+    public string? OldestOccupyingLifecycleTag => ConsumingLifecycleTags.FirstOrDefault();
+    public string? NewWorkHeadCapToken => NewWorkHeadCap is { } reason
+        ? QueueWaitReasons.Token(reason) : null;
+}
 
 public enum QueueDecisionKind
 {

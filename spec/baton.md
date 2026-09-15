@@ -7298,37 +7298,27 @@ when the candidate adds nothing. A review lane bypasses the memory floor for the
 bypasses the cap: it is not what consumes the memory the floor protects. It still honours `hold` and
 the gap.
 
-**Operator order is the launch order, with exactly one thing allowed past the head (#2136).** The
-
 **Lifecycle WIP and finish-first selection.** `MaxActiveLifecycles`,
 `MaxPrePullRequestLifecycles`, and `MaxLiveReviews` default to respectively 4, 2, and 2 when absent,
 null, zero, or negative. An active lifecycle has a stage, no retirement, and a claimed attempt
 identity (`attemptId` or `parentAttemptId`); legacy rows without an identity count only when their
 room, PR, nonzero round, or non-queued execution state is durable evidence of an earlier launch.
-`Cancelled` is explicitly before-launch: a round-zero cancellation never consumes active or pre-PR
-WIP. Pre-PR is the active subset without a bound PR; live reviews are launched review or re-review
+`Cancelled` before launch never consumes active or pre-PR WIP. Pre-PR is the active subset without a bound PR; live reviews are launched review or re-review
 attempts. Retired rows count in none of these sets.
 
 Selection is review/re-review, fix/continue, other existing-lifecycle transition, then new work,
 preserving operator order within each band. A review held by `review-cap` may not block a launchable
 repair or transition in a later finish-first band. New work never passes new work, including behind a
 WIP-cap-blocked round-zero head. The scheduler records its chosen tag and band, whether it passed a
-new-work head, the three counts, cap waits, and oldest occupying lifecycle once in the decision
-ledger; Queue CLI and Fleet Glass project that recorded decision rather than independently selecting
-a contradictory next row.
-head is the first queued, non-external, non-`ready` item; nothing reorders weighted items among
-themselves. When the head is blocked on **slots and nothing else**, the scheduler launches the first
-later queued, non-external, non-`ready` item whose role bypasses the cap (`review`), because that item
-consumes none of what the head is waiting for and would otherwise starve behind it for the whole
-wait — measured 2026-09-08, two reviews sat behind one implement item at a full cap for the length of
-the wait. What may **not** pass: a weighted item of any size (any implement lane behind a full-weight
-head still waits, so the FIFO promise for implement lanes holds regardless of vendor); anything behind
-a head blocked on
-**memory**, which is a host fact and applies to the whole queue even though a review *at the head*
-bypasses the floor; and anything while `hold` or the gap is in force, since those are evaluated
-before the pick. The head keeps its own wait reason on the board while a review goes ahead of it.
-`QueueScheduler.Candidate` is the one picker for both the head and the item going next — the board's
-`isNext` is that same call, never a second predicate (#1912).
+new-work head, the three counts, the new-work head's cap wait, and the occupying lifecycle tags
+(oldest first, including ready and halted) once in the decision ledger. Queue CLI and Fleet Glass
+project that recorded decision rather than independently selecting
+a contradictory next row. The first eligible item in the highest occupied finish-first band may pass
+an operator-ordered new-work head; within each band operator order remains intact. With no existing
+lifecycle transition eligible, standalone and first-launch lifecycle rows keep mutual operator order.
+A later new-work row never passes a cap-blocked new-work head. Reviews still bypass mutating live weight
+and the memory floor, but not `hold`, gap, runway, vendor concurrency, or the review cap. The queue
+board's `isNext` uses `QueueScheduler.Candidate`, the same picker the daemon uses (#1912).
 
 **The hour band is local, not UTC.** "Night is 20:00–09:00" is a statement about when a person is at
 the machine; computing it in UTC moves it by the host's offset and applies the night floor through

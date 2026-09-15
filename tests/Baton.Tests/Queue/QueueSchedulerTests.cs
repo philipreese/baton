@@ -165,6 +165,125 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void Retirement_replenishes_one_slot_and_one_tick_selects_only_one_new_start()
+    {
+        var active = Enumerable.Range(1, 4)
+            .Select(n => Item($"active-{n}") with { Stage = WorkStage.Ready, Round = 1, PullRequest = 100 + n })
+            .ToArray();
+        var starts = new[]
+        {
+            Item("first") with { Stage = WorkStage.Implement },
+            Item("second") with { Stage = WorkStage.Implement },
+        };
+        var full = QueueScheduler.Decide(LocalAt(12), [.. active, .. starts], 0, 8, Defaults, null, false);
+        var retired = active[0] with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, LocalAt(11), "resolved"),
+        };
+        var oneSlot = QueueScheduler.Decide(LocalAt(12), [retired, .. active[1..], .. starts],
+            0, 8, Defaults, null, false);
+        var claimed = starts[0] with { AttemptId = FleetAttemptId.New(), State = QueueItemState.Done };
+        var fullAgain = QueueScheduler.Decide(LocalAt(12), [retired, .. active[1..], claimed, starts[1]],
+            0, 8, Defaults, null, false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, full.WaitReason);
+        Assert.Equal(QueueDecisionKind.Launch, oneSlot.Kind);
+        Assert.Equal("first", oneSlot.Item!.Tag);
+        Assert.Equal(3, oneSlot.Context!.Portfolio.ActiveLifecycles);
+        Assert.Equal(QueueWaitReason.LifecycleCap, fullAgain.WaitReason);
+        Assert.Equal("second", fullAgain.Item!.Tag);
+    }
+
+    [Fact]
+    public void Halted_and_unobserved_pr_lifecycles_hold_capacity_until_trusted_retirement()
+    {
+        var ready = Item("ready") with { Stage = WorkStage.Ready, AttemptId = FleetAttemptId.New() };
+        var halted = Item("halted") with
+        {
+            Stage = WorkStage.Fix,
+            State = QueueItemState.Failed,
+            Halted = true,
+            AttemptId = FleetAttemptId.New(),
+            PullRequest = null,
+        };
+        var newWork = Item("new") with { Stage = WorkStage.Implement };
+        var settings = new QueueSettings { MaxActiveLifecycles = 2, MaxPrePullRequestLifecycles = 2 };
+        var blocked = QueueScheduler.Decide(LocalAt(12), [ready, halted, newWork], 0, 8,
+            settings, null, false);
+        var retired = halted with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, LocalAt(11), "resolved"),
+        };
+        var admitted = QueueScheduler.Decide(LocalAt(12), [ready, retired, newWork], 0, 8,
+            settings, null, false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, blocked.WaitReason);
+        Assert.Equal(2, blocked.Context!.Portfolio.PrePullRequestLifecycles);
+        Assert.Equal("ready", blocked.Context.OldestOccupyingLifecycleTag);
+        Assert.Equal(QueueDecisionKind.Launch, admitted.Kind);
+    }
+
+    [Fact]
+    public void Finish_first_bands_pass_new_work_but_keep_operator_order_within_each_band()
+    {
+        var start = Item("start") with { Stage = WorkStage.Implement };
+        var fix1 = Item("fix-1") with { Stage = WorkStage.Fix, Round = 1 };
+        var fix2 = Item("fix-2") with { Stage = WorkStage.Continue, Round = 1 };
+        var review1 = Item("review-1") with { Stage = WorkStage.Review, Round = 1 };
+        var review2 = Item("review-2") with { Stage = WorkStage.ReReview, Round = 1 };
+        var first = QueueScheduler.Decide(LocalAt(12), [start, fix1, review1, review2, fix2],
+            0, 8, Defaults, null, false);
+        var second = QueueScheduler.Decide(LocalAt(12), [start, fix1, review2, fix2],
+            0, 8, Defaults, null, false);
+        var repair = QueueScheduler.Decide(LocalAt(12), [start, fix1, fix2],
+            0, 8, Defaults, null, false);
+
+        Assert.Equal("review-1", first.Item!.Tag);
+        Assert.Equal("review-2", second.Item!.Tag);
+        Assert.Equal("fix-1", repair.Item!.Tag);
+        Assert.Equal(QueuePriorityBand.Repair, repair.Context!.SelectedBand);
+        Assert.True(repair.Context.PassedNewWorkHead);
+    }
+
+    [Fact]
+    public void Round_zero_and_standalone_new_work_keep_fifo_even_when_head_is_cap_blocked()
+    {
+        var active = Item("active") with { Stage = WorkStage.Ready, Round = 1 };
+        var start = Item("start") with { Stage = WorkStage.Implement };
+        var standalone = Item("standalone");
+        var settings = new QueueSettings { MaxActiveLifecycles = 1 };
+        var blocked = QueueScheduler.Decide(LocalAt(12), [active, start, standalone],
+            0, 8, settings, null, false);
+        var firstStandalone = QueueScheduler.Decide(LocalAt(12), [active, standalone, start],
+            0, 8, settings, null, false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, blocked.WaitReason);
+        Assert.Equal("start", blocked.Item!.Tag);
+        Assert.Equal(QueuePriorityBand.NewWork, blocked.Context!.SelectedBand);
+        Assert.Equal(QueueDecisionKind.Launch, firstStandalone.Kind);
+        Assert.Equal("standalone", firstStandalone.Item!.Tag);
+    }
+
+    [Fact]
+    public void Partial_or_invalid_wip_settings_keep_every_other_positive_shipped_default()
+    {
+        var partial = new QueueSettings { MaxActiveLifecycles = 3 };
+        var invalid = new QueueSettings
+        {
+            MaxActiveLifecycles = 0,
+            MaxPrePullRequestLifecycles = -1,
+            MaxLiveReviews = 0,
+        };
+
+        Assert.Equal(3, partial.EffectiveMaxActiveLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxPrePullRequestLifecycles, partial.EffectiveMaxPrePullRequestLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxLiveReviews, partial.EffectiveMaxLiveReviews);
+        Assert.Equal(QueueSettings.DefaultMaxActiveLifecycles, invalid.EffectiveMaxActiveLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxPrePullRequestLifecycles, invalid.EffectiveMaxPrePullRequestLifecycles);
+        Assert.Equal(QueueSettings.DefaultMaxLiveReviews, invalid.EffectiveMaxLiveReviews);
+    }
+
+    [Fact]
     public void A_held_queue_waits_on_hold_even_with_a_launchable_item()
     {
         var items = new[] { Item() };

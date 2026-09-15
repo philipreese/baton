@@ -215,9 +215,11 @@ public sealed class QueueSchedulerService : BackgroundService
                         ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
                         PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
                         LiveReviews: decision.Context?.Portfolio.LiveReviews,
-                        PriorityBand: decision.Context?.SelectedBand.ToString().ToLowerInvariant(),
+                        PriorityBand: decision.Context?.SelectedBand?.ToString().ToLowerInvariant(),
                         PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
-                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag),
+                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag,
+                        ConsumingLifecycles: decision.Context?.ConsumingLifecycleTags,
+                        NewWorkHeadCap: decision.Context?.NewWorkHeadCapToken),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -484,9 +486,11 @@ public sealed class QueueSchedulerService : BackgroundService
                         ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
                         PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
                         LiveReviews: decision.Context?.Portfolio.LiveReviews,
-                        PriorityBand: decision.Context?.SelectedBand.ToString().ToLowerInvariant(),
+                        PriorityBand: decision.Context?.SelectedBand?.ToString().ToLowerInvariant(),
                         PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
-                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag),
+                        OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag,
+                        ConsumingLifecycles: decision.Context?.ConsumingLifecycleTags,
+                        NewWorkHeadCap: decision.Context?.NewWorkHeadCapToken),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -518,9 +522,11 @@ public sealed class QueueSchedulerService : BackgroundService
                     ActiveLifecycles: decision.Context?.Portfolio.ActiveLifecycles,
                     PrePullRequestLifecycles: decision.Context?.Portfolio.PrePullRequestLifecycles,
                     LiveReviews: decision.Context?.Portfolio.LiveReviews,
-                    PriorityBand: decision.Context?.SelectedBand.ToString().ToLowerInvariant(),
+                    PriorityBand: decision.Context?.SelectedBand?.ToString().ToLowerInvariant(),
                     PassedNewWorkHead: decision.Context?.PassedNewWorkHead,
-                    OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag),
+                    OldestOccupyingLifecycle: decision.Context?.OldestOccupyingLifecycleTag,
+                    ConsumingLifecycles: decision.Context?.ConsumingLifecycleTags,
+                    NewWorkHeadCap: decision.Context?.NewWorkHeadCapToken),
                 CancellationToken.None).ConfigureAwait(false);
 
             return interval;
