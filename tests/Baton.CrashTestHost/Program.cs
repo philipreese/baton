@@ -40,7 +40,7 @@ if (args is ["rev-parse", "HEAD"])
     return 0;
 }
 if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
-    && args is ["ls-remote", "--exit-code", "--heads", "origin", "2190-verified-pr-ownership"])
+    && args is ["-c", "credential.interactive=false", "ls-remote", "--exit-code", "--heads", "origin", "2190-verified-pr-ownership"])
 {
     // #2309: DeliveryVerifier's real surviving git probe must be job-contained even though this
     // child exits normally while its inherited-handle sleeper would otherwise keep CaptureAsync open.
