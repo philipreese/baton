@@ -1065,6 +1065,76 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_merged_retirement_that_wins_before_a_pre_launch_failure_preserves_the_lifecycle_row()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "retired-before-lock-failure";
+            var lifecycle = Item(tag, role: "review") with
+            {
+                Stage = WorkStage.Review,
+                Repository = "github.com/aer-works/baton",
+                PullRequest = 2307,
+                Workspace = home,
+                Round = 2,
+                LastVerdict = "C:\\fixtures\\verdict.json",
+            };
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [lifecycle] },
+                Ct);
+
+            var advancer = new WorkItemAdvancer(
+                new MergedObservationGh(),
+                (_, _) => Task.FromResult<string?>(null));
+            var lockProbeReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseLockProbe = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var launches = new List<QueueLaunchRequest>();
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launches.Add(request);
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceLocks: _ =>
+                {
+                    lockProbeReached.TrySetResult(true);
+                    releaseLockProbe.Task.GetAwaiter().GetResult();
+                    return [Path.Combine(home, ".git", "index.lock")];
+                });
+
+            var tick = service.TickOnceAsync(Ct);
+            await lockProbeReached.Task.WaitAsync(Ct);
+            await advancer.RefreshPullRequestObservationsAsync(DateTimeOffset.UtcNow, Ct);
+            releaseLockProbe.TrySetResult(true);
+            await tick;
+
+            Assert.Empty(launches);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueRetirement.Merged, retained.Retirement?.Kind);
+            Assert.Equal(
+                lifecycle with
+                {
+                    Retirement = retained.Retirement,
+                    DispositionOperations = retained.DispositionOperations,
+                },
+                retained);
+            var decisions = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.DoesNotContain(decisions, decision =>
+                decision.Tag == tag && decision.Decision == QueueDecisionEntry.Failed);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_launchable_item_is_marked_launched_with_its_room_and_recorded_as_launched()
     {
         var home = CreateTempHome();

@@ -568,14 +568,33 @@ public sealed class QueueSchedulerService : BackgroundService
         // RoomDirectory is assigned, never merged with what the item already carried: the pre-launch
         // mark writes the room the dispatch was GOING to use, and a refusal that never provisioned it
         // must not leave that path behind as if a room existed to go and read.
-        await MarkAsync(item.Tag, existing => existing with
+        var failed = false;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
-            State = QueueItemState.Failed,
-            Error = error,
-            RoomDirectory = room,
-            LastAdmission = admission ?? existing.LastAdmission,
-            AttemptId = attemptId ?? existing.AttemptId,
-        }).ConfigureAwait(false);
+            var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+            if (current?.Retirement is not null)
+            {
+                return snapshot;
+            }
+
+            failed = current is not null;
+            return snapshot with
+            {
+                Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                {
+                    State = QueueItemState.Failed,
+                    Error = error,
+                    RoomDirectory = room,
+                    LastAdmission = admission ?? existing.LastAdmission,
+                    AttemptId = attemptId ?? existing.AttemptId,
+                }),
+            };
+        }, CancellationToken.None).ConfigureAwait(false);
+
+        if (!failed)
+        {
+            return;
+        }
 
         await RecordAsync(
             new QueueDecisionEntry(
@@ -604,7 +623,9 @@ public sealed class QueueSchedulerService : BackgroundService
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-            if (current?.State != QueueItemState.Queued || !HasSameAdmissionDeclaration(current, item))
+            if (current?.State != QueueItemState.Queued
+                || current.Retirement is not null
+                || !HasSameAdmissionDeclaration(current, item))
             {
                 return snapshot;
             }
