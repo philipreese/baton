@@ -408,6 +408,9 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var nextWorkspace = Path.Combine(_root, "w2293-2");
         var commonDir = Path.Combine(repository, ".git");
         Directory.CreateDirectory(oldWorkspace);
+        var oldSentinel = Path.Combine(oldWorkspace, "keep.bin");
+        byte[] originalBytes = [0, 1, 2, 3, 255];
+        File.WriteAllBytes(oldSentinel, originalBytes);
         var calls = new List<string[]>();
         Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
         {
@@ -431,8 +434,10 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         Assert.Equal(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(nextWorkspace, "2293-lane-2"), provisioned);
         Assert.True(Directory.Exists(oldWorkspace));
+        Assert.Equal(originalBytes, File.ReadAllBytes(oldSentinel));
         Assert.Contains(calls, args => args is ["issue", "develop", "2293", "--name", "2293-lane-2", ..]);
         Assert.DoesNotContain(calls, args => args is ["worktree", "add", var workspace, ..] && workspace == oldWorkspace);
+        Assert.DoesNotContain(calls, args => args is ["worktree", "remove", ..] or ["branch", "-D", ..]);
     }
 
     [Fact]
