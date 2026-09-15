@@ -765,12 +765,15 @@ public static class QueueCommand
     /// Protected invariant: a historical roomless next stage may leave WIP only when its exact
     /// previous attempt settled, and the current attempt was durably refused or the next stage was
     /// durably cancelled before launch. Missing, torn, or changing evidence keeps it active.
+    /// LaunchedAt may record the scheduler's pre-room claim, not a worker start; a roomless refusal
+    /// may use that stamp only when it equals the exact retained refusal time.
     /// The leases remain open through QueueStore's write, not merely its mutation callback.
     /// </summary>
     internal static bool SameRetirementAttempt(QueueItem observed, QueueItem current) =>
         current.State == observed.State
         && current.Stage == observed.Stage
         && current.RoomDirectory == observed.RoomDirectory
+        && current.LaunchedAt == observed.LaunchedAt
         && current.AttemptId == observed.AttemptId
         && current.ParentAttemptId == observed.ParentAttemptId
         && current.CancelledAt == observed.CancelledAt;
@@ -787,7 +790,7 @@ public static class QueueCommand
             State: QueueItemState.Cancelled, RoomDirectory: null,
             AttemptId: null, ParentAttemptId: not null, CancelledAt: not null,
         };
-        if ((!refused && !cancelled) || item.LaunchedAt is not null)
+        if ((!refused && !cancelled) || (cancelled && item.LaunchedAt is not null))
         {
             return null;
         }
@@ -846,6 +849,7 @@ public static class QueueCommand
                 // sole exact refusal; conflicting metadata or attempt history fails closed.
                 if (refusal.Count != 1 || admission.Count > 1
                     || currentEvents.Count != refusal.Count + admission.Count
+                    || item.LaunchedAt is { } claimAt && claimAt != refusal[0].At
                     || refusal[0].At < settled[0].At
                     || admission.Any(e => e.WorkId?.Value != item.Tag
                         || e.ParentAttemptId != parent || e.RoomId is not null
