@@ -1593,10 +1593,12 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Theory]
-    [InlineData(WorkStage.Implement)]
-    [InlineData(WorkStage.Fix)]
+    [InlineData(WorkStage.Implement, null)]
+    [InlineData(WorkStage.Implement, "")]
+    [InlineData(WorkStage.Fix, null)]
+    [InlineData(WorkStage.Fix, "")]
     public async Task Missing_repository_identity_ends_a_halted_pr_recovery_without_repeating_failure(
-        WorkStage stage)
+        WorkStage stage, string? repository)
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -1608,7 +1610,7 @@ public sealed class WorkItemAdvancerTests
             {
                 Items = [seeded with
                 {
-                    Repository = null,
+                    Repository = repository,
                     Halted = true,
                     ReconciliationKind = QueueReconciliationKind.AwaitingVerifiedPullRequest,
                     Error = "original missing-PR delivery halt",
