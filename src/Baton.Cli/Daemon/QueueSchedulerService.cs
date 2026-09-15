@@ -922,9 +922,8 @@ public sealed class QueueSchedulerService : BackgroundService
                 BatonPaths.QueueFile,
                 snapshot => snapshot.Items.Any(item => string.Equals(item.Tag, tag, StringComparison.Ordinal)
                     && item.Retirement is null),
-                () => _lastVerdictKey = QueueDecisionLedgerStore
-                    .AppendAsync(entry, _lastVerdictKey, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
-                    .GetAwaiter().GetResult(),
+                () => _lastVerdictKey = QueueDecisionLedgerStore.AppendUnderQueueLock(
+                    entry, _lastVerdictKey, BatonPaths.QueueDecisionLedgerFile, cancellationToken),
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)

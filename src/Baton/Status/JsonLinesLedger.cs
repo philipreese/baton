@@ -116,47 +116,77 @@ internal sealed class JsonLinesLedger<TEntry>(
         AppendOperationObserver?.Invoke(entries.Count);
         EnsureParentDirectory(ledgerFilePath);
 
-        return RunUnderLockAsync(ledgerFilePath, () =>
+        return RunUnderLockAsync(
+            ledgerFilePath,
+            () => AppendAndGetAppendedUnlocked(entries, ledgerFilePath),
+            cancellationToken,
+            transaction);
+    }
+
+    /// <summary>
+    /// Performs one complete ledger append synchronously. This exists for a caller that already owns
+    /// the queue mutex and must make a queue decision and its ledger fact one ordering seam: queue
+    /// then ledger, never ledger then queue. It never schedules thread-pool work while that outer,
+    /// thread-affine mutex is held.
+    /// </summary>
+    internal IReadOnlyList<TEntry> AppendAndGetAppendedSynchronously(
+        IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (entries.Count == 0)
         {
-            var alreadyRecorded = ReadAllUnlocked(ledgerFilePath)
-                .Select(executionIdSelector)
-                .Where(id => id is { Length: > 0 })
-                .Select(id => id!)
-                .ToHashSet(keyComparer ?? StringComparer.Ordinal);
+            return [];
+        }
 
-            var toAppend = new List<TEntry>(entries.Count);
-            foreach (var entry in entries)
+        AppendOperationObserver?.Invoke(entries.Count);
+        EnsureParentDirectory(ledgerFilePath);
+        return MutexGuardedFileLock.RunUnderLock(
+            ledgerFilePath, LockNamePrefix, LockTimeout,
+            () => AppendAndGetAppendedUnlocked(entries, ledgerFilePath));
+    }
+
+    private IReadOnlyList<TEntry> AppendAndGetAppendedUnlocked(IReadOnlyList<TEntry> entries, string ledgerFilePath)
+    {
+        var alreadyRecorded = ReadAllUnlocked(ledgerFilePath)
+            .Select(executionIdSelector)
+            .Where(id => id is { Length: > 0 })
+            .Select(id => id!)
+            .ToHashSet(keyComparer ?? StringComparer.Ordinal);
+
+        var toAppend = new List<TEntry>(entries.Count);
+        foreach (var entry in entries)
+        {
+            var id = executionIdSelector(entry);
+            if (id is not { Length: > 0 } || alreadyRecorded.Add(id))
             {
-                var id = executionIdSelector(entry);
-                if (id is not { Length: > 0 } || alreadyRecorded.Add(id))
-                {
-                    toAppend.Add(entry);
-                }
+                toAppend.Add(entry);
             }
-            if (toAppend.Count == 0)
-            {
-                return (IReadOnlyList<TEntry>)toAppend;
-            }
+        }
+        if (toAppend.Count == 0)
+        {
+            return toAppend;
+        }
 
-            var builder = new StringBuilder();
-            if (NeedsLineSeparator(ledgerFilePath))
-            {
-                builder.Append('\n');
-            }
+        var builder = new StringBuilder();
+        if (NeedsLineSeparator(ledgerFilePath))
+        {
+            builder.Append('\n');
+        }
 
-            foreach (var entry in toAppend)
-            {
-                builder.Append(JsonSerializer.Serialize(entry, SerializerOptions)).Append('\n');
-            }
+        foreach (var entry in toAppend)
+        {
+            builder.Append(JsonSerializer.Serialize(entry, SerializerOptions)).Append('\n');
+        }
 
-            var bytes = Encoding.UTF8.GetBytes(builder.ToString());
-            using var stream = new FileStream(
-                ledgerFilePath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, useAsync: false);
-            stream.Write(bytes);
-            stream.Flush();
+        var bytes = Encoding.UTF8.GetBytes(builder.ToString());
+        using var stream = new FileStream(
+            ledgerFilePath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, useAsync: false);
+        stream.Write(bytes);
+        stream.Flush();
 
-            return (IReadOnlyList<TEntry>)toAppend;
-        }, cancellationToken, transaction);
+        return toAppend;
     }
 
     private static bool NeedsLineSeparator(string ledgerFilePath)

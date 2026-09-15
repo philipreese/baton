@@ -825,9 +825,8 @@ public sealed class WorkItemAdvancer
             {
                 foreach (var (tag, operation) in mergedRetirements)
                 {
-                    QueueDecisionLedgerStore.AppendDispositionAsync(
-                        tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
-                        .GetAwaiter().GetResult();
+                    QueueDecisionLedgerStore.AppendDispositionUnderQueueLock(
+                        tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken);
                 }
             },
             CancellationToken.None).ConfigureAwait(false);

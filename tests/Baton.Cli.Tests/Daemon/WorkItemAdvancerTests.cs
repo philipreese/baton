@@ -2488,4 +2488,78 @@ public sealed class WorkItemAdvancerTests
             DirectoryCleanup.DeleteRecursively(home);
         }
     }
+
+    [Theory]
+    [InlineData("readiness-claim")]
+    [InlineData("bound-room")]
+    [InlineData("changed-pr")]
+    [InlineData("changed-repository")]
+    [InlineData("prior-retirement")]
+    [InlineData("row-removal")]
+    public async Task A_merged_observation_rechecks_every_retirement_guard_at_the_mutation_point(string change)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var item = new QueueItem
+            {
+                Tag = "guarded-retirement",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Queued,
+                Repository = Repository,
+                PullRequest = 2307,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "guarded-retirement.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Items = [item] }, Ct);
+
+            var gh = new ObservationGh(async _ =>
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = change switch
+                    {
+                        "readiness-claim" => snapshot.Items.Select(current => current with
+                        {
+                            ReadinessMutationClaim = "claimed",
+                        }).ToList(),
+                        "bound-room" => snapshot.Items.Select(current => current with
+                        {
+                            RoomDirectory = Path.Combine(home, "live-room"),
+                        }).ToList(),
+                        "changed-pr" => snapshot.Items.Select(current => current with
+                        {
+                            PullRequest = 9999,
+                        }).ToList(),
+                        "changed-repository" => snapshot.Items.Select(current => current with
+                        {
+                            Repository = "github.com/other/baton",
+                        }).ToList(),
+                        "prior-retirement" => snapshot.Items.Select(current => current with
+                        {
+                            Retirement = new QueueRetirement(QueueRetirement.Operator, Now, "operator retained evidence"),
+                        }).ToList(),
+                        "row-removal" => [],
+                        _ => throw new InvalidOperationException($"Unknown mutation '{change}'."),
+                    },
+                }, Ct);
+            });
+
+            await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null))
+                .RefreshPullRequestObservationsAsync(Now, Ct);
+
+            var updated = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.DoesNotContain(updated.Items, current => current.Retirement?.Kind == QueueRetirement.Merged);
+            Assert.DoesNotContain(
+                await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct),
+                entry => entry.Decision == QueueDecisionEntry.Retired);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
 }
