@@ -112,11 +112,7 @@ test-other = { cmd = "python tools/buildlock.py dotnet build --no-incremental &&
 # #1833: `-m:1` (an MSBuild switch, #1671) no longer serializes anything under MTP -- MEASURED
 # forwarding it to each test module as an unrecognised argument, which made every module report
 # "Zero tests ran" (exit 5, invalid command line) rather than actually running serialized. MTP's own
-# equivalent was `--max-parallel-test-modules 1`, MEASURED to serialize the five xUnit projects'
-# testhosts on the 16 GB host (spec/baton.md §11 C-13). After the 32 GB upgrade, #2340 measured
-# a full suite with three project hosts and ample free RAM, so this gates leg uses 3. In-assembly
-# parallelism and the machine-wide build lock are unchanged. `--minimum-expected-tests 1` still
-# guards the zero-test leg exactly as `test` above does.
+# #2340: three-project gates fan-out; measurement and accepted trade-off live in spec/baton.md C-13.
 test-no-build = { cmd = "python tools/buildlock.py --replay dotnet test --no-build --max-parallel-test-modules 3 --minimum-expected-tests 1" }
 # Coverage report (#199): collects per-test-project Cobertura via Microsoft.Testing.Extensions.
 # CodeCoverage (MTP's own coverage extension, #1833 -- coverlet.collector was a VSTest data

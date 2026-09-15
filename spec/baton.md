@@ -6601,6 +6601,10 @@ run under the ordinary machine-wide build lock started three project hosts toget
 tests with one fixture-dependent skip, and completed in 4m21s. Available physical memory sampled
 while three hosts were active was about 14.8 GB. This is one clean measurement, not proof that the
 intermittent Windows file-move AccessDenied failures seen even under project serialization are fixed.
+The newly accepted trade-off is more simultaneous test-host, memory, and filesystem pressure in
+exchange for overlapping project durations rather than summing them. No same-tree, one-project
+comparator was run on the upgraded host, so this does not claim a measured wall-time speedup or
+that the available-memory sample was a peak-pressure measurement.
 `test-no-build` now permits three project hosts; `test`, the zero-test guard, in-assembly xUnit
 parallelism, and the global MSBuild exclusion remain unchanged. Repeatable test-host collisions,
 corrupted output, or memory pressure under this fan-out require restoring one project at a time,
