@@ -264,7 +264,9 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-e2e-{Guid.NewGuid():N}");
         try
         {
-            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Weigh the options for X.", model: "opus");
+            // The fake parent adapter accepts opaque model names, but a known Claude model
+            // would now be refused before room provisioning (#2328).
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Weigh the options for X.", model: "parent-only-model");
             var amendedSpecPath = Path.Combine(testRoot, "amended.md");
             await File.WriteAllTextAsync(amendedSpecPath, "Weigh the options for Y instead.", TestContext.Current.CancellationToken);
 
@@ -282,13 +284,13 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             var swapped = await RedispatchOntoAsync("child-swapped", "fake-noop");
             Assert.Null(swapped.Model);
             // Neither vendor here has a measured CLI default, so the display stamp is absent too —
-            // never the parent's "opus", which is what carrying the stamps verbatim produced.
+            // never the parent's model, which is what carrying the stamps verbatim produced.
             Assert.Null(swapped.ModelResolved);
 
             // The control: the same amended-spec path on the SAME vendor still inherits the model, so
             // what the assertions above catch is the swap and not an axis that never survives at all.
             var kept = await RedispatchOntoAsync("child-same", "fake");
-            Assert.Equal("opus", kept.Model);
+            Assert.Equal("parent-only-model", kept.Model);
         }
         finally
         {

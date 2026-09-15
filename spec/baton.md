@@ -7349,6 +7349,14 @@ when `--adapter` is named. With zero candidates, a named adapter's own validatio
 The resolved adapter's offline rules also check models when no adapter was named. These refusals
 precede row writes, spec copies, and worktree provisioning. Import does not perform this add-time validation.
 
+**Known adapter/model mismatches refuse before spawn (#2328).** Queue add already checks recorded
+model candidates as above. Direct dispatch applies that same candidate check to each final resolved
+binding after role/template/continuation resolution but before room creation, runway admission, or a
+vendor process. The scheduler repeats it for persisted/imported rows before claiming a room. A model
+known only to Codex cannot ride a role's default Claude adapter merely because `--adapter` was omitted.
+Candidate hints are not a universal allowlist: an unknown token still reaches the selected adapter's
+own validation, and a candidate shared by adapters remains usable on each listed adapter.
+
 **Conductor-only worker models fail closed (#2233).** The one conductor-model catalog classifies Fable
 and Astra. Queue admission, including every explicitly selected lifecycle stage, refuses either model
 and refuses an omitted model when the resolved vendor default is conductor-only or cannot be proven safe

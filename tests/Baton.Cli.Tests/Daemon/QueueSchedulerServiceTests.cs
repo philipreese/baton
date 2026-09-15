@@ -114,8 +114,11 @@ public sealed class QueueSchedulerServiceTests
         }
     }
 
-    [Fact]
-    public async Task A_persisted_Codex_Astra_item_fails_without_claiming_a_room_or_launching()
+    [Theory]
+    [InlineData("codex", "gpt-6-astra", "Astra is conductor-only")]
+    [InlineData("claude", "gpt-5.6-terra", "known by codex")]
+    public async Task A_persisted_invalid_adapter_model_item_fails_without_claiming_a_room_or_launching(
+        string adapter, string model, string error)
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -124,7 +127,7 @@ public sealed class QueueSchedulerServiceTests
             // QueueStore is the persisted/imported seam: old queue snapshots can bypass queue add.
             await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
             {
-                Items = [Item("imported-astra", scope: null) with { Adapter = "codex", Model = "gpt-6-astra" }],
+                Items = [Item("imported-model", scope: null) with { Adapter = adapter, Model = model }],
             }, Ct);
             var launched = false;
             var service = Service((_, _) =>
@@ -140,10 +143,10 @@ public sealed class QueueSchedulerServiceTests
             Assert.Equal(QueueItemState.Failed, item.State);
             Assert.Null(item.RoomDirectory);
             Assert.Null(item.LaunchedAt);
-            Assert.Contains("Astra is conductor-only", item.Error!, StringComparison.Ordinal);
+            Assert.Contains(error, item.Error!, StringComparison.OrdinalIgnoreCase);
             var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
-            Assert.Equal("imported-astra", fact.Tag);
+            Assert.Equal("imported-model", fact.Tag);
         }
         finally
         {

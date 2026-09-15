@@ -267,9 +267,9 @@ public sealed class QueueSchedulerService : BackgroundService
             // #2142: imported and hand-edited legacy rows bypass queue add, so apply the same
             // final-tuple policy before claiming a room or spawning a lane. This is a refusal, not a
             // fallback: the item records the actionable repair and no vendor process is started.
-            if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+            if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
             {
-                var remedy = ClaudeInvocationModelPolicy.TryInvocation(tier.Adapter) is { } suggestion
+                var remedy = WorkerInvocationModelPolicy.TryInvocation(tier.Adapter) is { } suggestion
                     ? $" Re-add the item with {suggestion}"
                     : string.Empty;
                 await FailAsync(
