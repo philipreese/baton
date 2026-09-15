@@ -723,6 +723,52 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.DoesNotContain("--size-rationale", minimal);
     }
 
+    [Theory]
+    [InlineData(WorkStage.Continue)]
+    [InlineData(WorkStage.Fix)]
+    public void A_follow_on_lane_forwards_the_canonical_repository_qualified_PR(WorkStage stage)
+    {
+        var item = new QueueItem
+        {
+            Tag = "2178-lane",
+            Role = "implement",
+            Workspace = @"C:\repos\w2178",
+            SpecFile = @"C:\Users\x\.baton\queue\specs\2178-lane.md",
+            Stage = stage,
+            Repository = "github.com/aer-works/baton",
+            PullRequest = 2304,
+        };
+        var tier = new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null);
+        var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(item, tier, @"C:\rooms\next"));
+        var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
+
+        Assert.Equal("aer-works/baton#2304", options.OriginatingPullRequest);
+        Assert.Equal(options.OriginatingPullRequest, parsed.OriginatingPullRequest);
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Continue, null, 2304)]
+    [InlineData(WorkStage.Continue, "github.com/aer-works/baton", null)]
+    [InlineData(WorkStage.Fix, null, null)]
+    public void A_follow_on_lane_without_canonical_repository_and_PR_provenance_is_refused(
+        WorkStage stage, string? repository, int? pullRequest)
+    {
+        var item = new QueueItem
+        {
+            Tag = "2178-lane",
+            Role = "implement",
+            Workspace = @"C:\repos\w2178",
+            SpecFile = @"C:\Users\x\.baton\queue\specs\2178-lane.md",
+            Stage = stage,
+            Repository = repository,
+            PullRequest = pullRequest,
+        };
+        var tier = new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null);
+
+        Assert.Throws<CliArgumentException>(() =>
+            QueueLauncher.BuildOptions(new QueueLaunchRequest(item, tier, @"C:\rooms\next")));
+    }
+
     /// <summary>
     /// #2117 review, finding 2: the lane's redirected streams decode as UTF-8 on the daemon's side,
     /// set on the start info, which is what hands <c>BeginOutputReadLine</c> its decoder.

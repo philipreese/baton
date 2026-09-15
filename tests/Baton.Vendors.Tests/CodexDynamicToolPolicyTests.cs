@@ -1820,6 +1820,35 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Equal(1, RefusedStepsCountedFor(refused));
     }
 
+    [Fact]
+    public async Task A_codex_follow_on_lane_reads_only_its_conductor_verified_originating_PR()
+    {
+        var ownership = new OriginatingPullRequestOwnership(
+            "aer-works/baton", 2304, "2178-lane", "0123456789abcdef0123456789abcdef01234567");
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant, ["changes.md"],
+            originatingPullRequestOwnership: ownership);
+        var gh = ShimGh(fixture.Workspace, "view fixture");
+
+        var own = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2304" });
+        var sibling = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2305" });
+        var labels = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = "gh pr edit 2304 --add-label operator-merge" });
+        var merge = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = "gh pr merge 2304 --squash" });
+
+        Assert.True(own.Success, own.Text);
+        Assert.False(sibling.Success);
+        Assert.Contains("This room opened aer-works/baton#2304", sibling.Text, StringComparison.Ordinal);
+        Assert.False(labels.Success);
+        Assert.False(merge.Success);
+        Assert.Contains(GrantRefusal.Marker, labels.Text);
+        Assert.Contains(GrantRefusal.Marker, merge.Text);
+    }
+
     /// <summary>
     /// A refused sibling read answers the same way however often it is asked: it is never replayed
     /// and never becomes #2002's repeat refusal, so the lane keeps being told which rule refused it
@@ -2893,7 +2922,8 @@ public sealed class CodexDynamicToolPolicyTests
             Action<PolicyFixture, CancellationToken>? beforeCommandTimeoutStarts = null,
             string? directGhOutput = null,
             int directGhExitCode = 0,
-            bool outputRootWithSpaces = false)
+            bool outputRootWithSpaces = false,
+            OriginatingPullRequestOwnership? originatingPullRequestOwnership = null)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -2942,7 +2972,7 @@ public sealed class CodexDynamicToolPolicyTests
                 && provenance is null
                 ? new CodexDynamicToolPolicy(
                     grant, Workspace, Output, createInput ? [Input] : [], outputs, commandCeiling,
-                    timeProvider)
+                    timeProvider, originatingPullRequestOwnership: originatingPullRequestOwnership)
                 : new CodexDynamicToolPolicy(
                     grant,
                     Workspace,
@@ -2956,7 +2986,8 @@ public sealed class CodexDynamicToolPolicyTests
                         ? null
                         : cancellationToken => beforeCommandTimeoutStarts(this, cancellationToken),
                     provenance,
-                    directPrefix);
+                    directPrefix,
+                    originatingPullRequestOwnership);
         }
 
         public string Root { get; }

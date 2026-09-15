@@ -53,6 +53,15 @@ public class DispatchOptionsParserTests
     }
 
     [Fact]
+    public void Parses_a_repository_qualified_originating_pull_request()
+    {
+        var options = DispatchOptionsParser.Parse(
+            ["implement", "--spec", "t.md", "--originating-pr", "aer-works/baton#2304"]);
+
+        Assert.Equal("aer-works/baton#2304", options.OriginatingPullRequest);
+    }
+
+    [Fact]
     public void The_new_axis_flags_default_to_null_when_absent()
     {
         var options = DispatchOptionsParser.Parse(["advise", "--spec", "t.md"]);

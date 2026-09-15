@@ -590,6 +590,7 @@ public static class QueueLauncher
         Add("--token-budget", options.TokenBudget?.ToString(CultureInfo.InvariantCulture));
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
+        Add("--originating-pr", options.OriginatingPullRequest);
         if (options.DeclaredTaskSize is { } declaredSize)
         {
             Add("--declared-size", declaredSize.Size.ToString().ToLowerInvariant());
@@ -984,7 +985,7 @@ public static class QueueLauncher
             OriginatingPullRequest: followOn
                 && item.Repository is { Length: > 0 } repository
                 && item.PullRequest is { } pullRequest
-                ? $"{repository}#{pullRequest}"
+                ? OriginatingPullRequestVerifier.CanonicalReference(repository, pullRequest)
                 : null);
     }
 

@@ -291,6 +291,17 @@ public static class DispatchCommand
         // an in-process caller (and every test) constructs.
         var verifyCommands = ParseVerifyCommands(options.VerifyCommands);
 
+        var originatingPullRequests = bindings.Values
+            .Select(binding => binding.OriginatingPullRequestOwnership)
+            .Where(ownership => ownership is not null)
+            .Distinct()
+            .ToArray();
+        if (originatingPullRequests.Length > 1)
+        {
+            throw new CliArgumentException(
+                "A room cannot carry conflicting originating pull-request ownership across its bindings.");
+        }
+
         // #1848: the runway hold — the last thing checked before this invocation provisions anything,
         // for the same reason the drain refusal is the first: a refusal here must leave no
         // half-provisioned room behind (Program's typed boundary still lands a ValidationRefused
@@ -470,7 +481,7 @@ public static class DispatchCommand
         await WorkflowDefinitionWriter.SaveToFileAsync(definition, workflowFilePath, cancellationToken).ConfigureAwait(false);
         await WorkerBindingConfigWriter.SaveToFileAsync(bindings, bindingsFilePath, cancellationToken).ConfigureAwait(false);
         await OriginatingPullRequestOwnership.WriteProvenanceAsync(
-            bindings.Values.Select(binding => binding.OriginatingPullRequestOwnership).SingleOrDefault(),
+            originatingPullRequests.SingleOrDefault(),
             options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
         // Register: true -- rationale is spec/baton.md §8 (#1657).

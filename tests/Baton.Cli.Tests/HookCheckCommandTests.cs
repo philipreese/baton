@@ -538,6 +538,33 @@ public class HookCheckCommandTests
         }
     }
 
+    [Theory]
+    [InlineData("gh pr view 2304", HookCheckCommand.AllowedExitCode)]
+    [InlineData("gh pr diff 2304", HookCheckCommand.AllowedExitCode)]
+    [InlineData("gh pr comment 2304 --body-file out.md", HookCheckCommand.AllowedExitCode)]
+    [InlineData("gh pr view 2305", HookCheckCommand.DeniedExitCode)]
+    [InlineData("gh pr list", HookCheckCommand.DeniedExitCode)]
+    [InlineData("gh pr edit 2304 --add-label operator-merge", HookCheckCommand.DeniedExitCode)]
+    [InlineData("gh pr merge 2304 --squash", HookCheckCommand.DeniedExitCode)]
+    public void An_originating_PR_grant_is_exact_and_does_not_widen_other_PR_authority(
+        string command, int expectedExitCode)
+    {
+        var role = Baton.Vendors.WorkerRoleCatalog.For("implement");
+        var payload = """{"tool_name": "Bash", "tool_input": {"command": COMMAND_JSON}}"""
+            .Replace("COMMAND_JSON", System.Text.Json.JsonSerializer.Serialize(command));
+        using var stdin = new StringReader(payload);
+        using var stderr = new StringWriter();
+
+        var exitCode = HookCheckCommand.Execute(
+            stdin, stderr, "claude:Edit,Write",
+            shellPatternsRaw: "claude:",
+            deniedShellPatternsRaw: "claude:" + string.Join(",", role.Grant.DeniedShellCommandPatterns!),
+            deniedShellOptionTokensRaw: "claude:" + string.Join(",", role.Grant.DeniedShellOptionTokens!),
+            originatingPullRequestRaw: "aer-works/baton#2304");
+
+        Assert.Equal(expectedExitCode, exitCode);
+    }
+
     [Fact]
     public void The_option_token_channel_is_what_denies_the_output_write_not_the_pattern_lists()
     {

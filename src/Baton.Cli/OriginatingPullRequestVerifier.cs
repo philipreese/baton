@@ -12,10 +12,7 @@ internal static class OriginatingPullRequestVerifier
 
     public static async Task<OriginatingPullRequestOwnership> VerifyAsync(string reference, string workspace, CancellationToken cancellationToken)
     {
-        var separator = reference.LastIndexOf('#');
-        var repository = separator > 0 ? CanonicalRepository(reference[..separator]) : null;
-        if (repository is null || !int.TryParse(reference[(separator + 1)..], out var number) || number <= 0)
-            throw new CliArgumentException("'--originating-pr' must be owner/repository#number.");
+        var (repository, number) = ParseReference(reference);
         var identity = GhPullRequestCreateProvenanceResolver.TryCaptureIdentity(workspace);
         var launchHead = await WorkspaceHead.TryCaptureAsync(workspace, cancellationToken).ConfigureAwait(false);
         if (identity is null || launchHead is null || identity.Repository != repository)
@@ -61,7 +58,42 @@ internal static class OriginatingPullRequestVerifier
         }
         var output = await stdoutTask.ConfigureAwait(false);
         _ = await stderrTask.ConfigureAwait(false);
-        if (process.ExitCode != 0)
+        return ValidateResponse(repository, number, identity, launchHead, process.ExitCode, output);
+    }
+
+    internal static (string Repository, int Number) ParseReference(string reference)
+    {
+        var separator = reference.LastIndexOf('#');
+        var repository = separator > 0 ? CanonicalRepository(reference[..separator]) : null;
+        if (repository is null || !int.TryParse(reference[(separator + 1)..], out var number) || number <= 0)
+            throw new CliArgumentException("'--originating-pr' must be owner/repository#number.");
+        return (repository, number);
+    }
+
+    internal static string CanonicalReference(string repositoryIdentity, int number)
+    {
+        var repository = repositoryIdentity.StartsWith("github.com/", StringComparison.OrdinalIgnoreCase)
+            ? repositoryIdentity["github.com/".Length..]
+            : repositoryIdentity;
+        var canonical = CanonicalRepository(repository);
+        if (canonical is null || number <= 0)
+        {
+            throw new CliArgumentException(
+                "An originating pull request requires a canonical GitHub repository and positive PR number.");
+        }
+
+        return $"{canonical}#{number}";
+    }
+
+    internal static OriginatingPullRequestOwnership ValidateResponse(
+        string repository,
+        int number,
+        GhPullRequestCreateIdentity identity,
+        string launchHead,
+        int exitCode,
+        string output)
+    {
+        if (exitCode != 0)
         {
             throw new CliArgumentException("The originating pull request could not be read.");
         }

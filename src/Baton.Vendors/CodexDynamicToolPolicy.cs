@@ -179,10 +179,11 @@ public sealed class CodexDynamicToolPolicy
         Func<string, Stream>? commandCaptureStreamFactory,
         Action<CancellationToken>? beforeCommandTimeoutStartsForTest = null,
         GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
-        IReadOnlyList<string>? directGhPrefixArguments = null)
+        IReadOnlyList<string>? directGhPrefixArguments = null,
+        OriginatingPullRequestOwnership? originatingPullRequestOwnership = null)
         : this(
             grant, workingDirectory, outputDirectory, inputPaths, producedOutputNames,
-            commandCeiling, timeProvider, pullRequestCreateProvenance)
+            commandCeiling, timeProvider, pullRequestCreateProvenance, originatingPullRequestOwnership)
     {
         _commandCaptureStreamFactory = commandCaptureStreamFactory ?? CreateCommandCaptureStream;
         _beforeCommandTimeoutStartsForTest = beforeCommandTimeoutStartsForTest;
