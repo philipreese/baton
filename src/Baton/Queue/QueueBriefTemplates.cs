@@ -222,7 +222,7 @@ public static class QueueBriefTemplates
                 : "(no findings were recorded)"),
         });
 
-        return stage == WorkStage.Continue
+        var brief = stage == WorkStage.Continue
             ? $"""
                # Continue the work on `{item.Branch}`
 
@@ -237,6 +237,21 @@ public static class QueueBriefTemplates
                {body}
                """
             : body;
+
+        // The durable template is operator-owned, but readiness evidence is lifecycle policy. Keep
+        // this generated requirement last so an older or customized template cannot remove it or
+        // leave a contradictory reviewed-ref example as the effective instruction.
+        return stage is WorkStage.Review or WorkStage.ReReview
+            ? $"""
+               {brief.TrimEnd()}
+
+               ## Lifecycle verdict requirement
+
+               Write the structured verdict to `$BATON_OUTPUT_DIR/verdict.json`. Set `reviewedRef` to
+               `{context.HeadSha}` exactly, with no PR label, branch, prefix, suffix, or whitespace.
+               This field is machine-checked readiness evidence.
+               """
+            : brief;
     }
 
     /// <summary>What a rendered brief needs that the item itself does not carry.</summary>
