@@ -162,7 +162,7 @@ public sealed class WorkItemAdvancer
             : sentinel?.State ?? WorkflowOutcome.Failed;
         var verdictPath = item.Stage == WorkStage.Ready ? item.LastVerdict : FindVerdict(sentinel);
         var verdict = verdictPath is null ? null : TryReadVerdict(verdictPath);
-        var arrestedStep = sentinel?.Steps.FirstOrDefault(step =>
+        var arrestedStep = sentinel?.Steps?.FirstOrDefault(step =>
             string.Equals(step.IndeterminateProducerKind, nameof(Baton.Domain.IndeterminateProducer.Arrested), StringComparison.Ordinal));
 
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
@@ -249,7 +249,8 @@ public sealed class WorkItemAdvancer
             stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict,
             reading.Number, reading.HeadSha, head, reading.Succeeded, reading.IsOpen,
             reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
-            arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested);
+            arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
+            sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
@@ -1380,7 +1381,7 @@ public sealed class WorkItemAdvancer
     /// </summary>
     private static string? FindVerdict(WorkflowStatusView? sentinel)
     {
-        return sentinel?.Outputs.FirstOrDefault(p => string.Equals(
+        return sentinel?.Outputs?.FirstOrDefault(p => string.Equals(
             Path.GetFileName(p), CostLedgerStore.VerdictOutputName, StringComparison.OrdinalIgnoreCase));
     }
 

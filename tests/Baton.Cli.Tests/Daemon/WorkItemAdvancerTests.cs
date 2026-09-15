@@ -1474,6 +1474,90 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_zero_step_failed_implement_without_a_pr_halts_with_its_terminal_room_and_can_retire()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var advancer = Advancer(new FakeGh("[]"), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var fact = Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Equal(room, item.RoomDirectory);
+            Assert.Contains("zero worker steps", item.Error!, StringComparison.Ordinal);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: item.Tag, Reason: "terminal prelaunch refusal"),
+                TextWriter.Null, Ct);
+            Assert.NotNull((await ReadBackAsync()).Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_incomplete_terminal_without_steps_is_unknown_not_positive_zero_step_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "incomplete-terminal");
+            Directory.CreateDirectory(room);
+            await File.WriteAllTextAsync(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                """{"state":"Failed","outputs":[],"error":"incomplete sentinel"}""", Ct);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+
+            var fact = Assert.Single(await Advancer(new FakeGh("[]"),
+                (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Equal(QueueItemState.Queued, item.State);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_incomplete_terminal_without_outputs_retains_positive_zero_step_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "missing-outputs");
+            Directory.CreateDirectory(room);
+            await File.WriteAllTextAsync(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                """{"state":"Failed","steps":[],"error":"incomplete sentinel"}""", Ct);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+
+            var fact = Assert.Single(await Advancer(new FakeGh("[]"),
+                (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.True(item.Halted);
+            Assert.Equal(room, item.RoomDirectory);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_stalled_lane_with_its_work_pushed_is_re_reviewed_and_an_unpushed_one_continues()
     {
         var home = CreateTempHome();

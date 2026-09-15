@@ -30,7 +30,8 @@ namespace Baton.Queue;
 /// spec/baton.md §13 has the argument. What it means for the code below: nothing reads
 /// <c>WorkflowOutcome</c> beyond <see cref="Status.WorkflowOutcome.IsSucceededShaped"/> — the membership
 /// test that owns both succeeded-shaped words — and <see cref="IsPushed"/> is the whole discriminator
-/// for everything else.
+/// for work that reached a PR. Positive zero-step terminal evidence separately stops an unpushed,
+/// PR-less attempt before it could buy a continuation to recover nonexistent work.
 /// </para>
 /// <para>
 /// <b>Every dispatch is counted and bounded</b> (<see cref="WorkStages.MaxRounds"/>). Two of the arms
@@ -323,6 +324,17 @@ public static class WorkItemLifecycle
             };
         }
 
+        // Protected invariant: a settled lane with positively recorded zero worker steps and no PR
+        // has no worker work to recover. Do not mint a paid continuation or clear its terminal room.
+        // Unknown step evidence is not proof of zero steps; preserve the existing reconciliation arm.
+        if (observation.PullRequest is null && observation.WorkerStepsRecorded == false)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} "
+                + "with zero worker steps and no pull request — there is no observed work for an "
+                + "automatic continuation to recover; " + Recovery(observation.Stage));
+        }
+
         return EnsureDraft(observation, Dispatch(
             observation, WorkStage.Continue,
             $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with work that "
@@ -467,6 +479,10 @@ public static class WorkItemLifecycle
 /// <param name="PullRequest">The open PR's number on <paramref name="Branch"/>, or null when there is none.</param>
 /// <param name="PullRequestHeadSha"><c>gh pr view --json headRefOid</c>.</param>
 /// <param name="WorkspaceHeadSha">The worktree's own <c>HEAD</c> sha.</param>
+/// <param name="WorkerStepsRecorded">
+/// False only when a readable terminal sentinel positively lists zero steps; true when it lists any;
+/// null when terminal step evidence is absent or unreadable. Null never proves no worker work.
+/// </param>
 public sealed record WorkItemObservation(
     WorkStage Stage,
     int Round,
@@ -482,7 +498,8 @@ public sealed record WorkItemObservation(
     bool? PullRequestIsDraft,
     string? RequiredChecks,
     bool? WorkspaceChanged = null,
-    IndeterminateProducer? IndeterminateProducer = null);
+    IndeterminateProducer? IndeterminateProducer = null,
+    bool? WorkerStepsRecorded = null);
 
 /// <summary>What the queue does with a work item next.</summary>
 /// <param name="Kind">Which of the three shapes below.</param>
