@@ -2417,11 +2417,14 @@ public static class MutationInterface
                     usageParser, prepared.OutputDirectory);
                 // A post-exit observation is authoritative on replay. A new live probe could instead
                 // describe a later remote state, not this execution's delivered work.
-                var evidence = await DeliveryVerifier.ReadEvidenceAsync(prepared.OutputDirectory, CancellationToken.None).ConfigureAwait(false);
-                var deliveryOutcome = evidence?.ToOutcome() ?? await DeliveryVerifier.CheckAsync(
-                    binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
-                    shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
-                if (evidence is null)
+                var evidenceReading = await DeliveryVerifier.ReadEvidenceAsync(prepared.OutputDirectory, CancellationToken.None).ConfigureAwait(false);
+                var deliveryOutcome = evidenceReading.Evidence?.ToOutcome()
+                    ?? (evidenceReading.Problem is { } problem
+                        ? new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun, NotRunReason: problem)
+                        : await DeliveryVerifier.CheckAsync(
+                            binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
+                            shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false));
+                if (evidenceReading.IsMissing)
                 {
                     await DeliveryVerifier.WriteEvidenceAsync(
                         prepared.OutputDirectory, binding.Target.WorkingDirectory, binding.ExpectPr,

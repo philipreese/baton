@@ -1,5 +1,7 @@
 using Baton.Accounting;
+using Baton.Artifacts;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Status;
 using Baton.Store;
 
@@ -111,14 +113,10 @@ public static class TerminalSettleRecorder
                 var stamps = await RoomBindingStamps
                     .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
 
-                // #1901 C1: the issue, PR and diff shape each worker's own workspace still holds. Read
-                // here rather than inside the ledger for the same reason the overrides above are
-                // (WorkspaceDeliveryProbe's own remarks), and fail-open in exactly the same way -- a
-                // workspace that is gone, a `gh` that is absent, or a network that is down costs the
-                // stamp, never the row. See this method's own parameter doc for why this one call
-                // takes the caller's token where every other write here takes None.
-                var delivery = await WorkspaceDeliveryProbe
-                    .ReadForRoomAsync(terminalRoomDirectoryPath, deliveryProbeToken).ConfigureAwait(false);
+                // The ledger is an as-of execution record. Read the immutable post-execution stamp
+                // rather than reprobe a workspace whose remote state may have changed after settle.
+                var delivery = await ReadDeliveryEvidenceByWorkerAsync(terminalEntries, terminalRoomDirectoryPath)
+                    .ConfigureAwait(false);
 
                 // identitySource, from the resolver rather than assumed here (#1931 re-review MEDIUM):
                 // the settle site writes most of the ledger, so a field only the backfill stamped would
@@ -147,5 +145,26 @@ public static class TerminalSettleRecorder
         {
             Console.Error.WriteLine($"Could not append to the cost ledger: {ex.Message}.");
         }
+    }
+
+    private static async Task<IReadOnlyDictionary<string, WorkspaceDelivery>> ReadDeliveryEvidenceByWorkerAsync(
+        IReadOnlyList<LogEntry> entries, string roomDirectoryPath)
+    {
+        var result = new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal);
+        var artifactsRoot = Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName);
+        foreach (var entry in entries)
+        {
+            if (entry is not LogEntry.FlowLogEntry { Event: FlowEvent.ExecutionRequestAccepted accepted }) continue;
+            var reading = await DeliveryVerifier.ReadEvidenceAsync(
+                ArtifactManager.ResolveOutputDirectory(artifactsRoot, accepted.Request.ExecutionId), CancellationToken.None)
+                .ConfigureAwait(false);
+            if (reading.Evidence is { } evidence)
+            {
+                result[accepted.Request.Worker] = new WorkspaceDelivery(
+                    PullRequest: evidence.PullRequestNumber?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+
+        return result;
     }
 }

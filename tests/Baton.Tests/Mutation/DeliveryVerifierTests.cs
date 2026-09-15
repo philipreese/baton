@@ -73,8 +73,8 @@ public sealed class DeliveryVerifierTests
 
             TempGitRepository.CommitAll(workspace, "later local change must not rewrite delivery evidence");
             var recovered = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
-            Assert.Equal(DeliveryCheckStatus.Passed, recovered?.Verification);
-            Assert.NotEqual(GitRevParseHead(workspace), recovered?.LocalHead);
+            Assert.Equal(DeliveryCheckStatus.Passed, recovered.Evidence?.Verification);
+            Assert.NotEqual(GitRevParseHead(workspace), recovered.Evidence?.LocalHead);
         }
         finally
         {

@@ -63,6 +63,12 @@ public sealed record DeliveryEvidence(
     };
 }
 
+/// <summary>The result of opening an immutable stamp; unreadable is distinct from absent.</summary>
+public sealed record DeliveryEvidenceReading(DeliveryEvidence? Evidence, string? Problem = null)
+{
+    public bool IsMissing => Evidence is null && Problem is null;
+}
+
 /// <summary>
 /// #1978: what <c>gh pr list --head &lt;branch&gt; --json number</c> answered, as three states rather
 /// than a bool — <see cref="AnyOpen"/> <see langword="null"/> means the question was NOT answered
@@ -178,28 +184,35 @@ public static class DeliveryVerifier
             DateTimeOffset.UtcNow.ToString("O"), localHead, branch, remoteHead, pullRequestNumber,
             deliveryOutcome.Status, deliveryOutcome.FailingMembers,
             deliveryOutcome.Tail ?? deliveryOutcome.NotRunReason, observationProblem), EvidenceJsonOptions);
+        var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
-            await using var writer = new StreamWriter(stream);
-            await writer.WriteAsync(evidence.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(temporaryPath, evidence, cancellationToken).ConfigureAwait(false);
+            File.Move(temporaryPath, path, overwrite: false);
         }
         catch (IOException) when (File.Exists(path)) { }
+        finally
+        {
+            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+        }
     }
 
     /// <summary>Reads the immutable observation for an execution, if its complete JSON is available.</summary>
-    public static async Task<DeliveryEvidence?> ReadEvidenceAsync(string outputDirectory, CancellationToken cancellationToken)
+    public static async Task<DeliveryEvidenceReading> ReadEvidenceAsync(string outputDirectory, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         var path = Path.Combine(outputDirectory, DeliveryEvidenceFileName);
-        if (!File.Exists(path)) return null;
+        if (!File.Exists(path)) return new(null);
         try
         {
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            return await JsonSerializer.DeserializeAsync<DeliveryEvidence>(stream, EvidenceJsonOptions, cancellationToken).ConfigureAwait(false);
+            var evidence = await JsonSerializer.DeserializeAsync<DeliveryEvidence>(stream, EvidenceJsonOptions, cancellationToken).ConfigureAwait(false);
+            return evidence is { ObservedAt.Length: > 0 }
+                ? new(evidence)
+                : new(null, "delivery evidence stamp is incomplete");
         }
-        catch (JsonException) { return null; }
-        catch (IOException) { return null; }
+        catch (JsonException) { return new(null, "delivery evidence stamp is unreadable"); }
+        catch (IOException) { return new(null, "delivery evidence stamp could not be read"); }
     }
 
     private static async Task<DeliveryCheckOutcome> CheckCoreAsync(
