@@ -638,7 +638,6 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
 
         if dry_run:
             run_step(deps, daemon_restart_cmd, dry_run, print_fn)
-            print_fn("tool-refresh: restarted baton-daemon scheduled task")
         else:
             # #1777 fix round F1: a machine where the task was never registered, or where it is
             # deliberately Disabled, must not fail the whole refresh over a restart it was never
@@ -677,7 +676,14 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
     # Prune old tool installations
     prune_tools(deps, dry_run, print_fn, keep_count=3)
 
-    print_fn(f"tool-refresh: verified -- baton {version} ({pointer_sha}) installed at {tool_dir} and active")
+    if dry_run:
+        print_fn(
+            f"tool-refresh: [dry-run] preview complete -- target baton {version} ({pointer_sha}) "
+            f"at {tool_dir}; no installation, pointer flip, daemon restart, or active-daemon "
+            "verification performed"
+        )
+    else:
+        print_fn(f"tool-refresh: verified -- baton {version} ({pointer_sha}) installed at {tool_dir} and active")
     return 0
 
 
@@ -1009,6 +1015,13 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
         if code != 0:
             print(f"  FAILED: refresh exited {code}, want 0. Messages: {messages}")
             ok = False
+        if not any(m.startswith("tool-refresh: verified -- baton 2.3.4 ")
+                   and m.endswith(" and active") for m in messages):
+            print("  FAILED: real refresh did not report its verified active install")
+            ok = False
+        if any("[dry-run] preview complete" in m for m in messages):
+            print("  FAILED: real refresh falsely reported a preview")
+            ok = False
 
         current_file = os.path.join(tools_root, "current")
         if not os.path.isfile(current_file):
@@ -1269,6 +1282,7 @@ def _selftest_fail_closed_on_verify_failure() -> bool:
 
 def _selftest_dry_run_touches_nothing() -> bool:
     import tempfile
+    from unittest.mock import patch
 
     ok = True
     with tempfile.TemporaryDirectory() as td:
@@ -1292,7 +1306,9 @@ def _selftest_dry_run_touches_nothing() -> bool:
         _assert_isolated(deps)
 
         messages: List[str] = []
-        code = refresh(deps, dry_run=True, print_fn=messages.append)
+        # Exercise the scheduled-task preview on every CI host, including Linux gate runners.
+        with patch.object(sys, "platform", "win32"):
+            code = refresh(deps, dry_run=True, print_fn=messages.append)
         if code != 0:
             print(f"  FAILED: --dry-run exited {code}, want 0")
             ok = False
@@ -1301,6 +1317,16 @@ def _selftest_dry_run_touches_nothing() -> bool:
             ok = False
         if os.path.exists(os.path.join(tools_root, "current")):
             print("  FAILED: --dry-run wrote current pointer")
+            ok = False
+        if any(m == "tool-refresh: restarted baton-daemon scheduled task" for m in messages):
+            print("  FAILED: --dry-run falsely reported a completed daemon restart")
+            ok = False
+        if any(m.startswith("tool-refresh: verified -- ") and m.endswith(" and active")
+               for m in messages):
+            print("  FAILED: --dry-run falsely reported an active verified install")
+            ok = False
+        if not any(m.startswith("tool-refresh: [dry-run] preview complete -- ") for m in messages):
+            print("  FAILED: --dry-run did not identify its final report as a preview")
             ok = False
 
     return ok

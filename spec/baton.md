@@ -6266,6 +6266,8 @@ new `{BATON_HOME}/tools/<sha>`, verifies `--version` and `templates --json` dire
 atomically, installs/updates the launcher (uninstalling any legacy global tool in `~/.dotnet/tools` to prevent executable
 collision), rebuilds `src/Baton.Cli` Debug for the daemon-served Fleet Glass, restarts the `baton-daemon` scheduled task, and prunes
 old unreferenced tool directories. It requires no drain wait and writes no drain marker.
+`tool-refresh --dry-run` reports planned commands and a preview target, never a completed restart,
+installation, pointer flip, or active-daemon verification; only the real refresh reports those facts.
 
 **Manual drain marker.** Draining is retained solely as an operator-invoked stop: an explicit `{BATON_HOME}/draining.json`
 marker causes `baton dispatch`, `baton redispatch`, and `baton resume` to refuse with `ValidationRefused` (2) fail-closed;
