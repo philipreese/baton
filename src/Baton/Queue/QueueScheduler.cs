@@ -77,11 +77,27 @@ public static class QueueScheduler
         // passer means neither shuts (it bypasses both by construction) and for the head means exactly
         // what they meant before.
         var candidate = Candidate(items, liveWeight, freeGb, floorGb, settings, held)!;
+        var portfolio = QueuePortfolio.From(items);
 
         // One predicate for both bypasses (spec/baton.md §13), hoisted above the floor rather than
         // repeated in each condition, so the two can never diverge into a lane that skips one gate and
         // not the other.
         var bypasses = QueueWeights.BypassesCap(candidate.Role);
+
+        if (IsNewLifecycle(candidate) && portfolio.ActiveLifecycles >= settings.EffectiveMaxActiveLifecycles)
+        {
+            return QueueDecision.Wait(QueueWaitReason.LifecycleCap, candidate, liveWeight, freeGb, floorGb);
+        }
+
+        if (IsNewLifecycle(candidate) && portfolio.PrePullRequestLifecycles >= settings.EffectiveMaxPrePullRequestLifecycles)
+        {
+            return QueueDecision.Wait(QueueWaitReason.PrePullRequestCap, candidate, liveWeight, freeGb, floorGb);
+        }
+
+        if (IsReview(candidate) && portfolio.LiveReviews >= settings.EffectiveMaxLiveReviews)
+        {
+            return QueueDecision.Wait(QueueWaitReason.ReviewCap, candidate, liveWeight, freeGb, floorGb);
+        }
 
         if (!bypasses && BelowFloor(freeGb, floorGb))
         {
@@ -128,9 +144,23 @@ public static class QueueScheduler
         QueueSettings settings,
         bool held)
     {
+        if (held)
+        {
+            return Candidate(items);
+        }
+
+        var finishFirst = items.FirstOrDefault(i => IsEligible(i) && PriorityBandFor(i) == QueuePriorityBand.Review)
+            ?? items.FirstOrDefault(i => IsEligible(i) && PriorityBandFor(i) == QueuePriorityBand.Repair)
+            ?? items.FirstOrDefault(i => IsEligible(i) && PriorityBandFor(i) == QueuePriorityBand.Transition);
+        if (finishFirst is not null)
+        {
+            return finishFirst;
+        }
+
+        // Preserve the established weightless-review escape hatch for a slot-blocked new-work head.
+        // It is a host-capacity exception, distinct from lifecycle finish-first ordering above.
         var head = Candidate(items);
         if (head is null
-            || held
             || QueueWeights.BypassesCap(head.Role)
             || BelowFloor(freeGb, floorGb)
             || !OverCap(head, liveWeight, settings))
@@ -181,6 +211,35 @@ public static class QueueScheduler
     /// </remarks>
     internal static QueueItem? Candidate(IReadOnlyList<QueueItem> items) =>
         items.FirstOrDefault(IsEligible);
+
+    internal static bool IsActiveLifecycle(QueueItem item) =>
+        item.Stage is not null
+        && item.Retirement is null
+        && (item.AttemptId is not null
+            || item.ParentAttemptId is not null
+            || item.RoomDirectory is { Length: > 0 }
+            || item.PullRequest is not null
+            || item.Round != 0
+            || item.State != QueueItemState.Queued);
+
+    internal static bool IsNewLifecycle(QueueItem item) => item.Stage is not null && !IsActiveLifecycle(item);
+
+    private static bool IsReview(QueueItem item) => item.Stage is WorkStage.Review or WorkStage.ReReview;
+
+    internal static QueuePriorityBand PriorityBandFor(QueueItem item)
+    {
+        if (!IsActiveLifecycle(item))
+        {
+            return QueuePriorityBand.NewWork;
+        }
+
+        return item.Stage switch
+        {
+            WorkStage.Review or WorkStage.ReReview => QueuePriorityBand.Review,
+            WorkStage.Fix or WorkStage.Continue => QueuePriorityBand.Repair,
+            _ => QueuePriorityBand.Transition,
+        };
+    }
 
     /// <summary>The one candidacy predicate: queued, not external, not <c>ready</c>. Both
     /// <see cref="Candidate(IReadOnlyList{QueueItem})"/> and the pass-through pick read it.</summary>
@@ -249,6 +308,12 @@ public enum QueueWaitReason
     /// <summary>The candidate's weight would exceed <c>QueueSettings.MaxLiveWeight</c>.</summary>
     Slots,
 
+    LifecycleCap,
+
+    PrePullRequestCap,
+
+    ReviewCap,
+
     /// <summary>
     /// <c>baton dispatch</c>'s own runway gate held the vendor (Q5). Never produced by
     /// <see cref="QueueScheduler.Decide"/> — only by the launch attempt it authorized — and the item
@@ -268,7 +333,31 @@ public static class QueueWaitReasons
         QueueWaitReason.Gap => "gap",
         QueueWaitReason.Memory => "memory",
         QueueWaitReason.Slots => "slots",
+        QueueWaitReason.LifecycleCap => "lifecycle-cap",
+        QueueWaitReason.PrePullRequestCap => "pre-pr-cap",
+        QueueWaitReason.ReviewCap => "review-cap",
         QueueWaitReason.RunwayHeld => "runway-held",
         _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, "Unknown queue wait reason."),
     };
+}
+
+public enum QueuePriorityBand
+{
+    Review,
+    Repair,
+    Transition,
+    NewWork,
+}
+
+public sealed record QueuePortfolio(int ActiveLifecycles, int PrePullRequestLifecycles, int LiveReviews)
+{
+    internal static QueuePortfolio From(IReadOnlyList<QueueItem> items)
+    {
+        var active = items.Where(QueueScheduler.IsActiveLifecycle).ToList();
+        return new(
+            active.Count,
+            active.Count(item => item.PullRequest is null),
+            items.Count(item => item.State == QueueItemState.Launched
+                && item.Stage is WorkStage.Review or WorkStage.ReReview));
+    }
 }

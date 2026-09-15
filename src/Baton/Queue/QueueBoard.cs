@@ -78,6 +78,15 @@ public static class QueueBoard
             FreeGb: freeGb is { } gb ? Math.Round(gb, 1) : null,
             NightBand: settings.IsNightBand(localNow),
             Lanes: liveLanes);
+        var lifecycle = QueuePortfolio.From(items);
+        var lifecycleSlots = new QueueLifecycleSlotsView(
+            lifecycle.ActiveLifecycles,
+            settings.EffectiveMaxActiveLifecycles,
+            lifecycle.PrePullRequestLifecycles,
+            settings.EffectiveMaxPrePullRequestLifecycles,
+            lifecycle.LiveReviews,
+            settings.EffectiveMaxLiveReviews,
+            items.Where(QueueScheduler.IsActiveLifecycle).Select(item => item.Tag).ToList());
 
         // The scheduler's OWN pick, called rather than re-spelled -- QueueScheduler.Candidate's remarks
         // are why it is exposed at all. The row the panel marks `next` is therefore the row the
@@ -252,6 +261,7 @@ public static class QueueBoard
         return new QueueBoardView(
             Held: held,
             Slots: slots,
+            LifecycleSlots: lifecycleSlots,
             LastDecisionAt: lastDecision?.At,
             Pending: pending,
             PullRequests: pullRequests,
@@ -457,6 +467,16 @@ public sealed record QueueSlotsView(
     [property: JsonPropertyName("nightBand")] bool NightBand,
     [property: JsonPropertyName("lanes")] IReadOnlyList<QueueLiveLane> Lanes);
 
+/// <summary>The durable lifecycle work-in-progress counters alongside process-weight slots.</summary>
+public sealed record QueueLifecycleSlotsView(
+    [property: JsonPropertyName("active")] int Active,
+    [property: JsonPropertyName("activeCap")] int ActiveCap,
+    [property: JsonPropertyName("prePr")] int PrePullRequest,
+    [property: JsonPropertyName("prePrCap")] int PrePullRequestCap,
+    [property: JsonPropertyName("liveReviews")] int LiveReviews,
+    [property: JsonPropertyName("reviewCap")] int ReviewCap,
+    [property: JsonPropertyName("consumingTags")] IReadOnlyList<string> ConsumingTags);
+
 /// <summary>One pending row.</summary>
 /// <param name="Reason">A <see cref="QueueWaitReasons"/> token or a <see cref="QueueBoardWaitReasons"/> one.</param>
 /// <param name="IsNext">The item the scheduler would launch next. The row's POSITION does not say this
@@ -631,6 +651,7 @@ public static class QueueDeploymentStates
 public sealed record QueueBoardView(
     [property: JsonPropertyName("held")] bool Held,
     [property: JsonPropertyName("slots")] QueueSlotsView Slots,
+    [property: JsonPropertyName("lifecycleSlots")] QueueLifecycleSlotsView LifecycleSlots,
     [property: JsonPropertyName("lastDecisionAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     DateTimeOffset? LastDecisionAt,

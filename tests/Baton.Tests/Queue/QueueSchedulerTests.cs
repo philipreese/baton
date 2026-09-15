@@ -75,6 +75,53 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void Active_lifecycles_hold_a_new_start_after_processes_settle()
+    {
+        var active = Enumerable.Range(1, 4)
+            .Select(n => Item($"active-{n}") with { Stage = WorkStage.Review, Round = 1, State = QueueItemState.Done })
+            .ToArray();
+        var next = Item("new") with { Stage = WorkStage.Implement };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [.. active, next], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueWaitReason.LifecycleCap, decision.WaitReason);
+        Assert.Equal("new", decision.Item!.Tag);
+    }
+
+    [Fact]
+    public void Existing_fix_passes_a_new_work_head_while_pre_pr_capacity_is_full()
+    {
+        var active = new[]
+        {
+            Item("active-1") with { Stage = WorkStage.Review, Round = 1, State = QueueItemState.Done },
+            Item("active-2") with { Stage = WorkStage.Review, Round = 1, State = QueueItemState.Done },
+        };
+        var fix = Item("fix") with { Stage = WorkStage.Fix, Round = 1 };
+        var start = Item("start") with { Stage = WorkStage.Implement };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [start, .. active, fix], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("fix", decision.Item!.Tag);
+    }
+
+    [Fact]
+    public void Live_reviews_are_bounded_without_spending_mutating_weight()
+    {
+        var live = new[]
+        {
+            Item("live-1") with { Stage = WorkStage.Review, State = QueueItemState.Launched, Round = 1 },
+            Item("live-2") with { Stage = WorkStage.ReReview, State = QueueItemState.Launched, Round = 1 },
+        };
+        var review = Item("review") with { Stage = WorkStage.Review, Round = 1 };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [.. live, review], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueWaitReason.ReviewCap, decision.WaitReason);
+        Assert.Equal("review", decision.Item!.Tag);
+    }
+
+    [Fact]
     public void A_held_queue_waits_on_hold_even_with_a_launchable_item()
     {
         var items = new[] { Item() };
