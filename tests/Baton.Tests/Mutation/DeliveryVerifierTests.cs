@@ -84,6 +84,35 @@ public sealed class DeliveryVerifierTests
     }
 
     [Fact]
+    public async Task Incomplete_delivery_evidence_never_defaults_to_a_passing_observation()
+    {
+        var outputDirectory = TempPath("incomplete-evidence");
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            var path = Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName);
+            await File.WriteAllTextAsync(path, """{"observedAt":"2026-09-15T00:00:00Z"}""", TestContext.Current.CancellationToken);
+
+            var incomplete = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Null(incomplete.Evidence);
+            Assert.Contains("incomplete", incomplete.Problem, StringComparison.Ordinal);
+
+            await File.WriteAllTextAsync(path, """{"observedAt":"2026-09-15T00:00:00Z","verification":"Failed"}""", TestContext.Current.CancellationToken);
+            var failed = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Equal(DeliveryCheckStatus.Failed, failed.Evidence?.Verification);
+
+            await File.WriteAllTextAsync(path, """{"observedAt":"not-a-time","verification":"Passed","localHead":"a","branch":"lane","remoteHead":"a"}""", TestContext.Current.CancellationToken);
+            var malformedTime = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
+            Assert.Null(malformedTime.Evidence);
+            Assert.Contains("incomplete", malformedTime.Problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(outputDirectory);
+        }
+    }
+
+    [Fact]
     public async Task Unpushed_local_commits_on_top_of_a_pushed_branch_fail_branch_not_pushed()
     {
         var (workspace, origin) = CreatePushedWorkspace("feature-c");

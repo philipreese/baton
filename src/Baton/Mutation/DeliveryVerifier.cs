@@ -207,12 +207,31 @@ public static class DeliveryVerifier
         {
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             var evidence = await JsonSerializer.DeserializeAsync<DeliveryEvidence>(stream, EvidenceJsonOptions, cancellationToken).ConfigureAwait(false);
-            return evidence is { ObservedAt.Length: > 0 }
+            return IsCompleteEvidence(evidence)
                 ? new(evidence)
                 : new(null, "delivery evidence stamp is incomplete");
         }
         catch (JsonException) { return new(null, "delivery evidence stamp is unreadable"); }
         catch (IOException) { return new(null, "delivery evidence stamp could not be read"); }
+    }
+
+    private static bool IsCompleteEvidence(DeliveryEvidence? evidence)
+    {
+        if (evidence is null
+            || !DateTimeOffset.TryParse(evidence.ObservedAt, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out _)
+            || !Enum.IsDefined(evidence.Verification))
+        {
+            return false;
+        }
+
+        // A pass is an affirmative claim about one exact local/remote relationship. Failed and
+        // NotRun deliberately permit unavailable Git facts: requiring them would turn a truthful
+        // fail-closed observation into an unreadable stamp on replay.
+        return evidence.Verification != DeliveryCheckStatus.Passed
+            || (!string.IsNullOrWhiteSpace(evidence.LocalHead)
+                && !string.IsNullOrWhiteSpace(evidence.Branch)
+                && !string.IsNullOrWhiteSpace(evidence.RemoteHead));
     }
 
     private static async Task<DeliveryCheckOutcome> CheckCoreAsync(
