@@ -249,7 +249,8 @@ public sealed class WorkItemAdvancer
             stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict,
             reading.Number, reading.HeadSha, head, reading.Succeeded, reading.IsOpen,
             reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
-            arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested);
+            arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
+            sentinel is null ? null : sentinel.Steps.Count > 0);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;

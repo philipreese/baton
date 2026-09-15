@@ -7462,12 +7462,17 @@ written:
 | implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: true` | **continue** | structured arrest-boundary evidence proves work to recover |
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: false` or absent | **operator** | no observed work, or no measurement, justifies an automatic continuation |
+| implement / fix / continue | anything else, no PR and a readable terminal sentinel with zero worker steps | **operator** | positive empty-step evidence proves there is no worker work to recover; retain the room for terminal-backed disposition |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
 | review / re-review | anything else, readable verdict | **route by decision** | a later failed or indeterminate settlement does not discard a readable reviewer decision |
 | review / re-review | anything else, no readable verdict | **operator** | silence cannot spend another review round |
 | fix, `automaticFixUsed: true`, round at the ceiling | succeeded-shaped, PR open | **re-review** | the one automatic repair is not operator-ready before its paired exact-head review |
 | any other stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
+
+An absent or unreadable sentinel does not prove zero worker steps. The zero-step/no-PR stop applies
+only to positive terminal evidence; a halted row keeps that terminal room attached rather than
+clearing its only retirement proof for a continuation that cannot launch.
 
 **Draft is the lifecycle's visible readiness signal, not merge authority.** Every open PR with an
 unfinished review, fix, continuation, stale-approval, or required-check obligation is reconciled to draft.

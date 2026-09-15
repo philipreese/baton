@@ -1474,6 +1474,37 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_zero_step_failed_implement_without_a_pr_halts_with_its_terminal_room_and_can_retire()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var advancer = Advancer(new FakeGh("[]"), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var fact = Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Equal(room, item.RoomDirectory);
+            Assert.Contains("zero worker steps", item.Error!, StringComparison.Ordinal);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: item.Tag, Reason: "terminal prelaunch refusal"),
+                TextWriter.Null, Ct);
+            Assert.NotNull((await ReadBackAsync()).Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_stalled_lane_with_its_work_pushed_is_re_reviewed_and_an_unpushed_one_continues()
     {
         var home = CreateTempHome();

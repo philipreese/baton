@@ -28,9 +28,11 @@ public sealed class WorkItemLifecycleTests
         bool? prDraft = true,
         string? requiredChecks = PullRequestChecks.Passing,
         bool? workspaceChanged = null,
-        IndeterminateProducer? indeterminateProducer = null) =>
+        IndeterminateProducer? indeterminateProducer = null,
+        bool? workerStepsRecorded = null) =>
         new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead,
-            prObserved, prOpen, prDraft, requiredChecks, workspaceChanged, indeterminateProducer);
+            prObserved, prOpen, prDraft, requiredChecks, workspaceChanged, indeterminateProducer,
+            workerStepsRecorded);
 
     /// <summary>
     /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
@@ -352,6 +354,34 @@ public sealed class WorkItemLifecycleTests
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Implement, outcome: WorkflowOutcome.Failed,
             prHead: "deadbeefdeadbeef", workspaceHead: "0000111122223333"));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.Continue, transition.NextStage);
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Implement)]
+    [InlineData(WorkStage.Fix)]
+    [InlineData(WorkStage.Continue)]
+    public void A_zero_step_failed_mutating_lane_with_no_pr_stops_without_a_continuation(WorkStage stage)
+    {
+        var transition = WorkItemLifecycle.Decide(At(stage, outcome: WorkflowOutcome.Failed,
+            pr: null, prHead: null, workerStepsRecorded: false));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Contains("zero worker steps", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(null)]
+    public void Worker_steps_or_unreadable_step_evidence_do_not_mint_a_zero_step_refusal(
+        bool? workerStepsRecorded)
+    {
+        var transition = WorkItemLifecycle.Decide(At(WorkStage.Implement,
+            outcome: WorkflowOutcome.Failed, pr: null, prHead: null,
+            workerStepsRecorded: workerStepsRecorded));
 
         Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
         Assert.Equal(WorkStage.Continue, transition.NextStage);
