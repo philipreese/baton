@@ -58,6 +58,19 @@ public sealed class DeadPumpProbe : BackgroundService
     /// <summary>The stable marker on this probe's <see cref="FlowEvent.ExecutionFailed"/> arm.</summary>
     internal const string FailureReasonPrefix = "Arrested: pump dead —";
 
+    /// <summary>The exact durable journal attribution shared by dead-pump projection and retirement.
+    /// A generic terminal event without this marker is not evidence for the no-sentinel exception.</summary>
+    internal static bool IsTerminalDiagnostic(FlowEvent flowEvent) => flowEvent switch
+    {
+        FlowEvent.ExecutionFailed
+        {
+            FailureClassification: FailureClassification.Permanent,
+            Reason: { } reason,
+        } => reason.StartsWith(FailureReasonPrefix, StringComparison.Ordinal),
+        FlowEvent.StepRetryForeclosed { ForeclosedBy: DiagnosticName } => true,
+        _ => false,
+    };
+
     private readonly DaemonSettings _settings;
 
     public DeadPumpProbe(DaemonSettings settings)

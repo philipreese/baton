@@ -777,16 +777,8 @@ public sealed class QueueSchedulerService : BackgroundService
             var snapshot = await SnapshotBinder.LoadFromFileAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
             var entries = await new FlowEventLogReader(logPath)
                 .ReadAllEntriesWithTimestampsAsync(cancellationToken).ConfigureAwait(false);
-            if (!entries.OfType<LogEntry.FlowLogEntry>().Any(entry => entry.Event switch
-                {
-                    FlowEvent.ExecutionFailed
-                    {
-                        FailureClassification: FailureClassification.Permanent,
-                        Reason: { } reason,
-                    } => reason.StartsWith(DeadPumpProbe.FailureReasonPrefix, StringComparison.Ordinal),
-                    FlowEvent.StepRetryForeclosed { ForeclosedBy: DeadPumpProbe.DiagnosticName } => true,
-                    _ => false,
-                }))
+            if (!entries.OfType<LogEntry.FlowLogEntry>()
+                .Any(entry => DeadPumpProbe.IsTerminalDiagnostic(entry.Event)))
             {
                 return null;
             }
