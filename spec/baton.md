@@ -7242,10 +7242,15 @@ which is the sibling-repos layout the runner assumed.
 
 When the first lane has no reusable `w<n>` worktree but its branch is positively found locally or on
 `origin`, add selects the lowest free matching pair in order: `<n>-lane-2` with `<root>/w<n>-2`, then
-`-3`, and so on. A failed `gh issue develop` alone is not collision evidence: authentication, network,
-and other ambiguous failures refuse with their original diagnostic. Selection is retried after a
-concurrent creator wins, so two adds never write rows pointing at one branch or workspace. Every
-`--issue` queue row, lifecycle or ordinary, persists the exact selected branch; later PR discovery and
+`-3`, and so on. This includes a canonical `w<n>` path Git positively registers on a **different**
+branch: the old path/branch are left untouched, and only a proven canonical-ref collision permits
+suffix selection. A canonical directory with no exact Git registration, an unreadable registration
+probe, or a different registered branch without a proven canonical ref remains a refusal rather than
+an inferred reusable lane. A failed `gh issue develop` alone is not collision evidence:
+authentication, network, and other ambiguous failures refuse with their original diagnostic.
+Selection is retried after a concurrent creator wins, so two adds never write rows pointing at one
+branch or workspace. Every `--issue` queue row, lifecycle or ordinary, persists the exact selected
+branch; later PR discovery and
 lifecycle advancement read that value rather than re-deriving `<n>-lane`.
 
 `import <file>` reads the runner's own shape (`{tag, role, model, effort, skills, timeout, workspace|issue,

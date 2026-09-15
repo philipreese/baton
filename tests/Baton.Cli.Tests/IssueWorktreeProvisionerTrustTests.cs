@@ -400,18 +400,90 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
     }
 
     [Fact]
-    public async Task Provision_refuses_an_existing_canonical_workspace_registered_on_another_branch()
+    public async Task Provision_preserves_a_reopened_issues_older_worktree_and_selects_a_free_suffix()
     {
         using var home = new IsolatedBatonHome();
         var repository = MakeDirectory("baton");
-        var workspace = Path.Combine(_root, "w2293");
-        Directory.CreateDirectory(workspace);
+        var oldWorkspace = Path.Combine(_root, "w2293");
+        var nextWorkspace = Path.Combine(_root, "w2293-2");
+        var commonDir = Path.Combine(repository, ".git");
+        Directory.CreateDirectory(oldWorkspace);
+        var oldSentinel = Path.Combine(oldWorkspace, "keep.bin");
+        byte[] originalBytes = [0, 1, 2, 3, 255];
+        File.WriteAllBytes(oldSentinel, originalBytes);
+        var calls = new List<string[]>();
+        Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            if (args is ["worktree", "list", "--porcelain"])
+                return Task.FromResult((0, $"worktree {oldWorkspace}\nbranch refs/heads/2293-partial-artifact\n\n"));
+            if (args is ["show-ref", "--verify", "--quiet", "refs/heads/2293-lane"])
+                return Task.FromResult((0, string.Empty));
+            if (args is ["show-ref", "--verify", "--quiet", "refs/heads/2293-lane-2"])
+                return Task.FromResult((1, string.Empty));
+            if (args is ["ls-remote", "--heads", "origin", "refs/heads/2293-lane-2"])
+                return Task.FromResult((0, string.Empty));
+            if (file == "git" && args is ["worktree", "add", var workspace, "2293-lane-2"] && workspace == nextWorkspace)
+                Directory.CreateDirectory(nextWorkspace);
+            return Task.FromResult((0, string.Empty));
+        }
+
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, Probe(commonDir, repository, nextWorkspace),
+            TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(nextWorkspace, "2293-lane-2"), provisioned);
+        Assert.True(Directory.Exists(oldWorkspace));
+        Assert.Equal(originalBytes, File.ReadAllBytes(oldSentinel));
+        Assert.Contains(calls, args => args is ["issue", "develop", "2293", "--name", "2293-lane-2", ..]);
+        Assert.DoesNotContain(calls, args => args is ["worktree", "add", var workspace, ..] && workspace == oldWorkspace);
+        Assert.DoesNotContain(calls, args => args is ["worktree", "remove", ..] or ["branch", "-D", ..]);
+    }
+
+    [Fact]
+    public async Task Provision_refuses_an_older_registered_workspace_without_a_proven_canonical_branch_collision()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var oldWorkspace = Path.Combine(_root, "w2293");
+        Directory.CreateDirectory(oldWorkspace);
+        var calls = new List<string[]>();
+        Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(args switch
+            {
+                ["worktree", "list", "--porcelain"] => (0, $"worktree {oldWorkspace}\nbranch refs/heads/2293-partial-artifact\n\n"),
+                ["show-ref", "--verify", "--quiet", "refs/heads/2293-lane"] => (1, string.Empty),
+                ["ls-remote", "--heads", "origin", "refs/heads/2293-lane"] => (0, string.Empty),
+                _ => (0, string.Empty),
+            });
+        }
+
+        var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, probe: null,
+            output: TextWriter.Null, cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.Contains("2293-partial-artifact", refusal.Message, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(oldWorkspace));
+        Assert.DoesNotContain(calls, args => args is ["issue", "develop", ..] or ["worktree", "add", ..]);
+    }
+
+    [Theory]
+    [InlineData("unregistered")]
+    [InlineData("unreadable")]
+    public async Task Provision_refuses_an_unregistered_or_unreadable_existing_canonical_workspace(string caseName)
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var oldWorkspace = Path.Combine(_root, "w2293");
+        Directory.CreateDirectory(oldWorkspace);
         var calls = new List<string[]>();
         Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
         {
             calls.Add(args.ToArray());
             return Task.FromResult(args is ["worktree", "list", "--porcelain"]
-                ? (0, $"worktree {workspace}\nbranch refs/heads/some-other-branch\n\n")
+                ? caseName == "unreadable" ? (1, "git registration probe failed") : (0, string.Empty)
                 : (0, string.Empty));
         }
 
@@ -419,8 +491,9 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2293, repository, _root, CapturedRepository, Runner, probe: null,
             output: TextWriter.Null, cancellationToken: TestContext.Current.CancellationToken));
 
-        Assert.Contains("some-other-branch", refusal.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(calls, args => args is ["issue", "develop", ..]);
+        Assert.Contains("worktree", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(Directory.Exists(oldWorkspace));
+        Assert.DoesNotContain(calls, args => args is ["issue", "develop", ..] or ["worktree", "add", ..]);
     }
 
     [Fact]
