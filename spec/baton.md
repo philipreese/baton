@@ -1691,6 +1691,11 @@ mark), an open PR exists for that branch (`gh pr list --head <branch> --json num
 `implement: Succeeded` reports describing a push and a PR while their branch sat only local — the
 motivating measurement.
 
+A machine-owned, create-new `delivery-evidence.json` is also written in that post-exit boundary beside
+the worker output: it records the observation time, final local HEAD/branch, readable remote head and
+PR number, and the check verdict. It never rewrites `changes.md`; an existing stamp wins on restart, so
+the worker narrative is explicitly only an earlier as-of account and cannot certify later delivery.
+
 A failure appends `FlowEvent.VerifyFailed` with `VerifyFailedKind.DeliveryFailed` and `FailingMembers`
 naming exactly which of the two is missing — `branch-not-pushed`, `pr-not-open`, or both — settling
 `Indeterminate` via the same `IndeterminateProducer.VerifyFailed` path an ordinary gate failure uses, so

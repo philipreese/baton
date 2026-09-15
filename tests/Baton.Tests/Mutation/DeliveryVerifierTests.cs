@@ -51,6 +51,34 @@ public sealed class DeliveryVerifierTests
     }
 
     [Fact]
+    public async Task Delivery_evidence_is_immutable_and_records_the_post_execution_HEAD()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-evidence");
+        var outputDirectory = TempPath("evidence-output");
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            var gh = WriteFakeGh(workspace, """[{"number":2309}]""");
+            var outcome = await DeliveryVerifier.CheckAsync(workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: gh);
+            await DeliveryVerifier.WriteEvidenceAsync(outputDirectory, workspace, expectPr: true, outcome, TestContext.Current.CancellationToken, ghProgram: gh);
+            var evidencePath = Path.Combine(outputDirectory, DeliveryVerifier.DeliveryEvidenceFileName);
+            var original = await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken);
+
+            await DeliveryVerifier.WriteEvidenceAsync(outputDirectory, workspace, expectPr: true,
+                new DeliveryCheckOutcome(DeliveryCheckStatus.Failed), TestContext.Current.CancellationToken, ghProgram: gh);
+
+            Assert.Contains(GitRevParseHead(workspace), original, StringComparison.Ordinal);
+            Assert.Contains("\"pullRequestNumber\":2309", original, StringComparison.Ordinal);
+            Assert.Equal(original, await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+            if (Directory.Exists(outputDirectory)) Directory.Delete(outputDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Unpushed_local_commits_on_top_of_a_pushed_branch_fail_branch_not_pushed()
     {
         var (workspace, origin) = CreatePushedWorkspace("feature-c");

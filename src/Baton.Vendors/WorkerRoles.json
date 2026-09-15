@@ -53,7 +53,7 @@
       {
         "name": "changes.md",
         "schema": "none",
-        "instruction": "Write a summary of the changes you made -- which files, and what and why -- to $BATON_OUTPUT_DIR/changes.md. This is a floor and a handoff, not proof the change is correct; a following review verifies that against the diff."
+        "instruction": "Write a summary of the changes you made -- which files, and what and why -- to $BATON_OUTPUT_DIR/changes.md, stating its local HEAD and observation time. This is an early-preserved narrative, not proof of later commit, push, or PR delivery; a following review verifies it against the diff."
       }
     ]
   },

@@ -75,6 +75,9 @@ public sealed record OpenPullRequestReading(bool? AnyOpen, int? Number = null, s
 /// </summary>
 public static class DeliveryVerifier
 {
+    /// <summary>The machine-owned, append-only observation written after a delivery-capable worker exits.</summary>
+    public const string DeliveryEvidenceFileName = "delivery-evidence.json";
+
     /// <summary>
     /// <c>git ls-remote --exit-code</c>'s own documented meaning for this exit code: the query succeeded
     /// in reaching the remote, and no ref matched.
@@ -119,6 +122,40 @@ public static class DeliveryVerifier
         // operator cancel landing mid-check can never be misread as a tool-unavailable NotRun (or,
         // worse, silently fall through to the ordinary Succeeded outcome append a NotRun does).
         return cancellationToken.IsCancellationRequested ? DeliveryCheckOutcome.CancelledOutcome : outcome;
+    }
+
+    /// <summary>Records one post-execution observation without rewriting worker-authored output.</summary>
+    public static async Task WriteEvidenceAsync(string outputDirectory, string? workingDirectory, bool expectPr,
+        DeliveryCheckOutcome deliveryOutcome, CancellationToken cancellationToken, string gitProgram = "git", string ghProgram = "gh")
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        var path = Path.Combine(outputDirectory, DeliveryEvidenceFileName);
+        if (File.Exists(path)) return;
+        string? branch = null, localHead = null, remoteHead = null, observationProblem = null;
+        int? pullRequestNumber = null;
+        if (string.IsNullOrWhiteSpace(workingDirectory)) observationProblem = "no working directory for this execution";
+        else
+        {
+            var branchResult = await RunAsync(gitProgram, ["rev-parse", "--abbrev-ref", "HEAD"], workingDirectory, cancellationToken).ConfigureAwait(false);
+            var headResult = await RunAsync(gitProgram, ["rev-parse", "HEAD"], workingDirectory, cancellationToken).ConfigureAwait(false);
+            branch = branchResult.Spawned && branchResult.ExitCode == 0 ? branchResult.Output.Trim() : null;
+            localHead = headResult.Spawned && headResult.ExitCode == 0 ? headResult.Output.Trim() : null;
+            if (branch is null || localHead is null) observationProblem = "could not determine the final local branch and HEAD";
+            else if (!string.Equals(branch, "HEAD", StringComparison.Ordinal))
+            {
+                var remote = await RunNetworkAsync(gitProgram, ["ls-remote", "--heads", "origin", branch], workingDirectory, cancellationToken).ConfigureAwait(false);
+                remoteHead = remote.Spawned && remote.ExitCode == 0 ? remote.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() : null;
+                if (expectPr) pullRequestNumber = (await ReadOpenPullRequestAsync(workingDirectory, branch, ghProgram, cancellationToken).ConfigureAwait(false)).Number;
+            }
+        }
+        var evidence = JsonSerializer.Serialize(new { observedAt = DateTimeOffset.UtcNow.ToString("O"), localHead, branch, remoteHead, pullRequestNumber, verification = deliveryOutcome.Status.ToString(), failingMembers = deliveryOutcome.FailingMembers, verificationReason = deliveryOutcome.Tail ?? deliveryOutcome.NotRunReason, observationProblem });
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            await using var writer = new StreamWriter(stream);
+            await writer.WriteAsync(evidence.AsMemory(), cancellationToken).ConfigureAwait(false);
+        }
+        catch (IOException) when (File.Exists(path)) { }
     }
 
     private static async Task<DeliveryCheckOutcome> CheckCoreAsync(

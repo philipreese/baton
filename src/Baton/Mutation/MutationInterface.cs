@@ -2418,6 +2418,9 @@ public static class MutationInterface
                 var deliveryOutcome = await DeliveryVerifier.CheckAsync(
                     binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
                     shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
+                await DeliveryVerifier.WriteEvidenceAsync(
+                    prepared.OutputDirectory, binding.Target.WorkingDirectory, binding.ExpectPr,
+                    deliveryOutcome, CancellationToken.None).ConfigureAwait(false);
                 switch (deliveryOutcome.Status)
                 {
                     // #1788 review: the operator's own cancel landing inside this check's own window --
