@@ -370,6 +370,47 @@ public sealed class FleetEventLog
             () => (IReadOnlyList<FleetEvent>)Read(_livePath).Events.Where(e => e.Id > cursor).ToList()), cancellationToken);
     }
 
+    /// <summary>
+    /// A strict, read-deny-write snapshot of both retained segments for an operator proof. Unlike
+    /// display replay, a torn tail or unreadable segment cannot be treated as absence. The caller
+    /// holds the streams through its queue commit so append/rotation cannot invalidate the proof.
+    /// </summary>
+    internal FleetEventProofLease AcquireRetainedProof()
+    {
+        FileStream? rollover = null;
+        FileStream? live = null;
+        try
+        {
+            try { rollover = new FileStream(_rolloverPath, FileMode.Open, FileAccess.Read, FileShare.Read); }
+            catch (FileNotFoundException) { }
+            live = new FileStream(_livePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var older = rollover is null ? new FleetEventReadResult([], null) : Read(_rolloverPath);
+            var newer = Read(_livePath);
+            if (older.TornTailOffset is not null || newer.TornTailOffset is not null)
+            {
+                throw new IOException("The retained fleet-event proof has an incomplete tail.");
+            }
+            return new FleetEventProofLease(rollover, live, older.Events.Concat(newer.Events).ToList());
+        }
+        catch
+        {
+            rollover?.Dispose();
+            live?.Dispose();
+            throw;
+        }
+    }
+
+    internal sealed class FleetEventProofLease(FileStream? rollover, FileStream live, IReadOnlyList<FleetEvent> events)
+        : IDisposable
+    {
+        internal IReadOnlyList<FleetEvent> Events { get; } = events;
+        public void Dispose()
+        {
+            live.Dispose();
+            rollover?.Dispose();
+        }
+    }
+
     internal static string Serialize(FleetEvent entry) => JsonSerializer.Serialize(entry, Json);
 
     private FleetEvent? AppendLocked(FleetEventDraft draft)

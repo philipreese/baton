@@ -7137,7 +7137,17 @@ append-only ledger fact. Queue mutation linearizes before ledger append; replay 
 retained operation in order after a crash or append failure, and a successor disposition is forbidden
 until its predecessors have been durably acknowledged. A failed row with no room directory is not
 terminal proof: a late room may exist before its directory is persisted, so operator retirement must
-refuse it. The sole automatic exception is a failed row whose durable `admission.result` is explicitly
+refuse it unless the current attempt has an exact typed `attemptRefused` event with no
+`attemptStarted`/`attemptSettled` event, and its named parent attempt has matching `attemptStarted`
+and `attemptSettled` events for one room whose terminal sentinel agrees with the settled outcome.
+An older `Cancelled` next-stage row may likewise be operator-retired only when it has no claimed
+current attempt or room, its exact parent has that same settled-room proof, and an exact keyed
+`cancelled` queue-decision fact agrees with `cancelledAt`; a later launch for the work forbids it.
+Both operator exceptions require strict, retained live-plus-rollover event and decision reads and
+read-deny-write leases held through the queue commit. Missing, torn, mismatched, or changing proof
+keeps the lifecycle active; a bare admitted admission result or Cancelled state is never proof.
+These are operator dispositions, not a new automatic merged-retirement shortcut.
+The sole automatic exception is a failed row whose durable `admission.result` is explicitly
 `refused`: that refusal happened before execution, proves no room launch was admitted, and permits a
 trusted positive merged-PR observation to retire the row. An admitted, unknown, or legacy admission
 does not prove this and remains active; neither does a closed-but-unmerged PR. A room-bearing failed
