@@ -109,9 +109,7 @@ test-other = { cmd = "python tools/buildlock.py dotnet build --no-incremental &&
 # Standalone use is EXPOSED to the #688 stale-assembly trap `test` exists to close: outside a
 # gates run, use `pixi run test`.
 #
-# #1833: `-m:1` (an MSBuild switch, #1671) no longer serializes anything under MTP -- MEASURED
-# forwarding it to each test module as an unrecognised argument, which made every module report
-# "Zero tests ran" (exit 5, invalid command line) rather than actually running serialized. MTP's own
+# #1833: MSBuild's `-m:1` became an invalid MTP argument instead of serializing test modules.
 # #2340: three-project gates fan-out; measurement and accepted trade-off live in spec/baton.md C-13.
 test-no-build = { cmd = "python tools/buildlock.py --replay dotnet test --no-build --max-parallel-test-modules 3 --minimum-expected-tests 1" }
 # Coverage report (#199): collects per-test-project Cobertura via Microsoft.Testing.Extensions.
