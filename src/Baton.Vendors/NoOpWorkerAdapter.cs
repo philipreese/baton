@@ -25,7 +25,7 @@ public sealed class NoOpWorkerAdapter : IWorkerAdapter
             : "noop-output";
 
         return OperatingSystem.IsWindows()
-            ? new CoreDispatchTarget("cmd", ["/c", $"echo ok>%BATON_OUTPUT_DIR%\\{outputName}"])
-            : new CoreDispatchTarget("sh", ["-c", $"echo ok > \"$BATON_OUTPUT_DIR/{outputName}\""]);
+            ? new CoreDispatchTarget("cmd", ["/c", $"echo ok>%BATON_OUTPUT_DIR%\\{outputName}"], WorkingDirectory: invocation.WorkingDirectory)
+            : new CoreDispatchTarget("sh", ["-c", $"echo ok > \"$BATON_OUTPUT_DIR/{outputName}\""], WorkingDirectory: invocation.WorkingDirectory);
     }
 }
