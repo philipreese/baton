@@ -282,14 +282,13 @@ public class TerminalSentinelEndToEndTests
     }
 
     /// <summary>
-    /// #2030's red/green proof: cancelling a persisted room reaches the shared terminal-delivery
-    /// seam through the real CLI. The hermetic git.exe exits after starting a sleeper which inherits
-    /// its process handles. Before the fix Baton stays live draining that exited git child, and the
-    /// wrapper cannot reach EOF. The command is complete only when its terminal fact is durable, the
-    /// descendant is gone, and both Baton and its wrapper have exited.
+    /// A cancellation with no completed delivery-capable execution must settle from durable room
+    /// facts alone. In particular, terminal ledger projection must not revive the retired live
+    /// workspace probe merely to populate a cost row: that would observe a later remote state and
+    /// make cancellation wait for an unrelated child process before its wrapper can reach EOF.
     /// </summary>
     [Fact]
-    public async Task Cancelling_a_persisted_open_room_contains_a_delivery_probe_descendant_before_wrapper_eof()
+    public async Task Cancelling_a_persisted_open_room_does_not_revive_a_live_delivery_probe_before_wrapper_eof()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-cancel-wrapper-exit-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
@@ -313,10 +312,8 @@ public class TerminalSentinelEndToEndTests
             Assert.Equal(0, wrapper.ExitCode);
             Assert.True(File.Exists(markerPath), "the wrapper did not observe Baton stdout/stderr reaching EOF after cancellation");
             var sleeperPidPath = Path.Combine(fixtureBin, "sleeper.pid");
-            Assert.True(File.Exists(sleeperPidPath), "the delivery probe did not launch the inherited-handle descendant");
-            Assert.False(IsProcessAlive(int.Parse(await File.ReadAllTextAsync(
-                sleeperPidPath, TestContext.Current.CancellationToken))),
-                "the delivery-probe descendant survived command settlement");
+            Assert.False(File.Exists(sleeperPidPath),
+                "terminal settlement must read completed delivery evidence, not launch a new live workspace probe");
             var sentinelPath = Path.Combine(roomDirectory, "terminal.json");
             Assert.True(File.Exists(sentinelPath), "the terminal fact was not written before delivery-probe cleanup");
             var view = JsonSerializer.Deserialize<WorkflowStatusView>(await File.ReadAllTextAsync(sentinelPath, TestContext.Current.CancellationToken));
