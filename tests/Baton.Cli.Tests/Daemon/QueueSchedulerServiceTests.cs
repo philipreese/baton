@@ -1135,6 +1135,65 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_merged_retirement_after_a_pre_launch_failure_CAS_suppresses_the_delayed_failure_record()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "failure-before-merged-retirement";
+            var lifecycle = Item(tag, role: "review") with
+            {
+                Stage = WorkStage.Review,
+                Repository = "github.com/aer-works/baton",
+                PullRequest = 2307,
+                Workspace = home,
+                Round = 2,
+                LastVerdict = "C:\\fixtures\\verdict.json",
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [lifecycle] }, Ct);
+
+            var failureCommitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var appendFailure = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var service = new QueueSchedulerService(
+                (_, _) => throw new InvalidOperationException("the pre-launch failure must prevent launch"),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                afterFailureMutation: _ =>
+                {
+                    failureCommitted.TrySetResult(true);
+                    return appendFailure.Task;
+                },
+                workspaceLocks: _ => [Path.Combine(home, ".git", "index.lock")]);
+            var advancer = new WorkItemAdvancer(new MergedObservationGh(), (_, _) => Task.FromResult<string?>(null));
+
+            var tick = service.TickOnceAsync(Ct);
+            await failureCommitted.Task.WaitAsync(Ct);
+            await advancer.RefreshPullRequestObservationsAsync(DateTimeOffset.UtcNow, Ct);
+            appendFailure.TrySetResult(true);
+            await tick;
+
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueRetirement.Merged, retained.Retirement?.Kind);
+            Assert.Equal(WorkStage.Review, retained.Stage);
+            Assert.Equal(2, retained.Round);
+            Assert.Equal(lifecycle.LastVerdict, retained.LastVerdict);
+            Assert.Equal(QueueItemState.Failed, retained.State);
+            Assert.Null(retained.RoomDirectory);
+            Assert.Contains("Git lock file", retained.Error!, StringComparison.Ordinal);
+            var decisions = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.Contains(decisions, entry => entry.Tag == tag && entry.Decision == QueueDecisionEntry.Retired);
+            Assert.DoesNotContain(decisions, entry => entry.Tag == tag
+                && entry.Decision is QueueDecisionEntry.Failed or QueueDecisionEntry.Launched);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_launchable_item_is_marked_launched_with_its_room_and_recorded_as_launched()
     {
         var home = CreateTempHome();

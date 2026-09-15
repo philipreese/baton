@@ -50,6 +50,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<string, IReadOnlyList<string>> _workspaceLocks;
     private readonly WorkItemAdvancer _advancer;
     private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
+    private readonly Func<CancellationToken, Task>? _afterFailureMutation;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
 
     private DateTimeOffset? _lastLaunchAt;
@@ -73,6 +74,7 @@ public sealed class QueueSchedulerService : BackgroundService
         WorkItemAdvancer? advancer = null,
         Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null,
         Func<CancellationToken, Task>? beforeLaunchClaim = null,
+        Func<CancellationToken, Task>? afterFailureMutation = null,
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
         Func<string, CancellationToken, Task<string?>>? workspaceHead = null,
         Func<string, IReadOnlyList<string>>? workspaceLocks = null)
@@ -85,6 +87,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _workspaceHead = workspaceHead ?? WorkspaceHead.TryCaptureAsync;
         _workspaceLocks = workspaceLocks ?? (workspace => GitWorkspaceLockProbe.FindExisting(workspace));
         _beforeLaunchClaim = beforeLaunchClaim;
+        _afterFailureMutation = afterFailureMutation;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
         _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
     }
@@ -494,7 +497,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 CancellationToken.None).ConfigureAwait(false);
 
             // The item is already marked launched, above. All that is left is the fact.
-            await RecordAsync(
+            await RecordIfNotRetiredAsync(item.Tag,
                 new QueueDecisionEntry(
                     now, item.Tag, QueueDecisionEntry.Launched, null,
                     decision.LiveWeight, decision.FreeGb, decision.FloorGb,
@@ -596,7 +599,12 @@ public sealed class QueueSchedulerService : BackgroundService
             return;
         }
 
-        await RecordAsync(
+        if (_afterFailureMutation is not null)
+        {
+            await _afterFailureMutation(cancellationToken).ConfigureAwait(false);
+        }
+
+        await RecordIfNotRetiredAsync(item.Tag,
             new QueueDecisionEntry(
                 now, item.Tag, QueueDecisionEntry.Failed, error,
                 decision.LiveWeight, decision.FreeGb, decision.FloorGb,
@@ -649,7 +657,12 @@ public sealed class QueueSchedulerService : BackgroundService
             return false;
         }
 
-        await RecordAsync(
+        if (_afterFailureMutation is not null)
+        {
+            await _afterFailureMutation(cancellationToken).ConfigureAwait(false);
+        }
+
+        await RecordIfNotRetiredAsync(item.Tag,
             new QueueDecisionEntry(
                 now, item.Tag, QueueDecisionEntry.Failed, error,
                 decision.LiveWeight, decision.FreeGb, decision.FloorGb,
@@ -891,6 +904,31 @@ public sealed class QueueSchedulerService : BackgroundService
         {
             // The ledger's own fail-open contract: a recording failure must never be the reason a lane
             // that already launched is treated as not having launched. Logged, never swallowed silently.
+            Console.Error.WriteLine(
+                $"Could not append to the queue decision ledger at '{BatonPaths.QueueDecisionLedgerFile}': {ex.Message}.");
+        }
+    }
+
+    /// <summary>
+    /// Failure and final-launch records share the queue ordering seam with merged retirement. A
+    /// retirement that commits after the scheduler's CAS therefore either follows this append, or
+    /// suppresses the stale scheduler record; ledger availability still cannot undo the CAS.
+    /// </summary>
+    private async Task RecordIfNotRetiredAsync(string tag, QueueDecisionEntry entry, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await QueueStore.RecordIfCurrentAsync(
+                BatonPaths.QueueFile,
+                snapshot => snapshot.Items.Any(item => string.Equals(item.Tag, tag, StringComparison.Ordinal)
+                    && item.Retirement is null),
+                () => _lastVerdictKey = QueueDecisionLedgerStore
+                    .AppendAsync(entry, _lastVerdictKey, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+                    .GetAwaiter().GetResult(),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
             Console.Error.WriteLine(
                 $"Could not append to the queue decision ledger at '{BatonPaths.QueueDecisionLedgerFile}': {ex.Message}.");
         }

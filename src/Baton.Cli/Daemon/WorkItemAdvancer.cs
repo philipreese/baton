@@ -770,7 +770,7 @@ public sealed class WorkItemAdvancer
         }
 
         var mergedRetirements = new List<(string Tag, QueueDispositionOperation Operation)>();
-        await QueueStore.MutateAsync(
+        await QueueStore.MutateAndRecordAsync(
             BatonPaths.QueueFile,
             current =>
             {
@@ -821,13 +821,16 @@ public sealed class WorkItemAdvancer
                         .ToList(),
                 };
             },
+            () =>
+            {
+                foreach (var (tag, operation) in mergedRetirements)
+                {
+                    QueueDecisionLedgerStore.AppendDispositionAsync(
+                        tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+                        .GetAwaiter().GetResult();
+                }
+            },
             CancellationToken.None).ConfigureAwait(false);
-
-        foreach (var (tag, operation) in mergedRetirements)
-        {
-            await QueueDecisionLedgerStore.AppendDispositionAsync(
-                tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
-        }
     }
 
     private static bool IsEligibleForMergedObservationRetirement(QueueItem item, QualifiedPullRequest observation) =>
