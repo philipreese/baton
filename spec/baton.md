@@ -7124,8 +7124,17 @@ terminal proof: a late room may exist before its directory is persisted, so oper
 refuse it. The sole automatic exception is a failed row whose durable `admission.result` is explicitly
 `refused`: that refusal happened before execution, proves no room launch was admitted, and permits a
 trusted positive merged-PR observation to retire the row. An admitted, unknown, or legacy admission
-does not prove this and remains active; neither does a closed-but-unmerged PR. Room-bearing terminal
-rows require a readable terminal sentinel at the mutation point.
+does not prove this and remains active; neither does a closed-but-unmerged PR. A room-bearing failed
+row normally requires a readable terminal sentinel at the mutation point. When that sentinel is absent
+after §7's dead-pump arrest, which deliberately writes only a journal fact, operator retirement may
+instead use the same read-only snapshot-and-journal terminal projection as `baton status`. That narrow
+exception requires the probe's recorded permanent-failure prefix or retry-foreclosure attribution, and
+a terminal projection. The snapshot and append-only journal must be present, readable, and unchanged
+across projection. Under the queue mutation lock, their original lengths and modification times are
+reproved; read-deny-write leases then hold both files through the queue write, so a resumed append or
+snapshot rebind cannot interleave between proof and disposition. Any missing, malformed, changing,
+ordinary terminal without a dead-pump marker, or nonterminal account refuses retirement. The command
+writes no sentinel or room evidence; it only records the queue disposition after bounded reproof.
 
 ### Where it lives
 

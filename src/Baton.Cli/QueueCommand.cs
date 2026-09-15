@@ -1,8 +1,11 @@
 using System.Globalization;
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Cli.Daemon;
+using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
 using Baton.Vendors;
 
 namespace Baton.Cli;
@@ -670,8 +673,8 @@ public static class QueueCommand
                 && observation.State == PullRequestObservationStates.Closed
                 && observation.ObservedAt is not null
                 && observation.Error is null) == true;
-        var terminalRoomProof = await HasTerminalRoomProofAsync(observed, cancellationToken).ConfigureAwait(false);
-        if ((observed.State != QueueItemState.Failed || !terminalRoomProof) && !readyClosed)
+        var terminalRoomProof = await ReadTerminalRoomProofAsync(observed, cancellationToken).ConfigureAwait(false);
+        if ((observed.State != QueueItemState.Failed || !terminalRoomProof.IsProven) && !readyClosed)
         {
             throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement.");
         }
@@ -683,43 +686,53 @@ public static class QueueCommand
         var at = DateTimeOffset.UtcNow;
         var operation = new QueueDispositionOperation(
             Guid.NewGuid().ToString("N"), at, QueueDecisionEntry.Retired, $"operator: {reason}");
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        RoomJournalLease? journalLease = null;
+        try
         {
-            var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
-            var currentReadyClosed = current is
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
-                Stage: WorkStage.Ready,
-                State: QueueItemState.Queued,
-                Repository: { Length: > 0 },
-                PullRequest: > 0,
-            }
-                && snapshot.PullRequestObservations?.Any(observation =>
-                    string.Equals(observation.Repository, current.Repository, StringComparison.Ordinal)
-                    && observation.PullRequest == current.PullRequest
-                    && observation.State == PullRequestObservationStates.Closed
-                    && observation.ObservedAt is not null
-                    && observation.Error is null) == true;
-            if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
-                || current.State == QueueItemState.Launched
-                || current.RoomDirectory != observed.RoomDirectory
-                || (current.State != QueueItemState.Failed
-                    || !HasTerminalRoomProofAtMutation(current))
-                    && !currentReadyClosed)
-            {
-                return snapshot;
-            }
-            eligible = true;
-            return snapshot with
-            {
-                Items = snapshot.Items.Select(item => item.Tag == tag
-                ? item with
+                var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+                var currentReadyClosed = current is
                 {
-                    Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason),
-                    DispositionOperations = AppendDisposition(item, operation),
+                    Stage: WorkStage.Ready,
+                    State: QueueItemState.Queued,
+                    Repository: { Length: > 0 },
+                    PullRequest: > 0,
                 }
-                : item).ToList()
-            };
-        }, cancellationToken).ConfigureAwait(false);
+                    && snapshot.PullRequestObservations?.Any(observation =>
+                        string.Equals(observation.Repository, current.Repository, StringComparison.Ordinal)
+                        && observation.PullRequest == current.PullRequest
+                        && observation.State == PullRequestObservationStates.Closed
+                        && observation.ObservedAt is not null
+                        && observation.Error is null) == true;
+                if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
+                    || current.State == QueueItemState.Launched
+                    || current.RoomDirectory != observed.RoomDirectory
+                    || (current.State != QueueItemState.Failed
+                        || !HasTerminalRoomProofAtMutation(current, terminalRoomProof, out journalLease))
+                        && !currentReadyClosed)
+                {
+                    return snapshot;
+                }
+                eligible = true;
+                return snapshot with
+                {
+                    Items = snapshot.Items.Select(item => item.Tag == tag
+                    ? item with
+                    {
+                        Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason),
+                        DispositionOperations = AppendDisposition(item, operation),
+                    }
+                    : item).ToList()
+                };
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // QueueStore writes after its mutation callback. Keep the read-deny-write journal lease
+            // through that write, not just through the callback's stamp comparison.
+            journalLease?.Dispose();
+        }
 
         if (!eligible)
         {
@@ -790,28 +803,128 @@ public static class QueueCommand
         return 0;
     }
 
-    private static async Task<bool> HasTerminalRoomProofAsync(QueueItem item, CancellationToken cancellationToken)
+    internal sealed record TerminalRoomProof(bool FromSentinel, RoomJournalStamp? Journal)
+    {
+        public bool IsProven => FromSentinel || Journal is not null;
+    }
+
+    internal sealed record RoomJournalStamp(long LogLength, DateTime LogModifiedUtc,
+        long SnapshotLength, DateTime SnapshotModifiedUtc);
+
+    internal sealed class RoomJournalLease(FileStream log, FileStream snapshot) : IDisposable
+    {
+        public void Dispose()
+        {
+            snapshot.Dispose();
+            log.Dispose();
+        }
+    }
+
+    private static RoomJournalStamp? ReadRoomJournalStamp(string room)
+    {
+        try
+        {
+            var log = new FileInfo(Path.Combine(room, BatonPaths.FlowLogFileName));
+            var snapshot = new FileInfo(Path.Combine(room, BatonPaths.SnapshotFileName));
+            return log.Exists && snapshot.Exists
+                ? new RoomJournalStamp(log.Length, log.LastWriteTimeUtc, snapshot.Length, snapshot.LastWriteTimeUtc)
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    internal static async Task<TerminalRoomProof> ReadTerminalRoomProofAsync(
+        QueueItem item, CancellationToken cancellationToken)
     {
         if (item.RoomDirectory is not { Length: > 0 } room)
         {
             // A roomless timeout can mark the row failed before a late launcher persists its room.
             // No directory is absence of proof, never proof that a live room cannot exist.
-            return false;
+            return new TerminalRoomProof(false, null);
         }
 
-        return await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false) is not null;
+        if (await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false) is not null)
+        {
+            return new TerminalRoomProof(true, null);
+        }
+
+        // A dead-pump probe deliberately writes only a journal fact, never terminal.json. Use the
+        // same read-only terminal projector as baton status, and accept it only if no journal or
+        // snapshot change raced that read. Missing/malformed evidence cannot widen this guard.
+        var before = ReadRoomJournalStamp(room);
+        if (before is null)
+        {
+            return new TerminalRoomProof(false, null);
+        }
+        try
+        {
+            var entries = await new FlowEventLogReader(Path.Combine(room, BatonPaths.FlowLogFileName))
+                .ReadAllEntriesWithTimestampsAsync(cancellationToken).ConfigureAwait(false);
+            if (!entries.OfType<LogEntry.FlowLogEntry>()
+                .Any(entry => DeadPumpProbe.IsTerminalDiagnostic(entry.Event)))
+            {
+                return new TerminalRoomProof(false, null);
+            }
+            var projected = await WorkflowTerminalProbe.ProbeAsync(room, cancellationToken).ConfigureAwait(false);
+            var after = ReadRoomJournalStamp(room);
+            return projected.IsTerminal && before == after
+                ? new TerminalRoomProof(false, after)
+                : new TerminalRoomProof(false, null);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException or JsonException)
+        {
+            return new TerminalRoomProof(false, null);
+        }
     }
 
     /// <summary>
-    /// Re-proves the terminal sentinel while the queue mutex is held. This deliberately uses
-    /// synchronous file I/O: scheduling an asynchronous read and blocking for it would strand the
-    /// thread-affine queue mutex when the thread pool is saturated.
+    /// Re-proves the terminal account while the queue mutex is held. Journal proof returns a
+    /// read-deny-write lease that the caller retains through QueueStore's later write. This deliberately
+    /// uses synchronous file I/O: an await would strand the thread-affine queue mutex.
     /// </summary>
-    private static bool HasTerminalRoomProofAtMutation(QueueItem item)
+    internal static bool HasTerminalRoomProofAtMutation(
+        QueueItem item, TerminalRoomProof proof, out RoomJournalLease? lease)
     {
+        lease = null;
         if (item.RoomDirectory is not { Length: > 0 } room)
         {
             return false;
+        }
+
+        // Protected invariant: a late journal append or snapshot rebind must invalidate the
+        // dead-pump proof, and no append/rebind may interleave before the queue CAS writes retirement.
+        if (proof.Journal is { } journal)
+        {
+            try
+            {
+                var log = new FileStream(Path.Combine(room, BatonPaths.FlowLogFileName),
+                    FileMode.Open, FileAccess.Read, FileShare.Read);
+                try
+                {
+                    var snapshot = new FileStream(Path.Combine(room, BatonPaths.SnapshotFileName),
+                        FileMode.Open, FileAccess.Read, FileShare.Read);
+                    lease = new RoomJournalLease(log, snapshot);
+                }
+                catch
+                {
+                    log.Dispose();
+                    throw;
+                }
+                if (ReadRoomJournalStamp(room) == journal)
+                {
+                    return true;
+                }
+                lease.Dispose();
+                lease = null;
+                return false;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return false;
+            }
         }
 
         var path = Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName);

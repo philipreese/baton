@@ -1,11 +1,13 @@
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Cli.Daemon;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
 using Baton.Templates;
+using Baton.Tests.Shared;
 using Baton.Vendors;
 using Xunit;
 
@@ -1903,6 +1905,185 @@ public sealed class QueueCommandTests
         {
             DirectoryCleanup.DeleteRecursively(home);
         }
+    }
+
+    [Fact]
+    public async Task Retire_accepts_a_failed_room_with_terminal_journal_proof_but_no_sentinel()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (item, log) = await WriteRetirementRoomAsync(home, terminal: true);
+            var room = item.RoomDirectory!;
+            var journalBefore = await File.ReadAllBytesAsync(log, Ct);
+            Assert.False(File.Exists(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName)));
+
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: "journal-terminal", Reason: "operator handled"),
+                TextWriter.Null, Ct));
+            Assert.Equal(QueueRetirement.Operator,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement!.Kind);
+            Assert.Equal(journalBefore, await File.ReadAllBytesAsync(log, Ct));
+            Assert.False(File.Exists(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName)));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("open")]
+    [InlineData("missing-snapshot")]
+    [InlineData("malformed-journal")]
+    [InlineData("ordinary-terminal")]
+    public async Task Retire_refuses_missing_or_nonterminal_journal_proof(string evidence)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (item, log) = await WriteRetirementRoomAsync(home, terminal: evidence != "open",
+                deadPumpDiagnostic: evidence != "ordinary-terminal");
+            if (evidence == "missing-snapshot")
+            {
+                FileCleanup.EnsureDeleted(Path.Combine(item.RoomDirectory!, BatonPaths.SnapshotFileName));
+            }
+            else if (evidence == "malformed-journal")
+            {
+                await File.AppendAllTextAsync(log, "{broken\n", Ct);
+            }
+
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: item.Tag, Reason: "operator handled"), TextWriter.Null, Ct));
+            Assert.Null(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_late_journal_append_invalidates_terminal_retirement_proof_at_mutation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (item, log) = await WriteRetirementRoomAsync(home, terminal: true);
+            var proof = await QueueCommand.ReadTerminalRoomProofAsync(item, Ct);
+            Assert.True(proof.IsProven);
+            Assert.True(QueueCommand.HasTerminalRoomProofAtMutation(item, proof, out var lease));
+            using (lease)
+            {
+                // This is the writer's exact open/share shape. The held lease spans the queue
+                // callback and its subsequent write, so a resumed append cannot slip between them.
+                Assert.Throws<IOException>(() => new FileStream(log, FileMode.Append,
+                    FileAccess.Write, FileShare.Read).Dispose());
+            }
+
+            var stepId = new StepId("implement");
+            var resumed = new ExecutionRequest(
+                new ExecutionId("resumed-execution"), new WorkflowId("retire-journal"), stepId,
+                "implement", [], [], TimeSpan.FromMinutes(1), [], new Dictionary<StepId, ExecutionId>());
+            await using (var writer = new FlowEventLogWriter(log))
+            {
+                await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(resumed, 2, null), Ct);
+            }
+
+            Assert.False(QueueCommand.HasTerminalRoomProofAtMutation(item, proof, out var changedLease));
+            Assert.Null(changedLease);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_dead_pump_journal_lease_remains_held_through_the_queue_write()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (item, log) = await WriteRetirementRoomAsync(home, terminal: true);
+            var proof = await QueueCommand.ReadTerminalRoomProofAsync(item, Ct);
+            QueueCommand.RoomJournalLease? lease = null;
+            try
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+                {
+                    Assert.True(QueueCommand.HasTerminalRoomProofAtMutation(item, proof, out lease));
+                    return snapshot with
+                    {
+                        Items = snapshot.Items.Select(current => current.Tag == item.Tag
+                            ? current with
+                            {
+                                Retirement = new QueueRetirement(QueueRetirement.Operator,
+                                    DateTimeOffset.UtcNow, "operator handled"),
+                            }
+                            : current).ToList(),
+                    };
+                }, Ct);
+                // MutateAsync has returned only after writing queue.json, while the same lease
+                // acquired in its callback is still held. A resumed journal writer cannot interleave.
+                Assert.NotNull(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement);
+                Assert.Throws<IOException>(() => new FileStream(log, FileMode.Append,
+                    FileAccess.Write, FileShare.Read).Dispose());
+            }
+            finally
+            {
+                lease?.Dispose();
+            }
+            using var resumedWriter = new FileStream(log, FileMode.Append, FileAccess.Write, FileShare.Read);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    private static async Task<(QueueItem Item, string Log)> WriteRetirementRoomAsync(
+        string home, bool terminal, bool deadPumpDiagnostic = true)
+    {
+        var room = Path.Combine(home, "rooms", "journal-terminal");
+        Directory.CreateDirectory(room);
+        var stepId = new StepId("implement");
+        var snapshot = SnapshotBinder.Bind(new WorkflowDefinition(
+            new WorkflowTemplateId("retire-journal"), 1,
+            [new WorkflowStepDefinition(stepId, "implement", [], [], [], new RetryPolicy(1))]));
+        await SnapshotBinder.PersistAsync(snapshot, Path.Combine(room, BatonPaths.SnapshotFileName), Ct);
+        var executionId = new ExecutionId("retire-journal-execution");
+        var request = new ExecutionRequest(
+            executionId, new WorkflowId("retire-journal"), stepId, "implement", [], [],
+            TimeSpan.FromMinutes(1), [], new Dictionary<StepId, ExecutionId>());
+        var log = Path.Combine(room, BatonPaths.FlowLogFileName);
+        await using (var writer = new FlowEventLogWriter(log))
+        {
+            await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(request, 1, null), Ct);
+            if (terminal)
+            {
+                await writer.AppendAsync(new FlowEvent.ExecutionFailed(
+                    executionId, FailureClassification.Permanent,
+                    deadPumpDiagnostic ? DeadPumpProbe.FailureReasonPrefix + " fixture" : "ordinary terminal failure"), Ct);
+            }
+        }
+
+        var item = new QueueItem
+        {
+            Tag = "journal-terminal",
+            Role = "implement",
+            Workspace = home,
+            SpecFile = BatonPaths.QueueSpecFile("journal-terminal"),
+            Stage = WorkStage.Implement,
+            State = QueueItemState.Failed,
+            RoomDirectory = room,
+        };
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
+        return (item, log);
     }
 
     [Fact]
