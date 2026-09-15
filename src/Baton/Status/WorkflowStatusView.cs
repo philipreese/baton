@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Baton.Artifacts;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Outcomes;
 using Baton.Projection;
 using Baton.Scheduling;
@@ -225,7 +226,63 @@ public sealed record WorkflowStatusView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     IReadOnlyList<Baton.Runway.RunwayAdmissionView>? Runway = null,
     [property: JsonPropertyName("declaredTaskSize")]
-    Baton.Domain.TaskSizeDeclaration DeclaredTaskSize = default);
+    Baton.Domain.TaskSizeDeclaration DeclaredTaskSize = default,
+    // #2309: a post-exit stamp is the delivery authority. The worker handoff is deliberately a
+    // separate linked artifact, so arbitrary changes.md prose can never become routing input.
+    [property: JsonPropertyName("delivery")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<ExecutionDeliveryStatusView>? Delivery = null);
+
+/// <summary>
+/// The machine-owned delivery observation for one execution. <see cref="State"/> is authoritative:
+/// it comes only from that execution's immutable post-exit stamp, never from worker-authored prose.
+/// </summary>
+public sealed record DeliveryObservationStatusView(
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("observedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ObservedAt = null,
+    [property: JsonPropertyName("localHead")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? LocalHead = null,
+    [property: JsonPropertyName("branch")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Branch = null,
+    [property: JsonPropertyName("remoteHead")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? RemoteHead = null,
+    [property: JsonPropertyName("pullRequestNumber")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? PullRequestNumber = null,
+    [property: JsonPropertyName("failingMembers")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? FailingMembers = null,
+    [property: JsonPropertyName("reason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Reason = null,
+    [property: JsonPropertyName("observationProblem")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ObservationProblem = null);
+
+/// <summary>
+/// A worker-authored narrative artifact. Its <see cref="AsOf"/> is the file-system observation of
+/// when that artifact became available, not a parsed assertion from its prose and never delivery
+/// authority.
+/// </summary>
+public sealed record DeliveryHandoffStatusView(
+    [property: JsonPropertyName("artifact")] string Artifact,
+    [property: JsonPropertyName("asOf")] string AsOf);
+
+/// <summary>
+/// Delivery facts and the earlier worker handoff kept as distinct channels. Consumers must route on
+/// <see cref="AuthoritativeObservation"/>; <see cref="Handoff"/> is only linked narrative context.
+/// </summary>
+public sealed record ExecutionDeliveryStatusView(
+    [property: JsonPropertyName("execution")] string Execution,
+    [property: JsonPropertyName("authoritativeObservation")] DeliveryObservationStatusView AuthoritativeObservation,
+    [property: JsonPropertyName("handoff")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    DeliveryHandoffStatusView? Handoff = null);
 
 /// <summary>
 /// #1530: the wire shape for one <see cref="ArrestLedgerEntry"/> — plain strings throughout, the
@@ -485,6 +542,61 @@ public static class WorkflowStatusProjector
             WorkflowOutcome.Describe(state), steps, outputs, firstFailureReason, Rejected: anyRejected,
             ResolvedBy: resolvedBy, TerminalAt: terminalAt, Arrests: arrestViews,
             ArrestLedgerUnavailableReason: arrestLedgerUnavailableReason);
+    }
+
+    /// <summary>
+    /// Adds immutable per-execution delivery observations to an already-derived status view. This is
+    /// intentionally a file read only: absent, unreadable, or incomplete evidence is reported as
+    /// unknown and is never replaced by a fresh GitHub or git probe while status is being rendered.
+    /// </summary>
+    public static async Task<WorkflowStatusView> WithDeliveryEvidenceAsync(
+        WorkflowStatusView view,
+        IReadOnlyList<LogEntry> entries,
+        string roomDirectoryPath,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(view);
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
+
+        var artifactsRootPath = Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName);
+        var executions = new List<ExecutionDeliveryStatusView>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            if (entry is not LogEntry.FlowLogEntry { Event: FlowEvent.ExecutionRequestAccepted accepted }
+                || !seen.Add(accepted.Request.ExecutionId.Value))
+            {
+                continue;
+            }
+
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRootPath, accepted.Request.ExecutionId);
+            var handoffPath = Path.Combine(outputDirectory, "changes.md");
+            DeliveryHandoffStatusView? handoff = null;
+            if (File.Exists(handoffPath))
+            {
+                handoff = new DeliveryHandoffStatusView(
+                    Path.GetRelativePath(roomDirectoryPath, handoffPath),
+                    File.GetLastWriteTimeUtc(handoffPath).ToString("O"));
+            }
+
+            var reading = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, cancellationToken).ConfigureAwait(false);
+            if (reading.IsMissing && handoff is null)
+            {
+                continue;
+            }
+
+            var authoritative = reading.Evidence is { } evidence
+                ? new DeliveryObservationStatusView(
+                    evidence.Verification.ToString().ToLowerInvariant(), evidence.ObservedAt, evidence.LocalHead,
+                    evidence.Branch, evidence.RemoteHead, evidence.PullRequestNumber, evidence.FailingMembers,
+                    evidence.VerificationReason, evidence.ObservationProblem)
+                : new DeliveryObservationStatusView(
+                    "unknown", Reason: reading.Problem ?? "delivery evidence stamp is absent");
+            executions.Add(new ExecutionDeliveryStatusView(accepted.Request.ExecutionId.Value, authoritative, handoff));
+        }
+
+        return view with { Delivery = executions.Count > 0 ? executions : null };
     }
 
     /// <summary>

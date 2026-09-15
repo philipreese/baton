@@ -60,6 +60,8 @@ public static class TerminalSettleRecorder
         var terminalEntries = await new FlowEventLogReader(terminalLogPath)
             .ReadAllEntriesWithTimestampsAsync(CancellationToken.None).ConfigureAwait(false);
         var view = WorkflowStatusProjector.Project(result.State, result.Snapshot, terminalRoomDirectoryPath, terminalEntries);
+        view = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+            view, terminalEntries, terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
         // CancellationToken.None: a Ctrl-C that already carried the workflow to Terminal must not
         // then lose the sentinel write for the terminal state it just reached.
         await TerminalSentinelWriter.WriteAsync(terminalRoomDirectoryPath, view, CancellationToken.None).ConfigureAwait(false);

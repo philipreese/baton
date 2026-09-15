@@ -330,6 +330,56 @@ public class TerminalSentinelEndToEndTests
         }
     }
 
+    /// <summary>
+    /// The companion control to the cancellation no-reprobe test: this reaches the surviving
+    /// <see cref="Baton.Mutation.DeliveryVerifier.CheckAsync"/> probe through the real CLI. The
+    /// hermetic git.exe exits after starting a sleeper that inherited its output handle, so wrapper
+    /// EOF and the dead sleeper prove production containment rather than merely proving no probe ran.
+    /// </summary>
+    [Fact]
+    public async Task A_real_CLI_delivery_probe_contains_an_inherited_handle_sleeper_before_wrapper_eof()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-delivery-probe-containment-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var workspaceDirectory = Path.Combine(testRoot, "workspace");
+            Directory.CreateDirectory(workspaceDirectory);
+            var workflowFilePath = await WriteOneStepWorkflowAsync(testRoot);
+            var bindingsFilePath = await WriteDeliveryProbeNoOpBindingsAsync(testRoot, workspaceDirectory);
+            var markerPath = Path.Combine(testRoot, "wrapper-completed");
+            var logPath = Path.Combine(testRoot, "wrapper.log");
+            var fixtureBin = Path.Combine(testRoot, "fixture-bin");
+            WriteLingeringGitFixture(fixtureBin);
+
+            using var wrapper = StartRedirectingPowerShellWrapper(
+                markerPath, logPath, fixtureBin, true,
+                "run", workflowFilePath, "--bindings", bindingsFilePath, "--room-dir", roomDirectory);
+            await BoundedProcessWait.RunToExitAsync(
+                wrapper, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, wrapper.ExitCode);
+            Assert.True(File.Exists(markerPath), "the wrapper did not reach EOF after the delivery probe settled");
+            var sleeperPidPath = Path.Combine(fixtureBin, "sleeper.pid");
+            Assert.True(
+                File.Exists(sleeperPidPath),
+                $"the surviving DeliveryVerifier probe did not launch the hermetic git sleeper. Wrapper log: "
+                + (File.Exists(logPath) ? await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken) : "<absent>"));
+            var sleeperPid = int.Parse(await File.ReadAllTextAsync(sleeperPidPath, TestContext.Current.CancellationToken));
+            Assert.False(IsProcessAlive(sleeperPid), "the inherited-handle sleeper outlived terminal delivery settlement");
+
+            var sentinel = JsonSerializer.Deserialize<WorkflowStatusView>(
+                await File.ReadAllTextAsync(Path.Combine(roomDirectory, "terminal.json"), TestContext.Current.CancellationToken));
+            var delivery = Assert.Single(sentinel!.Delivery!);
+            Assert.Equal("passed", delivery.AuthoritativeObservation.State);
+        }
+        finally
+        {
+            TryKillLingeringGitSleeper(Path.Combine(testRoot, "fixture-bin"));
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public async Task A_second_real_CLI_run_against_an_already_completed_room_does_not_overwrite_its_sentinel()
     {
@@ -659,7 +709,11 @@ public class TerminalSentinelEndToEndTests
     }
 
     private static Process StartRedirectingPowerShellWrapper(
-        string markerPath, string logPath, string fixtureBin, params string[] args)
+        string markerPath, string logPath, string fixtureBin, params string[] args) =>
+        StartRedirectingPowerShellWrapper(markerPath, logPath, fixtureBin, triggerDeliveryProbeSleeper: false, args);
+
+    private static Process StartRedirectingPowerShellWrapper(
+        string markerPath, string logPath, string fixtureBin, bool triggerDeliveryProbeSleeper = false, params string[] args)
     {
         static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
@@ -667,6 +721,7 @@ public class TerminalSentinelEndToEndTests
         var sleeperPidPath = Path.Combine(fixtureBin, "sleeper.pid");
         var script = $"$env:PATH = {Quote(fixtureBin)} + ';' + $env:PATH; "
             + $"$env:BATON_CRASH_TEST_SLEEPER_PID_FILE = {Quote(sleeperPidPath)}; "
+            + (triggerDeliveryProbeSleeper ? "$env:BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER = '1'; " : string.Empty)
             + $"& dotnet exec {Quote(typeof(RunCommand).Assembly.Location)} {batonArguments} *> {Quote(logPath)}; "
             + $"if ($LASTEXITCODE -eq 0) {{ New-Item -ItemType File -Path {Quote(markerPath)} | Out-Null; exit 0 }}; exit $LASTEXITCODE";
         var startInfo = new ProcessStartInfo("powershell")
@@ -767,6 +822,21 @@ public class TerminalSentinelEndToEndTests
         };
         await File.WriteAllTextAsync(
             Path.Combine(roomDirectory, "bindings.json"), JsonSerializer.Serialize(bindings), TestContext.Current.CancellationToken);
+    }
+
+    private static async Task<string> WriteDeliveryProbeNoOpBindingsAsync(string directory, string workspaceDirectory)
+    {
+        var path = Path.Combine(directory, "delivery-bindings.json");
+        var bindings = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["solo"] = new WorkerBindingConfigEntry(
+                NoOpWorkerAdapter.AdapterName,
+                new WorkerContract("solo", [], [new ProducedOutput("plan")], []),
+                PromptTemplate: "unused-by-noop", Timeout: TimeSpan.FromSeconds(30),
+                WorkingDirectory: workspaceDirectory, DeliversBranch: true, ExpectPr: false),
+        };
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(bindings), TestContext.Current.CancellationToken);
+        return path;
     }
 
     private static async Task<string> WriteOneStepWorkflowAsync(string directory)

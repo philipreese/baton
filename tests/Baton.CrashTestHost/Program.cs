@@ -39,6 +39,35 @@ if (args is ["rev-parse", "HEAD"])
     await Console.Out.WriteLineAsync(HermeticHead);
     return 0;
 }
+if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
+    && args is ["ls-remote", "--exit-code", "--heads", "origin", "2190-verified-pr-ownership"])
+{
+    // #2309: DeliveryVerifier's real surviving git probe must be job-contained even though this
+    // child exits normally while its inherited-handle sleeper would otherwise keep CaptureAsync open.
+    var sleeperStart = new ProcessStartInfo("ping.exe")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+    };
+    sleeperStart.ArgumentList.Add("-n");
+    sleeperStart.ArgumentList.Add("9999");
+    sleeperStart.ArgumentList.Add("127.0.0.1");
+    using var sleeper = Process.Start(sleeperStart)
+        ?? throw new InvalidOperationException("Could not start the delivery-probe inherited-handle sleeper.");
+    if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_SLEEPER_PID_FILE") is { Length: > 0 } pidFile)
+    {
+        WritePidAtomically(pidFile, sleeper.Id);
+    }
+
+    await Console.Out.WriteLineAsync($"{HermeticHead}\trefs/heads/2190-verified-pr-ownership");
+    return 0;
+}
+if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
+    && (args is ["-c", "credential.interactive=false", "fetch", "origin", "+refs/heads/2190-verified-pr-ownership:refs/remotes/origin/2190-verified-pr-ownership"]
+        or ["merge-base", "--is-ancestor", "HEAD", "origin/2190-verified-pr-ownership"]))
+{
+    return 0;
+}
 if (args is ["rev-parse", "--path-format=absolute", "--git-common-dir"])
 {
     await Console.Out.WriteLineAsync("C:\\fixture\\.git");
