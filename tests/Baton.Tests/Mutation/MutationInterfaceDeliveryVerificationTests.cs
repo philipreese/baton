@@ -96,6 +96,87 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     [Fact]
+    public async Task An_unpushed_delivery_failure_short_circuits_before_workspace_verify()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-before-verify");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget(
+                        "cmd",
+                        ["/c", "git commit --allow-empty -m unpushed -q && echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30),
+                    VerifyCommandOverride: "exit 0",
+                    DeliversBranch: true,
+                    ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var stepState = Assert.Single(finalState.Steps);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(stepState.IndeterminateAwaitingResolution);
+            Assert.Empty(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.Empty(events.OfType<FlowEvent.VerifyPassed>());
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["branch-not-pushed"], failed.FailingMembers);
+            Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
+    public async Task A_pushed_delivery_still_runs_workspace_verify_before_success()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-then-verify");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget(
+                        "cmd",
+                        ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30),
+                    VerifyCommandOverride: "exit 0",
+                    DeliversBranch: true,
+                    ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            var step = Assert.Single(finalState.Steps);
+            Assert.False(step.IndeterminateAwaitingResolution, step.IndeterminateReason ?? "unexpected indeterminate settle");
+            Assert.Equal(StepStatus.Succeeded, step.Status);
+            Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.Single(events.OfType<FlowEvent.VerifyPassed>());
+            Assert.Empty(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
     public async Task A_role_that_does_not_deliver_a_branch_never_runs_the_check_even_when_unpushed()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-readonly");
