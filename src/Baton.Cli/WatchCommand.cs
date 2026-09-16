@@ -1,4 +1,5 @@
 using Baton.Status;
+using Baton.Cli.Daemon;
 
 namespace Baton.Cli;
 
@@ -89,11 +90,11 @@ public static class WatchCommand
         if (!IsDaemonLikelyRunning())
         {
             Console.Error.WriteLine(
-                "baton watch: no 'baton daemon' process detected for this user — this watch will only fire " +
+                "baton watch: no 'baton daemon' process detected for this storage root — this watch will only fire " +
                 "on a room transition once a daemon is running (it already fires immediately for an " +
                 "already-terminal room, which just happened not to be the case here). Run 'baton daemon' to " +
                 "receive the notification automatically. (A daemon started with --no-mutex is invisible to " +
-                "this check and reads as running.)");
+                "this check and appears absent.)");
         }
 
         return 0;
@@ -101,18 +102,18 @@ public static class WatchCommand
 
     /// <summary>
     /// Best-effort liveness read via the same named <see cref="Mutex"/> <c>DaemonHost</c> takes on
-    /// startup (<c>Global\BatonDaemonMutex_{user}</c>) — <see cref="Mutex.TryOpenExisting(string,out Mutex)"/>
+    /// startup (the resolved root's <c>Global\BatonDaemonMutex_{rootHash}</c>) — <see cref="Mutex.TryOpenExisting(string,out Mutex)"/>
     /// finds it without contending for ownership. Not authoritative: a daemon started with
     /// <c>--no-mutex</c> holds no such mutex and reads as absent even though it is running (the
     /// message above says so), and an inability to even ask the OS (no permission, or the kernel
     /// object name is momentarily held by something else) fails open — this is an operator hint, never
     /// a gate, so an unclear answer must not print a false warning.
     /// </summary>
-    private static bool IsDaemonLikelyRunning()
+    internal static bool IsDaemonLikelyRunning()
     {
         try
         {
-            if (Mutex.TryOpenExisting($"Global\\BatonDaemonMutex_{Environment.UserName}", out var mutex))
+            if (Mutex.TryOpenExisting(DaemonHost.MutexName(BatonPaths.Root), out var mutex))
             {
                 mutex.Dispose();
                 return true;

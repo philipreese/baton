@@ -107,8 +107,7 @@ public class DaemonHostTests
         try
         {
             var name = DaemonHost.MutexName(home);
-            Assert.StartsWith("Global\\BatonDaemonMutex_", name, StringComparison.Ordinal);
-            Assert.DoesNotContain(Environment.UserName, name, StringComparison.OrdinalIgnoreCase);
+            Assert.Matches(@"^Global\\BatonDaemonMutex_[A-F0-9]{16}$", name);
         }
         finally
         {

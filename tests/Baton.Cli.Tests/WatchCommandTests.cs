@@ -1,4 +1,5 @@
 using Baton.Cli.Tests.TestSupport;
+using Baton.Cli.Daemon;
 using Baton.Status;
 
 namespace Baton.Cli.Tests;
@@ -14,6 +15,16 @@ public sealed class WatchCommandTests
         var roomDir = Path.Combine(homePath, "rooms", name);
         Directory.CreateDirectory(roomDir);
         return roomDir;
+    }
+
+    [Fact]
+    public void Watch_liveness_probe_finds_the_daemon_mutex_for_its_storage_root()
+    {
+        using var home = new IsolatedBatonHome();
+        using var heldDaemonMutex = new Mutex(true, DaemonHost.MutexName(BatonPaths.Root), out var createdNew);
+        Assert.True(createdNew);
+
+        Assert.True(WatchCommand.IsDaemonLikelyRunning());
     }
 
     [Fact]

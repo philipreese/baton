@@ -488,7 +488,7 @@ watch, pending and fired; `baton watch --clear-fired` deletes the fired ones. **
 daemon` running for any transition after registration** — an already-terminal room at registration
 time is the only case this feature guarantees without one; `baton watch`'s own registration warns on
 stderr when no daemon mutex (`Global\BatonDaemonMutex_{rootHash}`) is found for the resolved storage root, though a
-daemon started with `--no-mutex` is invisible to that check and reads as running regardless.
+daemon started with `--no-mutex` is invisible to that check and reads as absent, so the hint is not an authoritative gate.
 
 **The stdin write is bounded by the same 30 s timeout as the command's own exit** (fix round,
 `WatchNotifier.cs`): the timeout is armed *before* the write starts and the write runs under it, so a
