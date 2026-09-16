@@ -122,11 +122,21 @@ public sealed class FleetProjectionQueueSectionTests : IDisposable
             new LifecycleNextAttempt(WorkStage.Implement, new FleetRevisionId(input), [], "initial"),
             DateTimeOffset.UtcNow.AddMinutes(-3)), CancellationToken.None);
         await log.Append(new FleetEventDraft(
+            FleetEventKind.AdmissionDecided, "fleet-implement-admission", DateTimeOffset.UtcNow.AddMinutes(-2),
+            AttemptId: implement, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+            InputRevisionId: new FleetRevisionId(input), Vendor: "codex", Model: "gpt", Effort: "medium",
+            DeclaredRole: "implement", EffectiveGrant: ["file-write"], AdmissionDecision: TaskRequirementAdmission.Admitted),
+            CancellationToken.None);
+        await log.Append(new FleetEventDraft(
             FleetEventKind.AttemptStarted, "fleet-implement-started", DateTimeOffset.UtcNow.AddMinutes(-2),
-            AttemptId: implement, WorkId: new FleetWorkId(item.Tag)), CancellationToken.None);
+            AttemptId: implement, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+            InputRevisionId: new FleetRevisionId(input), RoomId: new FleetRoomId("fleet-implement-room"),
+            Vendor: "codex", Model: "gpt", Effort: "medium", DeclaredRole: "implement", EffectiveGrant: ["file-write"]), CancellationToken.None);
         await log.Append(new FleetEventDraft(
             FleetEventKind.AttemptSettled, "fleet-implement-settled", DateTimeOffset.UtcNow.AddMinutes(-1),
-            AttemptId: implement, WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Succeeded),
+            AttemptId: implement, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+            InputRevisionId: new FleetRevisionId(input), RoomId: new FleetRoomId("fleet-implement-room"),
+            Vendor: "codex", Model: "gpt", Effort: "medium", DeclaredRole: "implement", EffectiveGrant: ["file-write"], Outcome: WorkflowOutcome.Succeeded),
             CancellationToken.None);
         await log.Append(new FleetEventDraft(
             FleetEventKind.RevisionProduced, "fleet-implement-revision", DateTimeOffset.UtcNow,

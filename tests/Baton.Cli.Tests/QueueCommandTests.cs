@@ -509,11 +509,20 @@ public sealed class QueueCommandTests
                 new LifecycleNextAttempt(WorkStage.Implement, new FleetRevisionId(input), [], "initial"),
                 DateTimeOffset.UtcNow.AddMinutes(-3)), Ct);
             await log.Append(new FleetEventDraft(
+                FleetEventKind.AdmissionDecided, "list-implement-admission", DateTimeOffset.UtcNow.AddMinutes(-2),
+                AttemptId: implement, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+                InputRevisionId: new FleetRevisionId(input), Vendor: "codex", Model: "gpt", Effort: "medium",
+                DeclaredRole: "implement", EffectiveGrant: ["file-write"], AdmissionDecision: TaskRequirementAdmission.Admitted), Ct);
+            await log.Append(new FleetEventDraft(
                 FleetEventKind.AttemptStarted, "list-implement-started", DateTimeOffset.UtcNow.AddMinutes(-2),
-                AttemptId: implement, WorkId: new FleetWorkId(item.Tag)), Ct);
+                AttemptId: implement, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+                InputRevisionId: new FleetRevisionId(input), RoomId: new FleetRoomId("list-implement-room"),
+                Vendor: "codex", Model: "gpt", Effort: "medium", DeclaredRole: "implement", EffectiveGrant: ["file-write"]), Ct);
             await log.Append(new FleetEventDraft(
                 FleetEventKind.AttemptSettled, "list-implement-settled", DateTimeOffset.UtcNow.AddMinutes(-1),
-                AttemptId: implement, WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Succeeded), Ct);
+                AttemptId: implement, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+                InputRevisionId: new FleetRevisionId(input), RoomId: new FleetRoomId("list-implement-room"),
+                Vendor: "codex", Model: "gpt", Effort: "medium", DeclaredRole: "implement", EffectiveGrant: ["file-write"], Outcome: WorkflowOutcome.Succeeded), Ct);
             await log.Append(new FleetEventDraft(
                 FleetEventKind.RevisionProduced, "list-implement-revision", DateTimeOffset.UtcNow,
                 AttemptId: implement, WorkId: new FleetWorkId(item.Tag), RevisionId: new FleetRevisionId(head)), Ct);

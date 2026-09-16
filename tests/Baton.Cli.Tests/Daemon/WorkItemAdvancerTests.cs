@@ -687,7 +687,7 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
-    public async Task A_graph_versioned_exact_head_approval_reaches_ready_through_the_production_advancer()
+    public async Task A_graph_versioned_post_markready_failing_reread_stays_nonready_through_the_production_advancer()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -728,9 +728,9 @@ public sealed class WorkItemAdvancerTests
             await AppendCompleteExecutionAsync(
                 log, graphItem, review, WorkStage.Review, PushedSha, Now.AddMinutes(-3));
 
-            // The post-mutation live read deliberately changes checks to failing. The current turn
-            // may only consume the passing fact it already persisted; the next tick will persist and
-            // evaluate the changed observation.
+            // The post-mutation live read deliberately changes checks to failing. Ready must use
+            // that immediately persisted re-read, not the passing observation that authorized the
+            // external mutation a moment earlier.
             var gh = new FakeGh($$$"""
                 [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{{PushedSha}}}",
                   "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
@@ -746,16 +746,20 @@ public sealed class WorkItemAdvancerTests
                 .AdvanceAsync(Now, Ct);
 
             var item = await ReadBackAsync();
-            Assert.True(item.Stage == WorkStage.Ready,
+            Assert.True(item.Stage != WorkStage.Ready,
                 $"item={JsonSerializer.Serialize(item)}; facts={JsonSerializer.Serialize(facts)}; "
                 + $"events={JsonSerializer.Serialize(await log.ReadRetained(Ct))}");
-            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(QueueItemState.Done, item.State);
+            Assert.Contains("no runnable unstarted frontier", item.Error!, StringComparison.Ordinal);
             Assert.Contains(gh.Calls, args => args is ["pr", "ready", ..]);
-            Assert.Single(facts);
+            Assert.Contains(gh.Calls, args => args is ["pr", "ready", "77", "--undo", ..]);
             Assert.Contains((await log.ReadRetained(Ct)), entry =>
                 entry.Kind == FleetEventKind.ReviewVerdictObserved
                 && entry.AttemptId == review
                 && entry.RevisionId == new FleetRevisionId(PushedSha));
+            Assert.Contains((await log.ReadRetained(Ct)), entry =>
+                entry.Kind == FleetEventKind.CheckObserved
+                && entry.RequiredChecks == PullRequestChecks.Failing);
         }
         finally
         {

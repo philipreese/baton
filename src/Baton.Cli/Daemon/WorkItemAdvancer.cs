@@ -461,8 +461,31 @@ public sealed class WorkItemAdvancer
             }
             else
             {
-                authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents!,
-                    LifecycleQueueProjection.Observation(item, authorityEvents!, now));
+                // The readiness mutation changed the only live observation in this turn. Persist
+                // that exact re-read before replay: rebuilding from the old retained list and the
+                // new mutable `pr` lets a green pre-mutation fact authorize Ready after GitHub has
+                // already reported failing checks.
+                await RecordOwnedObservationsAsync(item, stage, verdict, after, head,
+                    arrestedStep?.WorkspaceChanged == true, now, cancellationToken).ConfigureAwait(false);
+                var evidence = new QueuePullRequestEvidence(
+                    after.Number, after.HeadSha, after.Succeeded, after.IsOpen, after.IsDraft, now);
+                if (!await TryMarkAsync(item, existing => existing with
+                {
+                    PullRequest = after.Number ?? existing.PullRequest,
+                    LifecyclePullRequestEvidence = evidence,
+                }).ConfigureAwait(false))
+                {
+                    return null;
+                }
+                item = item with
+                {
+                    PullRequest = after.Number ?? item.PullRequest,
+                    LifecyclePullRequestEvidence = evidence,
+                };
+                authorityEvents = await FleetEventLog.OpenOperational().ReadRetained(cancellationToken)
+                    .ConfigureAwait(false);
+                authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents,
+                    LifecycleQueueProjection.Observation(item, authorityEvents, now));
                 transition = GraphTransition(authorityGraph, pr);
             }
         }
@@ -674,7 +697,10 @@ public sealed class WorkItemAdvancer
                     : PullRequestReadinessAction.None);
         }
         return new(WorkItemTransitionKind.None, null, graph.Projection.Round,
-            "the immutable graph has no runnable unstarted frontier");
+            "the immutable graph has no runnable unstarted frontier",
+            PullRequestAction: !graph.Ready && pr.Number is not null && pr.IsOpen == true && pr.IsDraft == false
+                ? PullRequestReadinessAction.MarkDraft
+                : PullRequestReadinessAction.None);
     }
 
     private static async Task<QueueDecisionEntry?> StopAsync(

@@ -1982,57 +1982,77 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
-    public async Task A_concurrent_conflicting_admission_winner_refuses_the_runway_held_frontier_before_launch()
+    public async Task A_losing_scheduler_cannot_refuse_the_matching_winners_already_claimed_frontier()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
+            var loserAssignment = new FrozenWorkerAssignment("loser", "codex", "gpt-5.6-sol", "medium",
+                "loser-pool", "fixture", "loser tuple", DateTimeOffset.UtcNow);
+            var winnerAssignment = loserAssignment with { DecisionId = "winner", Effort = "high" };
             var item = Item("admission-race") with
             {
                 Stage = WorkStage.Implement,
                 LifecycleGraphVersion = LifecycleAttemptGraph.Version,
                 Workspace = home,
                 Requirements = [],
+                WorkerAssignment = loserAssignment,
             };
             await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
             var events = new List<FleetEvent>();
-            Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
+            var launches = new List<QueueLaunchRequest>();
+            QueueSchedulerService? winner = null;
+            async Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
             {
+                // B has resolved its frozen loser tuple but has not won the admission append. Let
+                // A resolve the replacement tuple, append it, claim the row, and start before B
+                // observes the dedupe winner. This is the real two-service interleaving the CAS
+                // protects, not a hand-written launched row.
+                if (draft.Kind == FleetEventKind.AdmissionDecided && draft.AssignmentDecisionId == "loser")
+                {
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        Items = snapshot.Items.Select(current => current.Tag == item.Tag
+                            ? current with { WorkerAssignment = winnerAssignment }
+                            : current).ToList(),
+                    }, Ct);
+                    await winner!.TickOnceAsync(Ct);
+                    return null;
+                }
                 if (events.Any(entry => entry.DedupeKey == draft.DedupeKey))
                 {
-                    return Task.FromResult<FleetEvent?>(null);
+                    return null;
                 }
-                // The other scheduler wins the admission dedupe key after this scheduler resolved
-                // its tuple. The retained fact, not the local tuple, is now authoritative.
-                var winner = draft.Kind == FleetEventKind.AdmissionDecided
-                    ? draft with { Vendor = "conflicting-vendor" }
-                    : draft;
-                var entry = FleetEvent.From(events.Count + 1, winner);
+                var entry = FleetEvent.From(events.Count + 1, draft);
                 events.Add(entry);
-                return Task.FromResult<FleetEvent?>(draft.Kind == FleetEventKind.AdmissionDecided ? null : entry);
+                return entry;
             }
-            var launches = 0;
-            var service = new QueueSchedulerService(
-                (_, _) =>
+            QueueSchedulerService Service() => new(
+                (request, _) =>
                 {
-                    launches++;
-                    return Task.FromResult(new QueueLaunchOutcome(null, RunwayHeld: true));
+                    launches.Add(request);
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
                 },
                 _ => Task.FromResult(0d), () => 16d, () => DateTimeOffset.UtcNow,
                 appendFleetEvent: Append,
                 readFleetEvents: _ => Task.FromResult<IReadOnlyList<FleetEvent>>(events.ToList()),
                 workspaceHead: (_, _) => Task.FromResult<string?>(BaseHead),
                 workspaceLocks: _ => []);
+            winner = Service();
+            var loser = Service();
 
-            await service.TickOnceAsync(Ct);
+            await loser.TickOnceAsync(Ct);
 
-            Assert.Equal(0, launches);
+            Assert.Single(launches);
+            Assert.Equal("winner", launches[0].Item.WorkerAssignment!.DecisionId);
             var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
-            Assert.Equal(QueueItemState.Failed, retained.State);
-            Assert.Contains("durable admission", retained.Error!, StringComparison.Ordinal);
-            Assert.Contains(events, entry => entry.Kind == FleetEventKind.AdmissionDecided
-                && entry.Vendor == "conflicting-vendor");
+            Assert.Equal(QueueItemState.Launched, retained.State);
+            Assert.Equal("winner", retained.WorkerAssignment!.DecisionId);
+            Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.AttemptRefused);
+            Assert.Null(retained.Error);
+            Assert.DoesNotContain(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct),
+                entry => entry.Decision == QueueDecisionEntry.Failed);
         }
         finally
         {
@@ -2619,6 +2639,76 @@ public sealed class QueueSchedulerServiceTests
             Assert.Equal(
                 QueueItemState.Done,
                 Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).State);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Graph_settlement_uses_its_durable_admission_binding_after_the_next_stage_clears_assignment()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "bound-settlement");
+            Directory.CreateDirectory(room);
+            await File.WriteAllTextAsync(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                """{"state":"Succeeded","steps":[],"outputs":[]}""", Ct);
+            var attempt = new FleetAttemptId("bound-implement");
+            var item = Item("bound-settlement") with
+            {
+                LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+                Stage = WorkStage.Implement,
+                State = QueueItemState.Launched,
+                Workspace = home,
+                RoomDirectory = room,
+                AttemptId = attempt,
+                AttemptBaseRevision = BaseHead,
+                WorkerAssignment = null,
+                LastAdmission = new TaskRequirementAdmission([], ["file-write"], TaskRequirementAdmission.Admitted),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+            var now = DateTimeOffset.UtcNow;
+            var events = new List<FleetEvent>();
+            void Add(FleetEventDraft draft) => events.Add(FleetEvent.From(events.Count + 1, draft));
+            Add(LifecycleAttemptGraph.PlanEvent(item, attempt,
+                new(WorkStage.Implement, new FleetRevisionId(BaseHead), [], "initial"), now.AddMinutes(-3)));
+            Add(new(FleetEventKind.AdmissionDecided, "admission:bound-implement", now.AddMinutes(-2),
+                AttemptId: attempt, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+                InputRevisionId: new FleetRevisionId(BaseHead), Vendor: "durable-vendor", Model: "durable-model",
+                Effort: "durable-effort", DeclaredRole: "implement", EffectiveGrant: ["file-write"],
+                AssignmentDecisionId: "durable-assignment", AdmissionDecision: TaskRequirementAdmission.Admitted));
+            Add(new(FleetEventKind.AttemptStarted, "attempt-started:bound-implement", now.AddMinutes(-1),
+                AttemptId: attempt, WorkId: new FleetWorkId(item.Tag), RoomId: new FleetRoomId(BatonPaths.RecordKey(room)),
+                LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(BaseHead), Vendor: "durable-vendor",
+                Model: "durable-model", Effort: "durable-effort", DeclaredRole: "implement",
+                EffectiveGrant: ["file-write"], AssignmentDecisionId: "durable-assignment"));
+            Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
+            {
+                if (events.Any(entry => entry.DedupeKey == draft.DedupeKey)) return Task.FromResult<FleetEvent?>(null);
+                var entry = FleetEvent.From(events.Count + 1, draft);
+                events.Add(entry);
+                return Task.FromResult<FleetEvent?>(entry);
+            }
+            var service = new QueueSchedulerService(
+                (_, _) => Task.FromResult(new QueueLaunchOutcome(null)), _ => Task.FromResult(0d), () => 16d, () => now,
+                appendFleetEvent: Append,
+                readFleetEvents: _ => Task.FromResult<IReadOnlyList<FleetEvent>>(events.ToList()));
+
+            await service.ResolveFinishedItemsAsync(Ct);
+
+            var settlement = Assert.Single(events, entry => entry.Kind == FleetEventKind.AttemptSettled);
+            Assert.Equal(("durable-vendor", "durable-model", "durable-effort", "durable-assignment"),
+                (settlement.Vendor, settlement.Model, settlement.Effort, settlement.AssignmentDecisionId));
+            Add(new(FleetEventKind.RevisionProduced, "revision:bound-implement", now,
+                AttemptId: attempt, WorkId: new FleetWorkId(item.Tag), RevisionId: new FleetRevisionId(ReviewHead)));
+            var graph = LifecycleAttemptGraph.Build(item, events,
+                new LifecyclePullRequestObservation(42, ReviewHead, true, true, PullRequestChecks.Passing));
+            Assert.Null(graph.Halt);
+            Assert.Equal(WorkStage.Review, graph.NextAttempt!.Stage);
         }
         finally
         {

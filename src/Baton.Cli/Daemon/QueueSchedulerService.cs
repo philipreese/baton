@@ -383,11 +383,16 @@ public sealed class QueueSchedulerService : BackgroundService
                         tier, item.Role, admission, item.Stage!.Value, attemptBaseRevision, item.WorkerAssignment);
                 if (bindingMismatch is not null)
                 {
-                    await FailAsync(
+                    // A retained admission is a shared winner, not proof that this scheduler owns
+                    // the queue row. Another scheduler may already have claimed that same attempt
+                    // with the winning tuple. Do not append attemptRefused before this exact queued
+                    // frontier is still ours: that would contradict its start after it launched.
+                    await TryFailAdmissionMismatchAsync(
                         item,
                         $"durable admission for attempt '{attemptId.Value}' does not match the current resolved binding; "
                         + $"{bindingMismatch}; the queue refused to spend on a different worker configuration",
-                        room: null, now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
+                        now, decision, tier, cancellationToken, admission, attemptId, attemptBaseRevision)
+                        .ConfigureAwait(false);
                     return interval;
                 }
             }
@@ -797,6 +802,69 @@ public sealed class QueueSchedulerService : BackgroundService
     }
 
     /// <summary>
+    /// Records a durable-admission mismatch only while this scheduler still owns the exact queued
+    /// frontier it inspected. It appends refusal only after that conditional queue transition wins:
+    /// the retained admission can belong to a concurrent scheduler that has already started it, so
+    /// appending first would fabricate a contradictory terminal history.
+    /// </summary>
+    private async Task<bool> TryFailAdmissionMismatchAsync(
+        QueueItem item,
+        string error,
+        DateTimeOffset now,
+        QueueDecision decision,
+        QueueTierResolution tier,
+        CancellationToken cancellationToken,
+        TaskRequirementAdmission admission,
+        FleetAttemptId attemptId,
+        string? attemptBaseRevision)
+    {
+        var failed = false;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+            if (current?.State != QueueItemState.Queued
+                || current.Retirement is not null
+                || current.AttemptId != attemptId
+                || !string.Equals(current.AttemptBaseRevision, attemptBaseRevision, StringComparison.Ordinal))
+            {
+                return snapshot;
+            }
+
+            failed = true;
+            return snapshot with
+            {
+                Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                {
+                    State = QueueItemState.Failed,
+                    Error = error,
+                    RoomDirectory = null,
+                }),
+            };
+        }, CancellationToken.None).ConfigureAwait(false);
+
+        if (!failed)
+        {
+            return false;
+        }
+
+        if (LifecycleQueueProjection.IsGraphVersioned(item))
+        {
+            await _appendFleetEvent(
+                AttemptRefusedEvent(item, tier, attemptId, now, error), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
+        await RecordIfNotRetiredAsync(item.Tag,
+            new QueueDecisionEntry(
+                now, item.Tag, QueueDecisionEntry.Failed, error,
+                decision.LiveWeight, decision.FreeGb, decision.FloorGb,
+                tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
+                Room: null, tier.SelectionSource, admission),
+            cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
     /// Done detection (spec/baton.md §13): every launched item whose room now projects terminal is
     /// moved out of <see cref="QueueItemState.Launched"/> by
     /// <see cref="ClassifyTerminal"/>. One queue read, one write for the whole batch — a per-item
@@ -846,11 +914,27 @@ public sealed class QueueSchedulerService : BackgroundService
             {
                 if (item.AttemptId is { } settledAttemptId)
                 {
+                    LifecycleAttemptBinding? binding = null;
+                    if (LifecycleQueueProjection.IsGraphVersioned(item))
+                    {
+                        var retained = await _readFleetEvents(cancellationToken).ConfigureAwait(false);
+                        var graph = LifecycleAttemptGraph.Build(item, retained,
+                            LifecycleQueueProjection.Observation(item, retained, _now()));
+                        var node = graph.Graph.Nodes.SingleOrDefault(candidate => candidate.AttemptId == settledAttemptId);
+                        binding = node?.Binding;
+                        if (graph.Halt is not null || binding is null
+                            || !binding.IsCompleteAdmission(node!.Stage, node.InputRevision))
+                        {
+                            resolved[item.Tag] = (QueueItemState.Failed,
+                                $"attempt '{settledAttemptId.Value}' cannot settle without its complete durable admission binding");
+                            continue;
+                        }
+                    }
                     // Append before the queue transition. If the append is interrupted, the retained
                     // Launched row retries it next tick; if the queue write is interrupted afterward,
                     // the same key makes replay idempotent.
                     await _appendFleetEvent(
-                        AttemptSettledEvent(item, settledAttemptId, terminal, _now()), cancellationToken)
+                        AttemptSettledEvent(item, settledAttemptId, terminal, _now(), binding), cancellationToken)
                         .ConfigureAwait(false);
                 }
                 resolved[item.Tag] = ClassifyTerminal(terminal, item.RoomDirectory!);
@@ -1281,7 +1365,8 @@ public sealed class QueueSchedulerService : BackgroundService
         QueueItem item,
         FleetAttemptId attemptId,
         WorkflowStatusView sentinel,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        LifecycleAttemptBinding? binding = null)
     {
         var executions = sentinel.Steps
             .Where(step => step.Execution is { Length: > 0 })
@@ -1302,14 +1387,15 @@ public sealed class QueueSchedulerService : BackgroundService
             ExecutionId: execution is null ? null : new ExecutionId(execution.Execution!),
             IssueId: item.Issue,
             PullRequestId: item.PullRequest,
-            Vendor: item.WorkerAssignment?.Adapter ?? item.Adapter,
-            Model: item.WorkerAssignment?.Model ?? item.Model,
-            Effort: item.WorkerAssignment?.Effort ?? item.Effort,
-            DeclaredRole: item.Role,
-            EffectiveGrant: item.LastAdmission?.EffectiveGrant,
-            LifecycleStage: item.Stage,
-            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null,
-            AssignmentDecisionId: item.WorkerAssignment?.DecisionId,
+            Vendor: binding?.Vendor ?? item.WorkerAssignment?.Adapter ?? item.Adapter,
+            Model: binding?.Model ?? item.WorkerAssignment?.Model ?? item.Model,
+            Effort: binding?.Effort ?? item.WorkerAssignment?.Effort ?? item.Effort,
+            DeclaredRole: binding?.DeclaredRole ?? item.Role,
+            EffectiveGrant: binding?.EffectiveGrant ?? item.LastAdmission?.EffectiveGrant,
+            LifecycleStage: binding?.LifecycleStage ?? item.Stage,
+            InputRevisionId: binding?.InputRevision
+                ?? (item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null),
+            AssignmentDecisionId: binding?.AssignmentDecisionId ?? item.WorkerAssignment?.DecisionId,
             Outcome: sentinel.State,
             OutcomeDetail: sentinel.Error,
             ElapsedMilliseconds: usage?.WallClockMs,
