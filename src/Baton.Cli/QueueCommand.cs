@@ -68,7 +68,7 @@ public static class QueueCommand
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
             QueueVerb.List => ListAsync(options.Active, output, cancellationToken),
-            QueueVerb.Worktrees => WorktreesAsync(options.Format, output, cancellationToken),
+            QueueVerb.Worktrees => WorktreesAsync(options.Format, output, repositoryDirectory, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
             QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
@@ -428,12 +428,18 @@ public static class QueueCommand
         }
     }
 
-    private static async Task<int> WorktreesAsync(QueueWorktreesOutputFormat format, TextWriter output, CancellationToken cancellationToken)
+    private static async Task<int> WorktreesAsync(
+        QueueWorktreesOutputFormat format,
+        TextWriter output,
+        string? repositoryDirectory,
+        CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
+        var sourceRepository = Path.GetFullPath(repositoryDirectory ?? Directory.GetCurrentDirectory());
+        var worktreeRoot = settings.Queue.WorktreeRoot ?? Path.GetDirectoryName(sourceRepository);
         var report = await QueueWorktreeReport.CreateAsync(
-            snapshot.Items, settings.Queue.WorktreeRoot, cancellationToken).ConfigureAwait(false);
+            snapshot.Items, worktreeRoot, cancellationToken).ConfigureAwait(false);
         output.WriteLine(format == QueueWorktreesOutputFormat.Json ? report.ToJson() : report.ToText());
         return 0;
     }

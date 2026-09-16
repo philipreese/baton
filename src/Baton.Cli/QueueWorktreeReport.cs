@@ -12,28 +12,45 @@ namespace Baton.Cli;
 /// <summary>One read-only projection shared by <c>queue worktrees</c> text and JSON output.</summary>
 internal sealed record QueueWorktreeReport(string? WorktreeRoot, IReadOnlyList<QueueWorktreeEntry> Workspaces)
 {
+    private const int MaxParallelWorkspaceProbes = 8;
+
     public static async Task<QueueWorktreeReport> CreateAsync(
         IReadOnlyList<QueueItem> items,
         string? root,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null)
     {
+        repositoryResolver ??= RepositoryIdentityResolver.TryResolveAsync;
         var resolvedRoot = TryFullPath(root);
         var activeReferences = await QueueWorktreeReferenceIndex.CreateAsync(items, cancellationToken).ConfigureAwait(false);
         var groups = items.GroupBy(item => TryFullPath(item.Workspace) ?? item.Workspace, PathComparer)
-            .OrderBy(group => group.Key, PathComparer);
-        var entries = new List<QueueWorktreeEntry>();
-        foreach (var group in groups)
+            .OrderBy(group => group.Key, PathComparer)
+            .Select((group, index) => (Index: index, Path: group.Key, Rows: (IReadOnlyList<QueueItem>)group.ToList()))
+            .ToList();
+        using var gate = new SemaphoreSlim(Math.Min(MaxParallelWorkspaceProbes, Math.Max(1, Environment.ProcessorCount)));
+        var entryTasks = groups.Select(async group =>
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            entries.Add(await QueueWorktreeEntry.CreateAsync(
-                    group.Key, resolvedRoot, group.ToList(), activeReferences, cancellationToken)
-                .ConfigureAwait(false));
-        }
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return (group.Index, Entry: await QueueWorktreeEntry.CreateAsync(
+                        group.Path, resolvedRoot, group.Rows, activeReferences, repositoryResolver, cancellationToken)
+                    .ConfigureAwait(false));
+            }
+            finally
+            {
+                gate.Release();
+            }
+        });
+        var entries = (await Task.WhenAll(entryTasks).ConfigureAwait(false))
+            .OrderBy(result => result.Index)
+            .Select(result => result.Entry)
+            .ToList();
 
         return new QueueWorktreeReport(resolvedRoot, entries);
     }
 
-    public string ToJson() => JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+    public string ToJson() => JsonSerializer.Serialize(this);
 
     public string ToText() => string.Join(Environment.NewLine, new[]
     {
@@ -42,8 +59,8 @@ internal sealed record QueueWorktreeReport(string? WorktreeRoot, IReadOnlyList<Q
     }.Concat(Workspaces.Select(entry =>
         $"{entry.Path}: {entry.Classification} ({string.Join(", ", entry.ReasonCodes)})\n"
         + $"  origin: {entry.Origin}; beneath root: {entry.BeneathConfiguredRoot}; directory: {entry.Directory}\n"
-        + $"  rows: {string.Join(", ", entry.Rows.Select(row => $"{row.Tag}/{row.State}/{row.Stage ?? "none"}"))}\n"
-        + $"  git: {entry.Git.Registration}; head: {entry.Git.Head ?? "unknown"}; expected branch: {entry.Git.ExpectedBranch ?? "unknown"}; raw status: {entry.Git.RawStatus ?? "unknown"}\n"
+        + $"  rows: {string.Join(", ", entry.Rows.Select(row => $"{row.Tag}/{row.State}/{row.Stage ?? "none"}; origin={row.Origin}; retired={row.Retired}; repository={row.Repository ?? "unknown"}; branch={row.Branch ?? "unknown"}"))}\n"
+        + $"  git: {entry.Git.Registration}; head: {entry.Git.Head ?? "unknown"}; expected repository: {entry.Git.ExpectedRepository ?? "unknown"}; observed repository: {entry.Git.Repository ?? "unknown"}; expected branch: {entry.Git.ExpectedBranch ?? "unknown"}; raw status: {entry.Git.RawStatus ?? "unknown"}; truncated: {entry.Git.RawStatusTruncated}\n"
         + $"  substantive cleanliness: {entry.Git.SubstantiveCleanliness}; active references: {entry.ActiveReferences}; reference observation: {(entry.ActiveReferencesComplete ? "complete" : "unknown")}; size: {entry.SizeBytes?.ToString() ?? "unknown"} ({entry.SizeReason ?? "observed"})")));
 
     internal static string? TryFullPath(string? path)
@@ -70,8 +87,10 @@ internal sealed record QueueWorktreeRow(
 internal sealed record QueueWorktreeGit(
     string Registration,
     string? Head,
+    string? ExpectedRepository,
     string? ExpectedBranch,
     string? RawStatus,
+    bool RawStatusTruncated,
     string SubstantiveCleanliness,
     string? Repository,
     IReadOnlyList<string> ReasonCodes);
@@ -93,6 +112,8 @@ internal sealed record QueueWorktreeEntry(
     private const int MaxFilesMeasured = 10_000;
     private const int MaxDirectoriesMeasured = 10_000;
     private const long MaxBytesMeasured = 1L << 30;
+    private const int MaxRawStatusChars = 16_384;
+    private const int MaxGitProbeChars = 1 << 20;
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
 
     public static async Task<QueueWorktreeEntry> CreateAsync(
@@ -100,6 +121,7 @@ internal sealed record QueueWorktreeEntry(
         string? root,
         IReadOnlyList<QueueItem> rows,
         QueueWorktreeReferenceIndex activeReferenceIndex,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         CancellationToken cancellationToken)
     {
         var origins = rows.Select(row => row.WorkspaceOrigin ?? WorkspaceOrigins.Unknown)
@@ -123,13 +145,17 @@ internal sealed record QueueWorktreeEntry(
         if (referenceObservation.References.Count > 0) reasons.Add("active-baton-reference");
         if (!referenceObservation.Complete) reasons.Add("active-reference-observation-unavailable");
 
-        var size = TrySize(path, out var sizeReason);
+        var sizeTask = Task.Run(() => ObserveSize(path), cancellationToken);
         var git = exists
             ? await ObserveGitAsync(path, repositories.Count == 1 ? repositories[0] : null,
-                branches.Count == 1 ? branches[0] : null, cancellationToken).ConfigureAwait(false)
+                branches.Count == 1 ? branches[0] : null, repositoryResolver, cancellationToken).ConfigureAwait(false)
             : new QueueWorktreeGit(
-                "unavailable", null, branches.Count == 1 ? branches[0] : null, null, "unknown", null,
+                "unavailable", null, repositories.Count == 1 ? repositories[0] : null,
+                branches.Count == 1 ? branches[0] : null, null, false, "unknown", null,
                 ["git-worktree-probe-unavailable"]);
+        var sizeObservation = await sizeTask.ConfigureAwait(false);
+        var size = sizeObservation.Bytes;
+        var sizeReason = sizeObservation.Reason;
 
         reasons.AddRange(git.ReasonCodes);
         if (git.SubstantiveCleanliness == "dirty") reasons.Add("substantive-uncommitted-content");
@@ -141,6 +167,8 @@ internal sealed record QueueWorktreeEntry(
             || !referenceObservation.Complete
             || git.Registration == "unavailable"
             || git.SubstantiveCleanliness == "unknown"
+            || git.ReasonCodes.Contains("repository-probe-unavailable", StringComparer.Ordinal)
+            || git.ReasonCodes.Contains("expected-branch-probe-unavailable", StringComparer.Ordinal)
             || size is null;
         var classification = candidate ? "candidate" : unavailable ? "unknown" : "retain";
         return new QueueWorktreeEntry(
@@ -199,20 +227,21 @@ internal sealed record QueueWorktreeEntry(
         string path,
         string? expectedRepository,
         string? expectedBranch,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         CancellationToken cancellationToken)
     {
         var worktrees = await RunGitAsync(path, ["worktree", "list", "--porcelain"], cancellationToken).ConfigureAwait(false);
         if (!worktrees.Success)
         {
             return new QueueWorktreeGit(
-                "unavailable", null, expectedBranch, null, "unknown", null,
+                "unavailable", null, expectedRepository, expectedBranch, null, false, "unknown", null,
                 ["git-worktree-probe-unavailable"]);
         }
 
         var reasons = new List<string>();
         var registered = ParseRegistration(worktrees.Stdout, path, out var head, out var attachedBranch);
         if (!registered) reasons.Add("stale-registration");
-        var identity = await RepositoryIdentityResolver.TryResolveAsync(path, cancellationToken).ConfigureAwait(false);
+        var identity = await repositoryResolver(path, cancellationToken).ConfigureAwait(false);
         var repositoryMatches = expectedRepository is not null && identity?.Value == expectedRepository;
         if (!repositoryMatches) reasons.Add(identity is null ? "repository-probe-unavailable" : "wrong-repository");
         var branchMatches = expectedBranch is not null
@@ -221,11 +250,12 @@ internal sealed record QueueWorktreeEntry(
         var refHead = expectedBranch is not null
             ? await RunGitAsync(path, ["rev-parse", "--verify", "refs/heads/" + expectedBranch], cancellationToken).ConfigureAwait(false)
             : GitResult.Unavailable;
-        if (expectedBranch is not null && !refHead.Success) reasons.Add("expected-branch-ref-missing");
+        if (expectedBranch is not null && !refHead.Success) reasons.Add("expected-branch-probe-unavailable");
         if (refHead.Success && !string.Equals(refHead.Stdout.Trim(), head, StringComparison.Ordinal))
             reasons.Add("expected-branch-head-mismatch");
         var status = await RunGitAsync(
-            path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"], cancellationToken)
+            path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"], cancellationToken,
+            MaxRawStatusChars)
             .ConfigureAwait(false);
         var cleanliness = status.Success ? string.IsNullOrWhiteSpace(status.Stdout) ? "clean" : "dirty" : "unknown";
         if (!status.Success) reasons.Add("git-status-unavailable");
@@ -236,8 +266,10 @@ internal sealed record QueueWorktreeEntry(
         return new QueueWorktreeGit(
             exact ? "exact" : "mismatched",
             head,
+            expectedRepository,
             expectedBranch,
             status.Success ? status.Stdout.TrimEnd() : null,
+            status.Truncated,
             cleanliness,
             identity?.Value,
             reasons);
@@ -265,7 +297,11 @@ internal sealed record QueueWorktreeEntry(
         return path is not null && QueueWorktreeReport.PathComparer.Equals(path, expectedPath) && head is not null;
     }
 
-    private static async Task<GitResult> RunGitAsync(string path, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+    private static async Task<GitResult> RunGitAsync(
+        string path,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken,
+        int maxOutputChars = MaxGitProbeChars)
     {
         try
         {
@@ -286,8 +322,8 @@ internal sealed record QueueWorktreeEntry(
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ProbeTimeout);
-            var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
+            var stdout = ReadBoundedAsync(process.StandardOutput, maxOutputChars, timeout.Token);
+            var stderr = ReadBoundedAsync(process.StandardError, 4096, timeout.Token);
             try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -295,9 +331,9 @@ internal sealed record QueueWorktreeEntry(
                 return GitResult.Unavailable;
             }
 
-            return process.ExitCode == 0
-                ? new GitResult(true, await stdout.ConfigureAwait(false))
-                : GitResult.Unavailable;
+            var output = await stdout.ConfigureAwait(false);
+            _ = await stderr.ConfigureAwait(false);
+            return process.ExitCode == 0 ? new GitResult(true, output.Text, output.Truncated) : GitResult.Unavailable;
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
         {
@@ -305,10 +341,28 @@ internal sealed record QueueWorktreeEntry(
         }
     }
 
-    private static long? TrySize(string path, out string? reason)
+    private static async Task<BoundedRead> ReadBoundedAsync(
+        StreamReader reader,
+        int maxChars,
+        CancellationToken cancellationToken)
     {
-        reason = null;
-        if (!System.IO.Directory.Exists(path)) { reason = "directory-missing"; return null; }
+        var text = new StringBuilder(Math.Min(maxChars, 4096));
+        var buffer = new char[4096];
+        var truncated = false;
+        int read;
+        while ((read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
+        {
+            var remaining = maxChars - text.Length;
+            if (remaining > 0) text.Append(buffer, 0, Math.Min(remaining, read));
+            if (read > remaining) truncated = true;
+        }
+
+        return new BoundedRead(text.ToString(), truncated);
+    }
+
+    private static SizeObservation ObserveSize(string path)
+    {
+        if (!System.IO.Directory.Exists(path)) return new SizeObservation(null, "directory-missing");
         try
         {
             long total = 0;
@@ -319,17 +373,14 @@ internal sealed record QueueWorktreeEntry(
             pending.Push(path);
             while (pending.TryPop(out var directory))
             {
-                if (++directories > MaxDirectoriesMeasured) { reason = "directory-limit"; return null; }
-                if (started.Elapsed > ProbeTimeout) { reason = "time-limit"; return null; }
+                if (++directories > MaxDirectoriesMeasured) return new SizeObservation(null, "directory-limit");
+                if (started.Elapsed > ProbeTimeout) return new SizeObservation(null, "time-limit");
                 foreach (var entry in System.IO.Directory.EnumerateFileSystemEntries(directory))
                 {
-                    if (started.Elapsed > ProbeTimeout) { reason = "time-limit"; return null; }
+                    if (started.Elapsed > ProbeTimeout) return new SizeObservation(null, "time-limit");
                     var attributes = File.GetAttributes(entry);
                     if ((attributes & FileAttributes.ReparsePoint) != 0)
-                    {
-                        reason = "reparse-point";
-                        return null;
-                    }
+                        return new SizeObservation(null, "reparse-point");
 
                     if ((attributes & FileAttributes.Directory) != 0)
                     {
@@ -337,25 +388,27 @@ internal sealed record QueueWorktreeEntry(
                         continue;
                     }
 
-                    if (++files > MaxFilesMeasured) { reason = "file-limit"; return null; }
+                    if (++files > MaxFilesMeasured) return new SizeObservation(null, "file-limit");
                     total = checked(total + new FileInfo(entry).Length);
-                    if (total > MaxBytesMeasured) { reason = "byte-limit"; return null; }
+                    if (total > MaxBytesMeasured) return new SizeObservation(null, "byte-limit");
                 }
             }
 
-            return total;
+            return new SizeObservation(total, null);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or OverflowException)
         {
-            reason = "probe-failed";
-            return null;
+            return new SizeObservation(null, "probe-failed");
         }
     }
 
-    private sealed record GitResult(bool Success, string Stdout)
+    private sealed record GitResult(bool Success, string Stdout, bool Truncated = false)
     {
         public static readonly GitResult Unavailable = new(false, string.Empty);
     }
+
+    private sealed record BoundedRead(string Text, bool Truncated);
+    private sealed record SizeObservation(long? Bytes, string? Reason);
 
     private static bool IsStrictlyBeneath(string path, string root)
     {

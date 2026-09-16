@@ -94,7 +94,7 @@ public sealed class QueueWorktreeReportTests
             AssertReason(report, "halted", "failed-or-halted-row", "retain");
             AssertReason(report, "dirty", "substantive-uncommitted-content", "retain");
             AssertReason(report, "detached", "detached-head", "retain");
-            AssertReason(report, "missing-ref", "expected-branch-ref-missing", "retain");
+            AssertReason(report, "missing-ref", "expected-branch-probe-unavailable", "unknown");
             AssertReason(report, "wrong-repository", "wrong-repository", "retain");
             AssertReason(report, "outside-root", "outside-configured-root", "retain");
             AssertReason(report, "stale-registration", "stale-registration", "retain");
@@ -114,7 +114,67 @@ public sealed class QueueWorktreeReportTests
                 Assert.Contains(entry.Path, text, StringComparison.Ordinal);
                 Assert.Contains(entry.Classification, text, StringComparison.Ordinal);
                 foreach (var reason in entry.ReasonCodes) Assert.Contains(reason, text, StringComparison.Ordinal);
+                foreach (var row in entry.Rows)
+                {
+                    Assert.Contains(row.Origin, text, StringComparison.Ordinal);
+                    Assert.Contains(row.Repository!, text, StringComparison.Ordinal);
+                    Assert.Contains(row.Branch!, text, StringComparison.Ordinal);
+                    Assert.Contains($"retired={row.Retired}", text, StringComparison.Ordinal);
+                }
             }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Unavailable_repository_probe_stays_unknown()
+    {
+        var sandbox = Temp("repository-probe-unavailable");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var repo = await RepoAsync(root, "repository-probe-unavailable");
+            var report = await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "repository-probe-unavailable")],
+                root,
+                Ct,
+                (_, _) => Task.FromResult<Baton.Accounting.RepositoryIdentity?>(null));
+
+            AssertReason(report, "repository-probe-unavailable", "repository-probe-unavailable", "unknown");
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Raw_status_is_bounded_without_hiding_dirtiness()
+    {
+        var sandbox = Temp("bounded-status");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var repo = await RepoAsync(root, "many-untracked");
+            for (var index = 0; index < 400; index++)
+                await File.WriteAllTextAsync(Path.Combine(repo.Path, $"untracked-{index:D4}-{new string('x', 40)}.txt"), "x", Ct);
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync([Item(repo, "many-untracked")], root, Ct), "many-untracked");
+
+            Assert.Equal("dirty", entry.Git.SubstantiveCleanliness);
+            Assert.True(entry.Git.RawStatusTruncated);
+            Assert.NotNull(entry.Git.RawStatus);
+            Assert.True(entry.Git.RawStatus!.Length <= 16_384);
+            Assert.Equal("retain", entry.Classification);
         }
         finally
         {

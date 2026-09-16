@@ -2502,6 +2502,11 @@ public static class MutationInterface
                                 verifyOutcome.NotRunReason ?? "build lock busy",
                                 BuildLockBusy: true),
                             CancellationToken.None).ConfigureAwait(false);
+                        if (binding.DeliversBranch && recordedDelivery is null)
+                        {
+                            _ = await RecordDeliveryEvidenceAsync(
+                                prepared, binding, deliveryOutcomeBeforeVerify!, eventLogWriter).ConfigureAwait(false);
+                        }
                         return;
                     }
                     else

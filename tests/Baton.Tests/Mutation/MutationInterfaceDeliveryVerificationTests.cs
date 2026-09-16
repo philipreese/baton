@@ -177,6 +177,42 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     [Fact]
+    public async Task A_build_lock_blocked_verify_still_records_the_final_delivery_head()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-build-lock-busy");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget("cmd", ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"], WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30),
+                    VerifyCommandOverride: "echo GATES: BLOCKED 1 of 1 -- build & exit 3",
+                    DeliversBranch: true,
+                    ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(Assert.Single(finalState.Steps).IndeterminateAwaitingResolution);
+            Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.True(Assert.Single(events.OfType<FlowEvent.VerifyNotRun>()).BuildLockBusy);
+            var observation = Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+            Assert.Equal("Passed", observation.Verification);
+            Assert.Equal(observation.LocalHead, observation.RemoteHead);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
     public async Task A_role_that_does_not_deliver_a_branch_never_runs_the_check_even_when_unpushed()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-readonly");
