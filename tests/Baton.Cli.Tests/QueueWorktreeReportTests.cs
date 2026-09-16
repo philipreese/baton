@@ -608,6 +608,108 @@ public sealed class QueueWorktreeReportTests
     }
 
     [Fact]
+    public async Task Shared_liveness_deadline_bounds_a_stuck_synchronous_filesystem_probe()
+    {
+        var sandbox = Temp("synchronous-probe-deadline");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        using var releaseProbe = new ManualResetEventSlim();
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = Path.Combine(sandbox, "no-build-lock"),
+                Timeout = TimeSpan.FromMilliseconds(50),
+                EnumerateDirectories = _ =>
+                {
+                    releaseProbe.Wait();
+                    return [];
+                },
+            };
+
+            var started = Stopwatch.StartNew();
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.False(index.Complete);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(2), $"probe took {started.Elapsed}");
+        }
+        finally
+        {
+            releaseProbe.Set();
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Actual_python_build_lock_is_observed_held_and_missing_identity_fails_closed()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var sandbox = Temp("python-build-lock");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        Process? holder = null;
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var start = new ProcessStartInfo("python")
+            {
+                WorkingDirectory = FindRepoRoot(),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            start.ArgumentList.Add("tools/buildlock.py");
+            start.ArgumentList.Add("python");
+            start.ArgumentList.Add("-c");
+            start.ArgumentList.Add("import time; time.sleep(30)");
+            start.Environment["BATON_BUILDLOCK_FILE"] = lockPath;
+            holder = Process.Start(start) ?? throw new InvalidOperationException("Could not start Python build-lock holder.");
+
+            var heldDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+            while (DateTimeOffset.UtcNow < heldDeadline
+                && (QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath) != BuildLockProbeResult.Held
+                    || !File.Exists(lockPath + ".info")))
+            {
+                if (holder.HasExited) Assert.Fail($"build-lock holder exited {holder.ExitCode}");
+                // wait-ok: polling cadence only; heldDeadline is the 10-second failure ceiling.
+                await Task.Delay(50, Ct);
+            }
+            Assert.Equal(BuildLockProbeResult.Held, QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath));
+            Assert.True(File.Exists(lockPath + ".info"), "build-lock holder did not publish its sidecar");
+
+            File.Delete(lockPath + ".info");
+            var probe = QueueWorktreeLivenessProbe.Default with { BuildLockPath = lockPath };
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+            Assert.False(index.Complete);
+
+            holder.Kill(entireProcessTree: true);
+            await holder.WaitForExitAsync(Ct);
+            var freeDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+            while (DateTimeOffset.UtcNow < freeDeadline
+                && QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath) != BuildLockProbeResult.Free)
+            {
+                // wait-ok: polling cadence only; freeDeadline is the 5-second failure ceiling.
+                await Task.Delay(50, Ct);
+            }
+            Assert.Equal(BuildLockProbeResult.Free, QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath));
+        }
+        finally
+        {
+            if (holder is { HasExited: false }) holder.Kill(entireProcessTree: true);
+            holder?.Dispose();
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
     public async Task Caller_cancellation_is_not_converted_into_an_incomplete_snapshot()
     {
         var sandbox = Temp("branch-probe-caller-cancelled");
@@ -742,6 +844,18 @@ public sealed class QueueWorktreeReportTests
         var path = Path.Combine(Path.GetTempPath(), $"queue-worktrees-{name}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "Baton.slnx"))) return directory.FullName;
+            directory = directory.Parent;
+        }
+
+        throw new FileNotFoundException("Could not locate repo root containing Baton.slnx.");
     }
 
     private sealed record RepoFixture(string Path, string Branch, string Repository);
