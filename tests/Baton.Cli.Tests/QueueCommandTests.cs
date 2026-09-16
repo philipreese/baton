@@ -197,6 +197,152 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task Add_refuses_a_provisioned_implement_lane_whose_inherited_ceiling_withholds_required_categories()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceRepository = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2353");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(sourceRepository);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "2353-lane", Role: "implement", Issue: 2353,
+                    Lifecycle: true, SpecFilePath: brief,
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one admission fixture"),
+                    Requirements: ["file-write", "network", "github-write"]),
+                TextWriter.Null, Ct, sourceRepository,
+                (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo.git", null)),
+                (_, _, _, _, _, _) =>
+                {
+                    Directory.CreateDirectory(workspace);
+                    ProjectCeilingStore.Set(workspace,
+                        new ProjectCeiling(ReadFiles: true, WriteFiles: false,
+                            RunShellCommands: true, NetworkAccess: false),
+                        ProjectCeilingStore.DefaultPath);
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2353-lane"));
+                }));
+
+            Assert.Contains(workspace, refusal.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("file-write", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("WriteFiles", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("NetworkAccess", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(File.Exists(BatonPaths.QueueSpecFile("2353-lane")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_an_explicit_workspace_with_a_narrow_ceiling_before_copying_its_spec()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "narrow-workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: false,
+                    RunShellCommands: true, NetworkAccess: false), ProjectCeilingStore.DefaultPath);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "narrow-explicit", Role: "implement",
+                    WorkspaceDirectory: workspace, SpecFilePath: brief,
+                    Requirements: ["file-write", "network"]), TextWriter.Null, Ct));
+
+            Assert.Contains(workspace, refusal.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("WriteFiles", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("NetworkAccess", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(File.Exists(BatonPaths.QueueSpecFile("narrow-explicit")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("advise", false, false, false, "repository-read")]
+    [InlineData("implement", true, true, true, "network")]
+    public async Task Add_admits_a_role_whose_grant_fits_the_recorded_ceiling(
+        string role, bool writes, bool shell, bool network, string requirement)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "trusted-workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "do this", Ct);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: writes,
+                    RunShellCommands: shell, NetworkAccess: network), ProjectCeilingStore.DefaultPath);
+
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "trusted-lane", Role: role,
+                    WorkspaceDirectory: workspace, SpecFilePath: brief,
+                    Requirements: [requirement]), TextWriter.Null, Ct));
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(TaskRequirementAdmission.Admitted, item.LastAdmission?.Result);
+            Assert.True(File.Exists(BatonPaths.QueueSpecFile("trusted-lane")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Add_fails_closed_on_a_recorded_ceiling_that_cannot_safely_bind_implement(
+        bool revoked)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "closed-workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: true,
+                    RunShellCommands: true, NetworkAccess: false), ProjectCeilingStore.DefaultPath);
+            if (revoked)
+            {
+                ProjectCeilingStore.Revoke(workspace, ProjectCeilingStore.DefaultPath);
+            }
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "closed-lane", Role: "implement",
+                    WorkspaceDirectory: workspace, SpecFilePath: brief,
+                    Requirements: []), TextWriter.Null, Ct));
+
+            Assert.Contains(workspace, refusal.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(revoked ? "revoked" : "shell defeats", refusal.Message,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Theory]
     [InlineData("claude", "claude-fable-5-1", "Fable")]
     [InlineData("codex", "gpt-6-astra", "Astra")]

@@ -7213,7 +7213,13 @@ whole-lifecycle attachment is policy, and the queue does not silently choose one
 vendor process, the scheduler reads the current role catalog and compares these requirements to the
 effective grant — including its scoped `gh` shell patterns and declared output contract. A mismatch
 fails that item with the missing capability and a remedy; it never widens a role or guesses from the
-brief's prose. The item and its decision-ledger fact retain requested requirements, the effective
+brief's prose. At `queue add`, a workspace with a recorded project ceiling is checked against
+the role grant after that ceiling narrows it. A known mismatch or shell-incoherent narrowed grant
+refuses before the spec copy or queue-row/WIP claim, naming the exact workspace and withheld
+categories. An `--issue` worktree may already have been provisioned before its inherited ceiling
+is known; that path remains for an explicitly authorized trust correction and same-tag retry.
+The add check never widens the ceiling and does not replace the binding gate's launch-time check.
+The item and its decision-ledger fact retain requested requirements, the effective
 grant, the admission result, and zero vendor usage for that refusal, so the avoided spend remains
 auditable. Bare `queue list` prints each declaration and aggregate coverage. `queue list --active`
 selects queued and launched items plus lifecycle (`Stage != null`) done or failed items; it excludes

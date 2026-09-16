@@ -14,14 +14,19 @@ internal static class TaskRequirementPreflight
     private const string GitHubWriteProbe = "gh issue comment 1 --body admission";
 
     internal static TaskRequirementAdmission Evaluate(
-        QueueItem item, WorkerRole role, bool requireDeclaredRequirements)
+        QueueItem item, WorkerRole role, bool requireDeclaredRequirements,
+        PermissionGrant? cappedGrant = null)
     {
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(role);
 
-        var effectiveGrant = EffectiveGrant(role.Grant, role.Outputs.Select(output => output.Name));
+        var grant = cappedGrant ?? role.Grant;
+        var effectiveGrant = EffectiveGrant(grant, role.Outputs.Select(output => output.Name));
         if (item.Requirements is null)
         {
+            // The legacy missing-declaration gate classifies the execution-bearing role, not its
+            // currently capped grant. Otherwise a narrowed ceiling makes an old implement row
+            // look read-only and lets it launch without declared requirements.
             var executionBearing = TaskRequirements.IsExecutionBearing(
                 role.Grant.WriteFiles,
                 role.Grant.RunShellCommands && !role.Grant.ShellCommandsAreReadOnly,

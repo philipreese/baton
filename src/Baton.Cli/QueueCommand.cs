@@ -121,17 +121,16 @@ public static class QueueCommand
         // declaration before that side effect, not merely later in the daemon; the scheduler repeats
         // it for imported/hand-edited rows and any role-catalog change between add and launch.
         var role = WorkerRoleCatalog.For(options.Role!);
+        var admissionItem = new QueueItem
+        {
+            Tag = options.Tag!,
+            Role = options.Role!,
+            Workspace = "",
+            SpecFile = "",
+            Requirements = requirements,
+        };
         var admission = TaskRequirementPreflight.Evaluate(
-            new QueueItem
-            {
-                Tag = options.Tag!,
-                Role = options.Role!,
-                Workspace = "",
-                SpecFile = "",
-                Requirements = requirements,
-            },
-            role,
-            settings.Queue.RequireDeclaredRequirements);
+            admissionItem, role, settings.Queue.RequireDeclaredRequirements);
         if (admission.Result == TaskRequirementAdmission.Refused)
         {
             var missing = admission.Missing is { Count: > 0 }
@@ -186,6 +185,19 @@ public static class QueueCommand
                 $"Workspace '{workspace}' does not exist.",
                 "create it, or pass --issue <n> to have the queue provision a worktree for you.");
         }
+
+        // A recorded project ceiling is part of the effective grant, not a permission request.
+        // Refuse before spec/queue/WIP writes. --issue may already have provisioned the named path.
+        var projectAdmission = RecordedProjectCeilingAdmission.Evaluate(
+            admissionItem with { Workspace = workspace }, role, settings.Queue.RequireDeclaredRequirements);
+        if (projectAdmission.Admission.Result == TaskRequirementAdmission.Refused)
+        {
+            throw new CliArgumentException(
+                projectAdmission.RefusalMessage(workspace, options.Role!),
+                $"choose a role that fits this ceiling, or explicitly trust that exact workspace for the needed categories, then re-add '{tag}'; a provisioned worktree remains.");
+        }
+
+        admission = projectAdmission.Admission;
 
         // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
         // times in one evening (#1934 body); an item that launched days later against whatever the
