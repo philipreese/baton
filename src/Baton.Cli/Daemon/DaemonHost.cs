@@ -13,13 +13,10 @@ public static class DaemonHost
     public static Task RunDaemonAsync(string[] args) => RunDaemonAsync(args, onHostBuilt: null);
 
     /// <summary>
-    /// The daemon singleton mutex's name, scoped by the resolved storage root (<see cref="BatonPaths.Root"/>)
-    /// rather than just <see cref="Environment.UserName"/> (#1773). Two daemons under two different homes on
-    /// the same account — e.g. the operator's real <c>~/.baton</c> and a test's temp home via
-    /// <see cref="BatonEnvironmentSnapshot.BeginScope"/> — must never contend for the same OS mutex; a
-    /// username-only name made every test that skipped <c>--no-mutex</c> collide with (or seize) whatever
-    /// the operator's own daemon held. The root is hashed rather than embedded verbatim so the name stays a
-    /// bounded, filesystem-path-free token regardless of how long or unusual the root is.
+    /// The daemon singleton mutex's name is scoped by the resolved storage root (<see cref="BatonPaths.Root"/>)
+    /// alone (#1773, #2355). Distinct homes must not contend; conversely, two Windows principals that
+    /// resolve the same home must contend rather than launch two schedulers over one queue. The root is
+    /// hashed rather than embedded verbatim so the name stays a bounded, filesystem-path-free token.
     /// </summary>
     internal static string MutexName(string root)
     {
@@ -29,7 +26,9 @@ public static class DaemonHost
         // names, i.e. two daemons, which is the exact under-locking that comparer exists to prevent.
         var key = BatonPaths.RecordKey(root).ToLowerInvariant();
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..16];
-        return $"Global\\BatonDaemonMutex_{Environment.UserName}_{hash}";
+        // Protected invariant: one resolved Baton storage root has one mutex-protected daemon,
+        // regardless of the principal that launched it.
+        return $"Global\\BatonDaemonMutex_{hash}";
     }
 
     /// <summary>Test-only seam (Baton.Cli.Tests, via <c>InternalsVisibleTo</c>): <paramref name="onHostBuilt"/>
