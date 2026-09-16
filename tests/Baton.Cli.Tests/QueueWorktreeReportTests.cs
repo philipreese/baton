@@ -395,6 +395,102 @@ public sealed class QueueWorktreeReportTests
         }
     }
 
+    [Fact]
+    public async Task Unreadable_rooms_root_makes_the_liveness_index_incomplete()
+    {
+        var sandbox = Temp("rooms-root-denied");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                EnumerateDirectories = _ => throw new UnauthorizedAccessException("fixture denied"),
+                BuildLockPath = Path.Combine(sandbox, "no-build-lock"),
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.False(index.Complete);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Unreadable_build_lock_sidecar_makes_the_liveness_index_incomplete()
+    {
+        var sandbox = Temp("build-lock-denied");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var infoPath = lockPath + ".info";
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = lockPath,
+                ReadAllText = path => string.Equals(path, infoPath, StringComparison.OrdinalIgnoreCase)
+                    ? throw new UnauthorizedAccessException("fixture denied")
+                    : File.ReadAllText(path),
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.False(index.Complete);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Live_build_lock_owns_its_branch_even_from_another_clone_path()
+    {
+        var sandbox = Temp("build-lock-branch-owner");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var otherClone = await RepoAsync(root, "2333-lane");
+            await File.WriteAllTextAsync(
+                lockPath + ".info",
+                JsonSerializer.Serialize(new { pid = 42, cwd = otherClone.Path }),
+                Ct);
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = lockPath,
+                IsLiveProcess = _ => true,
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, probe);
+
+            Assert.True(index.Complete);
+            Assert.Contains("build-lock", index.ForBranch("2333-lane"));
+            Assert.Empty(index.For(candidate.Path));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
     private static QueueItem Item(
         RepoFixture repo,
         string tag,
