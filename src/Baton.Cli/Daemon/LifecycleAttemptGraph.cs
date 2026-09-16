@@ -45,8 +45,7 @@ public static class LifecycleAttemptGraph
             }
 
             var start = started[0];
-            if (!Enum.TryParse<WorkStage>(start.LifecycleStage, ignoreCase: true, out var stage)
-                || start.InputRevisionId is not { } input)
+            if (start.LifecycleStage is not { } stage || start.InputRevisionId is not { } input)
             {
                 return Halt(nodes, LifecycleGraphHaltKind.MissingIdentity,
                     $"attempt '{group.Key.Value}' has no typed stage or exact input revision");
@@ -59,6 +58,17 @@ public static class LifecycleAttemptGraph
             {
                 return Halt(nodes, LifecycleGraphHaltKind.DuplicateTerminalFact,
                     $"attempt '{group.Key.Value}' has duplicate terminal, revision, or verdict facts");
+            }
+
+            // A verdict is evidence about precisely the revision a review consumed. Validate this
+            // at node construction, rather than only when a later repair happens to name it: an
+            // approval on a stale head must not leave a graph apparently eligible to become ready.
+            if (verdicts.SingleOrDefault() is { } verdict
+                && (stage is not WorkStage.Review and not WorkStage.ReReview
+                    || verdict.RevisionId != input))
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.MismatchedVerdictRevision,
+                    $"attempt '{group.Key.Value}' records a verdict for a revision other than its exact review input");
             }
 
             if (revisions.SingleOrDefault()?.RevisionId is { } produced && produced == input)
@@ -191,6 +201,7 @@ public enum LifecycleGraphHaltKind
     MissingParent,
     FutureParent,
     UnsatisfiedDependency,
+    MismatchedVerdictRevision,
     MultipleRunnableFrontier,
 }
 

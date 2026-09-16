@@ -1109,7 +1109,7 @@ public sealed class QueueSchedulerService : BackgroundService
             Effort: tier?.Effort ?? item.Effort,
             DeclaredRole: item.Role,
             EffectiveGrant: item.LastAdmission?.EffectiveGrant,
-            LifecycleStage: item.Stage?.ToString(),
+            LifecycleStage: item.Stage,
             InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null,
             ParentAttemptIds: item.ParentAttemptId is { } parent ? [parent] : null,
             ParentEdgeKinds: item.ParentAttemptId is { } ? [EdgeFor(item.Stage)] : null);

@@ -2011,6 +2011,48 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task Changed_workspace_with_unchanged_captured_head_records_typed_nonproduction_and_halts()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteArrestedRoomAsync(home, workspaceChanged: true);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [seeded with
+                {
+                    AttemptId = new FleetAttemptId("attempt-dirty-unchanged"),
+                    AttemptBaseRevision = FullPushedSha,
+                }],
+            }, Ct);
+            var events = new List<FleetEventDraft>();
+
+            await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                }).AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.True(item.Halted);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Contains("no revision was produced", item.Error!, StringComparison.Ordinal);
+            Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+            Assert.Contains(events,
+                entry => entry.Kind == FleetEventKind.RevisionNotProducedUnchangedHeadAfterWorkspaceChange);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Overlapping_check_transitions_are_distinct_and_replays_are_idempotent()
     {
         var home = CreateTempHome();

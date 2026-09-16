@@ -109,7 +109,23 @@ public sealed class LifecycleAttemptGraphTests
                 parents: ["review"], edges: [FleetAttemptEdgeKind.Repairs]),
         ], Pr(B));
 
-        Assert.Equal(LifecycleGraphHaltKind.UnsatisfiedDependency, graph.Halt!.Kind);
+        Assert.Equal(LifecycleGraphHaltKind.MismatchedVerdictRevision, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Verdict_for_a_different_revision_halts_even_without_a_repair_child()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Event(2, FleetEventKind.AttemptSettled, "implement"),
+            Event(3, FleetEventKind.RevisionProduced, "implement", revision: B),
+            Event(4, FleetEventKind.AttemptStarted, "review", WorkStage.Review, B,
+                parents: ["implement"], edges: [FleetAttemptEdgeKind.Reviews]),
+            Event(5, FleetEventKind.AttemptSettled, "review"),
+            Event(6, FleetEventKind.ReviewVerdictObserved, "review", revision: A, verdict: "approve"),
+        ], Pr(B));
+
+        Assert.Equal(LifecycleGraphHaltKind.MismatchedVerdictRevision, graph.Halt!.Kind);
     }
 
     [Fact]
@@ -174,7 +190,7 @@ public sealed class LifecycleAttemptGraphTests
             $"{kind}:{id}",
             AttemptId: new FleetAttemptId(attempt),
             WorkId: new FleetWorkId("2363-lane"),
-            LifecycleStage: stage?.ToString(),
+            LifecycleStage: stage,
             InputRevisionId: input is null ? null : new FleetRevisionId(input),
             RevisionId: revision is null ? null : new FleetRevisionId(revision),
             ReviewVerdict: verdict,

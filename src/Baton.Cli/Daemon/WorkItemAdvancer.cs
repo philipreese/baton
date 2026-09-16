@@ -175,8 +175,24 @@ public sealed class WorkItemAdvancer
 
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
-        await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
+        await RecordOwnedObservationsAsync(item, stage, verdict, pr, head,
+            arrestedStep?.WorkspaceChanged == true, now, cancellationToken)
             .ConfigureAwait(false);
+
+        // Dirty workspace evidence does not prove delivery. In particular an arrested branch-delivery
+        // execution may leave files changed while HEAD is still the revision it consumed; treating a
+        // matching stale PR/HEAD as pushed would manufacture a successful lifecycle edge (#2362).
+        if (stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue
+            && arrestedStep?.WorkspaceChanged == true
+            && item.AttemptBaseRevision is { Length: > 0 } baseRevision
+            && string.Equals(baseRevision, head, StringComparison.OrdinalIgnoreCase))
+        {
+            return await FailAsync(item, stage,
+                new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0,
+                    "typed delivery evidence records workspace changes with an unchanged captured HEAD; "
+                    + "no revision was produced and this branch-delivery attempt cannot settle successfully"),
+                verdictPath, now, room).ConfigureAwait(false);
+        }
 
         if (string.Equals(item.LifecycleGraphVersion, LifecycleAttemptGraph.Version, StringComparison.Ordinal))
         {
@@ -1271,6 +1287,7 @@ public sealed class WorkItemAdvancer
         ReviewVerdict? verdict,
         PullRequestObservation pr,
         string? workspaceHead,
+        bool workspaceChanged,
         DateTimeOffset observedAt,
         CancellationToken cancellationToken)
     {
@@ -1315,6 +1332,18 @@ public sealed class WorkItemAdvancer
                 {
                     RevisionId = new FleetRevisionId(producedHead),
                     RevisionKind = revisionKind,
+                }, cancellationToken).ConfigureAwait(false);
+        }
+        else if (revisionKind is not null
+            && workspaceChanged
+            && item.AttemptBaseRevision is { Length: > 0 } capturedRevision
+            && string.Equals(capturedRevision, workspaceHead, StringComparison.OrdinalIgnoreCase))
+        {
+            await _appendFleetEvent(
+                Base(FleetEventKind.RevisionNotProducedUnchangedHeadAfterWorkspaceChange,
+                    $"revision-not-produced:{attemptId.Value}:{capturedRevision}") with
+                {
+                    RevisionId = new FleetRevisionId(capturedRevision),
                 }, cancellationToken).ConfigureAwait(false);
         }
 

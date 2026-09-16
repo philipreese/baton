@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Baton;
 using Baton.Domain;
+using Baton.Queue;
 using Baton.Status;
 
 namespace Baton.Cli.Daemon;
@@ -19,6 +20,7 @@ public enum FleetEventKind
     AttemptRetryScheduled,
     AttemptSettled,
     RevisionProduced,
+    RevisionNotProducedUnchangedHeadAfterWorkspaceChange,
     ReviewVerdictObserved,
     PullRequestBound,
     CheckObserved,
@@ -225,7 +227,7 @@ public sealed record FleetEventDraft(
     string? CheckStatus = null,
     DateTimeOffset? CheckStartedAt = null,
     DateTimeOffset? CheckCompletedAt = null,
-    string? LifecycleStage = null,
+    WorkStage? LifecycleStage = null,
     FleetRevisionId? InputRevisionId = null,
     IReadOnlyList<FleetAttemptId>? ParentAttemptIds = null,
     IReadOnlyList<FleetAttemptEdgeKind>? ParentEdgeKinds = null);
@@ -299,7 +301,7 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("checkCompletedAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckCompletedAt = null,
     [property: JsonPropertyName("lifecycleStage")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LifecycleStage = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WorkStage? LifecycleStage = null,
     [property: JsonPropertyName("inputRevisionId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetRevisionId? InputRevisionId = null,
     [property: JsonPropertyName("parentAttemptIds")]
