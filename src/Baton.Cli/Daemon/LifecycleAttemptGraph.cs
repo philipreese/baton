@@ -52,15 +52,16 @@ public static class LifecycleAttemptGraph
 
             var started = group.Where(e => e.Kind == FleetEventKind.AttemptStarted).ToList();
             var settled = group.Where(e => e.Kind == FleetEventKind.AttemptSettled).ToList();
+            var admissions = group.Where(e => e.Kind == FleetEventKind.AdmissionDecided).ToList();
             var revisions = group.Where(e => e.Kind == FleetEventKind.RevisionProduced).ToList();
             var verdicts = group.Where(e => e.Kind == FleetEventKind.ReviewVerdictObserved).ToList();
             var refusals = group.Where(e => e.Kind == FleetEventKind.AttemptRefused).ToList();
             var nonProductions = group.Where(e => e.Kind == FleetEventKind.RevisionNotProducedUnchangedHeadAfterWorkspaceChange).ToList();
-            if (started.Count > 1 || settled.Count > 1 || revisions.Count > 1 || verdicts.Count > 1
+            if (started.Count > 1 || settled.Count > 1 || admissions.Count > 1 || revisions.Count > 1 || verdicts.Count > 1
                 || refusals.Count > 1 || nonProductions.Count > 1)
             {
                 return Halt(nodes, LifecycleGraphHaltKind.DuplicateTerminalFact,
-                    $"attempt '{group.Key.Value}' has duplicate start, terminal, revision, verdict, or refusal facts");
+                    $"attempt '{group.Key.Value}' has duplicate admission, start, terminal, revision, verdict, or refusal facts");
             }
             if (started.Count == 0 && (settled.Count > 0 || revisions.Count > 0 || verdicts.Count > 0))
             {
@@ -91,6 +92,43 @@ public static class LifecycleAttemptGraph
                 return Halt(nodes, LifecycleGraphHaltKind.InvalidChronology,
                     $"attempt '{group.Key.Value}' has result facts outside plan-start-settle order");
             }
+            if (admissions.SingleOrDefault() is { } admission && admission.Id <= plan.Id)
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.InvalidChronology,
+                    $"attempt '{group.Key.Value}' has an admission fact before its plan");
+            }
+            var typedStart = started.SingleOrDefault();
+            var typedSettlement = settled.SingleOrDefault();
+            if (typedStart is not null
+                && ((typedStart.LifecycleStage is { } startStage && startStage != stage)
+                    || (typedStart.InputRevisionId is { } startInput && startInput != input)))
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
+                    $"attempt '{group.Key.Value}' start identity disagrees with its immutable plan");
+            }
+            if (typedSettlement is not null
+                && ((typedSettlement.LifecycleStage is { } settledStage && settledStage != stage)
+                    || (typedSettlement.InputRevisionId is { } settledInput && settledInput != input)
+                    || typedStart?.RoomId is { } startedRoom && typedSettlement.RoomId is { } settledRoom
+                        && settledRoom != startedRoom))
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
+                    $"attempt '{group.Key.Value}' settlement identity disagrees with its planned start");
+            }
+            if (settled.SingleOrDefault()?.ArtifactReferences is { } artifacts
+                && (artifacts.Any(string.IsNullOrWhiteSpace)
+                    || artifacts.Distinct(StringComparer.Ordinal).Count() != artifacts.Count))
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.MalformedArtifacts,
+                    $"attempt '{group.Key.Value}' has malformed produced artifact references");
+            }
+            var binding = LifecycleAttemptBinding.From(admissions.SingleOrDefault());
+            if (binding is not null
+                && (!binding.Matches(started.SingleOrDefault()) || !binding.Matches(settled.SingleOrDefault())))
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.ContradictoryAttemptBinding,
+                    $"attempt '{group.Key.Value}' binding or assignment decision disagrees across durable facts");
+            }
             if (verdicts.SingleOrDefault() is { } verdict
                 && (stage is not WorkStage.Review and not WorkStage.ReReview || verdict.RevisionId != input))
             {
@@ -115,7 +153,9 @@ public static class LifecycleAttemptGraph
                 settled.Count > 0, settled.SingleOrDefault()?.Outcome ?? refusals.SingleOrDefault()?.Outcome,
                 refusals.Count > 0, settled.SingleOrDefault()?.WorkspaceChanged,
                 nonProductions.Count > 0, revisions.SingleOrDefault()?.RevisionId,
-                verdicts.SingleOrDefault()?.RevisionId, verdicts.SingleOrDefault()?.ReviewVerdict));
+                verdicts.SingleOrDefault()?.RevisionId, verdicts.SingleOrDefault()?.ReviewVerdict,
+                binding, started.SingleOrDefault()?.RoomId ?? settled.SingleOrDefault()?.RoomId,
+                settled.SingleOrDefault()?.ExecutionId, settled.SingleOrDefault()?.ArtifactReferences));
         }
 
         nodes.Sort((left, right) => left.PlanEventId.CompareTo(right.PlanEventId));
@@ -341,7 +381,9 @@ public sealed record LifecycleAttemptNode(
     IReadOnlyList<FleetAttemptEdge> ParentEdges, long PlanEventId, long? StartEventId,
     bool Settled, string? Outcome, bool Refused, bool? WorkspaceChanged, bool RevisionNotProduced,
     FleetRevisionId? ProducedRevision,
-    FleetRevisionId? ReviewedRevision, string? ReviewVerdict)
+    FleetRevisionId? ReviewedRevision, string? ReviewVerdict,
+    LifecycleAttemptBinding? Binding, FleetRoomId? RoomId, ExecutionId? ExecutionId,
+    IReadOnlyList<string>? ProducedArtifacts)
 {
     public bool Started => StartEventId is not null;
 }
@@ -370,6 +412,9 @@ public enum LifecycleGraphHaltKind
     InvalidChronology,
     SettledWithoutStart,
     ContradictoryTerminalFact,
+    ContradictoryAttemptIdentity,
+    ContradictoryAttemptBinding,
+    MalformedArtifacts,
     UnchangedRevision,
     ContradictoryEdge,
     MissingParent,
@@ -388,6 +433,33 @@ public enum LifecycleGraphHaltKind
 }
 
 public sealed record LifecycleGraphHalt(LifecycleGraphHaltKind Kind, string Reason);
+
+/// <summary>
+/// The resolved binding that admission made for one attempt. This keeps the immutable node able to
+/// reject a later start or settlement recorded under a different assignment without re-reading a
+/// mutable queue row.
+/// </summary>
+public sealed record LifecycleAttemptBinding(
+    string? Vendor, string? Model, string? Effort, string? DeclaredRole,
+    IReadOnlyList<string>? EffectiveGrant, string? AssignmentDecisionId)
+{
+    internal static LifecycleAttemptBinding? From(FleetEvent? admission) => admission is null ? null : new(
+        admission.Vendor, admission.Model, admission.Effort, admission.DeclaredRole,
+        admission.EffectiveGrant, admission.AssignmentDecisionId);
+
+    internal bool Matches(FleetEvent? fact) => fact is null
+        || Same(Vendor, fact.Vendor)
+        && Same(Model, fact.Model)
+        && Same(Effort, fact.Effort)
+        && Same(DeclaredRole, fact.DeclaredRole)
+        && Same(AssignmentDecisionId, fact.AssignmentDecisionId)
+        && Same(EffectiveGrant, fact.EffectiveGrant);
+
+    private static bool Same(string? decision, string? fact) => fact is null || decision == fact;
+
+    private static bool Same(IReadOnlyList<string>? decision, IReadOnlyList<string>? fact) => fact is null
+        || decision is not null && decision.SequenceEqual(fact, StringComparer.Ordinal);
+}
 
 public sealed record LifecycleProjection(
     WorkStage? DisplayStage, QueueItemState? DisplayState, int Round, bool AutomaticFixUsed,
@@ -429,30 +501,70 @@ public static class LifecycleQueueProjection
     public static bool IsGraphVersioned(QueueItem item) =>
         string.Equals(item.LifecycleGraphVersion, LifecycleAttemptGraph.Version, StringComparison.Ordinal);
 
-    public static LifecyclePullRequestObservation Observation(QueueItem item)
+    public static LifecyclePullRequestObservation Observation(
+        QueueItem item, IReadOnlyList<FleetEvent> events, DateTimeOffset now)
     {
         var evidence = item.LifecyclePullRequestEvidence;
         if (evidence is not { Succeeded: true, Number: { } number }
             || item.PullRequest != number
-            || evidence.ObservedAt == default)
+            || evidence.ObservedAt == default
+            || evidence.ObservedAt > now
+            || now - evidence.ObservedAt > FleetProjectionWriter.StaleAfter())
         {
             return new(null, null, false, null, null);
         }
 
-        var checks = item.ChecksObservedAt == evidence.ObservedAt
-            && string.Equals(item.ChecksHeadSha, evidence.HeadSha, StringComparison.Ordinal)
-            ? item.Checks
-            : null;
+        var checks = events
+            .Where(e => e.Kind == FleetEventKind.CheckObserved
+                && e.WorkId is { } work && string.Equals(work.Value, item.Tag, StringComparison.Ordinal)
+                && e.PullRequestId == number
+                && e.RevisionId is { } revision && string.Equals(revision.Value, evidence.HeadSha, StringComparison.Ordinal)
+                && e.RequiredChecks is not null
+                && e.At <= now && now - e.At <= FleetProjectionWriter.StaleAfter())
+            .OrderByDescending(e => e.Id)
+            .Select(e => e.RequiredChecks)
+            .FirstOrDefault(checks => checks is PullRequestChecks.Passing or PullRequestChecks.Pending
+                or PullRequestChecks.Failing or PullRequestChecks.None);
         return new(evidence.Number, evidence.HeadSha, true, evidence.IsOpen, checks, evidence.IsDraft);
     }
 
     public static IReadOnlyList<QueueItem> Project(
         IReadOnlyList<QueueItem> items, IReadOnlyList<FleetEvent> events) =>
-        items.Select(item => IsGraphVersioned(item)
-            ? Apply(item, LifecycleAttemptGraph.Build(item, events, Observation(item)))
+        items.Select(item => IsGraphVersioned(item) || item.Stage is not null && item.State == QueueItemState.Cancelled
+            ? Apply(item, LifecycleAttemptGraph.Build(item, events, Observation(item, events, DateTimeOffset.UtcNow)),
+                LegacyCancelledHasNoLiveOrRunnableAttempt(item, events))
             : item).ToList();
 
-    public static QueueItem Apply(QueueItem item, LifecycleAttemptGraphResult graph)
+    /// <summary>
+    /// This is deliberately narrower than graph migration. A cancelled legacy row whose retained
+    /// typed facts show every known attempt settled/refused and no plan left to launch has no live
+    /// work to reserve WIP for. It remains an explicit compatibility halt and retirement still has
+    /// to prove every old room independently.
+    /// </summary>
+    public static bool LegacyCancelledHasNoLiveOrRunnableAttempt(QueueItem item, IReadOnlyList<FleetEvent> events)
+    {
+        if (IsGraphVersioned(item) || item.State != QueueItemState.Cancelled)
+        {
+            return false;
+        }
+
+        var attempts = events
+            .Where(e => e.WorkId is { } work && string.Equals(work.Value, item.Tag, StringComparison.Ordinal)
+                && e.AttemptId is not null)
+            .GroupBy(e => e.AttemptId!.Value)
+            .Select(group => group.Select(e => e.Kind).ToHashSet())
+            .ToList();
+        return attempts.Count > 0 && attempts.All(kinds =>
+            !(kinds.Contains(FleetEventKind.AttemptPlanned)
+                && !kinds.Contains(FleetEventKind.AttemptStarted)
+                && !kinds.Contains(FleetEventKind.AttemptRefused))
+            && !(kinds.Contains(FleetEventKind.AttemptStarted)
+                && !kinds.Contains(FleetEventKind.AttemptSettled)
+                && !kinds.Contains(FleetEventKind.AttemptRefused)));
+    }
+
+    public static QueueItem Apply(
+        QueueItem item, LifecycleAttemptGraphResult graph, bool legacyCancelledHasNoLiveOrRunnableAttempt = false)
     {
         // Retirement and cancellation remain operator authority. A plan appended immediately before
         // an operator wins the queue CAS is retained as history, but it must never resurrect the row.
@@ -460,9 +572,17 @@ public static class LifecycleQueueProjection
         {
             return item with
             {
-                LifecycleGraphActive = false,
-                LifecycleGraphPrePullRequest = false,
-                LifecycleGraphLiveReview = false,
+                LifecycleGraphActive = graph.IsCompatibility && !legacyCancelledHasNoLiveOrRunnableAttempt
+                    ? item.LifecycleGraphActive : false,
+                LifecycleGraphPrePullRequest = graph.IsCompatibility && !legacyCancelledHasNoLiveOrRunnableAttempt
+                    ? item.LifecycleGraphPrePullRequest : false,
+                LifecycleGraphLiveReview = graph.IsCompatibility && !legacyCancelledHasNoLiveOrRunnableAttempt
+                    ? item.LifecycleGraphLiveReview : false,
+                LifecycleCompatibilityHalt = graph.IsCompatibility && item.State == QueueItemState.Cancelled
+                    ? graph.Halt?.Reason
+                    : item.LifecycleCompatibilityHalt,
+                LifecycleCompatibilityReleasesWip = graph.IsCompatibility
+                    && legacyCancelledHasNoLiveOrRunnableAttempt,
             };
         }
         if (graph.IsCompatibility)
@@ -499,8 +619,8 @@ public static class LifecycleQueueProjection
             State = state,
             Round = graph.Projection.Round,
             AutomaticFixUsed = graph.Projection.AutomaticFixUsed,
-            AttemptId = frontier?.Started == true ? frontier.AttemptId : null,
-            AttemptBaseRevision = frontier?.Started == true ? frontier.InputRevision.Value : null,
+            AttemptId = frontier?.AttemptId,
+            AttemptBaseRevision = frontier?.InputRevision.Value,
             ParentAttemptId = parent,
             LifecycleGraphActive = graph.Projection.Active,
             LifecycleGraphPrePullRequest = graph.Projection.PrePullRequest,

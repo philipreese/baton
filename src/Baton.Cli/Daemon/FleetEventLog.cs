@@ -236,7 +236,9 @@ public sealed record FleetEventDraft(
     WorkStage? LifecycleStage = null,
     FleetRevisionId? InputRevisionId = null,
     IReadOnlyList<FleetAttemptEdge>? ParentEdges = null,
-    bool? WorkspaceChanged = null);
+    bool? WorkspaceChanged = null,
+    string? AssignmentDecisionId = null,
+    string? RequiredChecks = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -313,7 +315,11 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("parentEdges")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptEdge>? ParentEdges = null,
     [property: JsonPropertyName("workspaceChanged")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? WorkspaceChanged = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? WorkspaceChanged = null,
+    [property: JsonPropertyName("assignmentDecisionId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AssignmentDecisionId = null,
+    [property: JsonPropertyName("requiredChecks")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RequiredChecks = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -324,7 +330,8 @@ public sealed record FleetEvent(
         draft.CheckConclusion, draft.ElapsedMilliseconds, draft.LastMeaningfulProgressAt?.ToUniversalTime(),
         draft.Usage, draft.ArtifactReferences, draft.RevisionKind, draft.CheckRunId, draft.CheckName,
         draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime(),
-        draft.LifecycleStage, draft.InputRevisionId, draft.ParentEdges, draft.WorkspaceChanged);
+        draft.LifecycleStage, draft.InputRevisionId, draft.ParentEdges, draft.WorkspaceChanged,
+        draft.AssignmentDecisionId, draft.RequiredChecks);
 }
 
 /// <summary>

@@ -185,12 +185,17 @@ public sealed class WorkItemAdvancer
                 pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.IsDraft, now);
             if (!await TryMarkAsync(item, existing => existing with
             {
+                PullRequest = pr.Number ?? existing.PullRequest,
                 LifecyclePullRequestEvidence = evidence,
             }).ConfigureAwait(false))
             {
                 return null;
             }
-            item = item with { LifecyclePullRequestEvidence = evidence };
+            item = item with
+            {
+                PullRequest = pr.Number ?? item.PullRequest,
+                LifecyclePullRequestEvidence = evidence,
+            };
         }
 
         // Dirty workspace evidence does not prove delivery. In particular an arrested branch-delivery
@@ -214,7 +219,7 @@ public sealed class WorkItemAdvancer
         {
             authorityEvents = await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false);
             authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents,
-                new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks, pr.IsDraft));
+                LifecycleQueueProjection.Observation(item, authorityEvents, now));
             if (authorityGraph.Graph.Nodes.Count == 0 && authorityGraph.Halt is null)
             {
                 authorityGraph = authorityGraph with
@@ -234,7 +239,7 @@ public sealed class WorkItemAdvancer
                     ? await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false)
                     : [.. authorityEvents, planned];
                 authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents,
-                    new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks, pr.IsDraft));
+                    LifecycleQueueProjection.Observation(item, authorityEvents, now));
             }
             if (authorityGraph.Halt is { } halt)
             {
@@ -513,7 +518,8 @@ public sealed class WorkItemAdvancer
             WorkItemTransitionKind.Stop =>
                 await StopAsync(item, stage, transition, pr, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Dispatch =>
-                await QueueNextRoundAsync(item, stage, transition, pr, verdict, verdictPath, now, room)
+                await QueueNextRoundAsync(
+                    item, stage, transition, pr, verdict, verdictPath, now, room, authorityGraph)
                     .ConfigureAwait(false),
             _ => null,
         };
@@ -566,7 +572,8 @@ public sealed class WorkItemAdvancer
         ReviewVerdict? verdict,
         string? verdictPath,
         DateTimeOffset now,
-        string? room)
+        string? room,
+        LifecycleAttemptGraphResult? authorityGraph)
     {
         var next = transition.NextStage!.Value;
 
@@ -592,6 +599,9 @@ public sealed class WorkItemAdvancer
             Round: transition.Round,
             Findings: findings));
 
+        var graphFrontier = authorityGraph?.Frontier is { Started: false } marker
+            ? authorityGraph.Graph.Nodes.Single(node => node.AttemptId == marker.AttemptId)
+            : null;
         var advanced = await TryMarkAsync(item, existing => existing with
         {
             Stage = next,
@@ -620,8 +630,8 @@ public sealed class WorkItemAdvancer
             RoomDirectory = null,
             LaunchedAt = null,
             ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
-            AttemptId = null,
-            AttemptBaseRevision = null,
+            AttemptId = graphFrontier?.AttemptId,
+            AttemptBaseRevision = graphFrontier?.InputRevision.Value,
             Error = null,
             Halted = false,
             ReconciliationKind = null,
@@ -1390,9 +1400,10 @@ public sealed class WorkItemAdvancer
                 : null,
             IssueId: item.Issue,
             PullRequestId: pr.Number ?? item.PullRequest,
-            Vendor: item.Adapter,
-            Model: item.Model,
-            Effort: item.Effort,
+            Vendor: item.WorkerAssignment?.Adapter ?? item.Adapter,
+            Model: item.WorkerAssignment?.Model ?? item.Model,
+            Effort: item.WorkerAssignment?.Effort ?? item.Effort,
+            AssignmentDecisionId: item.WorkerAssignment?.DecisionId,
             DeclaredRole: item.Role,
             EffectiveGrant: item.LastAdmission?.EffectiveGrant);
 
@@ -1451,6 +1462,19 @@ public sealed class WorkItemAdvancer
                         CheckConclusion = check.Conclusion,
                         CheckStartedAt = check.StartedAt,
                         CheckCompletedAt = check.CompletedAt,
+                    }, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (pr.RequiredChecks is { } requiredChecks)
+            {
+                await _appendFleetEvent(
+                    Base(FleetEventKind.CheckObserved,
+                        $"required-checks:{attemptId.Value}:{number}:{pullRequestHead}:{requiredChecks}:"
+                        + observedAt.UtcTicks.ToString(CultureInfo.InvariantCulture)) with
+                    {
+                        PullRequestId = number,
+                        RevisionId = new FleetRevisionId(pullRequestHead),
+                        RequiredChecks = requiredChecks,
                     }, cancellationToken).ConfigureAwait(false);
             }
         }

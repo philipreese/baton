@@ -642,7 +642,8 @@ public sealed class WorkItemAdvancerTests
             var item = await ReadBackAsync();
             Assert.Equal(WorkStage.Review, item.Stage);
             Assert.Equal(QueueItemState.Queued, item.State);
-            Assert.Null(item.AttemptId);
+            Assert.NotNull(item.AttemptId);
+            Assert.Equal(FullPushedSha, item.AttemptBaseRevision);
             Assert.Equal(attemptId, item.ParentAttemptId);
             Assert.Equal(FullPushedSha, item.LifecyclePullRequestEvidence!.HeadSha);
             Assert.True(item.LifecyclePullRequestEvidence.Succeeded);
@@ -651,6 +652,7 @@ public sealed class WorkItemAdvancerTests
             var events = await log.ReadRetained(Ct);
             var reviewPlan = Assert.Single(events, entry =>
                 entry.Kind == FleetEventKind.AttemptPlanned && entry.LifecycleStage == WorkStage.Review);
+            Assert.Equal(reviewPlan.AttemptId, item.AttemptId);
             Assert.Equal(new FleetRevisionId(FullPushedSha), reviewPlan.InputRevisionId);
             Assert.Equal(
                 new FleetAttemptEdge(attemptId, FleetAttemptEdgeKind.Reviews),
@@ -2066,7 +2068,8 @@ public sealed class WorkItemAdvancerTests
 
             Assert.All(events, entry => Assert.Equal(attemptId, entry.AttemptId));
             Assert.Equal(
-                [FleetEventKind.PullRequestBound, FleetEventKind.CheckObserved, FleetEventKind.ReviewVerdictObserved],
+                [FleetEventKind.PullRequestBound, FleetEventKind.CheckObserved,
+                    FleetEventKind.CheckObserved, FleetEventKind.ReviewVerdictObserved],
                 events.Select(entry => entry.Kind));
             Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
             Assert.Equal(77, events[0].PullRequestId);
@@ -2074,10 +2077,11 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal("gates", events[1].CheckName);
             Assert.Equal("COMPLETED", events[1].CheckStatus);
             Assert.Equal("SUCCESS", events[1].CheckConclusion);
-            Assert.Equal(new FleetReviewRoundId("1934-lane:2"), events[2].ReviewRoundId);
-            Assert.Equal("approve", events[2].ReviewVerdict);
+            Assert.Equal(PullRequestChecks.Passing, events[2].RequiredChecks);
+            Assert.Equal(new FleetReviewRoundId("1934-lane:2"), events[3].ReviewRoundId);
+            Assert.Equal("approve", events[3].ReviewVerdict);
             // This fixture's reviewedRef is not a full immutable SHA, so it stays absent.
-            Assert.Null(events[2].RevisionId);
+            Assert.Null(events[3].RevisionId);
         }
         finally
         {
@@ -2247,13 +2251,20 @@ public sealed class WorkItemAdvancerTests
             var checks = (await log.ReadAfter(0, Ct))
                 .Where(entry => entry.Kind == FleetEventKind.CheckObserved)
                 .ToList();
-            Assert.Equal(3, checks.Count);
-            Assert.Equal(["101", "202", "101"], checks.Select(entry => entry.CheckRunId!.Value.Value));
-            Assert.Equal(["IN_PROGRESS", "IN_PROGRESS", "COMPLETED"], checks.Select(entry => entry.CheckStatus));
-            Assert.Null(checks[0].CheckConclusion);
-            Assert.Null(checks[0].CheckCompletedAt);
-            Assert.Equal("SUCCESS", checks[2].CheckConclusion);
-            Assert.Equal(DateTimeOffset.Parse("2026-09-11T15:02:00Z"), checks[2].CheckCompletedAt);
+            var runChecks = checks.Where(entry => entry.CheckRunId is not null).ToList();
+            Assert.Equal(3, runChecks.Count);
+            Assert.Equal(["101", "202", "101"], runChecks.Select(entry => entry.CheckRunId!.Value.Value));
+            Assert.Equal(["IN_PROGRESS", "IN_PROGRESS", "COMPLETED"], runChecks.Select(entry => entry.CheckStatus));
+            Assert.Null(runChecks[0].CheckConclusion);
+            Assert.Null(runChecks[0].CheckCompletedAt);
+            Assert.Equal("SUCCESS", runChecks[2].CheckConclusion);
+            Assert.Equal(DateTimeOffset.Parse("2026-09-11T15:02:00Z"), runChecks[2].CheckCompletedAt);
+            var requiredChecks = checks.Where(entry => entry.RequiredChecks is not null).ToList();
+            var requiredCheck = Assert.Single(requiredChecks);
+            Assert.Equal(PullRequestChecks.Passing, requiredCheck.RequiredChecks);
+            Assert.EndsWith(
+                Now.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                requiredCheck.DedupeKey, StringComparison.Ordinal);
         }
         finally
         {

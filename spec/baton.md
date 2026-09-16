@@ -7151,15 +7151,17 @@ the node. Only `attemptStarted` does. A pre-launch refusal appends `attemptRefus
 the failed row, so a crash cannot resurrect the plan. Thus a held launch retries the same single
 unstarted frontier; it cannot become a missing-start halt or manufacture another planned node.
 
-`LifecycleAttemptGraph.Build` is the sole cross-attempt policy reader. It replays plans, starts,
-settlements, produced revisions, revision-specific verdicts, and the exact PR head/check observation;
+`LifecycleAttemptGraph.Build` is the sole cross-attempt policy reader. It replays plans, admissions,
+starts, settlements, binding/assignment decisions, room/execution identities, produced artifacts,
+produced revisions, revision-specific verdicts, and the exact PR head/check observation;
 validates backward-only typed dependencies; and returns either one runnable frontier, ready, a wait,
 or a typed halt. Implement/fix/continue success requires a produced revision different from the
 node's input and present as the recorded open PR head. Review decisions apply only to their exact
 input revision. A block permits the one repair; re-review requires that repair's different produced
 revision. Approval permits ready only when it covers the current PR head and required checks pass.
-Missing, duplicate, contradictory, stale, or unproven evidence halts rather than consulting the
-queue row. A settlement carries the nullable structured `workspaceChanged` observation already
+Missing, duplicate, contradictory, stale, malformed, or unproven evidence halts rather than consulting the
+queue row. Start and settlement facts must agree with the planned stage/input and each other’s room;
+the node retains its settlement execution and artifact references. A settlement carries the nullable structured `workspaceChanged` observation already
 present in the terminal projection. An incomplete mutating attempt earns a continuation edge only
 when that observation is exactly `true`; false or absent evidence halts for the operator, and a
 `revisionNotProducedUnchangedHeadAfterWorkspaceChange` fact can never authorize continuation. The
@@ -7167,13 +7169,14 @@ same `WorkStages.MaxRounds` ceiling bounds graph-derived dispatches, including i
 post-fix re-review exception; it does not prevent that final review from approving or blocking.
 
 The exact forge observation used by replay is persisted as one typed compatibility value carrying
-PR number, head SHA, observation success, open/draft state, and observation time. Required-check
-evidence is usable only when its separately recorded `checksHeadSha` equals that exact observed head.
-It is also usable only when the observation's PR number equals the row's bound PR and its
-`observedAt` equals `checksObservedAt`; a timestamp mismatch is stale evidence, not green evidence.
-Missing evidence and a failed observation remain unknown: a PR number plus a stale green checks word
-must never be reinterpreted as a successful open-PR observation by queue list, Fleet Glass, or the
-scheduler.
+PR number, head SHA, observation success, open/draft state, and observation time. Queue-row
+`checks`, `checksHeadSha`, and `checksObservedAt` remain display-only. Required-check evidence is
+instead one durable `checkObserved` fact carrying the required-check summary and the exact PR number
+and head it observed. It is usable only for the row's bound PR and exact observed head, and only for
+the fleet projection's three-tick freshness window; the newest valid fact for that identity wins.
+Missing, future-dated, stale, malformed, or failed observation evidence remains unknown: a PR number
+plus a stale green checks word must never be reinterpreted as a successful open-PR observation by
+queue list, Fleet Glass, or the scheduler.
 
 The daemon writes the graph's compatibility projection back to the queue row and feeds that same
 projection to candidate selection and lifecycle WIP accounting. `queue list` and Fleet Glass call the
@@ -7455,9 +7458,13 @@ plan is new work; an unstarted review/fix/continue after a launched predecessor 
 ready, halted, or fully terminal history with no frontier occupies no WIP. Legacy rows use the
 compatibility rule: stage plus a claimed identity, room, PR, nonzero round, or non-queued execution
 state is durable evidence of an earlier launch. Only cancellation before the first launch avoids
-active or pre-PR WIP on that legacy path. `baton queue cancel`
-refuses a queued review, fix, or ready lifecycle that already has launch proof; an older malformed
-`Cancelled` legacy row with that proof still occupies WIP until trusted retirement. Pre-PR is the active
+active or pre-PR WIP on that legacy path, except that a cancelled legacy row whose retained typed
+facts prove every known attempt settled/refused and no planned attempt remains unstarted projects an
+explicit `legacy-unproven` compatibility halt and consumes no WIP. This is only a graph/compatibility
+projection: it neither invents lineage nor weakens `queue retire`'s per-room terminal-proof guard.
+`baton queue cancel` refuses a queued review, fix, or ready lifecycle that already has launch proof;
+an older malformed `Cancelled` legacy row with unresolved typed live/runnable evidence still occupies
+WIP until trusted retirement. Pre-PR is the active
 subset without a bound PR; live reviews are launched review or re-review
 attempts. Retired rows count in none of these sets.
 

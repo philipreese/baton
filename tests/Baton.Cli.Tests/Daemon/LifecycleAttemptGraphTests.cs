@@ -249,7 +249,8 @@ public sealed class LifecycleAttemptGraphTests
             Event(6, FleetEventKind.ReviewVerdictObserved, "review", revision: C, verdict: "approve"),
         };
 
-        var graph = LifecycleAttemptGraph.Build(item, facts, LifecycleQueueProjection.Observation(item));
+        var graph = LifecycleAttemptGraph.Build(item, facts,
+            LifecycleQueueProjection.Observation(item, facts, DateTimeOffset.UtcNow));
         var projected = LifecycleQueueProjection.Apply(item, graph);
 
         Assert.False(graph.Ready);
@@ -503,9 +504,116 @@ public sealed class LifecycleAttemptGraphTests
         };
 
         Assert.False(LifecycleAttemptGraph.Build(wrongPr, facts,
-            LifecycleQueueProjection.Observation(wrongPr)).Ready);
+            LifecycleQueueProjection.Observation(wrongPr, facts, observed)).Ready);
         Assert.False(LifecycleAttemptGraph.Build(staleChecks, facts,
-            LifecycleQueueProjection.Observation(staleChecks)).Ready);
+            LifecycleQueueProjection.Observation(staleChecks, facts, observed)).Ready);
+    }
+
+    [Fact]
+    public void A_typed_start_that_disagrees_with_its_plan_halts_while_a_matching_start_remains_valid()
+    {
+        var plan = Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A);
+        var matching = Started(101, "implement") with
+        {
+            LifecycleStage = WorkStage.Implement,
+            InputRevisionId = new FleetRevisionId(A),
+        };
+        var contradictory = matching with { LifecycleStage = WorkStage.Review };
+
+        Assert.Null(LifecycleAttemptGraph.Build(Item(), [plan, matching], Pr(A)).Halt);
+        Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
+            LifecycleAttemptGraph.Build(Item(), [plan, contradictory], Pr(A)).Halt!.Kind);
+    }
+
+    [Fact]
+    public void Conflicting_binding_and_malformed_terminal_artifacts_halt_without_reading_the_queue_row()
+    {
+        var plan = Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A);
+        var admission = new FleetEvent(11, DateTimeOffset.UtcNow, FleetEventKind.AdmissionDecided, "admission",
+            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
+            Vendor: "codex", Model: "gpt-5.6-sol", DeclaredRole: "implement", AssignmentDecisionId: "decision-a");
+        var conflictingStart = new FleetEvent(12, DateTimeOffset.UtcNow, FleetEventKind.AttemptStarted, "start",
+            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
+            LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(A), Vendor: "claude");
+
+        Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptBinding,
+            LifecycleAttemptGraph.Build(Item(), [plan, admission, conflictingStart], Pr(A)).Halt!.Kind);
+
+        var started = new FleetEvent(12, DateTimeOffset.UtcNow, FleetEventKind.AttemptStarted, "start",
+            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
+            LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(A),
+            RoomId: new FleetRoomId("room-a"));
+        var wrongRoom = new FleetEvent(20, DateTimeOffset.UtcNow, FleetEventKind.AttemptSettled, "settled-room",
+            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
+            Outcome: WorkflowOutcome.Succeeded, RoomId: new FleetRoomId("room-b"));
+
+        Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
+            LifecycleAttemptGraph.Build(Item(), [plan, started, wrongRoom], Pr(A)).Halt!.Kind);
+
+        var settled = new FleetEvent(20, DateTimeOffset.UtcNow, FleetEventKind.AttemptSettled, "settled",
+            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
+            Outcome: WorkflowOutcome.Succeeded, ArtifactReferences: ["artifact.txt", "artifact.txt"]);
+
+        Assert.Equal(LifecycleGraphHaltKind.MalformedArtifacts,
+            LifecycleAttemptGraph.Build(Item(), [plan, started, settled], Pr(A)).Halt!.Kind);
+    }
+
+    [Fact]
+    public void Only_fresh_durable_required_check_evidence_for_the_exact_pr_head_can_make_a_review_ready()
+    {
+        var now = DateTimeOffset.Parse("2026-09-16T12:00:00Z");
+        var item = Item() with
+        {
+            PullRequest = 42,
+            Checks = PullRequestChecks.Passing,
+            ChecksHeadSha = B,
+            ChecksObservedAt = now,
+            LifecyclePullRequestEvidence = new(42, B, true, true, true, now),
+        };
+        var facts = new[]
+        {
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(101, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement"),
+            Event(3, FleetEventKind.RevisionProduced, "implement", revision: B),
+            Event(4, FleetEventKind.AttemptStarted, "review", WorkStage.Review, B,
+                parents: ["implement"], edges: [FleetAttemptEdgeKind.Reviews]),
+            Started(104, "review"),
+            Event(5, FleetEventKind.AttemptSettled, "review"),
+            Event(6, FleetEventKind.ReviewVerdictObserved, "review", revision: B, verdict: "approve"),
+            new FleetEvent(70, now - FleetProjectionWriter.StaleAfter() - TimeSpan.FromSeconds(1),
+                FleetEventKind.CheckObserved, "required-stale", WorkId: new FleetWorkId("2363-lane"),
+                PullRequestId: 42, RevisionId: new FleetRevisionId(B), RequiredChecks: PullRequestChecks.Passing),
+        };
+
+        Assert.False(LifecycleAttemptGraph.Build(item, facts,
+            LifecycleQueueProjection.Observation(item, facts, now)).Ready);
+
+        var fresh = facts.Append(new FleetEvent(71, now, FleetEventKind.CheckObserved, "required-fresh",
+            WorkId: new FleetWorkId("2363-lane"), PullRequestId: 42,
+            RevisionId: new FleetRevisionId(B), RequiredChecks: PullRequestChecks.Passing)).ToList();
+        Assert.True(LifecycleAttemptGraph.Build(item, fresh,
+            LifecycleQueueProjection.Observation(item, fresh, now)).Ready);
+    }
+
+    [Fact]
+    public void Cancelled_legacy_history_with_no_typed_live_or_runnable_attempt_releases_only_wip()
+    {
+        var item = Item() with { LifecycleGraphVersion = null, State = QueueItemState.Cancelled };
+        var facts = new[]
+        {
+            new FleetEvent(1, DateTimeOffset.UtcNow, FleetEventKind.AttemptStarted, "started",
+                AttemptId: new FleetAttemptId("old"), WorkId: new FleetWorkId(item.Tag)),
+            new FleetEvent(2, DateTimeOffset.UtcNow, FleetEventKind.AttemptSettled, "settled",
+                AttemptId: new FleetAttemptId("old"), WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Cancelled),
+        };
+
+        var projected = Assert.Single(LifecycleQueueProjection.Project([item], facts));
+
+        Assert.Contains("legacy-unproven", projected.LifecycleCompatibilityHalt, StringComparison.Ordinal);
+        Assert.True(projected.LifecycleCompatibilityReleasesWip);
+        Assert.False(QueueScheduler.IsActiveLifecycle(projected));
+        Assert.Null(projected.Retirement);
     }
 
     [Fact]

@@ -418,7 +418,11 @@ public sealed class QueueSchedulerService : BackgroundService
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                 if (current?.State != QueueItemState.Queued
                     || current.Retirement is not null
-                    || !HasSameAdmissionDeclaration(current, item, admittedDeclaration))
+                    || !HasSameAdmissionDeclaration(current, item, admittedDeclaration)
+                    || (isGraphVersioned
+                        && (current.AttemptId != attemptId
+                            || !string.Equals(
+                                current.AttemptBaseRevision, attemptBaseRevision, StringComparison.Ordinal))))
                 {
                     return snapshot;
                 }
@@ -1074,7 +1078,8 @@ public sealed class QueueSchedulerService : BackgroundService
     private async Task<PreparedLifecycleQueue> PrepareLifecycleGraphsAsync(
         QueueSnapshot snapshot, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var graphItems = snapshot.Items.Where(LifecycleQueueProjection.IsGraphVersioned).ToList();
+        var graphItems = snapshot.Items.Where(item => LifecycleQueueProjection.IsGraphVersioned(item)
+            || item.Stage is not null && item.State == QueueItemState.Cancelled).ToList();
         if (graphItems.Count == 0)
         {
             return new(snapshot, new Dictionary<string, LifecycleAttemptGraphResult>(StringComparer.Ordinal));
@@ -1084,7 +1089,7 @@ public sealed class QueueSchedulerService : BackgroundService
         var graphs = new Dictionary<string, LifecycleAttemptGraphResult>(StringComparer.Ordinal);
         foreach (var item in graphItems)
         {
-            var graph = LifecycleAttemptGraph.Build(item, events, LifecycleQueueProjection.Observation(item));
+            var graph = LifecycleAttemptGraph.Build(item, events, LifecycleQueueProjection.Observation(item, events, now));
             LifecycleNextAttempt? plan = null;
             if (graph.Graph.Nodes.Count == 0 && graph.Halt is null && item.State == QueueItemState.Queued)
             {
@@ -1132,7 +1137,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 {
                     events.Add(planned);
                 }
-                graph = LifecycleAttemptGraph.Build(item, events, LifecycleQueueProjection.Observation(item));
+                graph = LifecycleAttemptGraph.Build(item, events, LifecycleQueueProjection.Observation(item, events, now));
             }
             graphs[item.Tag] = graph;
         }
@@ -1140,7 +1145,8 @@ public sealed class QueueSchedulerService : BackgroundService
         var projected = snapshot with
         {
             Items = snapshot.Items.Select(item => graphs.TryGetValue(item.Tag, out var graph)
-                ? LifecycleQueueProjection.Apply(item, graph)
+                ? LifecycleQueueProjection.Apply(item, graph,
+                    LifecycleQueueProjection.LegacyCancelledHasNoLiveOrRunnableAttempt(item, events))
                 : item).ToList(),
         };
         var originalByTag = snapshot.Items.ToDictionary(item => item.Tag, StringComparer.Ordinal);
@@ -1182,6 +1188,7 @@ public sealed class QueueSchedulerService : BackgroundService
             Vendor: tier.Adapter,
             Model: tier.Model,
             Effort: tier.Effort,
+            AssignmentDecisionId: item.WorkerAssignment?.DecisionId,
             DeclaredRole: item.Role,
             EffectiveGrant: admission.EffectiveGrant,
             RequestedRequirements: admission.Requested,
@@ -1204,13 +1211,14 @@ public sealed class QueueSchedulerService : BackgroundService
             RoomId: new FleetRoomId(BatonPaths.RecordKey(room)),
             IssueId: item.Issue,
             PullRequestId: item.PullRequest,
-            Vendor: tier?.Adapter ?? item.Adapter,
-            Model: tier?.Model ?? item.Model,
-            Effort: tier?.Effort ?? item.Effort,
+            Vendor: tier?.Adapter ?? item.WorkerAssignment?.Adapter ?? item.Adapter,
+            Model: tier?.Model ?? item.WorkerAssignment?.Model ?? item.Model,
+            Effort: tier?.Effort ?? item.WorkerAssignment?.Effort ?? item.Effort,
             DeclaredRole: item.Role,
             EffectiveGrant: item.LastAdmission?.EffectiveGrant,
             LifecycleStage: item.Stage,
-            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null);
+            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null,
+            AssignmentDecisionId: item.WorkerAssignment?.DecisionId);
 
     private static FleetEventDraft AttemptRefusedEvent(
         QueueItem item,
@@ -1259,8 +1267,14 @@ public sealed class QueueSchedulerService : BackgroundService
             ExecutionId: execution is null ? null : new ExecutionId(execution.Execution!),
             IssueId: item.Issue,
             PullRequestId: item.PullRequest,
+            Vendor: item.WorkerAssignment?.Adapter ?? item.Adapter,
+            Model: item.WorkerAssignment?.Model ?? item.Model,
+            Effort: item.WorkerAssignment?.Effort ?? item.Effort,
             DeclaredRole: item.Role,
             EffectiveGrant: item.LastAdmission?.EffectiveGrant,
+            LifecycleStage: item.Stage,
+            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null,
+            AssignmentDecisionId: item.WorkerAssignment?.DecisionId,
             Outcome: sentinel.State,
             OutcomeDetail: sentinel.Error,
             ElapsedMilliseconds: usage?.WallClockMs,

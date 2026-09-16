@@ -2135,6 +2135,88 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_stale_scheduler_claim_cannot_replace_a_same_stage_successor_frontier()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var now = DateTimeOffset.Parse("2026-09-16T12:00:00Z");
+            var item = Item("graph-frontier-race") with
+            {
+                Stage = WorkStage.Continue,
+                LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+                Workspace = home,
+                AutomaticFixUsed = false,
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+
+            var events = new List<FleetEvent>();
+            var implement = new LifecycleNextAttempt(WorkStage.Implement, new FleetRevisionId(BaseHead), [], "root");
+            var implementId = LifecycleAttemptGraph.PlanAttemptId(item, implement);
+            var continuation = new LifecycleNextAttempt(WorkStage.Continue, new FleetRevisionId(BaseHead),
+                [new FleetAttemptEdge(implementId, FleetAttemptEdgeKind.Continues)], "continue");
+            var continuationId = LifecycleAttemptGraph.PlanAttemptId(item, continuation);
+            events.Add(FleetEvent.From(1, LifecycleAttemptGraph.PlanEvent(item, implementId, implement, now)));
+            events.Add(new FleetEvent(2, now, FleetEventKind.AttemptStarted, "implement-started",
+                AttemptId: implementId, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+                InputRevisionId: new FleetRevisionId(BaseHead)));
+            events.Add(new FleetEvent(3, now, FleetEventKind.AttemptSettled, "implement-settled",
+                AttemptId: implementId, WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Failed,
+                WorkspaceChanged: true));
+            events.Add(FleetEvent.From(4, LifecycleAttemptGraph.PlanEvent(item, continuationId, continuation, now)));
+            Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
+            {
+                if (events.Any(entry => entry.DedupeKey == draft.DedupeKey))
+                {
+                    return Task.FromResult<FleetEvent?>(null);
+                }
+                var entry = FleetEvent.From(events.Count + 1, draft);
+                events.Add(entry);
+                return Task.FromResult<FleetEvent?>(entry);
+            }
+            var launches = 0;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launches++;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d), () => 16d, () => now,
+                appendFleetEvent: Append,
+                readFleetEvents: _ => Task.FromResult<IReadOnlyList<FleetEvent>>(events.ToList()),
+                workspaceHead: (_, _) => Task.FromResult<string?>(BaseHead),
+                workspaceLocks: _ => [],
+                beforeLaunchClaim: async _ =>
+                {
+                    // Another scheduler advanced N to N+1 while retaining the same `continue`
+                    // stage. Tag/state/declaration still match; only the immutable frontier does not.
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        Items = snapshot.Items.Select(current => current.Tag == item.Tag
+                            ? current with
+                            {
+                                AttemptId = new FleetAttemptId("continue-n-plus-one"),
+                                AttemptBaseRevision = "cccccccccccccccccccccccccccccccccccccccc",
+                            }
+                            : current).ToList(),
+                    }, Ct);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(0, launches);
+            var current = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(new FleetAttemptId("continue-n-plus-one"), current.AttemptId);
+            Assert.Equal("cccccccccccccccccccccccccccccccccccccccc", current.AttemptBaseRevision);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_hold_and_a_launch_are_told_apart_by_the_outcome_not_by_an_exception()
     {
         var home = CreateTempHome();

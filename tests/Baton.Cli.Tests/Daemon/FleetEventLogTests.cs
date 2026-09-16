@@ -116,6 +116,30 @@ public sealed class FleetEventLogTests : IDisposable
     }
 
     [Fact]
+    public async Task Assignment_and_required_check_evidence_round_trip_without_becoming_display_state()
+    {
+        var log = new FleetEventLog(Live, Rollover, maxLiveBytes: 100_000);
+        var eventAt = DateTimeOffset.Parse("2026-09-16T16:00:00Z");
+        await log.Append(new FleetEventDraft(
+            FleetEventKind.CheckObserved,
+            "required-checks:attempt-a:42:head:passing",
+            eventAt,
+            AttemptId: new FleetAttemptId("attempt-a"),
+            WorkId: new FleetWorkId("2363-lane"),
+            PullRequestId: 42,
+            RevisionId: new FleetRevisionId("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            AssignmentDecisionId: "decision-a",
+            RequiredChecks: "passing"), TestContext.Current.CancellationToken);
+
+        using var json = JsonDocument.Parse(Assert.Single(File.ReadAllLines(Live)));
+        Assert.Equal("decision-a", json.RootElement.GetProperty("assignmentDecisionId").GetString());
+        Assert.Equal("passing", json.RootElement.GetProperty("requiredChecks").GetString());
+        var replayed = Assert.Single(await log.ReadRetained(TestContext.Current.CancellationToken));
+        Assert.Equal("decision-a", replayed.AssignmentDecisionId);
+        Assert.Equal("passing", replayed.RequiredChecks);
+    }
+
+    [Fact]
     public void The_named_vocabulary_contains_every_kind_a_producer_can_write()
     {
         Assert.Equal(Enum.GetValues<FleetEventKind>().Length, FleetEventKinds.All.Count);

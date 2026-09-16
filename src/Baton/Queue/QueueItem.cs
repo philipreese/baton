@@ -275,9 +275,9 @@ public sealed record QueueItem
     public DateTimeOffset? LaunchedAt { get; init; }
 
     /// <summary>
-    /// Stable fleet-history identity for the current launch attempt. Generated in the same queue
-    /// mutation that claims the launch, before a room or vendor process exists; null on historical
-    /// rows and while no attempt has been claimed.
+    /// Stable fleet-history identity for the current immutable graph frontier or current launch
+    /// attempt. A graph plan persists it before admission so the launch CAS can prove it is still
+    /// consuming that exact frontier; null on historical rows with no typed attempt lineage.
     /// </summary>
     public FleetAttemptId? AttemptId { get; init; }
 
@@ -312,6 +312,17 @@ public sealed record QueueItem
     public bool? LifecycleGraphActive { get; init; }
     public bool? LifecycleGraphPrePullRequest { get; init; }
     public bool? LifecycleGraphLiveReview { get; init; }
+
+    /// <summary>
+    /// The explicit graph compatibility halt for a historical cancelled lifecycle. It makes the
+    /// unproven migration state visible without pretending that the row is a runnable or live node.
+    /// It never relaxes retirement evidence.
+    /// </summary>
+    public string? LifecycleCompatibilityHalt { get; init; }
+
+    /// <summary>True only when compatibility analysis finds every typed attempt terminal and no
+    /// typed plan awaiting launch. This is a WIP projection, never retirement proof.</summary>
+    public bool? LifecycleCompatibilityReleasesWip { get; init; }
 
     /// <summary>When an operator cancelled this request before launch. Its item and spec remain in the
     /// queue history; cancellation is a fact, not deletion.</summary>

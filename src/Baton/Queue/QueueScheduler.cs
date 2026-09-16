@@ -215,6 +215,7 @@ public static class QueueScheduler
     public static bool IsActiveLifecycle(QueueItem item) =>
         item.Stage is not null
         && item.Retirement is null
+        && item.LifecycleCompatibilityReleasesWip != true
         && (string.Equals(item.LifecycleGraphVersion, QueueItem.AttemptGraphVersion, StringComparison.Ordinal)
             ? item.LifecycleGraphActive == true
             : item.AttemptId is not null
