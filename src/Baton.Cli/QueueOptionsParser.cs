@@ -20,7 +20,7 @@ public static class QueueOptionsParser
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
-        "baton queue list [--active] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire|restore <tag> --reason <text> | baton queue import <file>. " +
+        "baton queue list [--active] | baton queue worktrees [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire|restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -37,6 +37,7 @@ public static class QueueOptionsParser
         {
             "add" => ParseAdd(args),
             "list" => ParseList(args),
+            "worktrees" => ParseWorktrees(args),
             "hold" => ParseBare(QueueVerb.Hold, args),
             "resume" => ParseBare(QueueVerb.Resume, args),
             "cancel" => ParseCancel(args),
@@ -81,6 +82,21 @@ public static class QueueOptionsParser
         }
 
         return new QueueOptions(QueueVerb.Import, ImportFilePath: args[1]);
+    }
+
+    private static QueueOptions ParseWorktrees(IReadOnlyList<string> args)
+    {
+        if (args.Count == 1) return new QueueOptions(QueueVerb.Worktrees);
+        if (args.Count == 3 && args[1] == "--format")
+        {
+            return args[2] switch
+            {
+                "text" => new QueueOptions(QueueVerb.Worktrees),
+                "json" => new QueueOptions(QueueVerb.Worktrees, Format: QueueWorktreesOutputFormat.Json),
+                _ => throw new CliArgumentException($"'--format' must be 'text' or 'json', got '{args[2]}'. {Usage}"),
+            };
+        }
+        throw new CliArgumentException($"'baton queue worktrees' takes no arguments or '--format text|json'. {Usage}");
     }
 
     private static QueueOptions ParseCancel(IReadOnlyList<string> args)

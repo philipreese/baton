@@ -7197,7 +7197,25 @@ writes no sentinel or room evidence; it only records the queue disposition after
 `baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
 engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeout <minutes>] [--max-tool-steps]
 [--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`, and
-`import <file>`.
+`import <file>`, and `worktrees [--format text|json]`.
+
+**Read-only retained-worktree inventory (#2318).** `queue worktrees` projects every distinct
+resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for
+compatibility: only the exact creation fact `issue-provisioned` confers Baton ownership;
+`operator-supplied`, `imported-unknown`, and historical null are respectively non-owned or
+unknown and are never inferred from names, roots, issue links, or Git state. Text and JSON expose
+the same identity, rows, origin, root containment, expected repository/branch, raw porcelain
+status, substantive cleanliness, bounded byte observation, known active references, and stable
+reason codes.
+
+The command writes no state and never authorizes deletion. A **static candidate** is only a
+read-only observation: every referring row is durably retired or cancelled before launch, no known
+active Baton reference remains, the path is strictly under `Queue.WorktreeRoot`, Git registers
+that exact path to the recorded repository, the attached expected local branch names checkout
+HEAD, and no substantive uncommitted content exists. Failed, missing, conflicting, dirty,
+outside-root, historical, imported, operator-supplied, active, failed/halted, or unavailable
+observations stay retain/unknown. The local Git probes and size walk are bounded; probe failure is
+visible as unknown rather than a candidate.
 
 `--skill <name>` is repeatable on an ordinary dispatch request. Its declaration uses dispatch's own
 normalization — surrounding whitespace is removed, first-seen order is retained, duplicates collapse,

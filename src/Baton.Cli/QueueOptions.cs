@@ -14,6 +14,14 @@ public enum QueueVerb
     Retire,
     Restore,
     Import,
+    Worktrees,
+}
+
+/// <summary>Output format for <c>baton queue worktrees</c> (#2318).</summary>
+public enum QueueWorktreesOutputFormat
+{
+    Text,
+    Json,
 }
 
 /// <summary>
@@ -59,6 +67,7 @@ public enum QueueVerb
 /// role grant. Null is reserved for imported/legacy unknown rows; queue add writes an empty list when
 /// no <c>--require</c> flag is supplied.</param>
 /// <param name="Active">Limits <c>list</c> to queued, launched, and lifecycle terminal work that still needs attention.</param>
+/// <param name="Format">The output format for <c>baton queue worktrees</c>.</param>
 public sealed record QueueOptions(
     QueueVerb Verb,
     string? Tag = null,
@@ -82,4 +91,5 @@ public sealed record QueueOptions(
     IReadOnlyList<string>? Skills = null,
     IReadOnlyList<string>? Requirements = null,
     bool Active = false,
-    TaskSizeDeclaration? DeclaredTaskSize = null);
+    TaskSizeDeclaration? DeclaredTaskSize = null,
+    QueueWorktreesOutputFormat Format = QueueWorktreesOutputFormat.Text);

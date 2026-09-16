@@ -418,6 +418,10 @@ def write_holder_info(path: str, command: list[str]) -> None:
         "pid": os.getpid(),
         "command": " ".join(command),
         "since": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # #2318: lets the read-only retained-worktree inventory attribute a live global
+        # build lock to the checkout it actually protects. Older sidecars omit this and
+        # therefore remain unknown, never evidence that a workspace is inactive.
+        "cwd": os.getcwd(),
     }
     try:
         with open(path + ".info", "w", encoding="utf-8") as f:
