@@ -72,8 +72,12 @@ internal static class RetainedIssueWorktreeValidator
 
         var referenceProbeItems = live.Append(new QueueItem
         {
-            Tag = "retained-validation", Role = role.Id, Workspace = path, SpecFile = path,
-            State = QueueItemState.Done, Retirement = new QueueRetirement(QueueRetirement.Operator, DateTimeOffset.UtcNow, "validation probe"),
+            Tag = "retained-validation",
+            Role = role.Id,
+            Workspace = path,
+            SpecFile = path,
+            State = QueueItemState.Done,
+            Retirement = new QueueRetirement(QueueRetirement.Operator, DateTimeOffset.UtcNow, "validation probe"),
         }).ToList();
         var references = await QueueWorktreeReferenceIndex.CreateAsync(referenceProbeItems, cancellationToken).ConfigureAwait(false);
         if (!references.Complete) throw Refusal("room-lock", "room or build-lock liveness evidence could not be read", path);
@@ -114,17 +118,25 @@ internal static class RetainedIssueWorktreeValidator
         $"Retained-worktree validation refused '{path}': {detail} (failed probe: {probe}).",
         "repair the named evidence and retry; validation makes no trust, queue, or worktree changes.");
 
-    private static bool TryRegistration(string porcelain, string expectedPath, out string? head, out string? branch)
+    internal static bool TryRegistration(string porcelain, string expectedPath, out string? head, out string? branch)
     {
-        head = null; branch = null; string? current = null;
+        head = null;
+        branch = null;
+        string? current = null;
+        var found = false;
         foreach (var line in porcelain.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
-            if (line.StartsWith("worktree ", StringComparison.Ordinal)) { current = QueueWorktreeReport.TryFullPath(line["worktree ".Length..]); continue; }
+            if (line.StartsWith("worktree ", StringComparison.Ordinal))
+            {
+                current = QueueWorktreeReport.TryFullPath(line["worktree ".Length..]);
+                found |= QueueWorktreeReport.PathComparer.Equals(current, expectedPath);
+                continue;
+            }
             if (!QueueWorktreeReport.PathComparer.Equals(current, expectedPath)) continue;
             if (line.StartsWith("HEAD ", StringComparison.Ordinal)) head = line["HEAD ".Length..];
             if (line.StartsWith("branch ", StringComparison.Ordinal)) branch = line["branch ".Length..];
         }
-        return QueueWorktreeReport.PathComparer.Equals(current, expectedPath);
+        return found;
     }
 
     private static bool IsStrictlyBeneath(string path, string root)
