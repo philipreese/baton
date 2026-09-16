@@ -58,6 +58,12 @@ public sealed class QueueCommandTests
             Assert.Equal(adapter, item.Adapter);
             Assert.Equal(model, item.Model);
             Assert.Null(item.Effort);
+            Assert.NotNull(item.WorkerAssignment);
+            Assert.Equal(adapter, item.WorkerAssignment.Adapter);
+            Assert.Equal(displayedModel, item.WorkerAssignment.Model);
+            Assert.Null(item.WorkerAssignment.Effort);
+            Assert.Equal("legacy-single-candidate", item.WorkerAssignment.ClosedReason);
+            Assert.Contains($"assignment: {adapter}/{displayedModel}/role-default", output.ToString(), StringComparison.Ordinal);
             Assert.Equal(WorkspaceOrigins.OperatorSupplied, item.WorkspaceOrigin);
         }
         finally

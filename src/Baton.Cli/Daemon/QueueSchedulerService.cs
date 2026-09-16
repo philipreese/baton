@@ -241,7 +241,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 // may silently re-rank the worker selected at queue-add time.
                 if (item.WorkerAssignment is { } frozen)
                 {
-                    tier = tier with { Adapter = frozen.Adapter, Model = frozen.Model, Effort = frozen.Effort };
+                    tier = QueueLauncher.ApplyFrozenAssignment(item, tier);
                 }
             }
             catch (KeyNotFoundException ex)

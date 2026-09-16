@@ -723,6 +723,29 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.DoesNotContain("--size-rationale", minimal);
     }
 
+    [Fact]
+    public void A_frozen_assignment_wins_over_a_later_tier_change()
+    {
+        var item = new QueueItem
+        {
+            Tag = "2319-lane",
+            Role = "implement",
+            Workspace = @"C:\repos\w2319",
+            SpecFile = @"C:\Users\x\.baton\queue\specs\2319-lane.md",
+            WorkerAssignment = new FrozenWorkerAssignment(
+                "decision-1", "codex", "gpt-5.6-terra", "high", "pool-hash",
+                "legacy-single-candidate", "Frozen at queue add.", DateTimeOffset.UtcNow),
+        };
+        var changedTier = new QueueTierResolution(
+            "engine", "agy", "gemini-3.8-flash-medium", "medium", false, null);
+
+        var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(item, changedTier, @"C:\rooms\next"));
+
+        Assert.Equal("codex", options.Adapter);
+        Assert.Equal("gpt-5.6-terra", options.Model);
+        Assert.Equal("high", options.Effort);
+    }
+
     [Theory]
     [InlineData(WorkStage.Continue)]
     [InlineData(WorkStage.Fix)]

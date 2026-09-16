@@ -8,8 +8,10 @@ public sealed class WorkerAssignmentPolicyTests
     private static readonly IReadOnlySet<DeclaredTaskSize> Sizes = new HashSet<DeclaredTaskSize> { DeclaredTaskSize.Small, DeclaredTaskSize.Medium, DeclaredTaskSize.Large };
     private static WorkerCandidate Candidate(string adapter, CapabilityBand band) =>
         new(adapter, "model", "medium", band, Sizes, new HashSet<string>(), new HashSet<string>());
-    private static AssignmentRequest Request(DeclaredTaskSize size = DeclaredTaskSize.Medium) =>
-        new("implement", "implement", "tooling", size, new HashSet<string>());
+    private static AssignmentRequest Request(
+        DeclaredTaskSize size = DeclaredTaskSize.Medium,
+        CapabilityBand requiredCapabilityBand = CapabilityBand.Standard) =>
+        new("implement", "implement", "tooling", size, new HashSet<string>(), requiredCapabilityBand);
     private static FleetFacts Facts(params (WorkerCandidate Candidate, FleetCandidateFacts Facts)[] values) =>
         new(values.ToDictionary(v => FleetFacts.Key(v.Candidate), v => v.Facts));
 
@@ -49,16 +51,31 @@ public sealed class WorkerAssignmentPolicyTests
     }
 
     [Fact]
-    public void Capability_precedes_weekly_runway_and_roster_order_breaks_ties()
+    public void A_candidate_below_the_required_capability_floor_loses_despite_abundant_runway()
     {
+        var incapable = Candidate("agy", CapabilityBand.Minimal);
         var capable = Candidate("codex", CapabilityBand.Standard);
-        var excessive = Candidate("claude", CapabilityBand.Frontier);
-        var tied = Candidate("agy", CapabilityBand.Standard);
-        var decision = WorkerAssignmentPolicy.Select(Request(), [capable, excessive, tied], Facts(
-            (capable, new(UsageEvidence.Fresh, false, 1)),
-            (excessive, new(UsageEvidence.Fresh, false, 100)),
-            (tied, new(UsageEvidence.Fresh, false, 1))));
+        var decision = WorkerAssignmentPolicy.Select(Request(), [incapable, capable], Facts(
+            (incapable, new(UsageEvidence.Fresh, false, 100)),
+            (capable, new(UsageEvidence.Fresh, false, 1))));
+
         Assert.Equal(capable, decision.Candidate);
+        Assert.Contains(decision.RejectedCandidates,
+            rejected => rejected.Candidate == incapable && rejected.Reason == CandidateRejectionReason.BelowCapabilityFloor);
+    }
+
+    [Fact]
+    public void Weekly_runway_and_roster_order_rank_only_the_lowest_sufficient_band()
+    {
+        var first = Candidate("codex", CapabilityBand.Standard);
+        var frontier = Candidate("claude", CapabilityBand.Frontier);
+        var second = Candidate("agy", CapabilityBand.Standard);
+        var decision = WorkerAssignmentPolicy.Select(Request(), [first, frontier, second], Facts(
+            (first, new(UsageEvidence.Fresh, false, 1)),
+            (frontier, new(UsageEvidence.Fresh, false, 100)),
+            (second, new(UsageEvidence.Fresh, false, 2))));
+
+        Assert.Equal(second, decision.Candidate);
     }
 
     [Fact]

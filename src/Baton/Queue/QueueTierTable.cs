@@ -155,8 +155,7 @@ public static class QueueTierTable
             || Differs(item.Effort, tier.Effort));
 
         return new QueueTierResolution(
-            key, adapter, model, effort, isOverride, isOverride ? item.Reason : null,
-            QueueSelectionSource.StageDefault, tier?.Candidates);
+            key, adapter, model, effort, isOverride, isOverride ? item.Reason : null, QueueSelectionSource.StageDefault);
     }
 
     /// <summary>
@@ -301,7 +300,6 @@ public static class QueueTierTable
             Adapter = entry.Adapter ?? named.Adapter,
             Model = entry.Model ?? named.Model,
             Effort = entry.Effort ?? named.Effort,
-            Candidates = named.Candidates,
         };
     }
 
@@ -343,5 +341,4 @@ public sealed record QueueTierResolution(
     string? Effort,
     bool IsOverride,
     string? OverrideReason,
-    QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault,
-    IReadOnlyList<WorkerCandidate>? Candidates = null);
+    QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault);

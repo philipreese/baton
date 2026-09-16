@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Baton.Domain;
-using Baton.Queue;
 using Baton.Status;
 
 namespace Baton.Vendors;
@@ -13,39 +12,7 @@ namespace Baton.Vendors;
 /// needs no rebuild (drop a <c>worker-tiers.json</c> under <see cref="BatonPaths.Root"/>, or point
 /// <see cref="WorkerRoleCatalog.TiersPathEnvironmentVariable"/> at one).
 /// </summary>
-/// <summary>
-/// The legacy triple or an ordered candidate pool from <c>WorkerTiers.json</c>.  The first candidate
-/// remains the compatibility projection used by role dispatch until a queue assignment freezes a
-/// particular candidate; this deliberately keeps existing single-candidate installations byte-for-byte
-/// equivalent.
-/// </summary>
-public sealed record WorkerTier(
-    string? Adapter,
-    string? Model,
-    string? Effort,
-    IReadOnlyList<WorkerTierCandidate>? Candidates = null)
-{
-    public IReadOnlyList<WorkerTierCandidate> CandidatePool => Candidates is { Count: > 0 }
-        ? Candidates
-        : Adapter is { Length: > 0 }
-            ? [new WorkerTierCandidate(Adapter, Model, Effort)]
-            : throw new InvalidOperationException("A worker tier must declare either adapter/model/effort or a non-empty candidates pool.");
-
-    public WorkerTierCandidate PrimaryCandidate => CandidatePool[0];
-}
-
-/// <summary>One ordered candidate in a tier pool. Optional eligibility metadata is consumed by queue
-/// assignment; omitted metadata retains the legacy triple's unrestricted compatibility posture.</summary>
-public sealed record WorkerTierCandidate(
-    [property: JsonRequired] string Adapter,
-    string? Model,
-    string? Effort,
-    IReadOnlyList<string>? TaskSizes = null,
-    IReadOnlyList<string>? ScopeClasses = null,
-    IReadOnlyList<string>? RequiredGrants = null,
-    string? CapabilityBand = null,
-    string? PolicyNotes = null,
-    bool ConductorOnly = false);
+public sealed record WorkerTier([property: JsonRequired] string Adapter, string? Model, string? Effort);
 
 /// <summary>
 /// A composable worker-role profile — the building block the front door (#887) composes into
@@ -272,10 +239,9 @@ public static class WorkerRoleCatalog
             ? new Queue.QueueTierSettings
             {
                 Tier = tierName,
-                Adapter = tier.PrimaryCandidate.Adapter,
-                Model = tier.PrimaryCandidate.Model,
-                Effort = tier.PrimaryCandidate.Effort,
-                Candidates = ToQueueCandidates(tier),
+                Adapter = tier.Adapter,
+                Model = tier.Model,
+                Effort = tier.Effort,
             }
             : null;
     }
@@ -291,43 +257,6 @@ public static class WorkerRoleCatalog
             Model = role.Model,
             Effort = role.Effort,
         };
-    }
-
-    /// <summary>Converts the canonical JSON roster once, at its reader boundary. Queue callers get
-    /// typed candidates and never parse WorkerTiers.json independently.</summary>
-    private static IReadOnlyList<WorkerCandidate> ToQueueCandidates(WorkerTier tier) =>
-        tier.CandidatePool.Select(candidate => new WorkerCandidate(
-            candidate.Adapter, candidate.Model, candidate.Effort,
-            ParseCapabilityBand(candidate.CapabilityBand), ParseTaskSizes(candidate.TaskSizes),
-            new HashSet<string>(candidate.ScopeClasses ?? [], StringComparer.OrdinalIgnoreCase),
-            new HashSet<string>(candidate.RequiredGrants ?? [], StringComparer.OrdinalIgnoreCase),
-            candidate.ConductorOnly)).ToList();
-
-    private static CapabilityBand ParseCapabilityBand(string? value) => value?.ToLowerInvariant() switch
-    {
-        null => CapabilityBand.Standard,
-        "minimal" => CapabilityBand.Minimal,
-        "cheap" => CapabilityBand.Cheap,
-        "standard" => CapabilityBand.Standard,
-        "frontier" => CapabilityBand.Frontier,
-        _ => throw new InvalidOperationException($"Worker tier candidate declares unknown capability band '{value}'."),
-    };
-
-    private static IReadOnlySet<DeclaredTaskSize> ParseTaskSizes(IReadOnlyList<string>? values)
-    {
-        var parsed = new HashSet<DeclaredTaskSize>();
-        foreach (var value in values ?? [])
-        {
-            if (!Enum.TryParse<DeclaredTaskSize>(value, ignoreCase: true, out var size)
-                || size == DeclaredTaskSize.Unknown)
-            {
-                throw new InvalidOperationException($"Worker tier candidate declares unknown task size '{value}'.");
-            }
-
-            parsed.Add(size);
-        }
-
-        return parsed;
     }
 
     private static Dictionary<string, WorkerTier> LoadTiers() =>
@@ -390,9 +319,9 @@ public static class WorkerRoleCatalog
             roles.Add(new WorkerRole(
                 Id: raw.Id,
                 Tier: raw.Tier,
-                Adapter: tier.PrimaryCandidate.Adapter,
-                Model: tier.PrimaryCandidate.Model,
-                Effort: tier.PrimaryCandidate.Effort,
+                Adapter: tier.Adapter,
+                Model: tier.Model,
+                Effort: tier.Effort,
                 Grant: new PermissionGrant(
                     ReadFiles: raw.ReadFiles,
                     WriteFiles: raw.WriteFiles,

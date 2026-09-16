@@ -77,6 +77,7 @@ public static class WorkerAssignmentPolicy
         bool allowRunwayOverride, bool allowUnknownSize, out CandidateRejectionReason rejection)
     {
         if (candidate.ConductorOnly) { rejection = CandidateRejectionReason.ConductorOnly; return false; }
+        if (candidate.CapabilityBand < request.RequiredCapabilityBand) { rejection = CandidateRejectionReason.BelowCapabilityFloor; return false; }
         if (!candidate.RequiredGrants.IsSupersetOf(request.RequiredGrants)) { rejection = CandidateRejectionReason.UnsupportedGrant; return false; }
         if (candidate.ScopeClasses.Count > 0 && (request.ScopeClass is null || !candidate.ScopeClasses.Contains(request.ScopeClass))) { rejection = CandidateRejectionReason.ScopeIneligible; return false; }
         if (candidate.TaskSizes.Count > 0 && !(allowUnknownSize && request.DeclaredSize == DeclaredTaskSize.Unknown) && !candidate.TaskSizes.Contains(request.DeclaredSize)) { rejection = CandidateRejectionReason.SizeIneligible; return false; }
@@ -93,7 +94,7 @@ public static class WorkerAssignmentPolicy
 public enum CapabilityBand { Minimal, Cheap, Standard, Frontier }
 public enum UsageEvidence { Fresh, Missing, Stale, Malformed, IntentionallyUnmeasured }
 public enum AssignmentReason { Automatic, OperatorOverride, DeclaredSizeRequired, InvalidOverride, NoEligibleCandidate }
-public enum CandidateRejectionReason { ConductorOnly, UnsupportedGrant, ScopeIneligible, SizeIneligible, DeclaredSizeMissing, UsageEvidenceUnavailable, RunwayHeld, AccountWideRunwayHeld, SpecializedRunwayHeld }
+public enum CandidateRejectionReason { ConductorOnly, BelowCapabilityFloor, UnsupportedGrant, ScopeIneligible, SizeIneligible, DeclaredSizeMissing, UsageEvidenceUnavailable, RunwayHeld, AccountWideRunwayHeld, SpecializedRunwayHeld }
 
 public sealed record WorkerCandidate(
     string Adapter, string? Model, string? Effort, CapabilityBand CapabilityBand,
@@ -108,7 +109,8 @@ public sealed record WorkerCandidate(
 
 public sealed record AssignmentRequest(
     string Role, string? Stage, string? ScopeClass, DeclaredTaskSize DeclaredSize,
-    IReadOnlySet<string> RequiredGrants, AssignmentOverride? Override = null, string? OverrideRunwayReason = null);
+    IReadOnlySet<string> RequiredGrants, CapabilityBand RequiredCapabilityBand,
+    AssignmentOverride? Override = null, string? OverrideRunwayReason = null);
 public sealed record AssignmentOverride(string Adapter, string? Model, string? Effort, string Reason);
 public sealed record FleetCandidateFacts(UsageEvidence Evidence, bool RunwayHeld, double UsableWeeklyRunway,
     bool AccountWideHeld = false, bool SpecializedBucketHeld = false);

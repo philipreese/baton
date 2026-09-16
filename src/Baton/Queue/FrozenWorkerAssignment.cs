@@ -16,10 +16,7 @@ public sealed record FrozenWorkerAssignment(
     string PoolHash,
     string ClosedReason,
     string Explanation,
-    DateTimeOffset DecidedAt,
-    IReadOnlyList<string>? ConsultedUsageSnapshots = null,
-    IReadOnlyList<string>? RejectedCandidates = null,
-    IReadOnlyList<string>? Supersedes = null)
+    DateTimeOffset DecidedAt)
 {
     /// <summary>Creates the compatibility decision for a resolved one-candidate tier. Multi-candidate
     /// selection is deliberately owned by <see cref="WorkerAssignmentPolicy"/> and must be supplied
@@ -31,7 +28,6 @@ public sealed record FrozenWorkerAssignment(
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(tuple))).ToLowerInvariant();
         return new FrozenWorkerAssignment(
             Guid.NewGuid().ToString("n"), tier.Adapter ?? string.Empty, tier.Model, tier.Effort, hash,
-            "legacy-single-candidate", "Legacy one-triple tier frozen before launch.", now,
-            ConsultedUsageSnapshots: [], RejectedCandidates: [], Supersedes: []);
+            "legacy-single-candidate", "Legacy one-triple tier frozen before launch.", now);
     }
 }
