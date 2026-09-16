@@ -67,6 +67,11 @@ public class ExecutionOutputDirectoryListingTests
         // #1488: lists {BATON_HOME}/watches -- the baton watch registry directory -- never an
         // execution's own output directory.
         ["Baton.Cli/WatchStore.cs"] = "lists watchesDirectoryPath (the baton watch registry), not an execution output directory",
+        // #2318: the bounded size probe walks a retained queue workspace only to total bytes and detect
+        // limits/reparse points. It never exposes the listed file names as declared worker outputs; even
+        // an operator-supplied path aimed at an execution directory remains an aggregate size observation.
+        ["Baton.Cli/QueueWorktreeReport.cs"] =
+            "EnumerateFileSystemEntries totals bounded retained-workspace bytes and never presents listed files as worker outputs",
         // #1557: GetFileSystemEntries lists artifacts/pruned/ itself (the room-level pruned root, not
         // an execution's own output directory) to find pruned execution dirs. The nested
         // EnumerateFiles DOES walk into a pruned execution's own former output directory, but sums it
