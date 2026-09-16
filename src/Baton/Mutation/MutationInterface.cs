@@ -2504,8 +2504,11 @@ public static class MutationInterface
                             CancellationToken.None).ConfigureAwait(false);
                         if (binding.DeliversBranch && recordedDelivery is null)
                         {
-                            _ = await RecordDeliveryEvidenceAsync(
+                            var finalDelivery = await RecordDeliveryEvidenceAsync(
                                 prepared, binding, deliveryOutcomeBeforeVerify!, eventLogWriter).ConfigureAwait(false);
+                            _ = await ApplyDeliveryOutcomeAsync(
+                                prepared.Request.ExecutionId, finalDelivery, eventLogWriter,
+                                dispatchCancellationToken).ConfigureAwait(false);
                         }
                         return;
                     }

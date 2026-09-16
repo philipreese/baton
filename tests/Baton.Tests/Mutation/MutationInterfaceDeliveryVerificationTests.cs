@@ -176,20 +176,25 @@ public sealed class MutationInterfaceDeliveryVerificationTests
         }
     }
 
-    [Fact]
-    public async Task A_build_lock_blocked_verify_still_records_the_final_delivery_head()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_build_lock_blocked_verify_records_and_enforces_the_final_delivery_head(bool mutatesHead)
     {
-        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-build-lock-busy");
+        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-build-lock-busy-" + mutatesHead);
         var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
         try
         {
+            var verifyCommand = mutatesHead
+                ? "git commit --allow-empty -m verify-mutated-head -q && echo GATES: BLOCKED 1 of 1 -- build & exit 3"
+                : "echo GATES: BLOCKED 1 of 1 -- build & exit 3";
             var bindings = new Dictionary<string, WorkerBinding>
             {
                 ["implementer"] = new WorkerBinding.Process(
                     new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
                     new CoreDispatchTarget("cmd", ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"], WorkingDirectory: workspace),
                     TimeSpan.FromSeconds(30),
-                    VerifyCommandOverride: "echo GATES: BLOCKED 1 of 1 -- build & exit 3",
+                    VerifyCommandOverride: verifyCommand,
                     DeliversBranch: true,
                     ExpectPr: false),
             };
@@ -201,8 +206,18 @@ public sealed class MutationInterfaceDeliveryVerificationTests
             Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
             Assert.True(Assert.Single(events.OfType<FlowEvent.VerifyNotRun>()).BuildLockBusy);
             var observation = Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
-            Assert.Equal("Passed", observation.Verification);
-            Assert.Equal(observation.LocalHead, observation.RemoteHead);
+            if (mutatesHead)
+            {
+                Assert.Equal("Failed", observation.Verification);
+                Assert.Contains("delivery heads changed", observation.VerificationReason, StringComparison.Ordinal);
+                Assert.Equal(VerifyFailedKind.DeliveryFailed, Assert.Single(events.OfType<FlowEvent.VerifyFailed>()).Kind);
+            }
+            else
+            {
+                Assert.Equal("Passed", observation.Verification);
+                Assert.Equal(observation.LocalHead, observation.RemoteHead);
+                Assert.Empty(events.OfType<FlowEvent.VerifyFailed>());
+            }
         }
         finally
         {
