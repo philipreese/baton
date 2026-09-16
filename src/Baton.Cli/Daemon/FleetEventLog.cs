@@ -67,6 +67,17 @@ public enum FleetRevisionKind
     Repair,
 }
 
+/// <summary>Why a later lifecycle attempt may consume an already-recorded attempt.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<FleetAttemptEdgeKind>))]
+public enum FleetAttemptEdgeKind
+{
+    Implements,
+    Reviews,
+    Repairs,
+    Continues,
+    Supersedes,
+}
+
 internal sealed class FleetRevisionKindJsonConverter : JsonConverter<FleetRevisionKind>
 {
     public override FleetRevisionKind Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
@@ -213,7 +224,11 @@ public sealed record FleetEventDraft(
     string? CheckName = null,
     string? CheckStatus = null,
     DateTimeOffset? CheckStartedAt = null,
-    DateTimeOffset? CheckCompletedAt = null);
+    DateTimeOffset? CheckCompletedAt = null,
+    string? LifecycleStage = null,
+    FleetRevisionId? InputRevisionId = null,
+    IReadOnlyList<FleetAttemptId>? ParentAttemptIds = null,
+    IReadOnlyList<FleetAttemptEdgeKind>? ParentEdgeKinds = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -282,7 +297,15 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("checkStartedAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckStartedAt = null,
     [property: JsonPropertyName("checkCompletedAt")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckCompletedAt = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckCompletedAt = null,
+    [property: JsonPropertyName("lifecycleStage")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LifecycleStage = null,
+    [property: JsonPropertyName("inputRevisionId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetRevisionId? InputRevisionId = null,
+    [property: JsonPropertyName("parentAttemptIds")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptId>? ParentAttemptIds = null,
+    [property: JsonPropertyName("parentEdgeKinds")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptEdgeKind>? ParentEdgeKinds = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -292,7 +315,8 @@ public sealed record FleetEvent(
         draft.MissingCapabilities, draft.AdmissionDecision, draft.Outcome, draft.OutcomeDetail, draft.ReviewVerdict,
         draft.CheckConclusion, draft.ElapsedMilliseconds, draft.LastMeaningfulProgressAt?.ToUniversalTime(),
         draft.Usage, draft.ArtifactReferences, draft.RevisionKind, draft.CheckRunId, draft.CheckName,
-        draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime());
+        draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime(),
+        draft.LifecycleStage, draft.InputRevisionId, draft.ParentAttemptIds, draft.ParentEdgeKinds);
 }
 
 /// <summary>

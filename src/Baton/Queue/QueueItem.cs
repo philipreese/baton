@@ -288,6 +288,13 @@ public sealed record QueueItem
     /// <summary>The immediately preceding lifecycle attempt, when this row was queued from one.</summary>
     public FleetAttemptId? ParentAttemptId { get; init; }
 
+    /// <summary>
+    /// Opts this item into the immutable lifecycle-attempt graph. Null is a legacy row whose
+    /// mutable lifecycle projection remains the explicit compatibility path; it is never given
+    /// invented lineage during replay.
+    /// </summary>
+    public string? LifecycleGraphVersion { get; init; }
+
     /// <summary>When an operator cancelled this request before launch. Its item and spec remain in the
     /// queue history; cancellation is a fact, not deletion.</summary>
     public DateTimeOffset? CancelledAt { get; init; }

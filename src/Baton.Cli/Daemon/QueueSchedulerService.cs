@@ -324,10 +324,9 @@ public sealed class QueueSchedulerService : BackgroundService
                 return interval;
             }
 
-            // Only a stage allowed to author code receives a pre-attempt revision baseline. Review
-            // and re-review can observe an existing HEAD but can never become its producer merely by
-            // finishing while it is checked out.
-            var attemptBaseRevision = item.Stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue
+            // Every graph-versioned attempt records the exact revision it consumes. Code roles use it
+            // as their delivery baseline; review roles only consume it and can never become its producer.
+            var attemptBaseRevision = item.Stage is not null
                 ? await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false)
                 : null;
             item = item with
@@ -1069,7 +1068,19 @@ public sealed class QueueSchedulerService : BackgroundService
             Model: tier?.Model ?? item.Model,
             Effort: tier?.Effort ?? item.Effort,
             DeclaredRole: item.Role,
-            EffectiveGrant: item.LastAdmission?.EffectiveGrant);
+            EffectiveGrant: item.LastAdmission?.EffectiveGrant,
+            LifecycleStage: item.Stage?.ToString(),
+            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null,
+            ParentAttemptIds: item.ParentAttemptId is { } parent ? [parent] : null,
+            ParentEdgeKinds: item.ParentAttemptId is { } ? [EdgeFor(item.Stage)] : null);
+
+    private static FleetAttemptEdgeKind EdgeFor(WorkStage? stage) => stage switch
+    {
+        WorkStage.Review or WorkStage.ReReview => FleetAttemptEdgeKind.Reviews,
+        WorkStage.Fix => FleetAttemptEdgeKind.Repairs,
+        WorkStage.Continue => FleetAttemptEdgeKind.Continues,
+        _ => FleetAttemptEdgeKind.Implements,
+    };
 
     private static FleetEventDraft AttemptRefusedEvent(
         QueueItem item,
