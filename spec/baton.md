@@ -7144,9 +7144,12 @@ invents typed parents or revisions for them.
 Before admission or dispatch, every graph-versioned attempt receives one durable `attemptPlanned`
 fact containing its generated attempt id, typed stage, exact input revision, and a list of typed
 `parentEdges` records. Parallel parent-id and edge-kind arrays are forbidden because positional
-agreement is not an identity invariant. Admission, including an eventual runway hold, does not start
-the node. Only `attemptStarted` does. Thus a held launch retries the same single unstarted frontier;
-it cannot become a missing-start halt or manufacture another planned node.
+agreement is not an identity invariant. The generated id is a deterministic digest of the work tag,
+stage, input revision, and ordered typed edges, so concurrent scheduler ticks append the same dedupe
+identity rather than two runnable plans. Admission, including an eventual runway hold, does not start
+the node. Only `attemptStarted` does. A pre-launch refusal appends `attemptRefused` before projecting
+the failed row, so a crash cannot resurrect the plan. Thus a held launch retries the same single
+unstarted frontier; it cannot become a missing-start halt or manufacture another planned node.
 
 `LifecycleAttemptGraph.Build` is the sole cross-attempt policy reader. It replays plans, starts,
 settlements, produced revisions, revision-specific verdicts, and the exact PR head/check observation;
@@ -7156,11 +7159,18 @@ node's input and present as the recorded open PR head. Review decisions apply on
 input revision. A block permits the one repair; re-review requires that repair's different produced
 revision. Approval permits ready only when it covers the current PR head and required checks pass.
 Missing, duplicate, contradictory, stale, or unproven evidence halts rather than consulting the
-queue row.
+queue row. A settlement carries the nullable structured `workspaceChanged` observation already
+present in the terminal projection. An incomplete mutating attempt earns a continuation edge only
+when that observation is exactly `true`; false or absent evidence halts for the operator, and a
+`revisionNotProducedUnchangedHeadAfterWorkspaceChange` fact can never authorize continuation. The
+same `WorkStages.MaxRounds` ceiling bounds graph-derived dispatches, including its one paired
+post-fix re-review exception; it does not prevent that final review from approving or blocking.
 
 The exact forge observation used by replay is persisted as one typed compatibility value carrying
 PR number, head SHA, observation success, open/draft state, and observation time. Required-check
 evidence is usable only when its separately recorded `checksHeadSha` equals that exact observed head.
+It is also usable only when the observation's PR number equals the row's bound PR and its
+`observedAt` equals `checksObservedAt`; a timestamp mismatch is stale evidence, not green evidence.
 Missing evidence and a failed observation remain unknown: a PR number plus a stale green checks word
 must never be reinterpreted as a successful open-PR observation by queue list, Fleet Glass, or the
 scheduler.

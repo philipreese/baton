@@ -29,7 +29,7 @@ public sealed class LifecycleAttemptGraphTests
     }
 
     [Fact]
-    public void Blocking_review_yields_fix_frontier_against_its_exact_revision()
+    public void Blocking_review_derives_fix_plan_against_its_exact_revision()
     {
         var graph = LifecycleAttemptGraph.Build(Item(), [
             Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
@@ -41,12 +41,12 @@ public sealed class LifecycleAttemptGraphTests
             Started(104, "review"),
             Event(5, FleetEventKind.AttemptSettled, "review"),
             Event(6, FleetEventKind.ReviewVerdictObserved, "review", revision: B, verdict: "block"),
-            Event(7, FleetEventKind.AttemptStarted, "fix", WorkStage.Fix, B,
-                parents: ["review"], edges: [FleetAttemptEdgeKind.Repairs]),
         ], Pr(B));
 
         Assert.Null(graph.Halt);
-        Assert.Equal(WorkStage.Fix, graph.Frontier!.Stage);
+        Assert.Null(graph.Frontier);
+        Assert.Equal(WorkStage.Fix, graph.NextAttempt!.Stage);
+        Assert.Equal(new FleetRevisionId(B), graph.NextAttempt.InputRevision);
     }
 
     [Fact]
@@ -160,7 +160,7 @@ public sealed class LifecycleAttemptGraphTests
         var failing = LifecycleAttemptGraph.Build(Item(), facts, new(42, B, true, true, "failing"));
 
         Assert.Equal(LifecycleGraphHaltKind.UnprovenPullRequestHead, stale.Halt!.Kind);
-        Assert.Equal(QueueItemState.Queued, failing.Projection.DisplayState);
+        Assert.Equal(QueueItemState.Done, failing.Projection.DisplayState);
     }
 
     [Fact]
@@ -175,7 +175,7 @@ public sealed class LifecycleAttemptGraphTests
     }
 
     [Fact]
-    public void Delivered_fix_plans_one_unstarted_rereview_frontier_consuming_C()
+    public void Delivered_fix_derives_one_rereview_plan_consuming_C()
     {
         var facts = new[]
         {
@@ -193,16 +193,14 @@ public sealed class LifecycleAttemptGraphTests
             Started(107, "fix"),
             Event(8, FleetEventKind.AttemptSettled, "fix"),
             Event(9, FleetEventKind.RevisionProduced, "fix", revision: C),
-            Event(10, FleetEventKind.AttemptStarted, "rereview", WorkStage.ReReview, C,
-                parents: ["fix"], edges: [FleetAttemptEdgeKind.Reviews]),
         };
 
         var graph = LifecycleAttemptGraph.Build(Item(), facts, Pr(C));
 
         Assert.Null(graph.Halt);
-        Assert.Equal(WorkStage.ReReview, graph.Frontier!.Stage);
-        Assert.False(graph.Frontier.Started);
-        Assert.Equal(new FleetRevisionId(C), graph.Graph.Nodes.Single(n => n.AttemptId.Value == "rereview").InputRevision);
+        Assert.Null(graph.Frontier);
+        Assert.Equal(WorkStage.ReReview, graph.NextAttempt!.Stage);
+        Assert.Equal(new FleetRevisionId(C), graph.NextAttempt.InputRevision);
     }
 
     [Fact]
@@ -287,7 +285,8 @@ public sealed class LifecycleAttemptGraphTests
         {
             Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
             Started(101, "implement"),
-            Event(2, FleetEventKind.AttemptSettled, "implement", outcome: WorkflowOutcome.Failed),
+            Event(2, FleetEventKind.AttemptSettled, "implement", outcome: WorkflowOutcome.Failed,
+                workspaceChanged: true),
         };
 
         var withoutRecovery = LifecycleAttemptGraph.Build(Item(), terminal, Pr(A));
@@ -365,6 +364,161 @@ public sealed class LifecycleAttemptGraphTests
         Assert.Equal(0, terminalPortfolio.LiveReviews);
     }
 
+    [Fact]
+    public void A_later_parentless_implement_is_not_a_second_root()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "root", WorkStage.Implement, A),
+            Started(101, "root"),
+            Event(2, FleetEventKind.AttemptSettled, "root", outcome: WorkflowOutcome.Failed,
+                workspaceChanged: true),
+            Event(3, FleetEventKind.AttemptStarted, "second-root", WorkStage.Implement, A),
+        ], Pr(A));
+
+        Assert.Equal(LifecycleGraphHaltKind.MissingParent, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Settlement_without_an_outcome_fails_closed()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(101, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement", missingOutcome: true),
+        ], Pr(A));
+
+        Assert.Equal(LifecycleGraphHaltKind.MissingOutcome, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Result_fact_before_start_fails_closed()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(100, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement"),
+        ], Pr(A));
+
+        Assert.Equal(LifecycleGraphHaltKind.InvalidChronology, graph.Halt!.Kind);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    public void Incomplete_attempt_without_positive_workspace_evidence_cannot_continue(bool? changed)
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(101, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement", outcome: WorkflowOutcome.Failed,
+                workspaceChanged: changed),
+        ], Pr(A));
+
+        Assert.Equal(LifecycleGraphHaltKind.NoRetainedContinuationState, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Cancelled_attempt_without_positive_workspace_evidence_cannot_continue()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(101, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement", outcome: WorkflowOutcome.Cancelled),
+        ], Pr(A));
+
+        Assert.Equal(LifecycleGraphHaltKind.NoRetainedContinuationState, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Typed_unchanged_head_nonproduction_cannot_authorize_continuation()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(101, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement", outcome: WorkflowOutcome.Failed,
+                workspaceChanged: true),
+            Event(3, FleetEventKind.RevisionNotProducedUnchangedHeadAfterWorkspaceChange,
+                "implement", revision: A),
+        ], Pr(A));
+
+        Assert.Equal(LifecycleGraphHaltKind.UnchangedRevision, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void The_fifth_ordinary_followup_is_stopped_by_the_round_ceiling()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(101, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement", outcome: WorkflowOutcome.Failed, workspaceChanged: true),
+            Event(3, FleetEventKind.AttemptStarted, "continue-1", WorkStage.Continue, A,
+                parents: ["implement"], edges: [FleetAttemptEdgeKind.Continues]),
+            Started(103, "continue-1"),
+            Event(4, FleetEventKind.AttemptSettled, "continue-1", outcome: WorkflowOutcome.Failed, workspaceChanged: true),
+            Event(5, FleetEventKind.AttemptStarted, "continue-2", WorkStage.Continue, A,
+                parents: ["continue-1"], edges: [FleetAttemptEdgeKind.Continues]),
+            Started(105, "continue-2"),
+            Event(6, FleetEventKind.AttemptSettled, "continue-2", outcome: WorkflowOutcome.Failed, workspaceChanged: true),
+            Event(7, FleetEventKind.AttemptStarted, "continue-3", WorkStage.Continue, A,
+                parents: ["continue-2"], edges: [FleetAttemptEdgeKind.Continues]),
+            Started(107, "continue-3"),
+            Event(8, FleetEventKind.AttemptSettled, "continue-3", outcome: WorkflowOutcome.Failed, workspaceChanged: true),
+            Event(9, FleetEventKind.AttemptStarted, "continue-4", WorkStage.Continue, A,
+                parents: ["continue-3"], edges: [FleetAttemptEdgeKind.Continues]),
+            Started(109, "continue-4"),
+            Event(10, FleetEventKind.AttemptSettled, "continue-4", outcome: WorkflowOutcome.Failed, workspaceChanged: true),
+        ], Pr(A));
+
+        Assert.Equal(LifecycleGraphHaltKind.RoundLimitReached, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Wrong_pr_or_stale_check_evidence_cannot_authorize_ready()
+    {
+        var observed = DateTimeOffset.Parse("2026-09-16T12:00:00Z");
+        var facts = new[]
+        {
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Started(101, "implement"),
+            Event(2, FleetEventKind.AttemptSettled, "implement"),
+            Event(3, FleetEventKind.RevisionProduced, "implement", revision: B),
+            Event(4, FleetEventKind.AttemptStarted, "review", WorkStage.Review, B,
+                parents: ["implement"], edges: [FleetAttemptEdgeKind.Reviews]),
+            Started(104, "review"),
+            Event(5, FleetEventKind.AttemptSettled, "review"),
+            Event(6, FleetEventKind.ReviewVerdictObserved, "review", revision: B, verdict: "approve"),
+        };
+        var wrongPr = Item() with
+        {
+            PullRequest = 42,
+            Checks = PullRequestChecks.Passing,
+            ChecksHeadSha = B,
+            ChecksObservedAt = observed,
+            LifecyclePullRequestEvidence = new(43, B, true, true, true, observed),
+        };
+        var staleChecks = wrongPr with
+        {
+            LifecyclePullRequestEvidence = new(42, B, true, true, true, observed),
+            ChecksObservedAt = observed - TimeSpan.FromMinutes(1),
+        };
+
+        Assert.False(LifecycleAttemptGraph.Build(wrongPr, facts,
+            LifecycleQueueProjection.Observation(wrongPr)).Ready);
+        Assert.False(LifecycleAttemptGraph.Build(staleChecks, facts,
+            LifecycleQueueProjection.Observation(staleChecks)).Ready);
+    }
+
+    [Fact]
+    public void Equivalent_plans_have_one_deterministic_attempt_identity()
+    {
+        var plan = new LifecycleNextAttempt(WorkStage.Review, new FleetRevisionId(B),
+            [new FleetAttemptEdge(new FleetAttemptId("implement"), FleetAttemptEdgeKind.Reviews)], "reason");
+
+        Assert.Equal(
+            LifecycleAttemptGraph.PlanAttemptId(Item(), plan),
+            LifecycleAttemptGraph.PlanAttemptId(Item(), plan));
+    }
+
     private static QueueItem Item() => new()
     {
         Tag = "2363-lane",
@@ -379,7 +533,8 @@ public sealed class LifecycleAttemptGraphTests
         new(42, head, true, true, PullRequestChecks.Passing);
 
     private static FleetEvent Started(long id, string attempt) => new(
-        id, DateTimeOffset.Parse("2026-09-16T12:00:00Z"), FleetEventKind.AttemptStarted,
+        id >= 100 ? (id - 100) * 10 + 1 : id * 10,
+        DateTimeOffset.Parse("2026-09-16T12:00:00Z"), FleetEventKind.AttemptStarted,
         $"started:{id}", AttemptId: new FleetAttemptId(attempt), WorkId: new FleetWorkId("2363-lane"));
 
     private static FleetEvent Event(
@@ -392,9 +547,11 @@ public sealed class LifecycleAttemptGraphTests
         string? verdict = null,
         string[]? parents = null,
         FleetAttemptEdgeKind[]? edges = null,
-        string? outcome = null) =>
+        string? outcome = null,
+        bool? workspaceChanged = null,
+        bool missingOutcome = false) =>
         new(
-            id,
+            id * 10,
             DateTimeOffset.Parse("2026-09-16T12:00:00Z"),
             kind == FleetEventKind.AttemptStarted ? FleetEventKind.AttemptPlanned : kind,
             $"{kind}:{id}",
@@ -404,7 +561,8 @@ public sealed class LifecycleAttemptGraphTests
             InputRevisionId: input is null ? null : new FleetRevisionId(input),
             RevisionId: revision is null ? null : new FleetRevisionId(revision),
             ReviewVerdict: verdict,
-            Outcome: outcome ?? (kind == FleetEventKind.AttemptSettled ? WorkflowOutcome.Succeeded : null),
+            Outcome: missingOutcome ? null : outcome ?? (kind == FleetEventKind.AttemptSettled ? WorkflowOutcome.Succeeded : null),
             ParentEdges: parents?.Zip(edges ?? [], (parent, edge) =>
-                new FleetAttemptEdge(new FleetAttemptId(parent), edge)).ToList());
+                new FleetAttemptEdge(new FleetAttemptId(parent), edge)).ToList(),
+            WorkspaceChanged: workspaceChanged);
 }

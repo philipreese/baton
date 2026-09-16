@@ -232,6 +232,15 @@ public sealed class QueueSchedulerService : BackgroundService
 
             var item = decision.Item!;
             prepared.Graphs.TryGetValue(item.Tag, out var selectedGraph);
+            var isGraphVersioned = LifecycleQueueProjection.IsGraphVersioned(item);
+            if (isGraphVersioned && selectedGraph?.Frontier is null)
+            {
+                // A graph row without a frontier is waiting, ready, or halted. Candidate selection
+                // should never return it, but a stale cross-process snapshot must fail closed here
+                // instead of manufacturing an unplanned attempt id.
+                return interval;
+            }
+            var attemptId = selectedGraph?.Frontier?.AttemptId ?? FleetAttemptId.New();
             var admittedDeclaration = item.DeclaredTaskSize;
             QueueTierResolution tier;
             WorkerRole role;
@@ -256,7 +265,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 await FailAsync(
                     item, ex.Message, room: null, now, decision,
                     new QueueTierResolution(null, item.Adapter, item.Model, item.Effort, false, null),
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken, attemptId: attemptId).ConfigureAwait(false);
                 return interval;
             }
 
@@ -268,7 +277,7 @@ public sealed class QueueSchedulerService : BackgroundService
             {
                 await FailAsync(
                     item, $"no tier is configured for '{tier.TierKey}' (scope class '{scopeClass}', role '{item.Role}')",
-                    room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
+                    room: null, now, decision, tier, cancellationToken, attemptId: attemptId).ConfigureAwait(false);
                 return interval;
             }
 
@@ -284,7 +293,7 @@ public sealed class QueueSchedulerService : BackgroundService
             {
                 var remedy = ex.TryInvocation is { Length: > 0 } ? $" Try: {ex.TryInvocation}" : string.Empty;
                 await FailAsync(
-                    item, ex.Message + remedy, room: null, now, decision, tier, cancellationToken)
+                    item, ex.Message + remedy, room: null, now, decision, tier, cancellationToken, attemptId: attemptId)
                     .ConfigureAwait(false);
                 return interval;
             }
@@ -299,7 +308,7 @@ public sealed class QueueSchedulerService : BackgroundService
                     : string.Empty;
                 await FailAsync(
                     item, refusal + remedy,
-                    room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
+                    room: null, now, decision, tier, cancellationToken, attemptId: attemptId).ConfigureAwait(false);
                 return interval;
             }
 
@@ -307,7 +316,6 @@ public sealed class QueueSchedulerService : BackgroundService
             // current when queue add ran. A role change between those moments is exactly the stale
             // authority this preflight is meant to catch, and this check is still before a room claim,
             // worktree operation, or vendor spawn.
-            var attemptId = selectedGraph?.Frontier?.AttemptId ?? FleetAttemptId.New();
             var projectPreflight = RecordedProjectCeilingAdmission.Evaluate(
                 item, role, settings.RequireDeclaredRequirements);
             var admission = projectPreflight.Admission;
@@ -471,12 +479,9 @@ public sealed class QueueSchedulerService : BackgroundService
                 // and the room id on the item is how an operator finds out.
                 var shutdownFailure = $"the daemon shut down while launching into room '{roomDirectory}'; check that room before "
                     + "re-adding this item, because the lane may have started";
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, shutdownFailure), CancellationToken.None)
-                    .ConfigureAwait(false);
                 await FailAsync(
                     item, shutdownFailure, roomDirectory, now, recordedDecision, tier,
-                    CancellationToken.None).ConfigureAwait(false);
+                    CancellationToken.None, attemptId: attemptId).ConfigureAwait(false);
                 return interval;
             }
             catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
@@ -486,13 +491,10 @@ public sealed class QueueSchedulerService : BackgroundService
                 // rather than unwound into the loop's catch-all, which would leave the item launched with
                 // nothing said about why (#1939 review).
                 var launchFailure = $"the launch into room '{roomDirectory}' threw {ex.GetType().Name}: {ex.Message}";
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, launchFailure), CancellationToken.None)
-                    .ConfigureAwait(false);
                 await FailAsync(
                     item, launchFailure,
                     Directory.Exists(roomDirectory) ? roomDirectory : null, now, recordedDecision, tier,
-                    CancellationToken.None).ConfigureAwait(false);
+                    CancellationToken.None, attemptId: attemptId).ConfigureAwait(false);
                 return interval;
             }
 
@@ -543,13 +545,11 @@ public sealed class QueueSchedulerService : BackgroundService
 
             if (outcome.Error is { Length: > 0 } error)
             {
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, error), CancellationToken.None)
-                    .ConfigureAwait(false);
                 // outcome.RoomDirectory, not the path above: the launcher reports it only when the dispatch
                 // actually provisioned the room, and a refusal that never got that far must leave the item
                 // pointing at nothing rather than at a directory that does not exist.
-                await FailAsync(item, error, outcome.RoomDirectory, now, recordedDecision, tier, CancellationToken.None)
+                await FailAsync(item, error, outcome.RoomDirectory, now, recordedDecision, tier,
+                    CancellationToken.None, attemptId: attemptId)
                     .ConfigureAwait(false);
                 return interval;
             }
@@ -638,6 +638,16 @@ public sealed class QueueSchedulerService : BackgroundService
         TaskRequirementAdmission? admission = null,
         FleetAttemptId? attemptId = null)
     {
+        var effectiveAttemptId = attemptId ?? item.AttemptId;
+        if (LifecycleQueueProjection.IsGraphVersioned(item) && effectiveAttemptId is { } graphAttemptId)
+        {
+            // The refusal fact is written first. A crash may leave the row queued, but replay then
+            // sees a terminal refused plan and cannot resurrect it for another launch.
+            await _appendFleetEvent(
+                AttemptRefusedEvent(item, tier, graphAttemptId, now, error), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
         // RoomDirectory is assigned, never merged with what the item already carried: the pre-launch
         // mark writes the room the dispatch was GOING to use, and a refusal that never provisioned it
         // must not leave that path behind as if a room existed to go and read.
@@ -697,6 +707,13 @@ public sealed class QueueSchedulerService : BackgroundService
         TaskRequirementAdmission admission,
         FleetAttemptId attemptId)
     {
+        if (LifecycleQueueProjection.IsGraphVersioned(item))
+        {
+            await _appendFleetEvent(
+                AttemptRefusedEvent(item, tier, attemptId, now, error), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
         var failed = false;
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
@@ -1104,7 +1121,8 @@ public sealed class QueueSchedulerService : BackgroundService
             if (plan is not null)
             {
                 var planned = await _appendFleetEvent(
-                    LifecycleAttemptGraph.PlanEvent(item, FleetAttemptId.New(), plan, now), cancellationToken)
+                    LifecycleAttemptGraph.PlanEvent(
+                        item, LifecycleAttemptGraph.PlanAttemptId(item, plan), plan, now), cancellationToken)
                     .ConfigureAwait(false);
                 if (planned is null)
                 {
@@ -1258,7 +1276,10 @@ public sealed class QueueSchedulerService : BackgroundService
                     usage.ToolSteps,
                     usage.RefusedToolSteps,
                     usage.RepeatedToolSteps),
-            ArtifactReferences: sentinel.Outputs.Count == 0 ? null : sentinel.Outputs);
+            ArtifactReferences: sentinel.Outputs.Count == 0 ? null : sentinel.Outputs,
+            WorkspaceChanged: sentinel.Steps.Any(step => step.WorkspaceChanged == true)
+                ? true
+                : sentinel.Steps.Any(step => step.WorkspaceChanged == false) ? false : null);
     }
 
     /// <summary>

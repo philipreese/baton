@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Baton.Cli.Daemon;
 using Baton.Domain;
+using Baton.Status;
 using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -95,6 +96,23 @@ public sealed class FleetEventLogTests : IDisposable
         Assert.False(json.RootElement.TryGetProperty("roomId", out _));
         Assert.False(json.RootElement.TryGetProperty("executionId", out _));
         Assert.False(json.RootElement.TryGetProperty("usage", out _));
+    }
+
+    [Fact]
+    public async Task Settlement_workspace_evidence_round_trips_as_a_typed_boolean()
+    {
+        var log = new FleetEventLog(Live, Rollover, maxLiveBytes: 100_000);
+        await log.Append(new FleetEventDraft(
+            FleetEventKind.AttemptSettled,
+            "settled:workspace-changed",
+            DateTimeOffset.Parse("2026-09-11T16:00:00Z"),
+            AttemptId: new FleetAttemptId("attempt-a"),
+            Outcome: WorkflowOutcome.Failed,
+            WorkspaceChanged: true), TestContext.Current.CancellationToken);
+
+        using var json = JsonDocument.Parse(Assert.Single(File.ReadAllLines(Live)));
+        Assert.True(json.RootElement.GetProperty("workspaceChanged").GetBoolean());
+        Assert.True(Assert.Single(await log.ReadRetained(TestContext.Current.CancellationToken)).WorkspaceChanged);
     }
 
     [Fact]

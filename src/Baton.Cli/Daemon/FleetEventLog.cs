@@ -235,7 +235,8 @@ public sealed record FleetEventDraft(
     DateTimeOffset? CheckCompletedAt = null,
     WorkStage? LifecycleStage = null,
     FleetRevisionId? InputRevisionId = null,
-    IReadOnlyList<FleetAttemptEdge>? ParentEdges = null);
+    IReadOnlyList<FleetAttemptEdge>? ParentEdges = null,
+    bool? WorkspaceChanged = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -310,7 +311,9 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("inputRevisionId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetRevisionId? InputRevisionId = null,
     [property: JsonPropertyName("parentEdges")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptEdge>? ParentEdges = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptEdge>? ParentEdges = null,
+    [property: JsonPropertyName("workspaceChanged")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? WorkspaceChanged = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -321,7 +324,7 @@ public sealed record FleetEvent(
         draft.CheckConclusion, draft.ElapsedMilliseconds, draft.LastMeaningfulProgressAt?.ToUniversalTime(),
         draft.Usage, draft.ArtifactReferences, draft.RevisionKind, draft.CheckRunId, draft.CheckName,
         draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime(),
-        draft.LifecycleStage, draft.InputRevisionId, draft.ParentEdges);
+        draft.LifecycleStage, draft.InputRevisionId, draft.ParentEdges, draft.WorkspaceChanged);
 }
 
 /// <summary>

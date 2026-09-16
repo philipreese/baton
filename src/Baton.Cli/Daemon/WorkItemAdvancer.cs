@@ -227,7 +227,8 @@ public sealed class WorkItemAdvancer
             if (authorityGraph.NextAttempt is { } plan)
             {
                 var planned = await _appendFleetEvent(
-                    LifecycleAttemptGraph.PlanEvent(item, FleetAttemptId.New(), plan, now), cancellationToken)
+                    LifecycleAttemptGraph.PlanEvent(
+                        item, LifecycleAttemptGraph.PlanAttemptId(item, plan), plan, now), cancellationToken)
                     .ConfigureAwait(false);
                 authorityEvents = planned is null
                     ? await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false)

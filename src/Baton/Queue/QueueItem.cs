@@ -19,7 +19,8 @@ namespace Baton.Queue;
 /// The rule this puts on whoever edits this record, unchanged from slice 1 and now satisfied rather
 /// than avoided: a field belongs here only if something reads or writes it. A field carrying a
 /// lifecycle no code advances reads to every consumer as a capability the product has —
-/// <c>WorkItemLifecycle</c> is the code that advances these.
+/// <c>LifecycleAttemptGraph</c> advances graph-versioned rows; <c>WorkItemLifecycle</c> remains the
+/// explicit compatibility policy for legacy rows.
 /// </para>
 /// </remarks>
 public sealed record QueueItem
@@ -178,8 +179,9 @@ public sealed record QueueItem
     public string? LastVerdict { get; init; }
 
     /// <summary>
-    /// How many rounds the queue has run for this item: 0 at add time, and <c>WorkItemLifecycle</c>
-    /// raises it whenever it queues another, whatever the stage (spec/baton.md §13 has the counting rule
+    /// How many rounds the queue has run for this item: 0 at add time. The immutable graph projection
+    /// derives it for graph-versioned rows; <c>WorkItemLifecycle</c> raises it for legacy rows whenever
+    /// it queues another, whatever the stage (spec/baton.md §13 has the counting rule
     /// and why it is not per-fix). Names nothing on disk; it is what a brief's header and the transition
     /// fact print, and what <see cref="WorkStages.MaxRounds"/> bounds.
     /// </summary>
@@ -194,8 +196,8 @@ public sealed record QueueItem
     /// <remarks>
     /// This is intentionally separate from <see cref="Round"/>. Continuations and re-review retries
     /// consume rounds too, so their count cannot prove whether the automatic fix was already used.
-    /// <see cref="WorkItemLifecycle"/> is the sole policy reader and <c>WorkItemAdvancer</c> is the
-    /// sole lifecycle writer.
+    /// <c>LifecycleAttemptGraph</c> is the policy reader for graph-versioned rows;
+    /// <see cref="WorkItemLifecycle"/> remains the legacy policy reader.
     /// </remarks>
     public bool? AutomaticFixUsed { get; init; }
 
@@ -327,7 +329,7 @@ public sealed record QueueItem
 
     /// <summary>
     /// True once the lifecycle has failed this work item with a reason a person has to act on —
-    /// <c>WorkItemLifecycle</c>'s <c>NeedsOperator</c> arms, including the
+    /// the lifecycle authority's operator-halt arms, including the
     /// <see cref="WorkStages.MaxRounds"/> ceiling. <b>The flag the advance's candidate filter reads.</b>
     /// </summary>
     /// <remarks>

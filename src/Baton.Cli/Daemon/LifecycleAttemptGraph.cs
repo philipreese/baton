@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
@@ -53,7 +55,9 @@ public static class LifecycleAttemptGraph
             var revisions = group.Where(e => e.Kind == FleetEventKind.RevisionProduced).ToList();
             var verdicts = group.Where(e => e.Kind == FleetEventKind.ReviewVerdictObserved).ToList();
             var refusals = group.Where(e => e.Kind == FleetEventKind.AttemptRefused).ToList();
-            if (started.Count > 1 || settled.Count > 1 || revisions.Count > 1 || verdicts.Count > 1 || refusals.Count > 1)
+            var nonProductions = group.Where(e => e.Kind == FleetEventKind.RevisionNotProducedUnchangedHeadAfterWorkspaceChange).ToList();
+            if (started.Count > 1 || settled.Count > 1 || revisions.Count > 1 || verdicts.Count > 1
+                || refusals.Count > 1 || nonProductions.Count > 1)
             {
                 return Halt(nodes, LifecycleGraphHaltKind.DuplicateTerminalFact,
                     $"attempt '{group.Key.Value}' has duplicate start, terminal, revision, verdict, or refusal facts");
@@ -67,6 +71,25 @@ public static class LifecycleAttemptGraph
             {
                 return Halt(nodes, LifecycleGraphHaltKind.ContradictoryTerminalFact,
                     $"attempt '{group.Key.Value}' is both refused and started or settled");
+            }
+            if (settled.SingleOrDefault() is { Outcome: null or "" })
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.MissingOutcome,
+                    $"attempt '{group.Key.Value}' has an attemptSettled fact without a typed outcome");
+            }
+            if (started.SingleOrDefault() is { } start && start.Id <= plan.Id
+                || settled.SingleOrDefault() is { } settlement
+                    && (started.SingleOrDefault() is not { } startedFact || settlement.Id <= startedFact.Id)
+                || revisions.SingleOrDefault() is { } revision
+                    && (settled.SingleOrDefault() is not { } settledFact || revision.Id <= settledFact.Id)
+                || verdicts.SingleOrDefault() is { } verdictFact
+                    && (settled.SingleOrDefault() is not { } verdictSettlement || verdictFact.Id <= verdictSettlement.Id)
+                || nonProductions.SingleOrDefault() is { } nonProduction
+                    && (settled.SingleOrDefault() is not { } nonProductionSettlement || nonProduction.Id <= nonProductionSettlement.Id)
+                || refusals.SingleOrDefault() is { } refusal && refusal.Id <= plan.Id)
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.InvalidChronology,
+                    $"attempt '{group.Key.Value}' has result facts outside plan-start-settle order");
             }
             if (verdicts.SingleOrDefault() is { } verdict
                 && (stage is not WorkStage.Review and not WorkStage.ReReview || verdict.RevisionId != input))
@@ -89,14 +112,17 @@ public static class LifecycleAttemptGraph
 
             nodes.Add(new LifecycleAttemptNode(
                 group.Key, stage, input, edges, plan.Id, started.SingleOrDefault()?.Id,
-                settled.SingleOrDefault()?.Outcome ?? refusals.SingleOrDefault()?.Outcome,
-                refusals.Count > 0, revisions.SingleOrDefault()?.RevisionId,
+                settled.Count > 0, settled.SingleOrDefault()?.Outcome ?? refusals.SingleOrDefault()?.Outcome,
+                refusals.Count > 0, settled.SingleOrDefault()?.WorkspaceChanged,
+                nonProductions.Count > 0, revisions.SingleOrDefault()?.RevisionId,
                 verdicts.SingleOrDefault()?.RevisionId, verdicts.SingleOrDefault()?.ReviewVerdict));
         }
 
+        nodes.Sort((left, right) => left.PlanEventId.CompareTo(right.PlanEventId));
         foreach (var node in nodes)
         {
-            if (node.ParentEdges.Count == 0 && node.Stage != WorkStage.Implement)
+            var isRoot = ReferenceEquals(node, nodes[0]);
+            if (node.ParentEdges.Count == 0 && (!isRoot || node.Stage != WorkStage.Implement))
             {
                 return Halt(nodes, LifecycleGraphHaltKind.MissingParent,
                     $"attempt '{node.AttemptId.Value}' is {node.Stage} without a typed predecessor");
@@ -122,7 +148,7 @@ public static class LifecycleAttemptGraph
             }
         }
 
-        var runnable = nodes.Where(n => n.Outcome is null && !n.Refused).ToList();
+        var runnable = nodes.Where(n => !n.Settled && !n.Refused).ToList();
         if (runnable.Count > 1)
         {
             return Halt(nodes, LifecycleGraphHaltKind.MultipleRunnableFrontier,
@@ -157,6 +183,22 @@ public static class LifecycleAttemptGraph
         InputRevisionId: plan.InputRevision,
         ParentEdges: plan.ParentEdges);
 
+    /// <summary>
+    /// Concurrent scheduler ticks must converge on one plan identity. Random ids turn the event log's
+    /// dedupe guarantee into two valid competing frontiers; hashing the complete immutable plan makes
+    /// the same logical frontier the same append key in every process.
+    /// </summary>
+    public static FleetAttemptId PlanAttemptId(QueueItem item, LifecycleNextAttempt plan)
+    {
+        var edges = string.Join("\n", plan.ParentEdges
+            .OrderBy(edge => edge.ParentAttemptId.Value, StringComparer.Ordinal)
+            .ThenBy(edge => edge.Kind)
+            .Select(edge => $"{edge.Kind}:{edge.ParentAttemptId.Value}"));
+        var source = $"{item.Tag}\n{plan.Stage}\n{plan.InputRevision.Value}\n{edges}";
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source))).ToLowerInvariant();
+        return new FleetAttemptId($"plan-{hash[..24]}");
+    }
+
     private static LifecycleNextAttemptResult DeriveNext(
         IReadOnlyList<LifecycleAttemptNode> nodes, LifecyclePullRequestObservation pullRequest)
     {
@@ -186,7 +228,7 @@ public static class LifecycleAttemptGraph
                     return LifecycleNextAttemptResult.Halted(LifecycleGraphHaltKind.AutomaticFixExhausted,
                         "the immutable graph already contains the one automatic fix");
                 }
-                return LifecycleNextAttemptResult.Planned(new(
+                return PlanNext(nodes, last, new(
                     WorkStage.Fix, last.InputRevision,
                     [new FleetAttemptEdge(last.AttemptId, FleetAttemptEdgeKind.Repairs)],
                     "blocking exact-revision verdict authorizes one repair"));
@@ -210,7 +252,7 @@ public static class LifecycleAttemptGraph
                 return producer is null
                     ? LifecycleNextAttemptResult.Halted(LifecycleGraphHaltKind.UnprovenPullRequestHead,
                         $"PR head {currentHead} has no producing attempt in the immutable graph")
-                    : LifecycleNextAttemptResult.Planned(new(
+                    : PlanNext(nodes, last, new(
                         WorkStage.ReReview, new FleetRevisionId(currentHead),
                         [new FleetAttemptEdge(producer.AttemptId, FleetAttemptEdgeKind.Reviews)],
                         "the prior approval is stale; review the current produced PR head"));
@@ -220,6 +262,11 @@ public static class LifecycleAttemptGraph
 
         if (last.ProducedRevision is not { } produced)
         {
+            if (last.RevisionNotProduced)
+            {
+                return LifecycleNextAttemptResult.Halted(LifecycleGraphHaltKind.UnchangedRevision,
+                    $"{WorkStages.Token(last.Stage)} attempt '{last.AttemptId.Value}' changed the workspace but produced no revision");
+            }
             if (last.Stage == WorkStage.Fix)
             {
                 return LifecycleNextAttemptResult.Halted(LifecycleGraphHaltKind.MissingProducedRevision,
@@ -230,7 +277,12 @@ public static class LifecycleAttemptGraph
                 return LifecycleNextAttemptResult.Halted(LifecycleGraphHaltKind.MissingProducedRevision,
                     $"successful {WorkStages.Token(last.Stage)} attempt '{last.AttemptId.Value}' has no produced revision");
             }
-            return LifecycleNextAttemptResult.Planned(new(
+            if (last.WorkspaceChanged != true)
+            {
+                return LifecycleNextAttemptResult.Halted(LifecycleGraphHaltKind.NoRetainedContinuationState,
+                    $"incomplete {WorkStages.Token(last.Stage)} attempt '{last.AttemptId.Value}' has no positive typed workspace-change evidence");
+            }
+            return PlanNext(nodes, last, new(
                 WorkStage.Continue, last.InputRevision,
                 [new FleetAttemptEdge(last.AttemptId, FleetAttemptEdgeKind.Continues)],
                 "incomplete code attempt retains one explicit continuation frontier"));
@@ -243,11 +295,23 @@ public static class LifecycleAttemptGraph
                 $"produced revision {produced.Value} is not the exact open PR head");
         }
 
-        return LifecycleNextAttemptResult.Planned(new(
+        return PlanNext(nodes, last, new(
             last.Stage == WorkStage.Fix ? WorkStage.ReReview : WorkStage.Review,
             produced,
             [new FleetAttemptEdge(last.AttemptId, FleetAttemptEdgeKind.Reviews)],
             "exact produced revision is present on the recorded open PR"));
+    }
+
+    private static LifecycleNextAttemptResult PlanNext(
+        IReadOnlyList<LifecycleAttemptNode> nodes, LifecycleAttemptNode last, LifecycleNextAttempt plan)
+    {
+        var nextRound = nodes.Count;
+        var pairedAutomaticFixReview = last.Stage == WorkStage.Fix && plan.Stage == WorkStage.ReReview;
+        return nextRound > WorkStages.MaxRounds && !pairedAutomaticFixReview
+            ? LifecycleNextAttemptResult.Halted(LifecycleGraphHaltKind.RoundLimitReached,
+                $"the immutable graph already contains {nodes.Count - 1} automatic round(s); "
+                + $"the ceiling is {WorkStages.MaxRounds}")
+            : LifecycleNextAttemptResult.Planned(plan);
     }
 
     private static bool EdgeIsSatisfied(LifecycleAttemptNode child, LifecycleAttemptNode parent, FleetAttemptEdgeKind edge) =>
@@ -259,9 +323,10 @@ public static class LifecycleAttemptGraph
                 && parent.ReviewedRevision == parent.InputRevision && parent.InputRevision == child.InputRevision
                 && string.Equals(parent.ReviewVerdict, "block", StringComparison.OrdinalIgnoreCase),
             FleetAttemptEdgeKind.Continues => child.Stage == WorkStage.Continue
+                && parent.Settled && parent.WorkspaceChanged == true
                 && parent.Outcome is { } outcome && !WorkflowOutcome.IsSucceededShaped(outcome)
                 && parent.InputRevision == child.InputRevision,
-            FleetAttemptEdgeKind.Supersedes => parent.Outcome is not null,
+            FleetAttemptEdgeKind.Supersedes => parent.Settled || parent.Refused,
             _ => false,
         };
 
@@ -274,7 +339,8 @@ public sealed record LifecycleAttemptDag(IReadOnlyList<LifecycleAttemptNode> Nod
 public sealed record LifecycleAttemptNode(
     FleetAttemptId AttemptId, WorkStage Stage, FleetRevisionId InputRevision,
     IReadOnlyList<FleetAttemptEdge> ParentEdges, long PlanEventId, long? StartEventId,
-    string? Outcome, bool Refused, FleetRevisionId? ProducedRevision,
+    bool Settled, string? Outcome, bool Refused, bool? WorkspaceChanged, bool RevisionNotProduced,
+    FleetRevisionId? ProducedRevision,
     FleetRevisionId? ReviewedRevision, string? ReviewVerdict)
 {
     public bool Started => StartEventId is not null;
@@ -300,6 +366,8 @@ public enum LifecycleGraphHaltKind
     MissingOrDuplicatePlan,
     MissingIdentity,
     DuplicateTerminalFact,
+    MissingOutcome,
+    InvalidChronology,
     SettledWithoutStart,
     ContradictoryTerminalFact,
     UnchangedRevision,
@@ -311,6 +379,8 @@ public enum LifecycleGraphHaltKind
     MultipleRunnableFrontier,
     MissingReviewVerdict,
     AutomaticFixExhausted,
+    RoundLimitReached,
+    NoRetainedContinuationState,
     MissingProducedRevision,
     UnprovenPullRequestHead,
     UndeliveredRevision,
@@ -330,12 +400,9 @@ public sealed record LifecycleProjection(
         LifecycleNextAttempt? next, bool ready, LifecyclePullRequestObservation pullRequest)
     {
         var stage = frontier?.Stage ?? next?.Stage ?? (ready ? WorkStage.Ready : nodes.LastOrDefault()?.Stage);
-        var approvedWaiting = frontier is null && nodes.LastOrDefault() is { } completed
-            && completed.Stage is WorkStage.Review or WorkStage.ReReview
-            && string.Equals(completed.ReviewVerdict, "approve", StringComparison.OrdinalIgnoreCase);
         var state = frontier is not null
             ? frontier.Started ? QueueItemState.Launched : QueueItemState.Queued
-            : ready || next is not null || approvedWaiting ? QueueItemState.Queued : QueueItemState.Done;
+            : ready || next is not null ? QueueItemState.Queued : QueueItemState.Done;
         // Historical terminal nodes do not occupy WIP. An initial unstarted implementation is new
         // work; an unstarted follow-up remains active only because a predecessor actually launched.
         var active = frontier is not null && (frontier.Started || nodes.Any(n => n.Started));
@@ -365,12 +432,15 @@ public static class LifecycleQueueProjection
     public static LifecyclePullRequestObservation Observation(QueueItem item)
     {
         var evidence = item.LifecyclePullRequestEvidence;
-        if (evidence is not { Succeeded: true })
+        if (evidence is not { Succeeded: true, Number: { } number }
+            || item.PullRequest != number
+            || evidence.ObservedAt == default)
         {
             return new(null, null, false, null, null);
         }
 
-        var checks = string.Equals(item.ChecksHeadSha, evidence.HeadSha, StringComparison.Ordinal)
+        var checks = item.ChecksObservedAt == evidence.ObservedAt
+            && string.Equals(item.ChecksHeadSha, evidence.HeadSha, StringComparison.Ordinal)
             ? item.Checks
             : null;
         return new(evidence.Number, evidence.HeadSha, true, evidence.IsOpen, checks, evidence.IsDraft);
