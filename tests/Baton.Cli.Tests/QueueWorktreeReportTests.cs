@@ -684,7 +684,7 @@ public sealed class QueueWorktreeReportTests
             Assert.Equal(BuildLockProbeResult.Held, QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath));
             Assert.True(File.Exists(lockPath + ".info"), "build-lock holder did not publish its sidecar");
 
-            File.Delete(lockPath + ".info");
+            FileCleanup.EnsureDeleted(lockPath + ".info");
             var probe = QueueWorktreeLivenessProbe.Default with { BuildLockPath = lockPath };
             var index = await QueueWorktreeReferenceIndex.CreateAsync(
                 [Item(candidate, "candidate")], Ct, probe);
