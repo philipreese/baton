@@ -358,6 +358,39 @@ public sealed class QueueSchedulerService : BackgroundService
             // that was actually made; its attempt id simply never gains a room.
             await _appendFleetEvent(AdmissionEvent(item, tier, attemptId, admission, now), cancellationToken)
                 .ConfigureAwait(false);
+            if (isGraphVersioned && admission.Result != TaskRequirementAdmission.Admitted)
+            {
+                await FailAsync(
+                    item,
+                    "graph-versioned lifecycle attempts require an explicit admitted requirements decision; "
+                    + "declare the task requirements and re-add the queue item",
+                    room: null, now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
+                return interval;
+            }
+            if (isGraphVersioned)
+            {
+                // Append is idempotent, not a claim: another scheduler can win the dedupe key after
+                // this tick selected its tier. Re-read the retained winner before the room claim so
+                // neither a stale resolver nor a runway-held retry can spend on a different binding.
+                var retained = await _readFleetEvents(cancellationToken).ConfigureAwait(false);
+                var durableGraph = LifecycleAttemptGraph.Build(item, retained,
+                    LifecycleQueueProjection.Observation(item, retained, now));
+                var durableBinding = durableGraph.Graph.Nodes
+                    .SingleOrDefault(node => node.AttemptId == attemptId)?.Binding;
+                var bindingMismatch = durableBinding is null
+                    ? "no complete retained admission exists"
+                    : durableBinding.DescribeResolvedMismatch(
+                        tier, item.Role, admission, item.Stage!.Value, attemptBaseRevision, item.WorkerAssignment);
+                if (bindingMismatch is not null)
+                {
+                    await FailAsync(
+                        item,
+                        $"durable admission for attempt '{attemptId.Value}' does not match the current resolved binding; "
+                        + $"{bindingMismatch}; the queue refused to spend on a different worker configuration",
+                        room: null, now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
+                    return interval;
+                }
+            }
 
             // The launch is RECORDED BEFORE IT IS STARTED, and started under the same token it was recorded
             // under -- spec/baton.md §13 states that ruling and the duplicate-worker failure it closes.
@@ -1191,6 +1224,8 @@ public sealed class QueueSchedulerService : BackgroundService
             AssignmentDecisionId: item.WorkerAssignment?.DecisionId,
             DeclaredRole: item.Role,
             EffectiveGrant: admission.EffectiveGrant,
+            LifecycleStage: item.Stage,
+            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null,
             RequestedRequirements: admission.Requested,
             MissingCapabilities: admission.Missing,
             AdmissionDecision: admission.Result);

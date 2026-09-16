@@ -462,7 +462,7 @@ public sealed class WorkItemAdvancer
             else
             {
                 authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents!,
-                    new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks, pr.IsDraft));
+                    LifecycleQueueProjection.Observation(item, authorityEvents!, now));
                 transition = GraphTransition(authorityGraph, pr);
             }
         }

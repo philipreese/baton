@@ -99,18 +99,30 @@ public static class LifecycleAttemptGraph
             }
             var typedStart = started.SingleOrDefault();
             var typedSettlement = settled.SingleOrDefault();
+            var startAdmission = admissions.SingleOrDefault();
+            if (typedStart is not null && startAdmission is null)
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.MissingAdmission,
+                    $"attempt '{group.Key.Value}' started without a durable admission decision");
+            }
+            if (typedStart is not null && startAdmission is not null && startAdmission.Id >= typedStart.Id)
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.InvalidChronology,
+                    $"attempt '{group.Key.Value}' admission was not recorded before its start");
+            }
             if (typedStart is not null
-                && ((typedStart.LifecycleStage is { } startStage && startStage != stage)
-                    || (typedStart.InputRevisionId is { } startInput && startInput != input)))
+                && (!LifecycleAttemptBinding.HasCompleteStartIdentity(typedStart)
+                    || typedStart.LifecycleStage != stage
+                    || typedStart.InputRevisionId != input))
             {
                 return Halt(nodes, LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
                     $"attempt '{group.Key.Value}' start identity disagrees with its immutable plan");
             }
             if (typedSettlement is not null
-                && ((typedSettlement.LifecycleStage is { } settledStage && settledStage != stage)
-                    || (typedSettlement.InputRevisionId is { } settledInput && settledInput != input)
-                    || typedStart?.RoomId is { } startedRoom && typedSettlement.RoomId is { } settledRoom
-                        && settledRoom != startedRoom))
+                && (!LifecycleAttemptBinding.HasCompleteSettlementIdentity(typedSettlement)
+                    || typedSettlement.LifecycleStage != stage
+                    || typedSettlement.InputRevisionId != input
+                    || typedStart?.RoomId is { } startedRoom && typedSettlement.RoomId != startedRoom))
             {
                 return Halt(nodes, LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
                     $"attempt '{group.Key.Value}' settlement identity disagrees with its planned start");
@@ -123,8 +135,19 @@ public static class LifecycleAttemptGraph
                     $"attempt '{group.Key.Value}' has malformed produced artifact references");
             }
             var binding = LifecycleAttemptBinding.From(admissions.SingleOrDefault());
+            if (binding is not null && !binding.IsCompleteAdmission(stage, input))
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.MissingIdentity,
+                    $"attempt '{group.Key.Value}' has an incomplete durable admission identity");
+            }
+            if (typedStart is not null && binding is null)
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.MissingIdentity,
+                    $"attempt '{group.Key.Value}' started without a complete durable admission identity");
+            }
             if (binding is not null
-                && (!binding.Matches(started.SingleOrDefault()) || !binding.Matches(settled.SingleOrDefault())))
+                && (typedStart is not null && !binding.MatchesCompleteStart(typedStart)
+                    || typedSettlement is not null && !binding.MatchesCompleteSettlement(typedSettlement)))
             {
                 return Halt(nodes, LifecycleGraphHaltKind.ContradictoryAttemptBinding,
                     $"attempt '{group.Key.Value}' binding or assignment decision disagrees across durable facts");
@@ -412,6 +435,7 @@ public enum LifecycleGraphHaltKind
     InvalidChronology,
     SettledWithoutStart,
     ContradictoryTerminalFact,
+    MissingAdmission,
     ContradictoryAttemptIdentity,
     ContradictoryAttemptBinding,
     MalformedArtifacts,
@@ -441,11 +465,82 @@ public sealed record LifecycleGraphHalt(LifecycleGraphHaltKind Kind, string Reas
 /// </summary>
 public sealed record LifecycleAttemptBinding(
     string? Vendor, string? Model, string? Effort, string? DeclaredRole,
-    IReadOnlyList<string>? EffectiveGrant, string? AssignmentDecisionId)
+    IReadOnlyList<string>? EffectiveGrant, string? AssignmentDecisionId,
+    WorkStage? LifecycleStage, FleetRevisionId? InputRevision, string? AdmissionDecision)
 {
     internal static LifecycleAttemptBinding? From(FleetEvent? admission) => admission is null ? null : new(
         admission.Vendor, admission.Model, admission.Effort, admission.DeclaredRole,
-        admission.EffectiveGrant, admission.AssignmentDecisionId);
+        admission.EffectiveGrant, admission.AssignmentDecisionId, admission.LifecycleStage,
+        admission.InputRevisionId, admission.AdmissionDecision);
+
+    internal bool IsCompleteAdmission(WorkStage stage, FleetRevisionId input) =>
+        LifecycleStage == stage && InputRevision == input
+        && AdmissionDecision == TaskRequirementAdmission.Admitted
+        && !string.IsNullOrWhiteSpace(Vendor)
+        && !string.IsNullOrWhiteSpace(DeclaredRole)
+        && EffectiveGrant is not null;
+
+    internal static bool HasCompleteStartIdentity(FleetEvent start) =>
+        start.LifecycleStage is not null
+        && start.InputRevisionId is not null
+        && start.RoomId is not null
+        && !string.IsNullOrWhiteSpace(start.Vendor)
+        && !string.IsNullOrWhiteSpace(start.DeclaredRole)
+        && start.EffectiveGrant is not null;
+
+    internal static bool HasCompleteSettlementIdentity(FleetEvent settlement) =>
+        settlement.LifecycleStage is not null
+        && settlement.InputRevisionId is not null
+        && settlement.RoomId is not null
+        && !string.IsNullOrWhiteSpace(settlement.Vendor)
+        && !string.IsNullOrWhiteSpace(settlement.DeclaredRole)
+        && settlement.EffectiveGrant is not null;
+
+    internal bool MatchesCompleteStart(FleetEvent? start) => start is not null
+        && HasCompleteStartIdentity(start)
+        && start.LifecycleStage == LifecycleStage
+        && start.InputRevisionId == InputRevision
+        && string.Equals(start.Vendor, Vendor, StringComparison.Ordinal)
+        && string.Equals(start.Model, Model, StringComparison.Ordinal)
+        && string.Equals(start.Effort, Effort, StringComparison.Ordinal)
+        && string.Equals(start.DeclaredRole, DeclaredRole, StringComparison.Ordinal)
+        && string.Equals(start.AssignmentDecisionId, AssignmentDecisionId, StringComparison.Ordinal)
+        && Same(EffectiveGrant, start.EffectiveGrant);
+
+    internal bool MatchesCompleteSettlement(FleetEvent? settlement) => settlement is null
+        || HasCompleteSettlementIdentity(settlement)
+        && settlement.LifecycleStage == LifecycleStage
+        && settlement.InputRevisionId == InputRevision
+        && string.Equals(settlement.Vendor, Vendor, StringComparison.Ordinal)
+        && string.Equals(settlement.Model, Model, StringComparison.Ordinal)
+        && string.Equals(settlement.Effort, Effort, StringComparison.Ordinal)
+        && string.Equals(settlement.DeclaredRole, DeclaredRole, StringComparison.Ordinal)
+        && string.Equals(settlement.AssignmentDecisionId, AssignmentDecisionId, StringComparison.Ordinal)
+        && Same(EffectiveGrant, settlement.EffectiveGrant);
+
+    internal string? DescribeResolvedMismatch(
+        QueueTierResolution tier, string role, TaskRequirementAdmission admission,
+        WorkStage stage, string? input, FrozenWorkerAssignment? assignment)
+    {
+        if (!IsCompleteAdmission(stage, new FleetRevisionId(input ?? string.Empty)))
+        {
+            return "the retained admission is incomplete or names a different stage/input";
+        }
+        if (!string.Equals(Vendor, tier.Adapter, StringComparison.Ordinal)
+            || !string.Equals(Model, tier.Model, StringComparison.Ordinal)
+            || !string.Equals(Effort, tier.Effort, StringComparison.Ordinal))
+        {
+            return "the retained vendor/model/effort differs from the resolved worker tuple";
+        }
+        if (!string.Equals(DeclaredRole, role, StringComparison.Ordinal)
+            || !Same(EffectiveGrant, admission.EffectiveGrant))
+        {
+            return "the retained role/grant differs from the current admission";
+        }
+        return string.Equals(AssignmentDecisionId, assignment?.DecisionId, StringComparison.Ordinal)
+            ? null
+            : "the retained assignment decision differs from the current frozen assignment";
+    }
 
     internal bool Matches(FleetEvent? fact) => fact is null
         || Same(Vendor, fact.Vendor)

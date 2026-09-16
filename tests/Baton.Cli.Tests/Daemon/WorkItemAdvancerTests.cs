@@ -36,7 +36,8 @@ public sealed class WorkItemAdvancerTests
         RepositoryIdentity.From("https://github.com/aer-works/baton.git", null)!;
 
     private sealed class FakeGh(
-        string stdout, int exitCode = 0, string requiredBucket = "pass", int readyExitCode = 0) : IGhCliRunner
+        string stdout, int exitCode = 0, string requiredBucket = "pass", int readyExitCode = 0,
+        string? requiredBucketAfterReady = null) : IGhCliRunner
     {
         private bool _isDraft = !stdout.Contains("\"isDraft\":false", StringComparison.Ordinal);
 
@@ -55,9 +56,12 @@ public sealed class WorkItemAdvancerTests
 
             if (args is ["pr", "checks", ..])
             {
+                var observedBucket = !_isDraft && requiredBucketAfterReady is not null
+                    ? requiredBucketAfterReady
+                    : requiredBucket;
                 return Task.FromResult(new GhCliResult(
                     Started: true, 0,
-                    $$$"""[{"name":"ci","bucket":"{{{requiredBucket}}}","state":"SUCCESS"}]""",
+                    $$$"""[{"name":"ci","bucket":"{{{observedBucket}}}","state":"SUCCESS"}]""",
                     string.Empty));
             }
 
@@ -237,6 +241,32 @@ public sealed class WorkItemAdvancerTests
 
     private static async Task<QueueItem> ReadBackAsync() =>
         (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
+
+    private static async Task AppendCompleteExecutionAsync(
+        FleetEventLog log,
+        QueueItem item,
+        FleetAttemptId attempt,
+        WorkStage stage,
+        string input,
+        DateTimeOffset at)
+    {
+        var work = new FleetWorkId(item.Tag);
+        var role = WorkStages.RoleFor(stage);
+        IReadOnlyList<string> grant = ["fixture-grant"];
+        var room = new FleetRoomId($"room:{attempt.Value}");
+        await log.Append(new(FleetEventKind.AdmissionDecided, $"admission:{attempt.Value}", at,
+            AttemptId: attempt, WorkId: work, LifecycleStage: stage, InputRevisionId: new FleetRevisionId(input),
+            Vendor: "codex", Model: "gpt", Effort: "high", DeclaredRole: role,
+            EffectiveGrant: grant, AdmissionDecision: TaskRequirementAdmission.Admitted), Ct);
+        await log.Append(new(FleetEventKind.AttemptStarted, $"attempt-started:{attempt.Value}", at,
+            AttemptId: attempt, WorkId: work, LifecycleStage: stage, InputRevisionId: new FleetRevisionId(input),
+            RoomId: room, Vendor: "codex", Model: "gpt", Effort: "high", DeclaredRole: role,
+            EffectiveGrant: grant), Ct);
+        await log.Append(new(FleetEventKind.AttemptSettled, $"attempt-settled:{attempt.Value}", at,
+            AttemptId: attempt, WorkId: work, LifecycleStage: stage, InputRevisionId: new FleetRevisionId(input),
+            RoomId: room, Vendor: "codex", Model: "gpt", Effort: "high", DeclaredRole: role,
+            EffectiveGrant: grant, Outcome: WorkflowOutcome.Succeeded), Ct);
+    }
 
     private static WorkItemAdvancer Advancer(
         IGhCliRunner gh,
@@ -617,19 +647,8 @@ public sealed class WorkItemAdvancerTests
                 attemptId,
                 new LifecycleNextAttempt(WorkStage.Implement, new FleetRevisionId(MergeSha), [], "initial"),
                 Now.AddMinutes(-2)), Ct);
-            await log.Append(new FleetEventDraft(
-                FleetEventKind.AttemptStarted,
-                $"attempt-started:{attemptId.Value}",
-                Now.AddMinutes(-1),
-                AttemptId: attemptId,
-                WorkId: new FleetWorkId(graphItem.Tag)), Ct);
-            await log.Append(new FleetEventDraft(
-                FleetEventKind.AttemptSettled,
-                $"attempt-settled:{attemptId.Value}",
-                Now,
-                AttemptId: attemptId,
-                WorkId: new FleetWorkId(graphItem.Tag),
-                Outcome: WorkflowOutcome.Succeeded), Ct);
+            await AppendCompleteExecutionAsync(
+                log, graphItem, attemptId, WorkStage.Implement, MergeSha, Now.AddMinutes(-1));
 
             var gh = new FakeGh(PrJson(77, FullPushedSha));
             var facts = await new WorkItemAdvancer(
@@ -695,13 +714,8 @@ public sealed class WorkItemAdvancerTests
                 graphItem, implement,
                 new(WorkStage.Implement, new FleetRevisionId(MergeSha), [], "initial"),
                 Now.AddMinutes(-8)), Ct);
-            await log.Append(new(
-                FleetEventKind.AttemptStarted, "attempt-started:implement", Now.AddMinutes(-7),
-                AttemptId: implement, WorkId: new FleetWorkId(graphItem.Tag)), Ct);
-            await log.Append(new(
-                FleetEventKind.AttemptSettled, "attempt-settled:implement", Now.AddMinutes(-6),
-                AttemptId: implement, WorkId: new FleetWorkId(graphItem.Tag),
-                Outcome: WorkflowOutcome.Succeeded), Ct);
+            await AppendCompleteExecutionAsync(
+                log, graphItem, implement, WorkStage.Implement, MergeSha, Now.AddMinutes(-7));
             await log.Append(new(
                 FleetEventKind.RevisionProduced, "revision:implement", Now.AddMinutes(-5),
                 AttemptId: implement, WorkId: new FleetWorkId(graphItem.Tag),
@@ -711,21 +725,19 @@ public sealed class WorkItemAdvancerTests
                 new(WorkStage.Review, new FleetRevisionId(PushedSha),
                     [new FleetAttemptEdge(implement, FleetAttemptEdgeKind.Reviews)], "review"),
                 Now.AddMinutes(-4)), Ct);
-            await log.Append(new(
-                FleetEventKind.AttemptStarted, "attempt-started:review", Now.AddMinutes(-3),
-                AttemptId: review, WorkId: new FleetWorkId(graphItem.Tag)), Ct);
-            await log.Append(new(
-                FleetEventKind.AttemptSettled, "attempt-settled:review", Now.AddMinutes(-2),
-                AttemptId: review, WorkId: new FleetWorkId(graphItem.Tag),
-                Outcome: WorkflowOutcome.Succeeded), Ct);
+            await AppendCompleteExecutionAsync(
+                log, graphItem, review, WorkStage.Review, PushedSha, Now.AddMinutes(-3));
 
+            // The post-mutation live read deliberately changes checks to failing. The current turn
+            // may only consume the passing fact it already persisted; the next tick will persist and
+            // evaluate the changed observation.
             var gh = new FakeGh($$$"""
                 [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{{PushedSha}}}",
                   "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
                   "statusCheckRollup":[{"databaseId":101,"name":"gates","status":"COMPLETED",
                     "conclusion":"SUCCESS","startedAt":"2026-09-06T11:00:00Z",
                     "completedAt":"2026-09-06T11:02:00Z"}]}]
-                """);
+                """, requiredBucketAfterReady: "fail");
             var facts = await new WorkItemAdvancer(
                 gh,
                 (_, _) => Task.FromResult<string?>(PushedSha),

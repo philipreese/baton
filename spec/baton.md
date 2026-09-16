@@ -7150,6 +7150,9 @@ identity rather than two runnable plans. Admission, including an eventual runway
 the node. Only `attemptStarted` does. A pre-launch refusal appends `attemptRefused` before projecting
 the failed row, so a crash cannot resurrect the plan. Thus a held launch retries the same single
 unstarted frontier; it cannot become a missing-start halt or manufacture another planned node.
+Graph-versioned attempts require an explicit `admitted` requirements decision before spend;
+the legacy `unknown` no-declaration result fails closed with an actionable refusal rather than being
+reinterpreted as permission. Historical non-graph rows retain their compatibility behavior.
 
 `LifecycleAttemptGraph.Build` is the sole cross-attempt policy reader. It replays plans, admissions,
 starts, settlements, binding/assignment decisions, room/execution identities, produced artifacts,

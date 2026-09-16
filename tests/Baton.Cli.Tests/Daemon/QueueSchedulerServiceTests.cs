@@ -1877,12 +1877,17 @@ public sealed class QueueSchedulerServiceTests
                 LifecycleGraphVersion = LifecycleAttemptGraph.Version,
                 Workspace = home,
                 AutomaticFixUsed = false,
+                Requirements = [],
             };
             await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [graphItem] }, Ct);
 
             var events = new List<FleetEvent>();
             Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
             {
+                if (events.Any(entry => entry.DedupeKey == draft.DedupeKey))
+                {
+                    return Task.FromResult<FleetEvent?>(null);
+                }
                 var entry = FleetEvent.From(events.Count + 1, draft);
                 events.Add(entry);
                 return Task.FromResult<FleetEvent?>(entry);
@@ -1927,6 +1932,115 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task Graph_versioned_attempt_without_declared_requirements_fails_before_vendor_spend()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = Item("graph-unknown-admission") with
+            {
+                Stage = WorkStage.Implement,
+                LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+                Workspace = home,
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+            var events = new List<FleetEvent>();
+            Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
+            {
+                var entry = FleetEvent.From(events.Count + 1, draft);
+                events.Add(entry);
+                return Task.FromResult<FleetEvent?>(entry);
+            }
+            var launches = 0;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launches++;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d), () => 16d, () => DateTimeOffset.UtcNow,
+                appendFleetEvent: Append,
+                readFleetEvents: _ => Task.FromResult<IReadOnlyList<FleetEvent>>(events.ToList()),
+                workspaceHead: (_, _) => Task.FromResult<string?>(BaseHead),
+                workspaceLocks: _ => []);
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(0, launches);
+            var failed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, failed.State);
+            Assert.Contains("require an explicit admitted requirements decision", failed.Error!, StringComparison.Ordinal);
+            Assert.Contains(events, entry => entry.Kind == FleetEventKind.AdmissionDecided
+                && entry.AdmissionDecision == TaskRequirementAdmission.Unknown);
+            Assert.Contains(events, entry => entry.Kind == FleetEventKind.AttemptRefused);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_concurrent_conflicting_admission_winner_refuses_the_runway_held_frontier_before_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = Item("admission-race") with
+            {
+                Stage = WorkStage.Implement,
+                LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+                Workspace = home,
+                Requirements = [],
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+            var events = new List<FleetEvent>();
+            Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
+            {
+                if (events.Any(entry => entry.DedupeKey == draft.DedupeKey))
+                {
+                    return Task.FromResult<FleetEvent?>(null);
+                }
+                // The other scheduler wins the admission dedupe key after this scheduler resolved
+                // its tuple. The retained fact, not the local tuple, is now authoritative.
+                var winner = draft.Kind == FleetEventKind.AdmissionDecided
+                    ? draft with { Vendor = "conflicting-vendor" }
+                    : draft;
+                var entry = FleetEvent.From(events.Count + 1, winner);
+                events.Add(entry);
+                return Task.FromResult<FleetEvent?>(draft.Kind == FleetEventKind.AdmissionDecided ? null : entry);
+            }
+            var launches = 0;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launches++;
+                    return Task.FromResult(new QueueLaunchOutcome(null, RunwayHeld: true));
+                },
+                _ => Task.FromResult(0d), () => 16d, () => DateTimeOffset.UtcNow,
+                appendFleetEvent: Append,
+                readFleetEvents: _ => Task.FromResult<IReadOnlyList<FleetEvent>>(events.ToList()),
+                workspaceHead: (_, _) => Task.FromResult<string?>(BaseHead),
+                workspaceLocks: _ => []);
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(0, launches);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, retained.State);
+            Assert.Contains("durable admission", retained.Error!, StringComparison.Ordinal);
+            Assert.Contains(events, entry => entry.Kind == FleetEventKind.AdmissionDecided
+                && entry.Vendor == "conflicting-vendor");
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task Graph_versioned_prelaunch_refusal_is_durable_and_is_not_retried_next_tick()
     {
         var home = CreateTempHome();
@@ -1940,6 +2054,7 @@ public sealed class QueueSchedulerServiceTests
                 LifecycleGraphVersion = LifecycleAttemptGraph.Version,
                 Workspace = home,
                 AutomaticFixUsed = false,
+                Requirements = [],
                 Skills = [null!],
             };
             await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [graphItem] }, Ct);
@@ -2007,7 +2122,10 @@ public sealed class QueueSchedulerServiceTests
 
             await service.TickOnceAsync(Ct);
 
-            var launch = Assert.Single(launches);
+            Assert.True(launches.Count == 1,
+                $"events={System.Text.Json.JsonSerializer.Serialize(events)}; "
+                + $"row={System.Text.Json.JsonSerializer.Serialize(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items))}");
+            var launch = launches[0];
             Assert.Equal(WorkStage.Fix, launch.Item.Stage);
             var plan = Assert.Single(events, entry =>
                 entry.Kind == FleetEventKind.AttemptPlanned && entry.LifecycleStage == WorkStage.Fix);
@@ -2040,7 +2158,10 @@ public sealed class QueueSchedulerServiceTests
 
             await service.TickOnceAsync(Ct);
 
-            var launch = Assert.Single(launches);
+            Assert.True(launches.Count == 1,
+                $"events={System.Text.Json.JsonSerializer.Serialize(events)}; "
+                + $"row={System.Text.Json.JsonSerializer.Serialize(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items))}");
+            var launch = launches[0];
             Assert.Equal(WorkStage.ReReview, launch.Item.Stage);
             var plan = Assert.Single(events, entry =>
                 entry.Kind == FleetEventKind.AttemptPlanned && entry.LifecycleStage == WorkStage.ReReview);
@@ -2067,6 +2188,7 @@ public sealed class QueueSchedulerServiceTests
                 LifecycleGraphVersion = LifecycleAttemptGraph.Version,
                 Workspace = home,
                 AutomaticFixUsed = false,
+                Requirements = [],
             };
             await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
 
@@ -2148,6 +2270,7 @@ public sealed class QueueSchedulerServiceTests
                 LifecycleGraphVersion = LifecycleAttemptGraph.Version,
                 Workspace = home,
                 AutomaticFixUsed = false,
+                Requirements = [],
             };
             await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
 
@@ -2158,13 +2281,10 @@ public sealed class QueueSchedulerServiceTests
                 [new FleetAttemptEdge(implementId, FleetAttemptEdgeKind.Continues)], "continue");
             var continuationId = LifecycleAttemptGraph.PlanAttemptId(item, continuation);
             events.Add(FleetEvent.From(1, LifecycleAttemptGraph.PlanEvent(item, implementId, implement, now)));
-            events.Add(new FleetEvent(2, now, FleetEventKind.AttemptStarted, "implement-started",
-                AttemptId: implementId, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
-                InputRevisionId: new FleetRevisionId(BaseHead)));
-            events.Add(new FleetEvent(3, now, FleetEventKind.AttemptSettled, "implement-settled",
-                AttemptId: implementId, WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Failed,
-                WorkspaceChanged: true));
-            events.Add(FleetEvent.From(4, LifecycleAttemptGraph.PlanEvent(item, continuationId, continuation, now)));
+            AddCompleteExecution(events, item, implementId, WorkStage.Implement, BaseHead, now,
+                WorkflowOutcome.Failed, workspaceChanged: true);
+            events.Add(FleetEvent.From(events.Count + 1,
+                LifecycleAttemptGraph.PlanEvent(item, continuationId, continuation, now)));
             Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
             {
                 if (events.Any(entry => entry.DedupeKey == draft.DedupeKey))
@@ -2748,6 +2868,7 @@ public sealed class QueueSchedulerServiceTests
             ChecksObservedAt = observedAt,
             LifecyclePullRequestEvidence = new(42, head, true, true, true, observedAt),
             AutomaticFixUsed = false,
+            Requirements = [],
         };
 
     private static List<FleetEvent> BlockingReviewHistory(QueueItem item, DateTimeOffset at)
@@ -2759,19 +2880,13 @@ public sealed class QueueSchedulerServiceTests
         var review = new FleetAttemptId("review");
         Add(LifecycleAttemptGraph.PlanEvent(item, implement,
             new(WorkStage.Implement, new FleetRevisionId(BaseHead), [], "initial"), at));
-        Add(new(FleetEventKind.AttemptStarted, "started:implement", at,
-            AttemptId: implement, WorkId: work));
-        Add(new(FleetEventKind.AttemptSettled, "settled:implement", at,
-            AttemptId: implement, WorkId: work, Outcome: WorkflowOutcome.Succeeded));
+        AddCompleteExecution(events, item, implement, WorkStage.Implement, BaseHead, at);
         Add(new(FleetEventKind.RevisionProduced, "revision:implement", at,
             AttemptId: implement, WorkId: work, RevisionId: new FleetRevisionId(ReviewHead)));
         Add(LifecycleAttemptGraph.PlanEvent(item, review,
             new(WorkStage.Review, new FleetRevisionId(ReviewHead),
                 [new FleetAttemptEdge(implement, FleetAttemptEdgeKind.Reviews)], "review"), at));
-        Add(new(FleetEventKind.AttemptStarted, "started:review", at,
-            AttemptId: review, WorkId: work));
-        Add(new(FleetEventKind.AttemptSettled, "settled:review", at,
-            AttemptId: review, WorkId: work, Outcome: WorkflowOutcome.Succeeded));
+        AddCompleteExecution(events, item, review, WorkStage.Review, ReviewHead, at);
         Add(new(FleetEventKind.ReviewVerdictObserved, "verdict:review", at,
             AttemptId: review, WorkId: work, RevisionId: new FleetRevisionId(ReviewHead),
             ReviewVerdict: "block"));
@@ -2788,13 +2903,38 @@ public sealed class QueueSchedulerServiceTests
         Add(LifecycleAttemptGraph.PlanEvent(item, fix,
             new(WorkStage.Fix, new FleetRevisionId(ReviewHead),
                 [new FleetAttemptEdge(review, FleetAttemptEdgeKind.Repairs)], "fix"), at));
-        Add(new(FleetEventKind.AttemptStarted, "started:fix", at,
-            AttemptId: fix, WorkId: work));
-        Add(new(FleetEventKind.AttemptSettled, "settled:fix", at,
-            AttemptId: fix, WorkId: work, Outcome: WorkflowOutcome.Succeeded));
+        AddCompleteExecution(events, item, fix, WorkStage.Fix, ReviewHead, at);
         Add(new(FleetEventKind.RevisionProduced, "revision:fix", at,
             AttemptId: fix, WorkId: work, RevisionId: new FleetRevisionId(FixedHead)));
         return events;
+    }
+
+    private static void AddCompleteExecution(
+        List<FleetEvent> events,
+        QueueItem item,
+        FleetAttemptId attempt,
+        WorkStage stage,
+        string input,
+        DateTimeOffset at,
+        string outcome = WorkflowOutcome.Succeeded,
+        bool? workspaceChanged = null)
+    {
+        void Add(FleetEventDraft draft) => events.Add(FleetEvent.From(events.Count + 1, draft));
+        var work = new FleetWorkId(item.Tag);
+        IReadOnlyList<string> grant = ["file-write"];
+        var room = new FleetRoomId($"room:{attempt.Value}");
+        Add(new(FleetEventKind.AdmissionDecided, $"admission:{attempt.Value}", at,
+            AttemptId: attempt, WorkId: work, LifecycleStage: stage, InputRevisionId: new FleetRevisionId(input),
+            Vendor: "claude", Model: "opus", Effort: "high", DeclaredRole: "implement",
+            EffectiveGrant: grant, AdmissionDecision: TaskRequirementAdmission.Admitted));
+        Add(new(FleetEventKind.AttemptStarted, $"started:{attempt.Value}", at,
+            AttemptId: attempt, WorkId: work, LifecycleStage: stage, InputRevisionId: new FleetRevisionId(input),
+            RoomId: room, Vendor: "claude", Model: "opus", Effort: "high", DeclaredRole: "implement",
+            EffectiveGrant: grant));
+        Add(new(FleetEventKind.AttemptSettled, $"settled:{attempt.Value}", at,
+            AttemptId: attempt, WorkId: work, LifecycleStage: stage, InputRevisionId: new FleetRevisionId(input),
+            RoomId: room, Vendor: "claude", Model: "opus", Effort: "high", DeclaredRole: "implement",
+            EffectiveGrant: grant, Outcome: outcome, WorkspaceChanged: workspaceChanged));
     }
 
     private static QueueSchedulerService GraphService(

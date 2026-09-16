@@ -513,49 +513,69 @@ public sealed class LifecycleAttemptGraphTests
     public void A_typed_start_that_disagrees_with_its_plan_halts_while_a_matching_start_remains_valid()
     {
         var plan = Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A);
-        var matching = Started(101, "implement") with
-        {
-            LifecycleStage = WorkStage.Implement,
-            InputRevisionId = new FleetRevisionId(A),
-        };
+        IReadOnlyList<string> grant = ["file-write"];
+        var admission = new FleetEvent(11, DateTimeOffset.UtcNow, FleetEventKind.AdmissionDecided, "admission",
+            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
+            LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(A),
+            Vendor: "codex", Model: "gpt", Effort: "high", DeclaredRole: "implement",
+            EffectiveGrant: grant, AssignmentDecisionId: "assignment",
+            AdmissionDecision: TaskRequirementAdmission.Admitted);
+        var matching = new FleetEvent(12, DateTimeOffset.UtcNow, FleetEventKind.AttemptStarted, "start",
+            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
+            LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(A),
+            RoomId: new FleetRoomId("room"), Vendor: "codex", Model: "gpt", Effort: "high",
+            DeclaredRole: "implement", EffectiveGrant: grant, AssignmentDecisionId: "assignment");
         var contradictory = matching with { LifecycleStage = WorkStage.Review };
 
-        Assert.Null(LifecycleAttemptGraph.Build(Item(), [plan, matching], Pr(A)).Halt);
+        Assert.Null(Baton.Cli.Daemon.LifecycleAttemptGraph.Build(Item(), [plan, admission, matching], Pr(A)).Halt);
         Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
-            LifecycleAttemptGraph.Build(Item(), [plan, contradictory], Pr(A)).Halt!.Kind);
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(Item(), [plan, admission, contradictory], Pr(A)).Halt!.Kind);
     }
 
     [Fact]
     public void Conflicting_binding_and_malformed_terminal_artifacts_halt_without_reading_the_queue_row()
     {
         var plan = Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A);
+        IReadOnlyList<string> grant = ["file-write"];
         var admission = new FleetEvent(11, DateTimeOffset.UtcNow, FleetEventKind.AdmissionDecided, "admission",
             AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
-            Vendor: "codex", Model: "gpt-5.6-sol", DeclaredRole: "implement", AssignmentDecisionId: "decision-a");
-        var conflictingStart = new FleetEvent(12, DateTimeOffset.UtcNow, FleetEventKind.AttemptStarted, "start",
-            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
-            LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(A), Vendor: "claude");
-
-        Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptBinding,
-            LifecycleAttemptGraph.Build(Item(), [plan, admission, conflictingStart], Pr(A)).Halt!.Kind);
-
+            LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(A),
+            Vendor: "codex", Model: "gpt-5.6-sol", Effort: "high", DeclaredRole: "implement",
+            EffectiveGrant: grant, AssignmentDecisionId: "decision-a",
+            AdmissionDecision: TaskRequirementAdmission.Admitted);
         var started = new FleetEvent(12, DateTimeOffset.UtcNow, FleetEventKind.AttemptStarted, "start",
             AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
             LifecycleStage: WorkStage.Implement, InputRevisionId: new FleetRevisionId(A),
-            RoomId: new FleetRoomId("room-a"));
-        var wrongRoom = new FleetEvent(20, DateTimeOffset.UtcNow, FleetEventKind.AttemptSettled, "settled-room",
-            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
-            Outcome: WorkflowOutcome.Succeeded, RoomId: new FleetRoomId("room-b"));
+            RoomId: new FleetRoomId("room-a"), Vendor: "codex", Model: "gpt-5.6-sol", Effort: "high",
+            DeclaredRole: "implement", EffectiveGrant: grant, AssignmentDecisionId: "decision-a");
+        var conflictingStart = started with { Vendor = "claude" };
+
+        Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptBinding,
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(Item(), [plan, admission, conflictingStart], Pr(A)).Halt!.Kind);
+
+        var wrongRoom = started with
+        {
+            Id = 20,
+            Kind = FleetEventKind.AttemptSettled,
+            DedupeKey = "settled-room",
+            Outcome = WorkflowOutcome.Succeeded,
+            RoomId = new FleetRoomId("room-b"),
+        };
 
         Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
-            LifecycleAttemptGraph.Build(Item(), [plan, started, wrongRoom], Pr(A)).Halt!.Kind);
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(Item(), [plan, admission, started, wrongRoom], Pr(A)).Halt!.Kind);
 
-        var settled = new FleetEvent(20, DateTimeOffset.UtcNow, FleetEventKind.AttemptSettled, "settled",
-            AttemptId: new FleetAttemptId("implement"), WorkId: new FleetWorkId("2363-lane"),
-            Outcome: WorkflowOutcome.Succeeded, ArtifactReferences: ["artifact.txt", "artifact.txt"]);
+        var settled = started with
+        {
+            Id = 20,
+            Kind = FleetEventKind.AttemptSettled,
+            DedupeKey = "settled",
+            Outcome = WorkflowOutcome.Succeeded,
+            ArtifactReferences = ["artifact.txt", "artifact.txt"],
+        };
 
         Assert.Equal(LifecycleGraphHaltKind.MalformedArtifacts,
-            LifecycleAttemptGraph.Build(Item(), [plan, started, settled], Pr(A)).Halt!.Kind);
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(Item(), [plan, admission, started, settled], Pr(A)).Halt!.Kind);
     }
 
     [Fact]
@@ -617,6 +637,38 @@ public sealed class LifecycleAttemptGraphTests
     }
 
     [Fact]
+    public void Typed_attempts_require_a_complete_admission_before_a_matching_start_or_settlement()
+    {
+        var item = Item();
+        var attempt = new FleetAttemptId("identity");
+        var plan = FleetEvent.From(1, Baton.Cli.Daemon.LifecycleAttemptGraph.PlanEvent(
+            item, attempt, new(WorkStage.Implement, new FleetRevisionId(A), [], "initial"), DateTimeOffset.UtcNow));
+        var admission = new FleetEvent(2, DateTimeOffset.UtcNow, FleetEventKind.AdmissionDecided, "admission:identity",
+            AttemptId: attempt, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+            InputRevisionId: new FleetRevisionId(A), Vendor: "codex", Model: "gpt", Effort: "high",
+            DeclaredRole: "implement", EffectiveGrant: ["file-write"], AssignmentDecisionId: "assignment",
+            AdmissionDecision: TaskRequirementAdmission.Admitted);
+        var start = new FleetEvent(3, DateTimeOffset.UtcNow, FleetEventKind.AttemptStarted, "start:identity",
+            AttemptId: attempt, WorkId: new FleetWorkId(item.Tag), LifecycleStage: WorkStage.Implement,
+            InputRevisionId: new FleetRevisionId(A), RoomId: new FleetRoomId("room-identity"), Vendor: "codex",
+            Model: "gpt", Effort: "high", DeclaredRole: "implement", EffectiveGrant: ["file-write"],
+            AssignmentDecisionId: "assignment");
+
+        Assert.Null(Baton.Cli.Daemon.LifecycleAttemptGraph.Build(item, [plan, admission, start], Pr(A)).Halt);
+        Assert.Equal(LifecycleGraphHaltKind.MissingAdmission,
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(item, [plan, start], Pr(A)).Halt!.Kind);
+        Assert.Equal(LifecycleGraphHaltKind.InvalidChronology,
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(item, [plan, start, admission with { Id = 4 }], Pr(A)).Halt!.Kind);
+        Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptBinding,
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(item, [plan, admission, start with { Model = null }], Pr(A)).Halt!.Kind);
+
+        var incompleteSettlement = new FleetEvent(4, DateTimeOffset.UtcNow, FleetEventKind.AttemptSettled,
+            "settled:identity", AttemptId: attempt, WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Succeeded);
+        Assert.Equal(LifecycleGraphHaltKind.ContradictoryAttemptIdentity,
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(item, [plan, admission, start, incompleteSettlement], Pr(A)).Halt!.Kind);
+    }
+
+    [Fact]
     public void Equivalent_plans_have_one_deterministic_attempt_identity()
     {
         var plan = new LifecycleNextAttempt(WorkStage.Review, new FleetRevisionId(B),
@@ -637,11 +689,83 @@ public sealed class LifecycleAttemptGraphTests
         Stage = WorkStage.Implement,
     };
 
+    // Most graph scenarios describe routing, not the mechanics of a worker launch. Keep those
+    // fixtures mechanically valid: production always persists this complete chain before a result.
+    private static class LifecycleAttemptGraph
+    {
+        public const string Version = Baton.Cli.Daemon.LifecycleAttemptGraph.Version;
+
+        public static LifecycleAttemptGraphResult Build(
+            QueueItem item, IReadOnlyList<FleetEvent> facts, LifecyclePullRequestObservation pr) =>
+            Baton.Cli.Daemon.LifecycleAttemptGraph.Build(item, CompleteLaunchEvidence(facts), pr);
+
+        public static FleetAttemptId PlanAttemptId(QueueItem item, LifecycleNextAttempt plan) =>
+            Baton.Cli.Daemon.LifecycleAttemptGraph.PlanAttemptId(item, plan);
+
+        private static IReadOnlyList<FleetEvent> CompleteLaunchEvidence(IReadOnlyList<FleetEvent> facts)
+        {
+            var completed = facts.ToList();
+            foreach (var group in facts.Where(fact => fact.AttemptId is not null).GroupBy(fact => fact.AttemptId!.Value))
+            {
+                var plan = group.SingleOrDefault(fact => fact.Kind == FleetEventKind.AttemptPlanned);
+                var start = group.SingleOrDefault(fact => fact.Kind == FleetEventKind.AttemptStarted);
+                if (plan?.LifecycleStage is not { } stage || plan.InputRevisionId is not { } input || start is null
+                    || group.Any(fact => fact.Kind == FleetEventKind.AdmissionDecided))
+                {
+                    continue;
+                }
+
+                const string vendor = "fixture-vendor";
+                const string model = "fixture-model";
+                const string effort = "fixture-effort";
+                const string role = "fixture-role";
+                const string assignment = "fixture-assignment";
+                IReadOnlyList<string> grant = ["fixture-grant"];
+                var room = new FleetRoomId($"fixture-room-{group.Key.Value}");
+                completed.Add(new FleetEvent(plan.Id + 1, plan.At, FleetEventKind.AdmissionDecided,
+                    $"fixture-admission:{group.Key.Value}", AttemptId: group.Key, WorkId: plan.WorkId,
+                    Vendor: vendor, Model: model, Effort: effort, DeclaredRole: role, EffectiveGrant: grant,
+                    AssignmentDecisionId: assignment, LifecycleStage: stage, InputRevisionId: input,
+                    AdmissionDecision: TaskRequirementAdmission.Admitted));
+                completed[completed.IndexOf(start)] = start with
+                {
+                    LifecycleStage = stage,
+                    InputRevisionId = input,
+                    RoomId = room,
+                    Vendor = vendor,
+                    Model = model,
+                    Effort = effort,
+                    DeclaredRole = role,
+                    EffectiveGrant = grant,
+                    AssignmentDecisionId = assignment,
+                };
+
+                var settlement = group.FirstOrDefault(fact => fact.Kind == FleetEventKind.AttemptSettled);
+                if (settlement is not null)
+                {
+                    completed[completed.IndexOf(settlement)] = settlement with
+                    {
+                        LifecycleStage = stage,
+                        InputRevisionId = input,
+                        RoomId = room,
+                        Vendor = vendor,
+                        Model = model,
+                        Effort = effort,
+                        DeclaredRole = role,
+                        EffectiveGrant = grant,
+                        AssignmentDecisionId = assignment,
+                    };
+                }
+            }
+            return completed.OrderBy(fact => fact.Id).ToList();
+        }
+    }
+
     private static LifecyclePullRequestObservation Pr(string head) =>
         new(42, head, true, true, PullRequestChecks.Passing);
 
     private static FleetEvent Started(long id, string attempt) => new(
-        id >= 100 ? (id - 100) * 10 + 1 : id * 10,
+        id >= 100 ? (id - 100) * 10 + 2 : id * 10 + 2,
         DateTimeOffset.Parse("2026-09-16T12:00:00Z"), FleetEventKind.AttemptStarted,
         $"started:{id}", AttemptId: new FleetAttemptId(attempt), WorkId: new FleetWorkId("2363-lane"));
 
