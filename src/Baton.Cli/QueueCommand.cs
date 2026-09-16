@@ -161,6 +161,9 @@ public static class QueueCommand
             queueSnapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)), tag);
 
         var sourceRepository = repositoryDirectory ?? Directory.GetCurrentDirectory();
+        var effectiveWorktreeRoot = options.Issue is not null
+            ? IssueWorktreeProvisioner.ResolveWorktreeRoot(settings.Queue.WorktreeRoot, sourceRepository)
+            : null;
         var issueRepository = options.Issue is not null
             ? await ResolveIssueRepositoryAsync(sourceRepository, repositoryResolver, cancellationToken).ConfigureAwait(false)
             : null;
@@ -170,7 +173,7 @@ public static class QueueCommand
         var retained = options is { Lifecycle: true, Issue: { }, WorkspaceDirectory: { } };
         var retainedProof = retained
             ? await RetainedIssueWorktreeValidator.ValidateAsync(
-                options.WorkspaceDirectory!, options.Issue!.Value, issueRepository!, settings.Queue.WorktreeRoot,
+                options.WorkspaceDirectory!, options.Issue!.Value, issueRepository!, effectiveWorktreeRoot,
                 role, settings.Queue.RequireDeclaredRequirements, requirements, queueSnapshot.Items, cancellationToken)
                 .ConfigureAwait(false)
             : null;
@@ -181,7 +184,7 @@ public static class QueueCommand
             ? await issueProvisioner(
                 issue,
                 sourceRepository,
-                settings.Queue.WorktreeRoot,
+                effectiveWorktreeRoot,
                 issueRepository!,
                 output,
                 cancellationToken).ConfigureAwait(false)
@@ -288,6 +291,12 @@ public static class QueueCommand
             // running lane's own record would be overwritten.
             var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
             RefuseIfNotReplaceable(existing, tag);
+
+            if (retainedProof is not null)
+            {
+                RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership(
+                    snapshot.Items, retainedProof.Workspace, retainedProof.Branch);
+            }
 
             // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
             // inside the queue's authoritative mutation so a cancellation that wins the same lock is

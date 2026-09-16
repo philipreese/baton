@@ -75,6 +75,17 @@ public static class IssueWorktreeProvisioner
     }
 
     /// <summary>
+    /// Resolves the configured root with the same sibling-checkout default used by issue provisioning.
+    /// Retained-worktree validation consumes this value too, so its root boundary cannot differ from
+    /// the provisioner that originally selected the checkout.
+    /// </summary>
+    internal static string ResolveWorktreeRoot(string? configuredRoot, string repositoryDirectory) =>
+        configuredRoot ?? Path.GetDirectoryName(Path.GetFullPath(repositoryDirectory))
+            ?? throw new CliArgumentException(
+                $"Cannot derive a worktree root from '{repositoryDirectory}' — it has no parent directory.",
+                "set Queue.WorktreeRoot in ~/.baton/settings.json to say where w<n> worktrees belong.");
+
+    /// <summary>
     /// The issue's title and body, for the implement brief <c>baton queue add --lifecycle</c> renders
     /// when no <c>--spec</c> is given. Through the SAME runner every other spawn here uses, so this adds
     /// no process-spawn site of its own.
@@ -170,10 +181,7 @@ public static class IssueWorktreeProvisioner
 
         runner ??= RunRetainedProbeAsync;
 
-        var root = worktreeRoot ?? Path.GetDirectoryName(Path.GetFullPath(repositoryDirectory))
-            ?? throw new CliArgumentException(
-                $"Cannot derive a worktree root from '{repositoryDirectory}' — it has no parent directory.",
-                "set Queue.WorktreeRoot in ~/.baton/settings.json to say where w<n> worktrees belong.");
+        var root = ResolveWorktreeRoot(worktreeRoot, repositoryDirectory);
 
         var firstWorkspace = Path.Combine(root, $"w{issue}");
         var firstBranch = BranchNameFor(issue);

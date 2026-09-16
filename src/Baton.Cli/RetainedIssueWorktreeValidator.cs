@@ -66,9 +66,7 @@ internal static class RetainedIssueWorktreeValidator
         if (!string.IsNullOrWhiteSpace(statusOutput)) throw Refusal("git-status", "the workspace has tracked or untracked source changes", path);
 
         var live = queueItems.Where(item => item.State is QueueItemState.Queued or QueueItemState.Launched).ToList();
-        if (live.Any(item => QueueWorktreeReport.PathComparer.Equals(QueueWorktreeReport.TryFullPath(item.Workspace), path)
-            || string.Equals(item.Branch, branch, StringComparison.Ordinal)))
-            throw Refusal("queue-liveness", "a queued or launched item owns this path or branch", path);
+        RefuseIfLiveQueueOwnership(queueItems, path, branch);
 
         var referenceProbeItems = live.Append(new QueueItem
         {
@@ -112,6 +110,19 @@ internal static class RetainedIssueWorktreeValidator
                 && item.State is QueueItemState.Done or QueueItemState.Failed or QueueItemState.Cancelled)
             .Select(item => item.Tag).Distinct(StringComparer.Ordinal).ToList();
         return new Proof(path, repository, branch, head, ceiling, predecessors, admission);
+    }
+
+    /// <summary>
+    /// Refuses live ownership from the queue snapshot currently being observed. Queue add calls this
+    /// both before its side effects and again inside the queue-store mutation, whose snapshot is held
+    /// under the queue lock.
+    /// </summary>
+    internal static void RefuseIfLiveQueueOwnership(IReadOnlyList<QueueItem> queueItems, string path, string branch)
+    {
+        var live = queueItems.Where(item => item.State is QueueItemState.Queued or QueueItemState.Launched);
+        if (live.Any(item => QueueWorktreeReport.PathComparer.Equals(QueueWorktreeReport.TryFullPath(item.Workspace), path)
+            || string.Equals(item.Branch, branch, StringComparison.Ordinal)))
+            throw Refusal("queue-liveness", "a queued or launched item owns this path or branch", path);
     }
 
     private static CliArgumentException Refusal(string probe, string detail, string path) => new(

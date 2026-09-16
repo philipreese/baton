@@ -1,4 +1,5 @@
 using Baton.Cli;
+using Baton.Queue;
 using Xunit;
 
 namespace Baton.Cli.Tests;
@@ -41,5 +42,54 @@ public sealed class RetainedIssueWorktreeValidatorTests
         Assert.False(found);
         Assert.Null(head);
         Assert.Null(branch);
+    }
+
+    [Fact]
+    public void Default_worktree_root_is_the_source_repository_parent()
+    {
+        var repository = Path.GetFullPath(@"C:\repos\baton");
+
+        var root = IssueWorktreeProvisioner.ResolveWorktreeRoot(null, repository);
+
+        Assert.Equal(Path.GetDirectoryName(repository), root);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Live_queue_ownership_refuses_a_matching_path_or_branch(bool matchesPath)
+    {
+        var workspace = Path.GetFullPath(@"C:\repos\w2333");
+        var live = new QueueItem
+        {
+            Tag = "other-tag",
+            Role = "implement",
+            Workspace = matchesPath ? workspace : Path.GetFullPath(@"C:\repos\w-other"),
+            SpecFile = "unused",
+            Branch = matchesPath ? "another-branch" : "2333-lane",
+            State = QueueItemState.Queued,
+        };
+
+        var refusal = Assert.Throws<CliArgumentException>(() =>
+            RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership([live], workspace, "2333-lane"));
+
+        Assert.Contains("queue-liveness", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Terminal_queue_history_does_not_own_a_retained_workspace()
+    {
+        var workspace = Path.GetFullPath(@"C:\repos\w2333");
+        var terminal = new QueueItem
+        {
+            Tag = "previous-tag",
+            Role = "implement",
+            Workspace = workspace,
+            SpecFile = "unused",
+            Branch = "2333-lane",
+            State = QueueItemState.Failed,
+        };
+
+        RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership([terminal], workspace, "2333-lane");
     }
 }
