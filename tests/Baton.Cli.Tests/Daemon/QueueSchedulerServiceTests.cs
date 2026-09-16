@@ -488,6 +488,46 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_capped_legacy_implement_row_still_fails_closed_when_requirements_are_mandatory()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await File.WriteAllTextAsync(BatonPaths.SettingsFile, "{\"Queue\":{\"RequireDeclaredRequirements\":true}}", Ct);
+            var workspace = Path.Combine(home, "capped-legacy-workspace");
+            Directory.CreateDirectory(workspace);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: false,
+                    RunShellCommands: false, NetworkAccess: false), ProjectCeilingStore.DefaultPath);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("legacy-implement") with { Workspace = workspace, Requirements = null }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Equal(TaskRequirementAdmission.Refused, item.LastAdmission!.Result);
+            Assert.Equal(["declared requirements"], item.LastAdmission.Missing);
+            Assert.Equal(["repository-read", "artifact:changes.md"], item.LastAdmission.EffectiveGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_role_catalog_change_is_rechecked_at_launch_instead_of_trusting_queue_time_assumptions()
     {
         var home = CreateTempHome();

@@ -73,7 +73,7 @@ adapter/model/effort from a role-and-scope tier table. Every evaluation lands as
 `~/.baton/fleet/queue.jsonl`, so "why did this lane start when it did" is answerable afterwards. The
 numbers and the tier table live in `~/.baton/settings.json` under `Queue`.
 
-For add-time admission against a recorded project ceiling, see [`spec/baton.md` §13](spec/baton.md#13-the-conductor-queue).
+For add-time admission against a recorded project ceiling, see [`spec/baton.md` §13](spec/baton.md).
 
 An item added with `--lifecycle` carries a required declared task size and one-clause rationale
 (`--declared-size` and `--size-rationale`; the single vocabulary definition is

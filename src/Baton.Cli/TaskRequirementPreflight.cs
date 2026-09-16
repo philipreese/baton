@@ -24,10 +24,13 @@ internal static class TaskRequirementPreflight
         var effectiveGrant = EffectiveGrant(grant, role.Outputs.Select(output => output.Name));
         if (item.Requirements is null)
         {
+            // The legacy missing-declaration gate classifies the execution-bearing role, not its
+            // currently capped grant. Otherwise a narrowed ceiling makes an old implement row
+            // look read-only and lets it launch without declared requirements.
             var executionBearing = TaskRequirements.IsExecutionBearing(
-                grant.WriteFiles,
-                grant.RunShellCommands && !grant.ShellCommandsAreReadOnly,
-                grant.NetworkAccess);
+                role.Grant.WriteFiles,
+                role.Grant.RunShellCommands && !role.Grant.ShellCommandsAreReadOnly,
+                role.Grant.NetworkAccess);
             return requireDeclaredRequirements && executionBearing
                 ? new TaskRequirementAdmission(
                     null, effectiveGrant, TaskRequirementAdmission.Refused,
