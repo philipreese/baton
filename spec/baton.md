@@ -7209,6 +7209,25 @@ engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeou
 [--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`, and
 `import <file>`, and `worktrees [--format text|json]`.
 
+**Explicit retained issue worktree reuse (#2333).** `queue add --issue <n> --workspace <dir>
+--lifecycle` is the only retained-checkout form: `--issue` supplies the issue, rendered lifecycle
+brief and PR identity; `--workspace` supplies the exact existing checkout. The command never scans
+for an old suffix. Before it writes a spec or queue row, provisions a worktree, or changes trust, the
+issue-worktree validator normalizes the path and proves it is strictly beneath the configured root, a
+registered worktree of the issue repository, attached to exactly `<n>-lane` or `<n>-lane-<positive
+suffix>`, clean under the ordinary substantive status contract, and internally consistent at HEAD.
+It also proves there is no live room, build lock, claimed/nonterminal queue row, or open PR for that
+path or branch; terminal predecessor rows are retained as evidence, not an ownership veto. Every Git,
+queue, room, lock, PR, and exact-path trust probe fails closed with the failed evidence source and a
+copy/paste-safe remedy. The exact path must already have a non-revoked recorded ceiling that admits
+the initial stage grant; a repository sibling's ceiling is not evidence. The persisted item records
+the observed repository, path, branch, HEAD, ceiling/provenance and terminal predecessor tags as
+explicit retained-worktree reuse. An open PR remains the existing explicit continuation path.
+
+Fresh `queue add --issue <n> --lifecycle` continues to provision a new issue worktree. Its initial
+ceiling is selected by the provisioning rule, never by an arbitrary same-repository checkout; a
+temporary review checkout cannot become implementation authority.
+
 **Read-only retained-worktree inventory (#2318).** `queue worktrees` projects every distinct
 resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for
 compatibility: only the exact creation fact `issue-provisioned` confers Baton ownership;

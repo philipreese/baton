@@ -94,7 +94,7 @@ public static class IssueWorktreeProvisioner
         ArgumentException.ThrowIfNullOrEmpty(repositoryDirectory);
         ArgumentException.ThrowIfNullOrEmpty(repository);
 
-        runner ??= RunAsync;
+        runner ??= RunRetainedProbeAsync;
         var (exit, output) = await runner(
             "gh",
             ["issue", "view", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -168,7 +168,7 @@ public static class IssueWorktreeProvisioner
         ArgumentException.ThrowIfNullOrEmpty(repositoryDirectory);
         ArgumentException.ThrowIfNullOrEmpty(repository);
 
-        runner ??= RunAsync;
+        runner ??= RunRetainedProbeAsync;
 
         var root = worktreeRoot ?? Path.GetDirectoryName(Path.GetFullPath(repositoryDirectory))
             ?? throw new CliArgumentException(
@@ -187,7 +187,7 @@ public static class IssueWorktreeProvisioner
             if (await CanReuseCanonicalWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
                     .ConfigureAwait(false))
             {
-                await TrustAsync(firstWorkspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await TrustAsync(firstWorkspace, repositoryDirectory, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
                 return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
             }
         }
@@ -228,7 +228,7 @@ public static class IssueWorktreeProvisioner
                 "git", ["worktree", "add", workspace, branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
             if (worktreeExit == 0)
             {
-                await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await TrustAsync(workspace, repositoryDirectory, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
                 return new ProvisionedIssueWorktree(workspace, branch);
             }
 
@@ -358,6 +358,7 @@ public static class IssueWorktreeProvisioner
     /// </remarks>
     internal static async Task TrustAsync(
         string workspace,
+        string sourceRepository,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
         string? storePath = null,
         TextWriter? output = null,
@@ -369,38 +370,29 @@ public static class IssueWorktreeProvisioner
         await TrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var result = await InheritedProjectCeiling.TryInheritAsync(workspace, storePath, probe, cancellationToken)
-                .ConfigureAwait(false);
-            switch (result.Outcome)
+            var own = ProjectCeilingStore.TryGetRecord(workspace, storePath);
+            if (own is { IsRevoked: false }) return;
+            if (await probe(workspace, cancellationToken).ConfigureAwait(false) is null)
+                throw new ProjectNotTrustedException(workspace,
+                    "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+
+            // #2333: the source checkout is the only deterministic bootstrap authority. Do not scan
+            // sibling records: a temporary review worktree must not become an implementation ceiling.
+            var source = ProjectCeilingStore.TryGetRecord(sourceRepository, storePath);
+            if (source is { IsRevoked: true })
+                throw new ProjectNotTrustedException(workspace, ProjectCeilingStore.CanonicalKey(sourceRepository), source.RevokedAt!.Value);
+            if (source is not null)
             {
-                case InheritanceOutcome.Inherited:
-                    (output ?? Console.Out).WriteLine(result.Fact);
-                    return;
-                case InheritanceOutcome.AlreadyTrusted:
-                    return;
-                case InheritanceOutcome.NoIdentity:
-                    throw new ProjectNotTrustedException(
-                        workspace,
-                        "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
-                case InheritanceOutcome.CandidateUnknown:
-                    // #2121: nothing live matched and a recorded path that cannot be identified might be the
-                    // tombstone, so the never-trusted fallback below is not known to apply. The exception's
-                    // own remedy names that path (not the workspace, which probed fine) so the operator can
-                    // repair it or `baton trust <path> --forget` the record.
-                    throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
-                case InheritanceOutcome.Revoked:
-                    // #2121: the fallback below is for a repository the operator never trusted, and this one
-                    // the operator revoked. The refusal names the tombstone so the operator knows which
-                    // revocation `baton trust` would be undoing.
-                    throw new ProjectNotTrustedException(workspace, result.RevokedPath!, result.RevokedAt!.Value);
-                case InheritanceOutcome.NoTrustedSource:
-                    ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
-                    (output ?? Console.Out).WriteLine(
-                        $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
-                    return;
-                default:
-                    throw new ArgumentOutOfRangeException(nameof(result), result.Outcome, "Unhandled inheritance outcome.");
+                var inherited = source with { InheritedFrom = ProjectCeilingStore.CanonicalKey(sourceRepository) };
+                ProjectCeilingStore.Set(workspace, inherited, storePath);
+                (output ?? Console.Out).WriteLine(
+                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from source repository {ProjectCeilingStore.CanonicalKey(sourceRepository)}");
+                return;
             }
+
+            ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
+            (output ?? Console.Out).WriteLine(
+                $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: source repository has no recorded ceiling; recorded ceiling all");
         }
         finally
         {
@@ -414,7 +406,7 @@ public static class IssueWorktreeProvisioner
     /// by the caller's token. A timeout kills the child and surfaces as a non-zero exit with the
     /// output collected so far, so the refusal message above still names something.
     /// </summary>
-    private static async Task<(int ExitCode, string Output)> RunAsync(
+    internal static async Task<(int ExitCode, string Output)> RunRetainedProbeAsync(
         string fileName, IReadOnlyList<string> arguments, string workingDirectory, CancellationToken cancellationToken)
     {
         var startInfo = ChildProcessStartInfo.Create(fileName, startInfo =>

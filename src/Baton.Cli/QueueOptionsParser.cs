@@ -358,12 +358,12 @@ public static class QueueOptionsParser
                 + $"'--workspace <dir>' to name one that already exists. {Usage}");
         }
 
-        if (issue is not null && !string.IsNullOrWhiteSpace(workspace))
+        if (issue is not null && !string.IsNullOrWhiteSpace(workspace) && !lifecycle)
         {
             throw new CliArgumentException(
                 "'--issue' and '--workspace' are two answers to the same question — '--issue' provisions the "
                 + "worktree the item runs in, so a workspace passed alongside it would be silently discarded.",
-                "drop one of them.");
+                "drop one of them, or add '--lifecycle' to explicitly reuse the exact retained issue worktree.");
         }
 
         if (scope is not null && !QueueTierTable.ScopeClasses.Contains(scope, StringComparer.OrdinalIgnoreCase))

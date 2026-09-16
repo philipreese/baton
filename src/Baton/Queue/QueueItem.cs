@@ -247,6 +247,12 @@ public sealed record QueueItem
     /// </summary>
     public string? WorkspaceOrigin { get; init; }
 
+    /// <summary>
+    /// Evidence that this issue lifecycle explicitly reused a pre-existing, validator-proven worktree.
+    /// Null means the workspace was newly provisioned or is historical; it is never inferred later.
+    /// </summary>
+    public RetainedWorktreeReuse? RetainedWorktreeReuse { get; init; }
+
     /// <summary>Baton's own copy of the spec (<c>BatonPaths.QueueSpecFile</c>). Absolute, so a
     /// relocated <c>~/.baton</c> is a re-add rather than a silently missing file.</summary>
     public required string SpecFile { get; init; }
@@ -401,3 +407,19 @@ public static class WorkspaceOrigins
     /// <summary>Interpretation token for historical null provenance.</summary>
     public const string Unknown = "unknown";
 }
+
+/// <summary>Immutable add-time evidence for an explicitly retained issue worktree.</summary>
+public sealed record RetainedWorktreeReuse(
+    string Repository,
+    string Branch,
+    string Head,
+    RetainedWorktreeCeiling Ceiling,
+    IReadOnlyList<string> TerminalPredecessorTags);
+
+/// <summary>The exact-path ceiling copied into retained-worktree proof without coupling the core queue model to vendor adapters.</summary>
+public sealed record RetainedWorktreeCeiling(
+    bool ReadFiles,
+    bool WriteFiles,
+    bool RunShellCommands,
+    bool NetworkAccess,
+    string? InheritedFrom);

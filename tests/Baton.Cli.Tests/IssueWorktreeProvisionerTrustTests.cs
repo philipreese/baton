@@ -74,7 +74,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         // verb's own fallback wrote `all`, not that a ceiling was derived.
         var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
         Assert.Equal(
-            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: no trusted repository to inherit from; recorded ceiling all",
+            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: source repository has no recorded ceiling; recorded ceiling all",
             line);
         Assert.DoesNotContain("inherited", line, StringComparison.OrdinalIgnoreCase);
     }
@@ -196,7 +196,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         Assert.Null(recorded.InheritedFrom);
         var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
         Assert.Equal(
-            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: no trusted repository to inherit from; recorded ceiling all",
+            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: source repository has no recorded ceiling; recorded ceiling all",
             line);
     }
 
@@ -207,7 +207,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
     /// never-trusted fallback the revoked arm exists to keep it from.
     /// </summary>
     [Fact]
-    public async Task Provision_refuses_rather_than_falling_back_when_a_recorded_path_cannot_be_identified()
+    public async Task Provision_refuses_a_revoked_source_repository_even_when_an_old_probe_is_unreadable()
     {
         using var home = new IsolatedBatonHome();
         var repository = MakeDirectory("baton");
@@ -226,18 +226,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             output, TestContext.Current.CancellationToken));
 
         Assert.Equal(worktree, refusal.ProjectPath);
-        Assert.Contains(ProjectCeilingStore.CanonicalKey(repository), refusal.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("git rev-parse timed out after 10s", refusal.Message, StringComparison.Ordinal);
-        // The remedy names the RECORDED path, not the workspace: the workspace probed fine, and the
-        // try-line is what the operator acts on (#2121 re-review, L2).
-        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), refusal.CandidatePath);
-        Assert.Equal(
-            $"repair '{ProjectCeilingStore.CanonicalKey(repository)}' so 'git' can identify it, or baton trust "
-            + $"\"{ProjectCeilingStore.CanonicalKey(repository)}\" --forget to drop its record if that checkout is gone, "
-            + $"then retry — or baton trust \"{worktree}\" --ceiling all (or a comma-separated subset of "
-            + "ReadFiles,WriteFiles,RunShellCommands,NetworkAccess) to record one by hand.",
-            refusal.TryInvocation);
-        Assert.DoesNotContain($"'{worktree}' is a git checkout", refusal.TryInvocation, StringComparison.Ordinal);
+        Assert.Contains("revoked", refusal.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
         Assert.Equal(string.Empty, output.ToString());
     }
