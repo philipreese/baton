@@ -177,4 +177,5 @@ public sealed record QueueTierSettings
     public string? Adapter { get; init; }
     public string? Model { get; init; }
     public string? Effort { get; init; }
+
 }

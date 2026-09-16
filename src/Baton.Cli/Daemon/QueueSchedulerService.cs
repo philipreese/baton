@@ -236,6 +236,13 @@ public sealed class QueueSchedulerService : BackgroundService
                         item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
                     : QueueTierTable.Resolve(
                         item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+                // A persisted decision is the launch authority. Refreshing configuration here may
+                // still validate the row and the runway gate may still hold it, but no scheduler tick
+                // may silently re-rank the worker selected at queue-add time.
+                if (item.WorkerAssignment is { } frozen)
+                {
+                    tier = QueueLauncher.ApplyFrozenAssignment(item, tier);
+                }
             }
             catch (KeyNotFoundException ex)
             {

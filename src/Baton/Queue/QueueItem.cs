@@ -43,6 +43,10 @@ public sealed record QueueItem
 
     public string? Effort { get; init; }
 
+    /// <summary>The frozen pre-launch worker decision. Null is the explicit compatibility shape for
+    /// rows written before worker assignment decisions existed.</summary>
+    public FrozenWorkerAssignment? WorkerAssignment { get; init; }
+
     private TaskSizeDeclaration _declaredTaskSize = TaskSizeDeclaration.Unknown;
 
     /// <summary>The frozen conductor routing declaration; absent or null legacy JSON is projected explicitly as unknown.</summary>

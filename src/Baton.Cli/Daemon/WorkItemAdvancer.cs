@@ -519,6 +519,10 @@ public sealed class WorkItemAdvancer
         {
             Stage = next,
             Role = WorkStages.RoleFor(next),
+            // A frozen assignment belongs to the attempt that just settled. The next lifecycle
+            // stage has its own role and stage plan; carrying the old tuple forward would silently
+            // run review/fix/re-review on the implementation worker.
+            WorkerAssignment = null,
             Round = transition.Round,
             PullRequest = pr.Number ?? existing.PullRequest,
             // Coalesced, never assigned: a `gh` that did not run (missing, unauthenticated, no PR on

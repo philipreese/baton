@@ -206,6 +206,9 @@ public static class QueueCommand
         EnsureQueueSpecsDirectory();
         var specDestination = BatonPaths.QueueSpecFile(tag);
 
+        // Shipped pools remain one candidate in this migration. Freeze that exact tuple now so a
+        // later tier-file edit cannot change the worker between queue display and launch.
+        var frozenAssignment = FrozenWorkerAssignment.ForLegacyTier(tier, DateTimeOffset.UtcNow);
         var item = new QueueItem
         {
             Tag = tag,
@@ -216,6 +219,7 @@ public static class QueueCommand
             Adapter = adapter,
             Model = options.Model,
             Effort = options.Effort,
+            WorkerAssignment = frozenAssignment,
             DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
             Skills = options.Skills,
             Requirements = requirements,
@@ -289,6 +293,7 @@ public static class QueueCommand
         output.WriteLine($"{(replaced ? "Replaced" : "Queued")} '{tag}' ({item.Role}) in {workspace}");
         output.WriteLine($"  spec: {specDestination}");
         output.WriteLine($"  tier: {DescribeTier(tier, adapterFromModel)}");
+        output.WriteLine($"  assignment: {frozenAssignment.Adapter}/{frozenAssignment.Model ?? "role-default"}/{frozenAssignment.Effort ?? "role-default"} ({frozenAssignment.DecisionId})");
         if (tier.IsOverride)
         {
             output.WriteLine($"  override: {tier.OverrideReason}");
@@ -536,6 +541,10 @@ public static class QueueCommand
             output.WriteLine(item.Requirements is null
                 ? "  requirements: unknown (legacy migration row)"
                 : $"  requirements: {(item.Requirements.Count == 0 ? "none" : string.Join(", ", item.Requirements))}");
+            if (item.WorkerAssignment is { } assignment)
+            {
+                output.WriteLine($"  assignment: {assignment.Adapter}/{assignment.Model ?? "role-default"}/{assignment.Effort ?? "role-default"} ({assignment.DecisionId}; {assignment.ClosedReason})");
+            }
             if (item.LastAdmission is { } admission)
             {
                 var missing = admission.Missing is { Count: > 0 }
