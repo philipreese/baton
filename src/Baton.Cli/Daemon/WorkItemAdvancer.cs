@@ -9,14 +9,14 @@ namespace Baton.Cli.Daemon;
 
 /// <summary>
 /// The I/O half of #1934 slice 2: for every settled work item, read what its room, its verdict and its
-/// PR say, ask <see cref="WorkItemLifecycle"/> what that means, and write the next round back onto the
-/// queue with one recorded fact naming the evidence.
+/// PR say, ask the immutable attempt graph (or <see cref="WorkItemLifecycle"/> for explicit legacy
+/// rows) what that means, and write the compatibility projection back onto the queue.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>All the policy is in <see cref="WorkItemLifecycle.Decide"/>, which is pure</b> — the same split
-/// <see cref="QueueSchedulerService"/> has with <c>QueueScheduler</c>. This class reads files, spawns
-/// <c>gh</c> and mutates the queue; it decides nothing.
+/// <b>Graph-versioned policy is in <see cref="LifecycleAttemptGraph.Build"/>; legacy policy remains in
+/// <see cref="WorkItemLifecycle.Decide"/>.</b> Both are pure. This class reads files, spawns <c>gh</c>,
+/// appends planned-attempt facts and writes compatibility fields; it decides nothing independently.
 /// </para>
 /// <para>
 /// <b>No new process-spawn site.</b> <c>gh</c> goes through <see cref="IGhCliRunner"/>, the seam
@@ -179,6 +179,20 @@ public sealed class WorkItemAdvancer
             arrestedStep?.WorkspaceChanged == true, now, cancellationToken)
             .ConfigureAwait(false);
 
+        if (LifecycleQueueProjection.IsGraphVersioned(item))
+        {
+            var evidence = new QueuePullRequestEvidence(
+                pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.IsDraft, now);
+            if (!await TryMarkAsync(item, existing => existing with
+            {
+                LifecyclePullRequestEvidence = evidence,
+            }).ConfigureAwait(false))
+            {
+                return null;
+            }
+            item = item with { LifecyclePullRequestEvidence = evidence };
+        }
+
         // Dirty workspace evidence does not prove delivery. In particular an arrested branch-delivery
         // execution may leave files changed while HEAD is still the revision it consumed; treating a
         // matching stale PR/HEAD as pushed would manufacture a successful lifecycle edge (#2362).
@@ -194,12 +208,34 @@ public sealed class WorkItemAdvancer
                 verdictPath, now, room).ConfigureAwait(false);
         }
 
-        if (string.Equals(item.LifecycleGraphVersion, LifecycleAttemptGraph.Version, StringComparison.Ordinal))
+        LifecycleAttemptGraphResult? authorityGraph = null;
+        IReadOnlyList<FleetEvent>? authorityEvents = null;
+        if (LifecycleQueueProjection.IsGraphVersioned(item))
         {
-            var graph = LifecycleAttemptGraph.Build(item,
-                await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false),
-                new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks));
-            if (graph.Halt is { } halt)
+            authorityEvents = await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false);
+            authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents,
+                new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks, pr.IsDraft));
+            if (authorityGraph.Graph.Nodes.Count == 0 && authorityGraph.Halt is null)
+            {
+                authorityGraph = authorityGraph with
+                {
+                    Halt = new(LifecycleGraphHaltKind.MissingOrDuplicatePlan,
+                        "a settled graph-versioned lifecycle has no durable attempt plan"),
+                    Projection = LifecycleProjection.Halted,
+                };
+            }
+            if (authorityGraph.NextAttempt is { } plan)
+            {
+                var planned = await _appendFleetEvent(
+                    LifecycleAttemptGraph.PlanEvent(item, FleetAttemptId.New(), plan, now), cancellationToken)
+                    .ConfigureAwait(false);
+                authorityEvents = planned is null
+                    ? await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false)
+                    : [.. authorityEvents, planned];
+                authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents,
+                    new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks, pr.IsDraft));
+            }
+            if (authorityGraph.Halt is { } halt)
             {
                 return await FailAsync(item, stage,
                     new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0, halt.Reason),
@@ -299,7 +335,9 @@ public sealed class WorkItemAdvancer
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
             sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null);
 
-        var transition = WorkItemLifecycle.Decide(Observation(pr));
+        var transition = authorityGraph is null
+            ? WorkItemLifecycle.Decide(Observation(pr))
+            : GraphTransition(authorityGraph, pr);
         var readinessClaimed = false;
 
         // A crash can leave a durable claim after GitHub reached the requested state but before the
@@ -411,7 +449,16 @@ public sealed class WorkItemAdvancer
             }
 
             pr = after;
-            transition = WorkItemLifecycle.Decide(Observation(pr));
+            if (authorityGraph is null)
+            {
+                transition = WorkItemLifecycle.Decide(Observation(pr));
+            }
+            else
+            {
+                authorityGraph = LifecycleAttemptGraph.Build(item, authorityEvents!,
+                    new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks, pr.IsDraft));
+                transition = GraphTransition(authorityGraph, pr);
+            }
         }
 
         if (transition.PullRequestAction != PullRequestReadinessAction.None)
@@ -585,6 +632,38 @@ public sealed class WorkItemAdvancer
         }).ConfigureAwait(false);
 
         return advanced ? Fact(item, from, next, transition, now, room) : null;
+    }
+
+    /// <summary>
+    /// Converts the graph module's authoritative frontier into the existing queue-row compatibility
+    /// mutation. Unlike <see cref="WorkItemLifecycle"/>, this reads no mutable stage, round, or fix flag.
+    /// </summary>
+    private static WorkItemTransition GraphTransition(
+        LifecycleAttemptGraphResult graph, PullRequestObservation pr)
+    {
+        if (graph.Halt is { } halt)
+        {
+            return new(WorkItemTransitionKind.NeedsOperator, null, 0, halt.Reason);
+        }
+        if (graph.Ready)
+        {
+            return new(WorkItemTransitionKind.Stop, WorkStage.Ready, graph.Projection.Round,
+                "the immutable graph has exact-current-head approval and passing required checks",
+                PullRequestAction: pr.IsDraft == true
+                    ? PullRequestReadinessAction.MarkReady
+                    : PullRequestReadinessAction.None);
+        }
+        if (graph.Frontier is { Started: false } frontier)
+        {
+            return new(WorkItemTransitionKind.Dispatch, frontier.Stage, graph.Projection.Round,
+                $"the immutable graph planned its single {WorkStages.Token(frontier.Stage)} frontier",
+                UsesAutomaticFix: frontier.Stage == WorkStage.Fix,
+                PullRequestAction: pr.Number is not null && pr.IsOpen == true && pr.IsDraft == false
+                    ? PullRequestReadinessAction.MarkDraft
+                    : PullRequestReadinessAction.None);
+        }
+        return new(WorkItemTransitionKind.None, null, graph.Projection.Round,
+            "the immutable graph has no runnable unstarted frontier");
     }
 
     private static async Task<QueueDecisionEntry?> StopAsync(

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Baton.Cli.Daemon;
+using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
@@ -97,6 +98,50 @@ public sealed class FleetProjectionQueueSectionTests : IDisposable
 
         var prs = queue.GetProperty("pullRequests").EnumerateArray().Select(p => p.GetProperty("pr").GetInt32()).ToList();
         Assert.Equal([2028, 2030], prs);
+    }
+
+    [Fact]
+    public async Task Fleet_queue_rows_render_the_graph_frontier_not_the_stale_mutable_stage()
+    {
+        const string input = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var implement = new FleetAttemptId("fleet-implement");
+        var review = new FleetAttemptId("fleet-review");
+        var item = Item("2363-lane", WorkStage.Implement, 2363, pr: 77) with
+        {
+            LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+            Checks = PullRequestChecks.Passing,
+            ChecksHeadSha = head,
+            LifecyclePullRequestEvidence = new QueuePullRequestEvidence(
+                77, head, true, true, true, DateTimeOffset.UtcNow),
+        };
+        await WriteQueueAsync(item);
+
+        var log = FleetEventLog.OpenOperational();
+        await log.Append(LifecycleAttemptGraph.PlanEvent(item, implement,
+            new LifecycleNextAttempt(WorkStage.Implement, new FleetRevisionId(input), [], "initial"),
+            DateTimeOffset.UtcNow.AddMinutes(-3)), CancellationToken.None);
+        await log.Append(new FleetEventDraft(
+            FleetEventKind.AttemptStarted, "fleet-implement-started", DateTimeOffset.UtcNow.AddMinutes(-2),
+            AttemptId: implement, WorkId: new FleetWorkId(item.Tag)), CancellationToken.None);
+        await log.Append(new FleetEventDraft(
+            FleetEventKind.AttemptSettled, "fleet-implement-settled", DateTimeOffset.UtcNow.AddMinutes(-1),
+            AttemptId: implement, WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Succeeded),
+            CancellationToken.None);
+        await log.Append(new FleetEventDraft(
+            FleetEventKind.RevisionProduced, "fleet-implement-revision", DateTimeOffset.UtcNow,
+            AttemptId: implement, WorkId: new FleetWorkId(item.Tag), RevisionId: new FleetRevisionId(head)),
+            CancellationToken.None);
+        await log.Append(LifecycleAttemptGraph.PlanEvent(item, review,
+            new LifecycleNextAttempt(WorkStage.Review, new FleetRevisionId(head),
+                [new FleetAttemptEdge(implement, FleetAttemptEdgeKind.Reviews)], "review exact head"),
+            DateTimeOffset.UtcNow), CancellationToken.None);
+
+        var queue = (await BuildAsync()).GetProperty("queue");
+        var lane = Assert.Single(Assert.Single(queue.GetProperty("pullRequests").EnumerateArray())
+            .GetProperty("lanes").EnumerateArray());
+        Assert.Equal("review", lane.GetProperty("stage").GetString());
+        Assert.Equal("Queued", lane.GetProperty("state").GetString());
     }
 
     [Fact]

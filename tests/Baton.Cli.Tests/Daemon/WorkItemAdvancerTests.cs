@@ -591,6 +591,81 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_graph_versioned_implement_derives_and_persists_one_unstarted_review_plan()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            var attemptId = new FleetAttemptId("implement-attempt");
+            var graphItem = seeded with
+            {
+                LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+                AttemptId = attemptId,
+                AttemptBaseRevision = MergeSha,
+            };
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [graphItem] },
+                Ct);
+
+            var log = FleetEventLog.OpenOperational();
+            await log.Append(LifecycleAttemptGraph.PlanEvent(
+                graphItem,
+                attemptId,
+                new LifecycleNextAttempt(WorkStage.Implement, new FleetRevisionId(MergeSha), [], "initial"),
+                Now.AddMinutes(-2)), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptStarted,
+                $"attempt-started:{attemptId.Value}",
+                Now.AddMinutes(-1),
+                AttemptId: attemptId,
+                WorkId: new FleetWorkId(graphItem.Tag)), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptSettled,
+                $"attempt-settled:{attemptId.Value}",
+                Now,
+                AttemptId: attemptId,
+                WorkId: new FleetWorkId(graphItem.Tag),
+                Outcome: WorkflowOutcome.Succeeded), Ct);
+
+            var gh = new FakeGh(PrJson(77, FullPushedSha));
+            var facts = await new WorkItemAdvancer(
+                gh,
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                (_, _) => Task.FromResult<RepositoryIdentity?>(ExpectedRepositoryIdentity),
+                appendFleetEvent: (draft, token) => FleetEventLog.OpenOperational().Append(draft, token))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Review, item.Stage);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Null(item.AttemptId);
+            Assert.Equal(attemptId, item.ParentAttemptId);
+            Assert.Equal(FullPushedSha, item.LifecyclePullRequestEvidence!.HeadSha);
+            Assert.True(item.LifecyclePullRequestEvidence.Succeeded);
+            Assert.True(item.LifecyclePullRequestEvidence.IsOpen);
+
+            var events = await log.ReadRetained(Ct);
+            var reviewPlan = Assert.Single(events, entry =>
+                entry.Kind == FleetEventKind.AttemptPlanned && entry.LifecycleStage == WorkStage.Review);
+            Assert.Equal(new FleetRevisionId(FullPushedSha), reviewPlan.InputRevisionId);
+            Assert.Equal(
+                new FleetAttemptEdge(attemptId, FleetAttemptEdgeKind.Reviews),
+                Assert.Single(reviewPlan.ParentEdges!));
+            Assert.DoesNotContain(events, entry =>
+                entry.Kind == FleetEventKind.AttemptStarted && entry.AttemptId == reviewPlan.AttemptId);
+            Assert.Single(facts);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_legacy_lifecycle_item_without_repository_identity_retains_actionable_uncertainty()
     {
         var home = CreateTempHome();

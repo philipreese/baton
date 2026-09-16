@@ -13,6 +13,7 @@ namespace Baton.Cli.Daemon;
 public enum FleetEventKind
 {
     WorkQueued,
+    AttemptPlanned,
     AdmissionDecided,
     AttemptStarted,
     AttemptProgressed,
@@ -79,6 +80,11 @@ public enum FleetAttemptEdgeKind
     Continues,
     Supersedes,
 }
+
+/// <summary>One typed dependency edge on a planned lifecycle attempt.</summary>
+public sealed record FleetAttemptEdge(
+    [property: JsonPropertyName("parentAttemptId")] FleetAttemptId ParentAttemptId,
+    [property: JsonPropertyName("kind")] FleetAttemptEdgeKind Kind);
 
 internal sealed class FleetRevisionKindJsonConverter : JsonConverter<FleetRevisionKind>
 {
@@ -229,8 +235,7 @@ public sealed record FleetEventDraft(
     DateTimeOffset? CheckCompletedAt = null,
     WorkStage? LifecycleStage = null,
     FleetRevisionId? InputRevisionId = null,
-    IReadOnlyList<FleetAttemptId>? ParentAttemptIds = null,
-    IReadOnlyList<FleetAttemptEdgeKind>? ParentEdgeKinds = null);
+    IReadOnlyList<FleetAttemptEdge>? ParentEdges = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -304,10 +309,8 @@ public sealed record FleetEvent(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WorkStage? LifecycleStage = null,
     [property: JsonPropertyName("inputRevisionId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetRevisionId? InputRevisionId = null,
-    [property: JsonPropertyName("parentAttemptIds")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptId>? ParentAttemptIds = null,
-    [property: JsonPropertyName("parentEdgeKinds")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptEdgeKind>? ParentEdgeKinds = null)
+    [property: JsonPropertyName("parentEdges")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FleetAttemptEdge>? ParentEdges = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -318,7 +321,7 @@ public sealed record FleetEvent(
         draft.CheckConclusion, draft.ElapsedMilliseconds, draft.LastMeaningfulProgressAt?.ToUniversalTime(),
         draft.Usage, draft.ArtifactReferences, draft.RevisionKind, draft.CheckRunId, draft.CheckName,
         draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime(),
-        draft.LifecycleStage, draft.InputRevisionId, draft.ParentAttemptIds, draft.ParentEdgeKinds);
+        draft.LifecycleStage, draft.InputRevisionId, draft.ParentEdges);
 }
 
 /// <summary>
@@ -411,7 +414,7 @@ public sealed class FleetEventLog
                     throw new IOException("The retained fleet-event replay has an incomplete tail.");
                 }
 
-                return (IReadOnlyList<FleetEvent>)older.Events.Concat(newer.Events).ToList();
+                return MergeRetained(older.Events, newer.Events);
             }), cancellationToken);
 
     /// <summary>
@@ -434,7 +437,7 @@ public sealed class FleetEventLog
             {
                 throw new IOException("The retained fleet-event proof has an incomplete tail.");
             }
-            return new FleetEventProofLease(rollover, live, older.Events.Concat(newer.Events).ToList());
+            return new FleetEventProofLease(rollover, live, MergeRetained(older.Events, newer.Events));
         }
         catch
         {
@@ -486,7 +489,7 @@ public sealed class FleetEventLog
             var length = new FileInfo(_livePath).Length;
             if (length > 0 && length + bytes.Length > _maxLiveBytes)
             {
-                File.Move(_livePath, _rolloverPath, overwrite: true);
+                ArchiveLiveSegment();
             }
         }
 
@@ -505,6 +508,69 @@ public sealed class FleetEventLog
         stream.Write(bytes);
         stream.Flush(flushToDisk: true);
         return entry;
+    }
+
+    /// <summary>
+    /// Preserves every immutable lifecycle fact when the SSE live segment rolls. The archive is the
+    /// authoritative graph replay source; only <see cref="ReadAfter"/>'s browser cursor remains a
+    /// bounded live-window read.
+    /// </summary>
+    private void ArchiveLiveSegment()
+    {
+        var temporary = _rolloverPath + ".tmp";
+        var parent = Path.GetDirectoryName(_rolloverPath);
+        if (!string.IsNullOrEmpty(parent))
+        {
+            Directory.CreateDirectory(parent);
+        }
+        using (var destination = new FileStream(
+            temporary, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: false))
+        {
+            if (File.Exists(_rolloverPath))
+            {
+                using var existing = new FileStream(_rolloverPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                existing.CopyTo(destination);
+            }
+            using var live = new FileStream(_livePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            live.CopyTo(destination);
+            destination.Flush(flushToDisk: true);
+        }
+        File.Move(temporary, _rolloverPath, overwrite: true);
+        File.Delete(_livePath);
+    }
+
+    /// <summary>
+    /// A crash after the archive replacement but before deleting the live segment leaves an exact
+    /// overlap. Collapse only byte-equivalent logical events; a conflicting reused id or dedupe key
+    /// is corruption and must fail closed before lifecycle authority consumes it.
+    /// </summary>
+    private static IReadOnlyList<FleetEvent> MergeRetained(
+        IReadOnlyList<FleetEvent> older, IReadOnlyList<FleetEvent> newer)
+    {
+        var merged = new List<FleetEvent>();
+        foreach (var group in older.Concat(newer).GroupBy(entry => entry.Id).OrderBy(group => group.Key))
+        {
+            var first = group.First();
+            var serialized = Serialize(first);
+            if (group.Skip(1).Any(candidate => !string.Equals(
+                Serialize(candidate), serialized, StringComparison.Ordinal)))
+            {
+                throw new IOException($"The retained fleet-event replay contains conflicting rows for id {group.Key}.");
+            }
+
+            merged.Add(first);
+        }
+
+        var conflictingDedupe = merged
+            .GroupBy(entry => entry.DedupeKey, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Select(entry => entry.Id).Distinct().Skip(1).Any());
+        if (conflictingDedupe is not null)
+        {
+            throw new IOException(
+                $"The retained fleet-event replay reuses dedupe key '{conflictingDedupe.Key}' for different ids.");
+        }
+
+        return merged;
     }
 
     private static FleetEventReadResult Read(string path)

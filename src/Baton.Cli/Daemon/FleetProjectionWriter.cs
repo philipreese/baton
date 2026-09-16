@@ -399,6 +399,11 @@ public sealed class FleetProjectionWriter : BackgroundService
             }
 
             var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            if (snapshot.Items.Any(LifecycleQueueProjection.IsGraphVersioned))
+            {
+                var events = await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false);
+                snapshot = snapshot with { Items = LifecycleQueueProjection.Project(snapshot.Items, events) };
+            }
             var settings = (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
                 .ConfigureAwait(false)).Queue;
             var lastDecision = await ReadNewestDecisionAsync(cancellationToken).ConfigureAwait(false);

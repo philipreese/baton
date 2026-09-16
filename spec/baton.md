@@ -6348,11 +6348,14 @@ not to the projection writer's process lifetime. `FleetEventLog.Append` is the s
 `{Root}/fleet/events.jsonl`: it assigns a strictly increasing integer `id`, normalizes `at` to UTC,
 and writes one compact JSON object per line under the storage-root-scoped file lock. A reconnecting
 `GET /events` client sends `Last-Event-ID`; the daemon first replays retained rows from the live file
-whose id is greater than that cursor and then follows new appends as `event: fleet`. The operational
-rollover `{Root}/fleet/events.1.jsonl` is deliberately not replayed: it exists to recover the next id
-and bounded duplicate keys across rotation, not to impersonate the future compact all-time history.
-The existing retention-sweep byte threshold is reused as this operational JSONL ceiling, so this
-slice introduces no new numerical budget.
+whose id is greater than that cursor and then follows new appends as `event: fleet`. That browser
+replay remains bounded to the live segment. The archive `{Root}/fleet/events.1.jsonl` is different:
+rotation atomically appends the prior live segment to it, and lifecycle-attempt graph replay reads the
+archive plus the live segment. Immutable attempt lineage is launch authority, so rotation may not
+erase a parent fact while its queue row exists. A torn or unreadable archive therefore halts graph
+advancement rather than becoming historical absence. This deliberately makes the archive an
+authoritative append-only lifecycle history, not part of SSE replay; compaction requires a later
+format that proves it preserves every still-referenced node before it may bound this file.
 
 Projection change notification remains a separate `event: projection` frame with no SSE `id`, and
 `fleet/heartbeat.json` plus the projection version keep their existing polling semantics. This split
@@ -7127,7 +7130,48 @@ runs exactly that lane. A **work item** (slice 2, answer (b)) is anchored on an 
 `stage` the daemon advances. `stage` is null for the first and set for the second; there is no second
 "kind" field, because two fields answering one question is one of them going stale. Slice 1's rule —
 a field carrying a lifecycle no code advances is a promise the product does not keep — is now
-satisfied rather than avoided: `WorkItemLifecycle` is the code that advances these.
+satisfied rather than avoided: the immutable lifecycle-attempt graph advances graph-versioned rows,
+while `WorkItemLifecycle` remains only the explicit compatibility authority for historical rows.
+
+### Immutable lifecycle-attempt authority (#2363)
+
+New lifecycle items carry `lifecycleGraphVersion: attempt-dag-v1`. For those rows the mutable
+`stage`, `state`, `round`, `automaticFixUsed`, current attempt, and parent fields are compatibility
+projections only. The authoritative record is the retained fleet-event lineage. Historical rows
+without that marker remain on the explicit `WorkItemLifecycle` compatibility path; Baton never
+invents typed parents or revisions for them.
+
+Before admission or dispatch, every graph-versioned attempt receives one durable `attemptPlanned`
+fact containing its generated attempt id, typed stage, exact input revision, and a list of typed
+`parentEdges` records. Parallel parent-id and edge-kind arrays are forbidden because positional
+agreement is not an identity invariant. Admission, including an eventual runway hold, does not start
+the node. Only `attemptStarted` does. Thus a held launch retries the same single unstarted frontier;
+it cannot become a missing-start halt or manufacture another planned node.
+
+`LifecycleAttemptGraph.Build` is the sole cross-attempt policy reader. It replays plans, starts,
+settlements, produced revisions, revision-specific verdicts, and the exact PR head/check observation;
+validates backward-only typed dependencies; and returns either one runnable frontier, ready, a wait,
+or a typed halt. Implement/fix/continue success requires a produced revision different from the
+node's input and present as the recorded open PR head. Review decisions apply only to their exact
+input revision. A block permits the one repair; re-review requires that repair's different produced
+revision. Approval permits ready only when it covers the current PR head and required checks pass.
+Missing, duplicate, contradictory, stale, or unproven evidence halts rather than consulting the
+queue row.
+
+The exact forge observation used by replay is persisted as one typed compatibility value carrying
+PR number, head SHA, observation success, open/draft state, and observation time. Required-check
+evidence is usable only when its separately recorded `checksHeadSha` equals that exact observed head.
+Missing evidence and a failed observation remain unknown: a PR number plus a stale green checks word
+must never be reinterpreted as a successful open-PR observation by queue list, Fleet Glass, or the
+scheduler.
+
+The daemon writes the graph's compatibility projection back to the queue row and feeds that same
+projection to candidate selection and lifecycle WIP accounting. `queue list` and Fleet Glass call the
+same projection seam before rendering; they do not implement graph traversal or transition policy.
+The launch claim must consume the exact attempt id and input revision of the graph's unstarted
+frontier. A terminal node is never reopened: continuation, review, repair and re-review each add a new
+planned node. Graph replay reads both the authoritative archive and live event segment as ruled in
+§7; loss or corruption of either closes the frontier.
 
 ### Retirement, restoration, and retained disposition history
 
@@ -7395,12 +7439,15 @@ the gap.
 
 **Lifecycle WIP and finish-first selection.** `MaxActiveLifecycles`,
 `MaxPrePullRequestLifecycles`, and `MaxLiveReviews` default to respectively 4, 2, and 2 when absent,
-null, zero, or negative. An active lifecycle has a stage, no retirement, and a claimed attempt
-identity (`attemptId` or `parentAttemptId`); legacy rows without an identity count only when their
-room, PR, nonzero round, or non-queued execution state is durable evidence of an earlier launch.
-Only cancellation before the first launch avoids active or pre-PR WIP. `baton queue cancel`
+null, zero, or negative. For graph-versioned rows, active WIP means the graph has one current
+frontier and either that node or a predecessor actually started. Thus an initial unstarted implement
+plan is new work; an unstarted review/fix/continue after a launched predecessor remains active; and
+ready, halted, or fully terminal history with no frontier occupies no WIP. Legacy rows use the
+compatibility rule: stage plus a claimed identity, room, PR, nonzero round, or non-queued execution
+state is durable evidence of an earlier launch. Only cancellation before the first launch avoids
+active or pre-PR WIP on that legacy path. `baton queue cancel`
 refuses a queued review, fix, or ready lifecycle that already has launch proof; an older malformed
-`Cancelled` row with that proof still occupies WIP until trusted retirement. Pre-PR is the active
+`Cancelled` legacy row with that proof still occupies WIP until trusted retirement. Pre-PR is the active
 subset without a bound PR; live reviews are launched review or re-review
 attempts. Retired rows count in none of these sets.
 
@@ -7409,7 +7456,7 @@ preserving operator order within each band. A review held by `review-cap` may no
 repair or transition in a later finish-first band. New work never passes new work, including behind a
 WIP-cap-blocked round-zero head. The scheduler records its chosen tag and band, whether it passed a
 new-work head, the three counts, the new-work head's cap wait, and the occupying lifecycle tags
-(oldest first, including ready and halted) once in the decision ledger. Queue CLI and Fleet Glass
+(oldest first; graph-derived ready, halted, and fully terminal history are excluded) once in the decision ledger. Queue CLI and Fleet Glass
 project that recorded decision rather than independently selecting
 a contradictory next row. Wait facts record the selection-time WIP image; a successful
 launch fact records counts and occupants from the exact post-claim queue mutation, while its chosen

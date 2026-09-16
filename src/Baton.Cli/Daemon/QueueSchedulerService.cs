@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Baton.Domain;
 using Baton.Core.Internal;
 using Baton.Cli.Mcp;
@@ -52,6 +53,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
     private readonly Func<CancellationToken, Task>? _afterFailureMutation;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
+    private readonly Func<CancellationToken, Task<IReadOnlyList<FleetEvent>>> _readFleetEvents;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
@@ -76,6 +78,7 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<CancellationToken, Task>? beforeLaunchClaim = null,
         Func<CancellationToken, Task>? afterFailureMutation = null,
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
+        Func<CancellationToken, Task<IReadOnlyList<FleetEvent>>>? readFleetEvents = null,
         Func<string, CancellationToken, Task<string?>>? workspaceHead = null,
         Func<string, IReadOnlyList<string>>? workspaceLocks = null)
     {
@@ -89,6 +92,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _beforeLaunchClaim = beforeLaunchClaim;
         _afterFailureMutation = afterFailureMutation;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
+        _readFleetEvents = readFleetEvents ?? (token => FleetEventLog.OpenOperational().ReadRetained(token));
         _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
     }
 
@@ -198,9 +202,10 @@ public sealed class QueueSchedulerService : BackgroundService
             // candidate this same tick rather than one tick later.
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
 
-            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-            snapshot = await HaltInvalidLifecycleGraphsAsync(snapshot, cancellationToken).ConfigureAwait(false);
             var now = _now();
+            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var prepared = await PrepareLifecycleGraphsAsync(snapshot, now, cancellationToken).ConfigureAwait(false);
+            snapshot = prepared.Snapshot;
             var liveWeight = await _liveWeight(cancellationToken).ConfigureAwait(false);
             var freeGb = _freeGb();
 
@@ -226,6 +231,7 @@ public sealed class QueueSchedulerService : BackgroundService
             }
 
             var item = decision.Item!;
+            prepared.Graphs.TryGetValue(item.Tag, out var selectedGraph);
             var admittedDeclaration = item.DeclaredTaskSize;
             QueueTierResolution tier;
             WorkerRole role;
@@ -301,7 +307,7 @@ public sealed class QueueSchedulerService : BackgroundService
             // current when queue add ran. A role change between those moments is exactly the stale
             // authority this preflight is meant to catch, and this check is still before a room claim,
             // worktree operation, or vendor spawn.
-            var attemptId = FleetAttemptId.New();
+            var attemptId = selectedGraph?.Frontier?.AttemptId ?? FleetAttemptId.New();
             var projectPreflight = RecordedProjectCeilingAdmission.Evaluate(
                 item, role, settings.RequireDeclaredRequirements);
             var admission = projectPreflight.Admission;
@@ -327,9 +333,11 @@ public sealed class QueueSchedulerService : BackgroundService
 
             // Every graph-versioned attempt records the exact revision it consumes. Code roles use it
             // as their delivery baseline; review roles only consume it and can never become its producer.
-            var attemptBaseRevision = item.Stage is not null
-                ? await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false)
-                : null;
+            var attemptBaseRevision = selectedGraph?.Frontier is { } graphFrontier
+                ? selectedGraph.Graph.Nodes.Single(node => node.AttemptId == graphFrontier.AttemptId).InputRevision.Value
+                : item.Stage is not null
+                    ? await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false)
+                    : null;
             item = item with
             {
                 LastAdmission = admission,
@@ -417,6 +425,13 @@ public sealed class QueueSchedulerService : BackgroundService
                     LastAdmission = admission,
                     AttemptId = attemptId,
                     AttemptBaseRevision = attemptBaseRevision,
+                    LifecycleGraphActive = LifecycleQueueProjection.IsGraphVersioned(existing) ? true : existing.LifecycleGraphActive,
+                    LifecycleGraphPrePullRequest = LifecycleQueueProjection.IsGraphVersioned(existing)
+                        ? existing.PullRequest is null
+                        : existing.LifecycleGraphPrePullRequest,
+                    LifecycleGraphLiveReview = LifecycleQueueProjection.IsGraphVersioned(existing)
+                        ? existing.Stage is WorkStage.Review or WorkStage.ReReview
+                        : existing.LifecycleGraphLiveReview,
                 });
                 return snapshot with
                 {
@@ -483,9 +498,9 @@ public sealed class QueueSchedulerService : BackgroundService
 
             if (outcome.RunwayHeld)
             {
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, "runway-held"), CancellationToken.None)
-                    .ConfigureAwait(false);
+                // A runway hold is neither a refusal nor a start. The durable plan remains the one
+                // unstarted frontier for the next tick; recording AttemptRefused here would terminally
+                // poison that plan and force a second attempt id.
                 // The item goes back to QUEUED, undoing the pre-launch mark above: nothing was dispatched,
                 // so it must be the candidate again next tick (Q5's arm). _lastLaunchAt stays advanced, so
                 // the gap paces the retry -- a held vendor must not be re-asked every TickSeconds.
@@ -494,9 +509,18 @@ public sealed class QueueSchedulerService : BackgroundService
                     State = QueueItemState.Queued,
                     RoomDirectory = null,
                     LaunchedAt = null,
-                    ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
+                    ParentAttemptId = item.ParentAttemptId,
                     AttemptId = null,
                     AttemptBaseRevision = null,
+                    LifecycleGraphActive = LifecycleQueueProjection.IsGraphVersioned(existing)
+                        ? false
+                        : existing.LifecycleGraphActive,
+                    LifecycleGraphPrePullRequest = LifecycleQueueProjection.IsGraphVersioned(existing)
+                        ? false
+                        : existing.LifecycleGraphPrePullRequest,
+                    LifecycleGraphLiveReview = LifecycleQueueProjection.IsGraphVersioned(existing)
+                        ? false
+                        : existing.LifecycleGraphLiveReview,
                 }).ConfigureAwait(false);
                 await RecordAsync(
                     new QueueDecisionEntry(
@@ -1026,43 +1050,101 @@ public sealed class QueueSchedulerService : BackgroundService
         FleetEventLog.OpenOperational().Append(draft, cancellationToken);
 
     /// <summary>
-    /// The scheduler consumes the same replay used by lifecycle advancement before selecting a row.
-    /// A graph-versioned row with a broken lineage is projected to an operator halt, so its mutable
-    /// queued stage cannot become a dispatch authorization. Rows without the marker stay on the
-    /// explicit legacy compatibility path.
+    /// Materializes missing durable plans, then projects the immutable graph back onto queue rows.
+    /// This is the scheduler's only lifecycle authority seam: selection and WIP both consume the
+    /// returned projected rows, and a launch must consume its exact unstarted frontier id.
     /// </summary>
-    private static async Task<QueueSnapshot> HaltInvalidLifecycleGraphsAsync(
-        QueueSnapshot snapshot,
-        CancellationToken cancellationToken)
+    private async Task<PreparedLifecycleQueue> PrepareLifecycleGraphsAsync(
+        QueueSnapshot snapshot, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var graphItems = snapshot.Items
-            .Where(item => string.Equals(item.LifecycleGraphVersion, LifecycleAttemptGraph.Version, StringComparison.Ordinal))
-            .ToList();
+        var graphItems = snapshot.Items.Where(LifecycleQueueProjection.IsGraphVersioned).ToList();
         if (graphItems.Count == 0)
         {
-            return snapshot;
+            return new(snapshot, new Dictionary<string, LifecycleAttemptGraphResult>(StringComparer.Ordinal));
         }
 
-        var events = await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false);
-        var halts = graphItems
-            .Select(item => (item.Tag, Halt: LifecycleAttemptGraph.Build(item, events,
-                new LifecyclePullRequestObservation(item.PullRequest, item.ChecksHeadSha,
-                    item.PullRequest is not null, item.PullRequest is not null, item.Checks)).Halt))
-            .Where(result => result.Halt is not null)
-            .ToDictionary(result => result.Tag, result => result.Halt!, StringComparer.Ordinal);
-        if (halts.Count == 0)
+        var events = (await _readFleetEvents(cancellationToken).ConfigureAwait(false)).ToList();
+        var graphs = new Dictionary<string, LifecycleAttemptGraphResult>(StringComparer.Ordinal);
+        foreach (var item in graphItems)
         {
-            return snapshot;
+            var graph = LifecycleAttemptGraph.Build(item, events, LifecycleQueueProjection.Observation(item));
+            LifecycleNextAttempt? plan = null;
+            if (graph.Graph.Nodes.Count == 0 && graph.Halt is null && item.State == QueueItemState.Queued)
+            {
+                var input = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
+                if (input is not { Length: > 0 })
+                {
+                    graph = graph with
+                    {
+                        Halt = new(LifecycleGraphHaltKind.MissingIdentity,
+                            "the initial lifecycle attempt cannot be planned without an exact workspace HEAD"),
+                        Projection = LifecycleProjection.Halted,
+                    };
+                }
+                else
+                {
+                    plan = new(WorkStage.Implement, new FleetRevisionId(input), [],
+                        "the initial implementation consumes the captured workspace HEAD");
+                }
+            }
+            else if (graph.Graph.Nodes.Count == 0 && graph.Halt is null)
+            {
+                graph = graph with
+                {
+                    Halt = new(LifecycleGraphHaltKind.MissingOrDuplicatePlan,
+                        "a graph-versioned lifecycle left the initial queued state without a durable attempt plan"),
+                    Projection = LifecycleProjection.Halted,
+                };
+            }
+            else if (graph.NextAttempt is { } next)
+            {
+                plan = next;
+            }
+
+            if (plan is not null)
+            {
+                var planned = await _appendFleetEvent(
+                    LifecycleAttemptGraph.PlanEvent(item, FleetAttemptId.New(), plan, now), cancellationToken)
+                    .ConfigureAwait(false);
+                if (planned is null)
+                {
+                    events = (await _readFleetEvents(cancellationToken).ConfigureAwait(false)).ToList();
+                }
+                else
+                {
+                    events.Add(planned);
+                }
+                graph = LifecycleAttemptGraph.Build(item, events, LifecycleQueueProjection.Observation(item));
+            }
+            graphs[item.Tag] = graph;
         }
 
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+        var projected = snapshot with
         {
-            Items = state.Items.Select(item => halts.TryGetValue(item.Tag, out var halt)
-                ? item with { State = QueueItemState.Failed, Halted = true, Error = halt.Reason }
+            Items = snapshot.Items.Select(item => graphs.TryGetValue(item.Tag, out var graph)
+                ? LifecycleQueueProjection.Apply(item, graph)
                 : item).ToList(),
+        };
+        var originalByTag = snapshot.Items.ToDictionary(item => item.Tag, StringComparer.Ordinal);
+        var projectedByTag = projected.Items.ToDictionary(item => item.Tag, StringComparer.Ordinal);
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+        {
+            Items = current.Items.Select(item => originalByTag.TryGetValue(item.Tag, out var original)
+                && projectedByTag.TryGetValue(item.Tag, out var projection)
+                && SameQueueRow(item, original)
+                    ? projection
+                    : item).ToList(),
         }, cancellationToken).ConfigureAwait(false);
-        return await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var committed = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        return new(committed, graphs);
     }
+
+    private static bool SameQueueRow(QueueItem left, QueueItem right) =>
+        string.Equals(JsonSerializer.Serialize(left), JsonSerializer.Serialize(right), StringComparison.Ordinal);
+
+    private sealed record PreparedLifecycleQueue(
+        QueueSnapshot Snapshot,
+        IReadOnlyDictionary<string, LifecycleAttemptGraphResult> Graphs);
 
     private static FleetEventDraft AdmissionEvent(
         QueueItem item,
@@ -1110,17 +1192,7 @@ public sealed class QueueSchedulerService : BackgroundService
             DeclaredRole: item.Role,
             EffectiveGrant: item.LastAdmission?.EffectiveGrant,
             LifecycleStage: item.Stage,
-            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null,
-            ParentAttemptIds: item.ParentAttemptId is { } parent ? [parent] : null,
-            ParentEdgeKinds: item.ParentAttemptId is { } ? [EdgeFor(item.Stage)] : null);
-
-    private static FleetAttemptEdgeKind EdgeFor(WorkStage? stage) => stage switch
-    {
-        WorkStage.Review or WorkStage.ReReview => FleetAttemptEdgeKind.Reviews,
-        WorkStage.Fix => FleetAttemptEdgeKind.Repairs,
-        WorkStage.Continue => FleetAttemptEdgeKind.Continues,
-        _ => FleetAttemptEdgeKind.Implements,
-    };
+            InputRevisionId: item.AttemptBaseRevision is { Length: > 0 } input ? new FleetRevisionId(input) : null);
 
     private static FleetEventDraft AttemptRefusedEvent(
         QueueItem item,

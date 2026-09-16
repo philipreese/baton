@@ -1861,6 +1861,69 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task Graph_versioned_runway_hold_reuses_one_durable_unstarted_plan_on_the_next_tick()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var now = DateTimeOffset.Parse("2026-09-16T12:00:00Z");
+            var graphItem = Item("graph-held") with
+            {
+                Stage = WorkStage.Implement,
+                LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+                Workspace = home,
+                AutomaticFixUsed = false,
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [graphItem] }, Ct);
+
+            var events = new List<FleetEvent>();
+            Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken _)
+            {
+                var entry = FleetEvent.From(events.Count + 1, draft);
+                events.Add(entry);
+                return Task.FromResult<FleetEvent?>(entry);
+            }
+            var launches = new List<QueueLaunchRequest>();
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launches.Add(request);
+                    return Task.FromResult(launches.Count == 1
+                        ? new QueueLaunchOutcome(null, RunwayHeld: true)
+                        : new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d), () => 16d, () => now,
+                appendFleetEvent: Append,
+                readFleetEvents: _ => Task.FromResult<IReadOnlyList<FleetEvent>>(events.ToList()),
+                workspaceHead: (_, _) => Task.FromResult<string?>(new string('a', 40)),
+                workspaceLocks: _ => []);
+
+            await service.TickOnceAsync(Ct);
+            var afterHold = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Queued, afterHold.State);
+            var planned = Assert.Single(events, e => e.Kind == FleetEventKind.AttemptPlanned);
+            Assert.DoesNotContain(events, e => e.Kind == FleetEventKind.AttemptStarted);
+
+            now += TimeSpan.FromMinutes(4);
+            await service.TickOnceAsync(Ct);
+
+            var decisions = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.True(launches.Count == 2,
+                $"launches={launches.Count}; decisions={string.Join(" | ", decisions.Select(d => $"{d.Decision}:{d.Reason}"))}; "
+                + $"row={System.Text.Json.JsonSerializer.Serialize(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items))}");
+            Assert.Equal(planned.AttemptId, launches[0].Item.AttemptId);
+            Assert.Equal(planned.AttemptId, launches[1].Item.AttemptId);
+            Assert.Single(events, e => e.Kind == FleetEventKind.AttemptPlanned);
+            Assert.Equal(planned.AttemptId, Assert.Single(events, e => e.Kind == FleetEventKind.AttemptStarted).AttemptId);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_hold_and_a_launch_are_told_apart_by_the_outcome_not_by_an_exception()
     {
         var home = CreateTempHome();

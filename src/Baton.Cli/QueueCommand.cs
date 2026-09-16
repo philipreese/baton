@@ -482,6 +482,11 @@ public static class QueueCommand
     private static async Task<int> ListAsync(bool active, TextWriter output, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        if (snapshot.Items.Any(LifecycleQueueProjection.IsGraphVersioned))
+        {
+            var events = await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false);
+            snapshot = snapshot with { Items = LifecycleQueueProjection.Project(snapshot.Items, events) };
+        }
         var items = active ? snapshot.Items.Where(IsActive).ToList() : snapshot.Items;
         var settings = snapshot.Items.Any(i => i.Stage is not null)
             ? (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false)).Queue

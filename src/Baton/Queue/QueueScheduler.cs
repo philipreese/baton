@@ -215,7 +215,9 @@ public static class QueueScheduler
     public static bool IsActiveLifecycle(QueueItem item) =>
         item.Stage is not null
         && item.Retirement is null
-        && (item.AttemptId is not null
+        && (string.Equals(item.LifecycleGraphVersion, QueueItem.AttemptGraphVersion, StringComparison.Ordinal)
+            ? item.LifecycleGraphActive == true
+            : item.AttemptId is not null
             || item.ParentAttemptId is not null
             // Compatibility evidence for rows written before attempt identities existed.
             || item.RoomDirectory is { Length: > 0 }
@@ -390,8 +392,12 @@ public sealed record QueuePortfolio(int ActiveLifecycles, int PrePullRequestLife
         var active = items.Where(QueueScheduler.IsActiveLifecycle).ToList();
         return new(
             active.Count,
-            active.Count(item => item.PullRequest is null),
-            items.Count(item => item.State == QueueItemState.Launched
-                && item.Stage is WorkStage.Review or WorkStage.ReReview));
+            active.Count(item => string.Equals(item.LifecycleGraphVersion, QueueItem.AttemptGraphVersion, StringComparison.Ordinal)
+                ? item.LifecycleGraphPrePullRequest == true
+                : item.PullRequest is null),
+            items.Count(item => string.Equals(item.LifecycleGraphVersion, QueueItem.AttemptGraphVersion, StringComparison.Ordinal)
+                ? item.LifecycleGraphLiveReview == true
+                : item.State == QueueItemState.Launched
+                    && item.Stage is WorkStage.Review or WorkStage.ReReview));
     }
 }

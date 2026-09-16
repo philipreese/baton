@@ -24,6 +24,7 @@ namespace Baton.Queue;
 /// </remarks>
 public sealed record QueueItem
 {
+    public const string AttemptGraphVersion = "attempt-dag-v1";
     /// <summary>The operator's own name for this piece of work — also the spec filename under
     /// <c>BatonPaths.QueueSpecsDirectory</c> and the room label, so it is constrained to a slug by
     /// <see cref="QueueTag.IsValid"/> (<see cref="QueueTag.Rule"/> is that rule in words).</summary>
@@ -295,6 +296,21 @@ public sealed record QueueItem
     /// </summary>
     public string? LifecycleGraphVersion { get; init; }
 
+    /// <summary>
+    /// The exact forge observation used by the immutable lifecycle graph. Null and
+    /// <see cref="QueuePullRequestEvidence.Succeeded"/> false are unknown, never an inferred open PR.
+    /// Check identity remains in <see cref="ChecksHeadSha"/> and must match this observation's head.
+    /// </summary>
+    public QueuePullRequestEvidence? LifecyclePullRequestEvidence { get; init; }
+
+    /// <summary>
+    /// Persisted compatibility projection of the authoritative lifecycle graph. Null is legacy;
+    /// graph-versioned readers consume these three flags instead of inferring WIP from row history.
+    /// </summary>
+    public bool? LifecycleGraphActive { get; init; }
+    public bool? LifecycleGraphPrePullRequest { get; init; }
+    public bool? LifecycleGraphLiveReview { get; init; }
+
     /// <summary>When an operator cancelled this request before launch. Its item and spec remain in the
     /// queue history; cancellation is a fact, not deletion.</summary>
     public DateTimeOffset? CancelledAt { get; init; }
@@ -374,6 +390,15 @@ public sealed record RequiredCheckEvidenceWait(
     [property: JsonPropertyName("latestObservationAt")] DateTimeOffset LatestObservationAt,
     [property: JsonPropertyName("attemptCount")] int AttemptCount,
     [property: JsonPropertyName("reason")] string Reason);
+
+/// <summary>One exact, persisted forge observation for lifecycle-graph replay.</summary>
+public sealed record QueuePullRequestEvidence(
+    [property: JsonPropertyName("number")] int? Number,
+    [property: JsonPropertyName("headSha")] string? HeadSha,
+    [property: JsonPropertyName("succeeded")] bool Succeeded,
+    [property: JsonPropertyName("isOpen")] bool? IsOpen,
+    [property: JsonPropertyName("isDraft")] bool? IsDraft,
+    [property: JsonPropertyName("observedAt")] DateTimeOffset ObservedAt);
 
 /// <summary>
 /// Where an item is with respect to <em>launching</em>. Five states: cancellation is terminal, while the

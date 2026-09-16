@@ -32,6 +32,40 @@ public sealed class FleetEventLogTests : IDisposable
         Assert.Equal(3, third!.Id);
         Assert.True(File.Exists(Rollover));
         Assert.Equal([third], await restarted.ReadAfter(0, cancellationToken));
+        Assert.Equal([first, second, third], await restarted.ReadRetained(cancellationToken));
+    }
+
+    [Fact]
+    public async Task Authoritative_replay_preserves_graph_facts_across_multiple_rotations()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var log = new FleetEventLog(Live, Rollover, maxLiveBytes: 1);
+        var written = new List<FleetEvent>();
+        for (var index = 0; index < 5; index++)
+        {
+            written.Add((await log.Append(Draft(
+                FleetEventKind.AttemptProgressed, $"progress:{index}", new FleetAttemptId($"attempt-{index}")), token))!);
+        }
+
+        Assert.Equal(written, await log.ReadRetained(token));
+        Assert.Single(await log.ReadAfter(0, token));
+    }
+
+    [Fact]
+    public async Task Authoritative_replay_collapses_the_exact_overlap_left_by_an_interrupted_rotation()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var log = new FleetEventLog(Live, Rollover, maxLiveBytes: 100_000);
+        var first = await log.Append(
+            Draft(FleetEventKind.AttemptPlanned, "planned:one", new FleetAttemptId("attempt-one")), token);
+        var second = await log.Append(
+            Draft(FleetEventKind.AttemptStarted, "started:one", new FleetAttemptId("attempt-one")), token);
+
+        // Archive replacement is durable before live deletion. A process death between those two
+        // operations leaves this exact overlap, which must replay once rather than poison the graph.
+        File.Copy(Live, Rollover);
+
+        Assert.Equal([first!, second!], await log.ReadRetained(token));
     }
 
     [Fact]

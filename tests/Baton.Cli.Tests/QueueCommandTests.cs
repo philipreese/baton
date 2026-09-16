@@ -476,6 +476,65 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task List_renders_the_graph_frontier_instead_of_the_stale_mutable_stage()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string input = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            const string head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            var implement = new FleetAttemptId("list-implement");
+            var review = new FleetAttemptId("list-review");
+            var item = new QueueItem
+            {
+                Tag = "2363-lane",
+                Role = "implement",
+                Workspace = home,
+                SpecFile = BatonPaths.QueueSpecFile("2363-lane"),
+                Stage = WorkStage.Implement,
+                State = QueueItemState.Queued,
+                Issue = 2363,
+                PullRequest = 77,
+                LifecycleGraphVersion = LifecycleAttemptGraph.Version,
+                Checks = PullRequestChecks.Passing,
+                ChecksHeadSha = head,
+                LifecyclePullRequestEvidence = new QueuePullRequestEvidence(
+                    77, head, true, true, true, DateTimeOffset.UtcNow),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+
+            var log = FleetEventLog.OpenOperational();
+            await log.Append(LifecycleAttemptGraph.PlanEvent(item, implement,
+                new LifecycleNextAttempt(WorkStage.Implement, new FleetRevisionId(input), [], "initial"),
+                DateTimeOffset.UtcNow.AddMinutes(-3)), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptStarted, "list-implement-started", DateTimeOffset.UtcNow.AddMinutes(-2),
+                AttemptId: implement, WorkId: new FleetWorkId(item.Tag)), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptSettled, "list-implement-settled", DateTimeOffset.UtcNow.AddMinutes(-1),
+                AttemptId: implement, WorkId: new FleetWorkId(item.Tag), Outcome: WorkflowOutcome.Succeeded), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.RevisionProduced, "list-implement-revision", DateTimeOffset.UtcNow,
+                AttemptId: implement, WorkId: new FleetWorkId(item.Tag), RevisionId: new FleetRevisionId(head)), Ct);
+            await log.Append(LifecycleAttemptGraph.PlanEvent(item, review,
+                new LifecycleNextAttempt(WorkStage.Review, new FleetRevisionId(head),
+                    [new FleetAttemptEdge(implement, FleetAttemptEdgeKind.Reviews)], "review exact head"),
+                DateTimeOffset.UtcNow), Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct));
+
+            Assert.Contains("2363-lane  queued  review  stage: review (round 1)  PR #77", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("stage: implement", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task List_active_reports_an_empty_selection_without_losing_banners()
     {
         var home = CreateTempHome();
