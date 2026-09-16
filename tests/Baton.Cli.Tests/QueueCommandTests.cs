@@ -181,7 +181,7 @@ public sealed class QueueCommandTests
                     resolvedRepository = true;
                     return Task.FromResult<RepositoryIdentity?>(null);
                 },
-                (_, _, _, _, _, _) =>
+                (_, _, _, _, _, _, _) =>
                 {
                     provisioned = true;
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree("never", "never-lane"));
@@ -218,8 +218,9 @@ public sealed class QueueCommandTests
                     Requirements: ["file-write", "network", "github-write"]),
                 TextWriter.Null, Ct, sourceRepository,
                 (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo.git", null)),
-                (_, _, _, _, _, _) =>
+                (_, _, _, _, deterministicSourceCeiling, _, _) =>
                 {
+                    Assert.True(deterministicSourceCeiling);
                     Directory.CreateDirectory(workspace);
                     ProjectCeilingStore.Set(workspace,
                         new ProjectCeiling(ReadFiles: true, WriteFiles: false,
@@ -562,7 +563,7 @@ public sealed class QueueCommandTests
                 Ct,
                 sourceRepository,
                 (path, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo.git", null)),
-                (issue, source, _, repository, _, _) =>
+                (issue, source, _, repository, _, _, _) =>
                 {
                     Assert.Equal(2202, issue);
                     Assert.Equal(sourceRepository, source);
@@ -609,8 +610,9 @@ public sealed class QueueCommandTests
                 Ct,
                 sourceRepository,
                 (_, _) => Task.FromResult(RepositoryIdentity.From("git@github.com:Owner/Repo.git", null)),
-                (_, _, _, _, _, _) =>
+                (_, _, _, _, deterministicSourceCeiling, _, _) =>
                 {
+                    Assert.False(deterministicSourceCeiling);
                     Directory.CreateDirectory(workspace);
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2225-lane-2"));
                 });
@@ -650,8 +652,9 @@ public sealed class QueueCommandTests
                 Ct,
                 sourceRepository,
                 (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo", null)),
-                (_, _, _, _, _, _) =>
+                (_, _, _, _, deterministicSourceCeiling, _, _) =>
                 {
+                    Assert.True(deterministicSourceCeiling);
                     Directory.CreateDirectory(workspace);
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2225-lane"));
                 });
@@ -694,7 +697,7 @@ public sealed class QueueCommandTests
                     resolverCalled = true;
                     return Task.FromResult<RepositoryIdentity?>(null);
                 },
-                (_, _, _, _, _, _) =>
+                (_, _, _, _, _, _, _) =>
                 {
                     provisionerCalled = true;
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "unused-lane"));
@@ -739,7 +742,7 @@ public sealed class QueueCommandTests
                 Ct,
                 sourceRepository,
                 (_, _) => Task.FromResult(identity),
-                (_, _, _, _, _, _) =>
+                (_, _, _, _, _, _, _) =>
                 {
                     provisionerCalled = true;
                     Directory.CreateDirectory(workspace);
@@ -1078,7 +1081,7 @@ public sealed class QueueCommandTests
                 Ct,
                 home,
                 (_, _) => Task.FromResult<RepositoryIdentity?>(null),
-                (_, _, _, _, _, _) => Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(home, "write-failure-lane")),
+                (_, _, _, _, _, _, _) => Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(home, "write-failure-lane")),
                 (_, _) =>
                 {
                     if (failure == "unauthorized")

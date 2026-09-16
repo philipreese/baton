@@ -506,33 +506,33 @@ internal sealed record QueueWorktreeReferenceIndex(
 
                     var roomReference = "room:" + Path.GetFileName(room);
                     var branches = new HashSet<string>(StringComparer.Ordinal);
+                    string? recordedBranch = null;
                     var branchPath = RoomDeliveryBranch.PathFor(room);
                     if (File.Exists(branchPath))
                     {
                         try
                         {
-                            var recorded = File.ReadAllText(branchPath).Trim();
-                            if (recorded.Length > 0) branches.Add(recorded);
+                            recordedBranch = File.ReadAllText(branchPath).Trim();
+                            if (recordedBranch.Length > 0) branches.Add(recordedBranch);
                         }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                         {
-                            // Fall through to the live binding probe below; an unreadable optional
-                            // accounting record is not authority evidence.
+                            complete = false;
                         }
                     }
-                    if (branches.Count == 0)
+                    foreach (var bindingPath in paths)
                     {
-                        foreach (var bindingPath in paths)
+                        var observed = await WorkspaceHead.TryReadBranchAsync(bindingPath, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (observed is null)
                         {
-                            var observed = await WorkspaceHead.TryReadBranchAsync(bindingPath, cancellationToken)
-                                .ConfigureAwait(false);
-                            if (observed is null)
-                            {
-                                complete = false;
-                                continue;
-                            }
-                            branches.Add(observed);
+                            complete = false;
+                            continue;
                         }
+                        branches.Add(observed);
+                        if (!string.IsNullOrEmpty(recordedBranch)
+                            && !string.Equals(recordedBranch, observed, StringComparison.Ordinal))
+                            complete = false;
                     }
                     foreach (var branch in branches)
                     {

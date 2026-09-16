@@ -35,14 +35,15 @@ public static class QueueCommand
             cancellationToken,
             repositoryDirectory,
             RepositoryIdentityResolver.TryResolveAsync,
-            static (issue, sourceRepository, worktreeRoot, repository, writer, token) =>
+            static (issue, sourceRepository, worktreeRoot, repository, lifecycle, writer, token) =>
                 IssueWorktreeProvisioner.ProvisionAsync(
                     issue,
                     sourceRepository,
                     worktreeRoot,
                     repository,
                     output: writer,
-                    cancellationToken: token));
+                    cancellationToken: token,
+                    deterministicSourceCeiling: lifecycle));
 
     /// <summary>
     /// Test seam for the complete queue-add route. Production supplies the canonical repository
@@ -55,7 +56,7 @@ public static class QueueCommand
         CancellationToken cancellationToken,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
+        Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile = null)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -84,7 +85,7 @@ public static class QueueCommand
         TextWriter output,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
+        Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile,
         CancellationToken cancellationToken)
     {
@@ -186,6 +187,7 @@ public static class QueueCommand
                 sourceRepository,
                 effectiveWorktreeRoot,
                 issueRepository!,
+                options.Lifecycle,
                 output,
                 cancellationToken).ConfigureAwait(false)
             : null;

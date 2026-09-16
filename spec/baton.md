@@ -7329,8 +7329,10 @@ launched item refuses with `baton cancel <room-dir>`, the existing room-level re
 cancelled tags report that fact rather than pretending a new cancellation occurred.
 
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
-`git worktree add <root>/w<n> <n>-lane`, then applies the fresh-provisioning ceiling rule stated above
-under **Explicit retained issue worktree reuse (#2333)**. Add time because an operator queueing eight items at
+`git worktree add <root>/w<n> <n>-lane`, then records trust. A lifecycle add applies the deterministic
+fresh-provisioning ceiling rule stated above under **Explicit retained issue worktree reuse (#2333)**;
+an ordinary non-lifecycle add retains §9's repository-wide narrowest-source inheritance and
+never-trusted fallback. Add time because an operator queueing eight items at
 23:00 should learn immediately that the issue does not exist, and because it keeps `gh`/`git` spawning
 in the CLI rather than in the background host. `<root>` — which the issue left undefined — is
 `Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,

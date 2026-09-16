@@ -283,7 +283,7 @@ public sealed class QueueWorktreeReportTests
         try
         {
             var candidate = await RepoAsync(root, "candidate");
-            var otherClone = await RepoAsync(root, "other-clone");
+            var otherClone = await RepoAsync(root, "2333-lane");
             var room = Path.Combine(BatonPaths.Rooms, "branch-owner-room");
             Directory.CreateDirectory(room);
             await WorkerBindingConfigWriter.SaveToFileAsync(
@@ -346,6 +346,47 @@ public sealed class QueueWorktreeReportTests
                 Assert.True(index.Complete);
                 Assert.Contains("room:unrecorded-branch-room", index.ForBranch("2333-lane"));
                 Assert.Empty(index.For(candidate.Path));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Live_room_branch_disagreement_is_incomplete_and_indexes_both_claims()
+    {
+        var sandbox = Temp("branch-disagreement");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var switchedClone = await RepoAsync(root, "2333-lane");
+            var room = Path.Combine(BatonPaths.Rooms, "switched-branch-room");
+            Directory.CreateDirectory(room);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new(
+                        "shell", new WorkerContract("implement", [], [], []),
+                        PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                        WorkingDirectory: switchedClone.Path),
+                },
+                BatonPaths.RoomBindingsFile(room), Ct);
+            await File.WriteAllTextAsync(RoomDeliveryBranch.PathFor(room), "original-branch", Ct);
+
+            using (ConcurrencyGuard.Acquire(room, "branch disagreement fixture"))
+            {
+                var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct);
+
+                Assert.False(index.Complete);
+                Assert.Contains("room:switched-branch-room", index.ForBranch("2333-lane"));
+                Assert.Contains("room:switched-branch-room", index.ForBranch("original-branch"));
             }
         }
         finally

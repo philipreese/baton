@@ -66,7 +66,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
             2333, repository, _root, CapturedRepository, Runner(worktree),
             Probe(commonDir, repository, review, worktree), TextWriter.Null,
-            TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken, deterministicSourceCeiling: true);
 
         var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
@@ -88,7 +88,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             IssueWorktreeProvisioner.ProvisionAsync(
                 2333, repository, _root, CapturedRepository, Runner(worktree),
                 Probe(commonDir, repository, review, worktree), TextWriter.Null,
-                TestContext.Current.CancellationToken));
+                TestContext.Current.CancellationToken, deterministicSourceCeiling: true));
 
         Assert.Contains("exact source checkout", refusal.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
@@ -112,7 +112,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() =>
             IssueWorktreeProvisioner.ProvisionAsync(
                 2333, repository, _root, CapturedRepository, Runner(worktree), probe,
-                TextWriter.Null, TestContext.Current.CancellationToken));
+                TextWriter.Null, TestContext.Current.CancellationToken, deterministicSourceCeiling: true));
 
         Assert.Contains(unreadable, refusal.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("identity probe failed", refusal.Message, StringComparison.OrdinalIgnoreCase);
@@ -137,14 +137,14 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
-        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
+        Assert.Null(recorded.InheritedFrom);
 
         // The other half of the polarity: nothing was inherited, and the WIDENING is what gets said —
         // on the same output the inheritance line uses, so an operator reading the add learns that the
         // verb's own fallback wrote `all`, not that a ceiling was derived.
         var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
         Assert.Equal(
-            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: source repository has no recorded ceiling; recorded ceiling all",
+            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: no trusted repository to inherit from; recorded ceiling all",
             line);
         Assert.DoesNotContain("inherited", line, StringComparison.OrdinalIgnoreCase);
     }
@@ -263,10 +263,10 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
-        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
+        Assert.Null(recorded.InheritedFrom);
         var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
         Assert.Equal(
-            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: source repository has no recorded ceiling; recorded ceiling all",
+            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: no trusted repository to inherit from; recorded ceiling all",
             line);
     }
 
