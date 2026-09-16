@@ -458,7 +458,9 @@ internal sealed record QueueWorktreeReferenceIndex(
             QueueWorktreeReport.PathComparer);
         var complete = true;
         var branchReferences = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        var started = Stopwatch.StartNew();
+        using var probeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        probeTimeout.CancelAfter(probe.Timeout ?? ProbeTimeout);
+        var probeToken = probeTimeout.Token;
 
         try
         {
@@ -466,7 +468,7 @@ internal sealed record QueueWorktreeReferenceIndex(
             foreach (var room in probe.EnumerateDirectories(BatonPaths.Rooms))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (++roomCount > MaxRoomsObserved || started.Elapsed > ProbeTimeout)
+                if (++roomCount > MaxRoomsObserved || probeToken.IsCancellationRequested)
                 {
                     complete = false;
                     break;
@@ -485,7 +487,7 @@ internal sealed record QueueWorktreeReferenceIndex(
                 try
                 {
                     bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
-                        BatonPaths.RoomBindingsFile(room), cancellationToken).ConfigureAwait(false);
+                        BatonPaths.RoomBindingsFile(room), probeToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is WorkerBindingConfigException or IOException or UnauthorizedAccessException)
                 {
@@ -516,7 +518,7 @@ internal sealed record QueueWorktreeReferenceIndex(
                 }
                 foreach (var bindingPath in paths)
                 {
-                    var observed = await probe.ReadBranchAsync(bindingPath, cancellationToken)
+                    var observed = await probe.ReadBranchAsync(bindingPath, probeToken)
                         .ConfigureAwait(false);
                     if (observed is null)
                     {
@@ -551,13 +553,34 @@ internal sealed record QueueWorktreeReferenceIndex(
         {
             // A fresh Baton home legitimately has no rooms root yet.
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
+            && probeToken.IsCancellationRequested)
+        {
+            complete = false;
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException)
         {
             complete = false;
         }
 
-        complete &= await ObserveBuildLockAsync(
-            workspaces, references, branchReferences, probe, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (probeToken.IsCancellationRequested)
+        {
+            complete = false;
+        }
+        else
+        {
+            try
+            {
+                complete &= await ObserveBuildLockAsync(
+                    workspaces, references, branchReferences, probe, probeToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
+                && probeToken.IsCancellationRequested)
+            {
+                complete = false;
+            }
+        }
         return new QueueWorktreeReferenceIndex(
             references.ToDictionary(
                 pair => pair.Key,
@@ -599,9 +622,16 @@ internal sealed record QueueWorktreeReferenceIndex(
     {
         var lockPath = probe.BuildLockPath ?? Environment.GetEnvironmentVariable("BATON_BUILDLOCK_FILE");
         if (string.IsNullOrWhiteSpace(lockPath)) lockPath = Path.Combine(Path.GetTempPath(), "baton-build.lock");
+        var lockState = probe.ProbeBuildLock(lockPath);
+        if (lockState is BuildLockProbeResult.Absent or BuildLockProbeResult.Free) return true;
+        if (lockState == BuildLockProbeResult.Unreadable) return false;
+
         var infoPath = lockPath + ".info";
         var infoRead = ReadOptionalText(infoPath, probe.ReadAllText);
-        if (infoRead.Content is null) return infoRead.Complete;
+        // The sidecar is deliberately best-effort diagnostics written only after the OS lock is
+        // acquired. A held lock without readable identity is active ownership we cannot attribute,
+        // never evidence that no workspace owns it.
+        if (infoRead.Content is null) return false;
 
         try
         {
@@ -661,6 +691,42 @@ internal sealed record QueueWorktreeReferenceIndex(
         }
     }
 
+    internal static BuildLockProbeResult ProbeBuildLockForReference(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+            if (!OperatingSystem.IsWindows()) return BuildLockProbeResult.Unreadable;
+            try
+            {
+                stream.Lock(0, 1);
+            }
+            catch (IOException)
+            {
+                return BuildLockProbeResult.Held;
+            }
+            try
+            {
+                stream.Unlock(0, 1);
+                return BuildLockProbeResult.Free;
+            }
+            catch (IOException)
+            {
+                return BuildLockProbeResult.Unreadable;
+            }
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return BuildLockProbeResult.Absent;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+            or NotSupportedException or System.Security.SecurityException)
+        {
+            return BuildLockProbeResult.Unreadable;
+        }
+    }
+
     private static bool IsSameOrBeneath(string path, string root)
     {
         if (QueueWorktreeReport.PathComparer.Equals(path, root)) return true;
@@ -680,13 +746,24 @@ internal sealed record QueueWorktreeReferenceIndex(
 internal sealed record QueueWorktreeLivenessProbe(
     Func<string, IEnumerable<string>> EnumerateDirectories,
     Func<string, string> ReadAllText,
+    Func<string, BuildLockProbeResult> ProbeBuildLock,
     Func<int, bool> IsLiveProcess,
     Func<string, CancellationToken, Task<string?>> ReadBranchAsync,
-    string? BuildLockPath = null)
+    string? BuildLockPath = null,
+    TimeSpan? Timeout = null)
 {
     public static QueueWorktreeLivenessProbe Default { get; } = new(
         Directory.EnumerateDirectories,
         File.ReadAllText,
+        QueueWorktreeReferenceIndex.ProbeBuildLockForReference,
         QueueWorktreeReferenceIndex.IsLiveProcessForProbe,
         WorkspaceHead.TryReadBranchAsync);
+}
+
+internal enum BuildLockProbeResult
+{
+    Absent,
+    Free,
+    Held,
+    Unreadable,
 }
