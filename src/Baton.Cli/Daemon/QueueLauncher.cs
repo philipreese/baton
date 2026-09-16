@@ -950,7 +950,9 @@ public static class QueueLauncher
     {
         ArgumentNullException.ThrowIfNull(request);
         var item = request.Item;
-        var tier = request.Tier;
+        var tier = item.WorkerAssignment is { } frozen
+            ? request.Tier with { Adapter = frozen.Adapter, Model = frozen.Model, Effort = frozen.Effort }
+            : request.Tier;
         var followOn = item.Stage is WorkStage.Continue or WorkStage.Fix;
         if (followOn && (item.Repository is not { Length: > 0 } || item.PullRequest is null
             || item.Branch is not { Length: > 0 }))

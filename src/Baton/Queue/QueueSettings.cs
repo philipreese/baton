@@ -177,4 +177,9 @@ public sealed record QueueTierSettings
     public string? Adapter { get; init; }
     public string? Model { get; init; }
     public string? Effort { get; init; }
+
+    /// <summary>Ordered worker candidates supplied by the canonical tier reader. It is intentionally
+    /// absent for literal queue settings rows: WorkerTiers.json remains the single roster register.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<WorkerCandidate>? Candidates { get; init; }
 }

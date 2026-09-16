@@ -18,14 +18,6 @@ public static class WorkerAssignmentPolicy
             return AssignmentDecision.Refused(AssignmentReason.NoEligibleCandidate, "The candidate pool is empty.", rejected);
         }
 
-        if (roster.Count > 1 && request.DeclaredSize == DeclaredTaskSize.Unknown)
-        {
-            return AssignmentDecision.Refused(
-                AssignmentReason.DeclaredSizeRequired,
-                "A declared task size is required when a role has multiple worker candidates.",
-                roster.Select(c => new CandidateRejection(c, CandidateRejectionReason.DeclaredSizeMissing)).ToList());
-        }
-
         var candidates = roster.Select((candidate, order) => (candidate, order)).ToList();
         if (request.Override is { } overrideChoice)
         {
@@ -35,13 +27,24 @@ public static class WorkerAssignmentPolicy
                 return AssignmentDecision.Refused(AssignmentReason.InvalidOverride, "The operator override is not in this candidate pool.", rejected);
             }
 
-            if (Eligible(match.candidate, request, fleetFacts, allowRunwayOverride: request.OverrideRunwayReason is not null, allowUnknownSize: roster.Count == 1, out var reason))
+            // An exact, valid operator choice is authoritative.  The declared-size requirement
+            // protects automatic selection between a pool; it must not mask validation of an
+            // explicit triple (or turn an invalid override into a size error).
+            if (Eligible(match.candidate, request, fleetFacts, allowRunwayOverride: request.OverrideRunwayReason is not null, allowUnknownSize: true, out var reason))
             {
                 return AssignmentDecision.Selected(match.candidate, AssignmentReason.OperatorOverride, request.Override.Reason, rejected);
             }
 
             rejected.Add(new CandidateRejection(match.candidate, reason));
             return AssignmentDecision.Refused(AssignmentReason.InvalidOverride, "The operator override is not eligible.", rejected);
+        }
+
+        if (roster.Count > 1 && request.DeclaredSize == DeclaredTaskSize.Unknown)
+        {
+            return AssignmentDecision.Refused(
+                AssignmentReason.DeclaredSizeRequired,
+                "A declared task size is required when a role has multiple worker candidates.",
+                roster.Select(c => new CandidateRejection(c, CandidateRejectionReason.DeclaredSizeMissing)).ToList());
         }
 
         var eligible = new List<(WorkerCandidate Candidate, int Order, FleetCandidateFacts Facts)>();

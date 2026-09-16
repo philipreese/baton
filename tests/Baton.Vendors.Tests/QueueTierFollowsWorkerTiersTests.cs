@@ -119,4 +119,30 @@ public sealed class QueueTierFollowsWorkerTiersTests
         Assert.Equal("gpt-5.6-sol", resolved.Model);
         Assert.Equal("medium", resolved.Effort);
     }
+
+    [Fact]
+    public void A_candidates_pool_keeps_its_order_while_projecting_its_first_candidate_for_legacy_readers()
+    {
+        using var tiers = new TempTiers();
+        using var env = tiers.PointAt(
+            """
+            {
+              "standard": {
+                "candidates": [
+                  { "adapter": "codex", "model": "first", "effort": "medium", "capability_band": "standard", "task_sizes": ["small"] },
+                  { "adapter": "claude", "model": "second", "effort": "high", "capability_band": "frontier", "task_sizes": ["large"] }
+                ]
+              }
+            }
+            """);
+
+        var resolved = QueueTierTable.Resolve(
+            ToolingItem(), new QueueSettings(), WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+
+        Assert.Equal("codex", resolved.Adapter);
+        Assert.Equal("first", resolved.Model);
+        Assert.Collection(resolved.Candidates!,
+            first => Assert.Equal("first", first.Model),
+            second => Assert.Equal("second", second.Model));
+    }
 }

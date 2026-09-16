@@ -32,6 +32,23 @@ public sealed class WorkerAssignmentPolicyTests
     }
 
     [Fact]
+    public void A_valid_exact_override_is_checked_before_the_multi_candidate_size_refusal()
+    {
+        var chosen = Candidate("codex", CapabilityBand.Standard);
+        var other = Candidate("claude", CapabilityBand.Frontier);
+        var request = Request(DeclaredTaskSize.Unknown) with
+        {
+            Override = new AssignmentOverride(chosen.Adapter, chosen.Model, chosen.Effort, "operator pin"),
+        };
+
+        var decision = WorkerAssignmentPolicy.Select(request, [chosen, other], Facts(
+            (chosen, new(UsageEvidence.Fresh, false, 2))));
+
+        Assert.Equal(chosen, decision.Candidate);
+        Assert.Equal(AssignmentReason.OperatorOverride, decision.Reason);
+    }
+
+    [Fact]
     public void Capability_precedes_weekly_runway_and_roster_order_breaks_ties()
     {
         var capable = Candidate("codex", CapabilityBand.Standard);
