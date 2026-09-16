@@ -81,6 +81,59 @@ public sealed class LifecycleAttemptGraphTests
     }
 
     [Fact]
+    public void Produced_revision_equal_to_its_input_cannot_authorize_review()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "fix", WorkStage.Fix, B),
+            Event(2, FleetEventKind.AttemptSettled, "fix"),
+            Event(3, FleetEventKind.RevisionProduced, "fix", revision: B),
+            Event(4, FleetEventKind.AttemptStarted, "rereview", WorkStage.ReReview, B,
+                parents: ["fix"], edges: [FleetAttemptEdgeKind.Reviews]),
+        ], Pr(B));
+
+        Assert.Equal(LifecycleGraphHaltKind.UnchangedRevision, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Verdict_for_a_different_revision_cannot_authorize_a_fix()
+    {
+        var graph = LifecycleAttemptGraph.Build(Item(), [
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Event(2, FleetEventKind.AttemptSettled, "implement"),
+            Event(3, FleetEventKind.RevisionProduced, "implement", revision: B),
+            Event(4, FleetEventKind.AttemptStarted, "review", WorkStage.Review, B,
+                parents: ["implement"], edges: [FleetAttemptEdgeKind.Reviews]),
+            Event(5, FleetEventKind.AttemptSettled, "review"),
+            Event(6, FleetEventKind.ReviewVerdictObserved, "review", revision: A, verdict: "block"),
+            Event(7, FleetEventKind.AttemptStarted, "fix", WorkStage.Fix, B,
+                parents: ["review"], edges: [FleetAttemptEdgeKind.Repairs]),
+        ], Pr(B));
+
+        Assert.Equal(LifecycleGraphHaltKind.UnsatisfiedDependency, graph.Halt!.Kind);
+    }
+
+    [Fact]
+    public void Approval_for_a_stale_head_or_failing_checks_is_not_done()
+    {
+        var facts = new[]
+        {
+            Event(1, FleetEventKind.AttemptStarted, "implement", WorkStage.Implement, A),
+            Event(2, FleetEventKind.AttemptSettled, "implement"),
+            Event(3, FleetEventKind.RevisionProduced, "implement", revision: B),
+            Event(4, FleetEventKind.AttemptStarted, "review", WorkStage.Review, B,
+                parents: ["implement"], edges: [FleetAttemptEdgeKind.Reviews]),
+            Event(5, FleetEventKind.AttemptSettled, "review"),
+            Event(6, FleetEventKind.ReviewVerdictObserved, "review", revision: B, verdict: "approve"),
+        };
+
+        var stale = LifecycleAttemptGraph.Build(Item(), facts, Pr(A));
+        var failing = LifecycleAttemptGraph.Build(Item(), facts, new(42, B, true, true, "failing"));
+
+        Assert.Equal(QueueItemState.Queued, stale.Projection.DisplayState);
+        Assert.Equal(QueueItemState.Queued, failing.Projection.DisplayState);
+    }
+
+    [Fact]
     public void Legacy_rows_remain_an_explicit_compatibility_result()
     {
         var legacy = Item() with { LifecycleGraphVersion = null };

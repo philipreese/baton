@@ -178,6 +178,19 @@ public sealed class WorkItemAdvancer
         await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
             .ConfigureAwait(false);
 
+        if (string.Equals(item.LifecycleGraphVersion, LifecycleAttemptGraph.Version, StringComparison.Ordinal))
+        {
+            var graph = LifecycleAttemptGraph.Build(item,
+                await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false),
+                new LifecyclePullRequestObservation(pr.Number, pr.HeadSha, pr.Succeeded, pr.IsOpen, pr.Checks));
+            if (graph.Halt is { } halt)
+            {
+                return await FailAsync(item, stage,
+                    new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0, halt.Reason),
+                    verdictPath, now, room).ConfigureAwait(false);
+            }
+        }
+
         // A merged PR is delivery evidence, but it is not permission to abandon a room that is
         // still running. In particular, the roomless-timeout sweep can mark a late launch Failed
         // before that launch creates its room. Only the terminal sentinel is proof this room is no

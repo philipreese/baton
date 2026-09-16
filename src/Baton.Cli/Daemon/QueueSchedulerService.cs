@@ -199,6 +199,7 @@ public sealed class QueueSchedulerService : BackgroundService
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
 
             var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            snapshot = await HaltInvalidLifecycleGraphsAsync(snapshot, cancellationToken).ConfigureAwait(false);
             var now = _now();
             var liveWeight = await _liveWeight(cancellationToken).ConfigureAwait(false);
             var freeGb = _freeGb();
@@ -1023,6 +1024,45 @@ public sealed class QueueSchedulerService : BackgroundService
     private static Task<FleetEvent?> AppendOperationalFleetEventAsync(
         FleetEventDraft draft, CancellationToken cancellationToken) =>
         FleetEventLog.OpenOperational().Append(draft, cancellationToken);
+
+    /// <summary>
+    /// The scheduler consumes the same replay used by lifecycle advancement before selecting a row.
+    /// A graph-versioned row with a broken lineage is projected to an operator halt, so its mutable
+    /// queued stage cannot become a dispatch authorization. Rows without the marker stay on the
+    /// explicit legacy compatibility path.
+    /// </summary>
+    private static async Task<QueueSnapshot> HaltInvalidLifecycleGraphsAsync(
+        QueueSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        var graphItems = snapshot.Items
+            .Where(item => string.Equals(item.LifecycleGraphVersion, LifecycleAttemptGraph.Version, StringComparison.Ordinal))
+            .ToList();
+        if (graphItems.Count == 0)
+        {
+            return snapshot;
+        }
+
+        var events = await FleetEventLog.OpenOperational().ReadRetained(cancellationToken).ConfigureAwait(false);
+        var halts = graphItems
+            .Select(item => (item.Tag, Halt: LifecycleAttemptGraph.Build(item, events,
+                new LifecyclePullRequestObservation(item.PullRequest, item.ChecksHeadSha,
+                    item.PullRequest is not null, item.PullRequest is not null, item.Checks)).Halt))
+            .Where(result => result.Halt is not null)
+            .ToDictionary(result => result.Tag, result => result.Halt!, StringComparer.Ordinal);
+        if (halts.Count == 0)
+        {
+            return snapshot;
+        }
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+        {
+            Items = state.Items.Select(item => halts.TryGetValue(item.Tag, out var halt)
+                ? item with { State = QueueItemState.Failed, Halted = true, Error = halt.Reason }
+                : item).ToList(),
+        }, cancellationToken).ConfigureAwait(false);
+        return await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+    }
 
     private static FleetEventDraft AdmissionEvent(
         QueueItem item,

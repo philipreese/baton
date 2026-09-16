@@ -61,6 +61,12 @@ public static class LifecycleAttemptGraph
                     $"attempt '{group.Key.Value}' has duplicate terminal, revision, or verdict facts");
             }
 
+            if (revisions.SingleOrDefault()?.RevisionId is { } produced && produced == input)
+            {
+                return Halt(nodes, LifecycleGraphHaltKind.UnchangedRevision,
+                    $"attempt '{group.Key.Value}' records a produced revision equal to its input revision");
+            }
+
             var parents = start.ParentAttemptIds ?? (start.ParentAttemptId is { } parent ? [parent] : []);
             var edges = start.ParentEdgeKinds ?? (start.ParentAttemptId is not null ? [FleetAttemptEdgeKind.Implements] : []);
             if (parents.Count != edges.Count || parents.Distinct().Count() != parents.Count)
@@ -127,9 +133,13 @@ public static class LifecycleAttemptGraph
             FleetAttemptEdgeKind.Implements => child.Stage == WorkStage.Implement
                 && parent.ProducedRevision is { } output && output == child.InputRevision,
             FleetAttemptEdgeKind.Reviews => child.Stage is WorkStage.Review or WorkStage.ReReview
-                && parent.ProducedRevision is { } output && output == child.InputRevision,
+                && parent.ProducedRevision is { } output
+                && output != parent.InputRevision
+                && output == child.InputRevision,
             FleetAttemptEdgeKind.Repairs => child.Stage == WorkStage.Fix
-                && parent.ReviewedRevision is { } reviewed && reviewed == child.InputRevision
+                && parent.ReviewedRevision is { } reviewed
+                && reviewed == parent.InputRevision
+                && reviewed == child.InputRevision
                 && string.Equals(parent.ReviewVerdict, "block", StringComparison.OrdinalIgnoreCase),
             FleetAttemptEdgeKind.Continues => child.Stage == WorkStage.Continue
                 && parent.Outcome is { } outcome && !WorkflowOutcome.IsSucceededShaped(outcome)
@@ -176,6 +186,7 @@ public enum LifecycleGraphHaltKind
     MissingOrDuplicateStart,
     MissingIdentity,
     DuplicateTerminalFact,
+    UnchangedRevision,
     ContradictoryEdge,
     MissingParent,
     FutureParent,
@@ -199,11 +210,23 @@ public sealed record LifecycleProjection(
         QueueItem item,
         IReadOnlyList<LifecycleAttemptNode> nodes,
         LifecycleAttemptNode? frontier,
-        LifecyclePullRequestObservation pullRequest) =>
-        new(frontier?.Stage ?? item.Stage, frontier is null ? QueueItemState.Done : QueueItemState.Launched,
+        LifecyclePullRequestObservation pullRequest)
+    {
+        var ready = frontier is null && nodes.LastOrDefault() is { } completed
+            && completed.Stage is WorkStage.Review or WorkStage.ReReview
+            && completed.ReviewedRevision == completed.InputRevision
+            && string.Equals(completed.ReviewVerdict, "approve", StringComparison.OrdinalIgnoreCase)
+            && pullRequest.Succeeded
+            && pullRequest.IsOpen == true
+            && string.Equals(pullRequest.HeadRevision, completed.InputRevision.Value, StringComparison.Ordinal)
+            && string.Equals(pullRequest.RequiredChecks, PullRequestChecks.Passing, StringComparison.Ordinal);
+
+        return new(frontier?.Stage ?? (ready ? WorkStage.Ready : item.Stage),
+            frontier is not null ? QueueItemState.Launched : ready ? QueueItemState.Done : QueueItemState.Queued,
             nodes.Count, frontier is not null,
             frontier?.Stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue,
             frontier?.Stage is WorkStage.Review or WorkStage.ReReview);
+    }
 }
 
 public sealed record LifecycleAttemptGraphResult(

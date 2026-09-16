@@ -395,6 +395,24 @@ public sealed class FleetEventLog
     }
 
     /// <summary>
+    /// Replays every retained segment for an authoritative lifecycle decision. A torn segment is not
+    /// historical absence: callers must halt rather than dispatch against a partial lineage.
+    /// </summary>
+    public Task<IReadOnlyList<FleetEvent>> ReadRetained(CancellationToken cancellationToken = default) =>
+        Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+            _livePath, LockNamePrefix, LockTimeout, () =>
+            {
+                var older = Read(_rolloverPath);
+                var newer = Read(_livePath);
+                if (older.TornTailOffset is not null || newer.TornTailOffset is not null)
+                {
+                    throw new IOException("The retained fleet-event replay has an incomplete tail.");
+                }
+
+                return (IReadOnlyList<FleetEvent>)older.Events.Concat(newer.Events).ToList();
+            }), cancellationToken);
+
+    /// <summary>
     /// A strict, read-deny-write snapshot of both retained segments for an operator proof. Unlike
     /// display replay, a torn tail or unreadable segment cannot be treated as absence. The caller
     /// holds the streams through its queue commit so append/rotation cannot invalidate the proof.
