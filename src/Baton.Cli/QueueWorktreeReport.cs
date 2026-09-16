@@ -429,6 +429,7 @@ internal sealed record QueueWorktreeReferenceObservation(IReadOnlyList<string> R
 /// </summary>
 internal sealed record QueueWorktreeReferenceIndex(
     IReadOnlyDictionary<string, IReadOnlyList<string>> References,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> BranchReferences,
     bool Complete)
 {
     private const int MaxRoomsObserved = 10_000;
@@ -436,6 +437,9 @@ internal sealed record QueueWorktreeReferenceIndex(
 
     public IReadOnlyList<string> For(string path) =>
         References.TryGetValue(path, out var values) ? values : [];
+
+    public IReadOnlyList<string> ForBranch(string branch) =>
+        BranchReferences.TryGetValue(branch, out var values) ? values : [];
 
     public static async Task<QueueWorktreeReferenceIndex> CreateAsync(
         IReadOnlyList<QueueItem> items,
@@ -451,6 +455,7 @@ internal sealed record QueueWorktreeReferenceIndex(
             _ => new HashSet<string>(StringComparer.Ordinal),
             QueueWorktreeReport.PathComparer);
         var complete = true;
+        var branchReferences = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         var started = Stopwatch.StartNew();
 
         try
@@ -475,6 +480,28 @@ internal sealed record QueueWorktreeReferenceIndex(
                         continue;
                     }
                     if (!held) continue;
+
+                    var branchPath = RoomDeliveryBranch.PathFor(room);
+                    if (File.Exists(branchPath))
+                    {
+                        try
+                        {
+                            var branch = File.ReadAllText(branchPath).Trim();
+                            if (branch.Length > 0)
+                            {
+                                if (!branchReferences.TryGetValue(branch, out var branchRooms))
+                                {
+                                    branchRooms = new HashSet<string>(StringComparer.Ordinal);
+                                    branchReferences.Add(branch, branchRooms);
+                                }
+                                branchRooms.Add("room:" + Path.GetFileName(room));
+                            }
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            complete = false;
+                        }
+                    }
 
                     IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings;
                     try
@@ -520,6 +547,10 @@ internal sealed record QueueWorktreeReferenceIndex(
                 pair => pair.Key,
                 pair => (IReadOnlyList<string>)pair.Value.Order(StringComparer.Ordinal).ToList(),
                 QueueWorktreeReport.PathComparer),
+            branchReferences.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<string>)pair.Value.Order(StringComparer.Ordinal).ToList(),
+                StringComparer.Ordinal),
             complete);
     }
 

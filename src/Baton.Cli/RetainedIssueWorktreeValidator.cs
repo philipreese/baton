@@ -32,10 +32,12 @@ internal static class RetainedIssueWorktreeValidator
         IReadOnlyList<QueueItem> queueItems,
         CancellationToken cancellationToken,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
-        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null)
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null,
+        Func<string, string?, bool, string>? ghResolver = null)
     {
         runner ??= RunAsync;
         repositoryResolver ??= RepositoryIdentityResolver.TryResolveAsync;
+        ghResolver ??= OriginatingPullRequestVerifier.ResolveExecutable;
         var path = QueueWorktreeReport.TryFullPath(workspace)
             ?? throw Refusal("workspace-path", "the workspace path could not be normalized", workspace);
         var root = QueueWorktreeReport.TryFullPath(worktreeRoot)
@@ -65,7 +67,7 @@ internal static class RetainedIssueWorktreeValidator
         if (statusExit != 0) throw Refusal("git-status", "substantive cleanliness could not be read", path);
         if (!string.IsNullOrWhiteSpace(statusOutput)) throw Refusal("git-status", "the workspace has tracked or untracked source changes", path);
 
-        var live = queueItems.Where(item => item.State is QueueItemState.Queued or QueueItemState.Launched).ToList();
+        var live = queueItems.Where(IsLiveOwner).ToList();
         RefuseIfLiveQueueOwnership(queueItems, path, branch);
 
         var referenceProbeItems = live.Append(new QueueItem
@@ -79,9 +81,20 @@ internal static class RetainedIssueWorktreeValidator
         }).ToList();
         var references = await QueueWorktreeReferenceIndex.CreateAsync(referenceProbeItems, cancellationToken).ConfigureAwait(false);
         if (!references.Complete) throw Refusal("room-lock", "room or build-lock liveness evidence could not be read", path);
-        if (references.For(path).Count > 0) throw Refusal("room-lock", "a live Baton room or build lock owns this workspace", path);
+        if (references.For(path).Count > 0 || references.ForBranch(branch).Count > 0)
+            throw Refusal("room-lock", "a live Baton room or build lock owns this workspace or branch", path);
 
-        var (prExit, prOutput) = await runner("gh", ["pr", "list", "--head", branch, "--state", "open", "--limit", "1", "--json", "number", "--repo", repository], path, cancellationToken).ConfigureAwait(false);
+        string gh;
+        try
+        {
+            gh = ghResolver(
+                path, Environment.GetEnvironmentVariable("PATH"), OperatingSystem.IsWindows());
+        }
+        catch (CliArgumentException ex)
+        {
+            throw Refusal("pull-request-authority", ex.Message, path);
+        }
+        var (prExit, prOutput) = await runner(gh, ["pr", "list", "--head", branch, "--state", "open", "--limit", "1", "--json", "number", "--repo", repository], path, cancellationToken).ConfigureAwait(false);
         if (prExit != 0) throw Refusal("pull-request", "the open-pull-request probe could not be read", path);
         try
         {
@@ -98,14 +111,24 @@ internal static class RetainedIssueWorktreeValidator
         }
 
         var admissionItem = new QueueItem { Tag = "retained-validation", Role = role.Id, Workspace = path, SpecFile = path, Requirements = requirements };
-        var admission = RecordedProjectCeilingAdmission.Evaluate(admissionItem, role, requireDeclaredRequirements);
-        var ceiling = ProjectCeilingStore.TryGetRecord(path, ProjectCeilingStore.DefaultPath);
+        RecordedProjectCeilingAdmission.Result admission;
+        ProjectCeiling? ceiling;
+        try
+        {
+            admission = RecordedProjectCeilingAdmission.Evaluate(admissionItem, role, requireDeclaredRequirements);
+            ceiling = ProjectCeilingStore.TryGetRecord(path, ProjectCeilingStore.DefaultPath);
+        }
+        catch (Exception ex) when (ex is ProjectCeilingStoreException or IOException or UnauthorizedAccessException)
+        {
+            throw Refusal("trust", $"the exact-path trust store could not be read: {ex.Message}", path);
+        }
         if (ceiling is null || !admission.CeilingFound || admission.Admission.Result == TaskRequirementAdmission.Refused)
             throw new CliArgumentException(
                 admission.CeilingFound ? admission.RefusalMessage(path, role.Id) : $"Retained-worktree validation refused '{path}': trust evidence for this exact path is missing.",
                 $"trust this exact checkout, then retry: baton trust \"{path}\" --ceiling \"ReadFiles,WriteFiles,RunShellCommands,NetworkAccess\".");
 
-        var predecessors = queueItems.Where(item => (QueueWorktreeReport.PathComparer.Equals(QueueWorktreeReport.TryFullPath(item.Workspace), path)
+        var predecessors = queueItems.Where(item => !IsLiveOwner(item)
+                && (QueueWorktreeReport.PathComparer.Equals(QueueWorktreeReport.TryFullPath(item.Workspace), path)
                 || string.Equals(item.Branch, branch, StringComparison.Ordinal))
                 && item.State is QueueItemState.Done or QueueItemState.Failed or QueueItemState.Cancelled)
             .Select(item => item.Tag).Distinct(StringComparer.Ordinal).ToList();
@@ -119,11 +142,15 @@ internal static class RetainedIssueWorktreeValidator
     /// </summary>
     internal static void RefuseIfLiveQueueOwnership(IReadOnlyList<QueueItem> queueItems, string path, string branch)
     {
-        var live = queueItems.Where(item => item.State is QueueItemState.Queued or QueueItemState.Launched);
+        var live = queueItems.Where(IsLiveOwner);
         if (live.Any(item => QueueWorktreeReport.PathComparer.Equals(QueueWorktreeReport.TryFullPath(item.Workspace), path)
             || string.Equals(item.Branch, branch, StringComparison.Ordinal)))
-            throw Refusal("queue-liveness", "a queued or launched item owns this path or branch", path);
+            throw Refusal("queue-liveness", "an active queue item or lifecycle owns this path or branch", path);
     }
+
+    private static bool IsLiveOwner(QueueItem item) =>
+        item.State is QueueItemState.Queued or QueueItemState.Launched
+        || QueueScheduler.IsActiveLifecycle(item);
 
     private static CliArgumentException Refusal(string probe, string detail, string path) => new(
         $"Retained-worktree validation refused '{path}': {detail} (failed probe: {probe}).",

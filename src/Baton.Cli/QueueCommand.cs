@@ -247,7 +247,11 @@ public static class QueueCommand
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.
             AutomaticFixUsed = options.Lifecycle ? false : null,
-            WorkspaceOrigin = options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
+            // A retained checkout was supplied by the operator. Baton proved it safe to reuse, but
+            // did not create it and therefore must never later treat it as cleanup-owned.
+            WorkspaceOrigin = retainedProof is not null
+                ? WorkspaceOrigins.OperatorSupplied
+                : options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
             RetainedWorktreeReuse = retainedProof is null ? null : new RetainedWorktreeReuse(
                 retainedProof.Repository, retainedProof.Branch, retainedProof.Head, new RetainedWorktreeCeiling(
                     retainedProof.Ceiling.ReadFiles, retainedProof.Ceiling.WriteFiles,

@@ -50,6 +50,51 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
     }
 
     [Fact]
+    public async Task Provision_uses_the_exact_source_even_when_a_sibling_is_narrower()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var review = MakeDirectory("review-worktree");
+        var worktree = Path.Combine(_root, "w2333");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Set(
+            review,
+            new ProjectCeiling(true, false, false, false),
+            ProjectCeilingStore.DefaultPath);
+
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2333, repository, _root, CapturedRepository, Runner(worktree),
+            Probe(commonDir, repository, review, worktree), TextWriter.Null,
+            TestContext.Current.CancellationToken);
+
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
+        Assert.NotNull(recorded);
+        Assert.True(recorded.IsUnrestricted);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
+    }
+
+    [Fact]
+    public async Task Provision_refuses_an_arbitrary_sibling_when_the_exact_source_is_unrecorded()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var review = MakeDirectory("review-worktree");
+        var worktree = Path.Combine(_root, "w2333");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(review, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+
+        var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() =>
+            IssueWorktreeProvisioner.ProvisionAsync(
+                2333, repository, _root, CapturedRepository, Runner(worktree),
+                Probe(commonDir, repository, review, worktree), TextWriter.Null,
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("exact source checkout", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
+    }
+
+    [Fact]
     public async Task Provision_falls_back_to_the_unrestricted_ceiling_when_no_trusted_sibling_matches()
     {
         using var home = new IsolatedBatonHome();
@@ -67,7 +112,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
-        Assert.Null(recorded.InheritedFrom);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
 
         // The other half of the polarity: nothing was inherited, and the WIDENING is what gets said —
         // on the same output the inheritance line uses, so an operator reading the add learns that the
@@ -193,7 +238,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
-        Assert.Null(recorded.InheritedFrom);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
         var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
         Assert.Equal(
             $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: source repository has no recorded ceiling; recorded ceiling all",

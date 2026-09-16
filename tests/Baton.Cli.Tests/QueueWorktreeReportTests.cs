@@ -272,6 +272,47 @@ public sealed class QueueWorktreeReportTests
         }
     }
 
+    [Fact]
+    public async Task Live_room_owns_its_recorded_branch_even_from_another_clone_path()
+    {
+        var sandbox = Temp("branch-owner");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var otherClone = await RepoAsync(root, "other-clone");
+            var room = Path.Combine(BatonPaths.Rooms, "branch-owner-room");
+            Directory.CreateDirectory(room);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new(
+                        "shell", new WorkerContract("implement", [], [], []),
+                        PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                        WorkingDirectory: otherClone.Path),
+                },
+                BatonPaths.RoomBindingsFile(room), Ct);
+            await File.WriteAllTextAsync(RoomDeliveryBranch.PathFor(room), "2333-lane", Ct);
+
+            using (ConcurrencyGuard.Acquire(room, "branch ownership fixture"))
+            {
+                var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct);
+
+                Assert.True(index.Complete);
+                Assert.Contains("room:branch-owner-room", index.ForBranch("2333-lane"));
+                Assert.Empty(index.For(candidate.Path));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
     private static QueueItem Item(
         RepoFixture repo,
         string tag,

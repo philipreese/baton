@@ -380,12 +380,42 @@ public static class IssueWorktreeProvisioner
         {
             var own = ProjectCeilingStore.TryGetRecord(workspace, storePath);
             if (own is { IsRevoked: false }) return;
-            if (await probe(workspace, cancellationToken).ConfigureAwait(false) is null)
-                throw new ProjectNotTrustedException(workspace,
-                    "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+            // Audit the whole repository identity without writing. The exact invocation checkout is
+            // the only source we will copy, but unknown/revoked sibling evidence still blocks the
+            // never-trusted `all` fallback.
+            var observation = await InheritedProjectCeiling.InspectAsync(
+                workspace, storePath, probe, cancellationToken).ConfigureAwait(false);
+            switch (observation.Outcome)
+            {
+                case InheritanceOutcome.NoIdentity:
+                    throw new ProjectNotTrustedException(workspace,
+                        "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+                case InheritanceOutcome.CandidateUnknown:
+                    throw new ProjectNotTrustedException(
+                        workspace, observation.CandidatePath!, observation.ProbeFailure ?? "repository identity is unreadable");
+                case InheritanceOutcome.Revoked:
+                    throw new ProjectNotTrustedException(workspace, observation.RevokedPath!, observation.RevokedAt!.Value);
+                case InheritanceOutcome.AlreadyTrusted:
+                    return;
+            }
 
-            // #2333: the source checkout is the only deterministic bootstrap authority. Do not scan
-            // sibling records: a temporary review worktree must not become an implementation ceiling.
+            RepositoryIdentity? sourceIdentity;
+            try
+            {
+                sourceIdentity = await probe(sourceRepository, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new ProjectNotTrustedException(workspace,
+                    $"the exact source checkout repository probe threw: {ex.Message}.");
+            }
+            if (sourceIdentity is null || observation.RepositoryIdentity is null
+                || !string.Equals(sourceIdentity.Value, observation.RepositoryIdentity, StringComparison.Ordinal))
+                throw new ProjectNotTrustedException(workspace,
+                    "the exact source checkout could not be proven to be the same repository as the new worktree.");
+
+            // #2333: the invocation checkout is the sole deterministic bootstrap authority. A
+            // temporary review sibling can block an unsafe fallback, but can never donate its grant.
             var source = ProjectCeilingStore.TryGetRecord(sourceRepository, storePath);
             if (source is { IsRevoked: true })
                 throw new ProjectNotTrustedException(workspace, ProjectCeilingStore.CanonicalKey(sourceRepository), source.RevokedAt!.Value);
@@ -398,7 +428,22 @@ public static class IssueWorktreeProvisioner
                 return;
             }
 
-            ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
+            var sourceKey = ProjectCeilingStore.CanonicalKey(sourceRepository);
+            if (observation.Outcome == InheritanceOutcome.Inherited
+                && observation.SourceCeiling is { } derived
+                && string.Equals(derived.InheritedFrom, sourceKey, StringComparison.OrdinalIgnoreCase))
+            {
+                ProjectCeilingStore.Set(workspace, derived with { InheritedFrom = sourceKey }, storePath);
+                (output ?? Console.Out).WriteLine(
+                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from deterministic source bootstrap {sourceKey}");
+                return;
+            }
+            if (observation.Outcome == InheritanceOutcome.Inherited)
+                throw new ProjectNotTrustedException(workspace,
+                    $"the exact source checkout '{sourceKey}' has no recorded ceiling, while another checkout of this repository does; sibling trust is not a deterministic bootstrap authority.");
+
+            ProjectCeilingStore.Set(
+                workspace, ProjectCeiling.Unrestricted with { InheritedFrom = sourceKey }, storePath);
             (output ?? Console.Out).WriteLine(
                 $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: source repository has no recorded ceiling; recorded ceiling all");
         }

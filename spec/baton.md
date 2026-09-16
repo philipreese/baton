@@ -7216,17 +7216,28 @@ for an old suffix. Before it writes a spec or queue row, provisions a worktree, 
 issue-worktree validator normalizes the path and proves it is strictly beneath the configured root, a
 registered worktree of the issue repository, attached to exactly `<n>-lane` or `<n>-lane-<positive
 suffix>`, clean under the ordinary substantive status contract, and internally consistent at HEAD.
-It also proves there is no live room, build lock, claimed/nonterminal queue row, or open PR for that
-path or branch; terminal predecessor rows are retained as evidence, not an ownership veto. Every Git,
+It also proves there is no live room, build lock, queued/launched row, unretired started lifecycle, or
+open PR for that path or branch. A terminal state does not release a lifecycle that still carries
+started/unretired evidence; only genuinely inactive predecessor rows are retained as evidence rather
+than an ownership veto. The PR query uses an absolute, link-free `gh` resolved outside the candidate
+workspace. Every Git,
 queue, room, lock, PR, and exact-path trust probe fails closed with the failed evidence source and a
 copy/paste-safe remedy. The exact path must already have a non-revoked recorded ceiling that admits
 the initial stage grant; a repository sibling's ceiling is not evidence. The persisted item records
-the observed repository, path, branch, HEAD, ceiling/provenance and terminal predecessor tags as
-explicit retained-worktree reuse. An open PR remains the existing explicit continuation path.
+the observed repository, path, branch, HEAD, ceiling/provenance and inactive predecessor tags as
+explicit retained-worktree reuse. Because Baton did not create this checkout, the queue row records
+`operator-supplied`, never cleanup-owned `issue-provisioned`. An open PR remains the existing explicit
+continuation path.
 
 Fresh `queue add --issue <n> --lifecycle` continues to provision a new issue worktree. Its initial
-ceiling is selected by the provisioning rule, never by an arbitrary same-repository checkout; a
-temporary review checkout cannot become implementation authority.
+ceiling uses the exact checkout from which the operator invoked the command as its sole bootstrap
+authority, never an arbitrary same-repository checkout; a temporary review checkout cannot become
+implementation authority. The repository-wide scan remains a fail-closed audit: an unreadable
+candidate or an identity with only revoked records refuses, and a trusted sibling with no provenance
+from the exact invocation checkout refuses rather than being copied. If the exact checkout has a live
+record, that exact ceiling is copied even when a sibling is narrower. If the repository is proven
+never trusted, the historical unrestricted bootstrap is recorded with the exact invocation checkout
+as provenance; concurrent provisions may copy only that deterministic bootstrap lineage.
 
 **Read-only retained-worktree inventory (#2318).** `queue worktrees` projects every distinct
 resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for
