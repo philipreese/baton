@@ -542,7 +542,22 @@ public sealed class WorkItemAdvancerTests
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
-            await SeedAsync(home, WorkStage.Implement, room);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items =
+                    [
+                        seeded with
+                        {
+                            WorkerAssignment = new FrozenWorkerAssignment(
+                                "implement-decision", "codex", "gpt-5.6-terra", "high", "pool-hash",
+                                "legacy-single-candidate", "Frozen for implementation.", Now),
+                        },
+                    ],
+                },
+                Ct);
             var gh = new FakeGh(PrJson(77, PushedSha));
 
             var facts = await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(PushedSha))
@@ -554,7 +569,15 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueItemState.Queued, item.State);
             Assert.Equal(77, item.PullRequest);
             Assert.Null(item.RoomDirectory);
+            Assert.Null(item.WorkerAssignment);
             Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
+
+            var reviewTier = new QueueTierResolution(
+                "engine", "agy", "gemini-3.8-flash-high", "high", false, null);
+            var reviewOptions = QueueLauncher.BuildOptions(
+                new QueueLaunchRequest(item, reviewTier, Path.Combine(home, "review-room")));
+            Assert.Equal("agy", reviewOptions.Adapter);
+            Assert.Equal("gemini-3.8-flash-high", reviewOptions.Model);
 
             var fact = Assert.Single(facts);
             Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
