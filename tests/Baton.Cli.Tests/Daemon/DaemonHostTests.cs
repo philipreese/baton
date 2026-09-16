@@ -58,8 +58,8 @@ public class DaemonHostTests
         try
         {
             // #1773: the mutex is scoped by the resolved home, not just the username -- this test takes
-            // that same isolated temp-home mutex rather than the real Global\BatonDaemonMutex_{user} the
-            // operator's own daemon under ~/.baton holds, so it can never contend with (or seize) it.
+            // that same isolated temp-home mutex rather than the operator's real per-home mutex
+            // under ~/.baton, so it can never contend with (or seize) it.
             var mutexName = DaemonHost.MutexName(tempHome);
             using var heldByAnotherInstance = new Mutex(true, mutexName, out var thisTestOwnsIt);
             Assert.True(thisTestOwnsIt);
@@ -97,6 +97,22 @@ public class DaemonHostTests
         {
             Directory.Delete(homeA, true);
             Directory.Delete(homeB, true);
+        }
+    }
+
+    [Fact]
+    public void MutexName_DoesNotEmbedTheProcessPrincipalForOneStorageRoot()
+    {
+        var home = CreateTempHome();
+        try
+        {
+            var name = DaemonHost.MutexName(home);
+            Assert.StartsWith("Global\\BatonDaemonMutex_", name, StringComparison.Ordinal);
+            Assert.DoesNotContain(Environment.UserName, name, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(home, true);
         }
     }
 
