@@ -214,20 +214,22 @@ public sealed class QueueCommandTests
                 new QueueOptions(QueueVerb.Add, Tag: "2353-lane", Role: "implement", Issue: 2353,
                     Lifecycle: true, SpecFilePath: brief,
                     DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one admission fixture"),
-                    Requirements: ["network"]),
+                    Requirements: ["file-write", "network", "github-write"]),
                 TextWriter.Null, Ct, sourceRepository,
                 (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo.git", null)),
                 (_, _, _, _, _, _) =>
                 {
                     Directory.CreateDirectory(workspace);
                     ProjectCeilingStore.Set(workspace,
-                        new ProjectCeiling(ReadFiles: true, WriteFiles: true,
+                        new ProjectCeiling(ReadFiles: true, WriteFiles: false,
                             RunShellCommands: true, NetworkAccess: false),
                         ProjectCeilingStore.DefaultPath);
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2353-lane"));
                 }));
 
             Assert.Contains(workspace, refusal.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("file-write", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("WriteFiles", refusal.Message, StringComparison.Ordinal);
             Assert.Contains("NetworkAccess", refusal.Message, StringComparison.Ordinal);
             Assert.False(File.Exists(BatonPaths.QueueFile));
             Assert.False(File.Exists(BatonPaths.QueueSpecFile("2353-lane")));

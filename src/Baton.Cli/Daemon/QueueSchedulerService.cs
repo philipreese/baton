@@ -294,20 +294,25 @@ public sealed class QueueSchedulerService : BackgroundService
             // authority this preflight is meant to catch, and this check is still before a room claim,
             // worktree operation, or vendor spawn.
             var attemptId = FleetAttemptId.New();
-            var admission = TaskRequirementPreflight.Evaluate(
+            var projectPreflight = RecordedProjectCeilingAdmission.Evaluate(
                 item, role, settings.RequireDeclaredRequirements);
+            var admission = projectPreflight.Admission;
             if (admission.Result == TaskRequirementAdmission.Refused)
             {
                 var missing = admission.Missing is { Count: > 0 }
                     ? string.Join(", ", admission.Missing)
                     : "an invalid requirement declaration";
+                var admissionRefusal = projectPreflight.CeilingFound
+                    ? projectPreflight.RefusalMessage(item.Workspace, item.Role)
+                        + " Choose a role that fits the recorded ceiling or explicitly correct trust for that exact workspace; requirements never grant authority."
+                    : $"task requirements are incompatible with role '{item.Role}'s effective grant: missing {missing}. "
+                        + "Choose a role whose grant supplies the requirement, or amend the task declaration; requirements never grant authority.";
                 await _appendFleetEvent(
                     AdmissionEvent(item, tier, attemptId, admission, now), cancellationToken)
                     .ConfigureAwait(false);
                 await FailAsync(
                     item,
-                    $"task requirements are incompatible with role '{item.Role}'s effective grant: missing {missing}. "
-                    + "Choose a role whose grant supplies the requirement, or amend the task declaration; requirements never grant authority.",
+                    admissionRefusal,
                     room: null, now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
                 return interval;
             }

@@ -4,6 +4,7 @@ using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
 using Baton.Templates;
+using Baton.Vendors;
 using Xunit;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -292,6 +293,93 @@ public sealed class QueueSchedulerServiceTests
             Assert.Equal(QueueDecisionEntry.Launched, fact.Decision);
             Assert.Equal(TaskRequirementAdmission.Admitted, fact.Admission!.Result);
             Assert.Contains("github-write", fact.Admission.EffectiveGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_recorded_ceiling_narrows_the_admitted_grant_in_queue_and_decision_ledger()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "capped-workspace");
+            Directory.CreateDirectory(workspace);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: true,
+                    RunShellCommands: false, NetworkAccess: true), ProjectCeilingStore.DefaultPath);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("capped") with
+                {
+                    Workspace = workspace,
+                    Requirements = ["repository-read", "file-write", "network"],
+                }],
+            }, Ct);
+            var service = Service((request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Launched, item.State);
+            Assert.Equal(TaskRequirementAdmission.Admitted, item.LastAdmission!.Result);
+            Assert.DoesNotContain("shell", item.LastAdmission.EffectiveGrant);
+            Assert.DoesNotContain("github-write", item.LastAdmission.EffectiveGrant);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(item.LastAdmission.Result, fact.Admission?.Result);
+            Assert.Equal(item.LastAdmission.EffectiveGrant, fact.Admission?.EffectiveGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_ceiling_narrowed_after_add_refuses_before_a_room_or_vendor_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "narrowed-workspace");
+            Directory.CreateDirectory(workspace);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: false,
+                    RunShellCommands: true, NetworkAccess: false), ProjectCeilingStore.DefaultPath);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("narrowed") with
+                {
+                    Workspace = workspace,
+                    Requirements = ["file-write", "network", "github-write"],
+                }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Equal(TaskRequirementAdmission.Refused, item.LastAdmission!.Result);
+            Assert.Contains("file-write", item.LastAdmission.Missing!);
+            Assert.Contains("WriteFiles", item.Error!, StringComparison.Ordinal);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(item.LastAdmission.Result, fact.Admission?.Result);
+            Assert.Equal(item.LastAdmission.EffectiveGrant, fact.Admission?.EffectiveGrant);
+            Assert.Equal(item.LastAdmission.Missing, fact.Admission?.Missing);
+            Assert.Equal(0, fact.Admission?.VendorUsage);
         }
         finally
         {

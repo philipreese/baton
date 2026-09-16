@@ -96,18 +96,7 @@ internal static class ProjectCeilingGate
         // #1784: strictCategories comes from the ceiling's own booleans, not from `capped` — see
         // CategoriesDefeatedByTheShell's own doc for why the capped value alone cannot be used here.
         // spec/baton.md §9's operator ruling is canonical for the rest; not restated here.
-        HashSet<string> strictCategories = [];
-        if (!ceiling.WriteFiles)
-        {
-            strictCategories.Add(nameof(PermissionGrant.WriteFiles));
-        }
-
-        if (!ceiling.NetworkAccess)
-        {
-            strictCategories.Add(nameof(PermissionGrant.NetworkAccess));
-        }
-
-        if (capped.CategoriesDefeatedByTheShell(strictCategories: strictCategories) is { Count: > 0 } withheld)
+        if (capped.CategoriesDefeatedByTheShell(strictCategories: ceiling.StrictShellCategories()) is { Count: > 0 } withheld)
         {
             throw new IncoherentPermissionGrantException(contract.WorkerName, withheld, capped.ShellCommandPatterns);
         }

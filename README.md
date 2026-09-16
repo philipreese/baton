@@ -73,11 +73,7 @@ adapter/model/effort from a role-and-scope tier table. Every evaluation lands as
 `~/.baton/fleet/queue.jsonl`, so "why did this lane start when it did" is answerable afterwards. The
 numbers and the tier table live in `~/.baton/settings.json` under `Queue`.
 
-When a workspace already has a recorded project ceiling, `queue add` checks its declared
-requirements against the role grant **after** that ceiling narrows it. A known mismatch refuses
-before the queue row or copied brief is written. With `--issue`, the newly provisioned worktree
-may remain: the refusal names its exact path so the operator can change that path's trust
-ceiling, if authorized, and re-add the tag. Baton never widens a narrow ceiling on its own.
+For add-time admission against a recorded project ceiling, see [`spec/baton.md` §13](spec/baton.md#13-the-conductor-queue).
 
 An item added with `--lifecycle` carries a required declared task size and one-clause rationale
 (`--declared-size` and `--size-rationale`; the single vocabulary definition is

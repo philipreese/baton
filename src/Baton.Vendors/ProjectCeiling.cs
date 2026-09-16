@@ -135,4 +135,25 @@ public sealed record ProjectCeiling(
             NetworkAccess = grant.NetworkAccess && NetworkAccess,
         };
     }
+
+    /// <summary>
+    /// The ceiling-closed categories an otherwise granted, unscoped shell could defeat.
+    /// Keep this single security predicate input shared by add-time admission and the launch gate;
+    /// only writes and general network access are defeated by such a shell (spec/baton.md §9).
+    /// </summary>
+    public IReadOnlySet<string> StrictShellCategories()
+    {
+        HashSet<string> categories = [];
+        if (!WriteFiles)
+        {
+            categories.Add(nameof(PermissionGrant.WriteFiles));
+        }
+
+        if (!NetworkAccess)
+        {
+            categories.Add(nameof(PermissionGrant.NetworkAccess));
+        }
+
+        return categories;
+    }
 }

@@ -14,18 +14,20 @@ internal static class TaskRequirementPreflight
     private const string GitHubWriteProbe = "gh issue comment 1 --body admission";
 
     internal static TaskRequirementAdmission Evaluate(
-        QueueItem item, WorkerRole role, bool requireDeclaredRequirements)
+        QueueItem item, WorkerRole role, bool requireDeclaredRequirements,
+        PermissionGrant? cappedGrant = null)
     {
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(role);
 
-        var effectiveGrant = EffectiveGrant(role.Grant, role.Outputs.Select(output => output.Name));
+        var grant = cappedGrant ?? role.Grant;
+        var effectiveGrant = EffectiveGrant(grant, role.Outputs.Select(output => output.Name));
         if (item.Requirements is null)
         {
             var executionBearing = TaskRequirements.IsExecutionBearing(
-                role.Grant.WriteFiles,
-                role.Grant.RunShellCommands && !role.Grant.ShellCommandsAreReadOnly,
-                role.Grant.NetworkAccess);
+                grant.WriteFiles,
+                grant.RunShellCommands && !grant.ShellCommandsAreReadOnly,
+                grant.NetworkAccess);
             return requireDeclaredRequirements && executionBearing
                 ? new TaskRequirementAdmission(
                     null, effectiveGrant, TaskRequirementAdmission.Refused,
