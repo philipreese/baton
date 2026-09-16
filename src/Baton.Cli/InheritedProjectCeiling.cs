@@ -157,7 +157,8 @@ internal static class InheritedProjectCeiling
         string workspacePath,
         string storePath,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool unknownOutranksSource = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(storePath);
         ArgumentNullException.ThrowIfNull(probe);
@@ -243,6 +244,15 @@ internal static class InheritedProjectCeiling
                 sourcePath = recordedPath;
                 source = recorded;
             }
+        }
+
+        if (unknownOutranksSource && unknownPath is not null)
+        {
+            return new InheritanceResult(
+                InheritanceOutcome.CandidateUnknown,
+                CandidatePath: unknownPath,
+                ProbeFailure: unknownFailure,
+                RepositoryIdentity: identity.Value);
         }
 
         if (source is null || sourcePath is null)

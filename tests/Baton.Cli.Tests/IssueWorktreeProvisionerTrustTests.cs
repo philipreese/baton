@@ -95,6 +95,31 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
     }
 
     [Fact]
+    public async Task Provision_refuses_an_unreadable_record_even_when_the_exact_source_is_trusted()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var unreadable = MakeDirectory("unreadable-worktree");
+        var worktree = Path.Combine(_root, "w2333");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Set(unreadable, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe = (path, _) =>
+            path.Equals(unreadable, StringComparison.OrdinalIgnoreCase)
+                ? throw new InvalidOperationException("identity probe failed")
+                : Task.FromResult(RepositoryIdentity.From(null, commonDir));
+
+        var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() =>
+            IssueWorktreeProvisioner.ProvisionAsync(
+                2333, repository, _root, CapturedRepository, Runner(worktree), probe,
+                TextWriter.Null, TestContext.Current.CancellationToken));
+
+        Assert.Contains(unreadable, refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("identity probe failed", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
+    }
+
+    [Fact]
     public async Task Provision_falls_back_to_the_unrestricted_ceiling_when_no_trusted_sibling_matches()
     {
         using var home = new IsolatedBatonHome();

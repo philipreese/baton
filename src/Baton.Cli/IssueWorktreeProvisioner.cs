@@ -384,7 +384,7 @@ public static class IssueWorktreeProvisioner
             // the only source we will copy, but unknown/revoked sibling evidence still blocks the
             // never-trusted `all` fallback.
             var observation = await InheritedProjectCeiling.InspectAsync(
-                workspace, storePath, probe, cancellationToken).ConfigureAwait(false);
+                workspace, storePath, probe, cancellationToken, unknownOutranksSource: true).ConfigureAwait(false);
             switch (observation.Outcome)
             {
                 case InheritanceOutcome.NoIdentity:

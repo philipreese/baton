@@ -481,28 +481,6 @@ internal sealed record QueueWorktreeReferenceIndex(
                     }
                     if (!held) continue;
 
-                    var branchPath = RoomDeliveryBranch.PathFor(room);
-                    if (File.Exists(branchPath))
-                    {
-                        try
-                        {
-                            var branch = File.ReadAllText(branchPath).Trim();
-                            if (branch.Length > 0)
-                            {
-                                if (!branchReferences.TryGetValue(branch, out var branchRooms))
-                                {
-                                    branchRooms = new HashSet<string>(StringComparer.Ordinal);
-                                    branchReferences.Add(branch, branchRooms);
-                                }
-                                branchRooms.Add("room:" + Path.GetFileName(room));
-                            }
-                        }
-                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                        {
-                            complete = false;
-                        }
-                    }
-
                     IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings;
                     try
                     {
@@ -526,11 +504,51 @@ internal sealed record QueueWorktreeReferenceIndex(
                         continue;
                     }
 
+                    var roomReference = "room:" + Path.GetFileName(room);
+                    var branches = new HashSet<string>(StringComparer.Ordinal);
+                    var branchPath = RoomDeliveryBranch.PathFor(room);
+                    if (File.Exists(branchPath))
+                    {
+                        try
+                        {
+                            var recorded = File.ReadAllText(branchPath).Trim();
+                            if (recorded.Length > 0) branches.Add(recorded);
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            // Fall through to the live binding probe below; an unreadable optional
+                            // accounting record is not authority evidence.
+                        }
+                    }
+                    if (branches.Count == 0)
+                    {
+                        foreach (var bindingPath in paths)
+                        {
+                            var observed = await WorkspaceHead.TryReadBranchAsync(bindingPath, cancellationToken)
+                                .ConfigureAwait(false);
+                            if (observed is null)
+                            {
+                                complete = false;
+                                continue;
+                            }
+                            branches.Add(observed);
+                        }
+                    }
+                    foreach (var branch in branches)
+                    {
+                        if (!branchReferences.TryGetValue(branch, out var branchRooms))
+                        {
+                            branchRooms = new HashSet<string>(StringComparer.Ordinal);
+                            branchReferences.Add(branch, branchRooms);
+                        }
+                        branchRooms.Add(roomReference);
+                    }
+
                     var continuation = IsContinuation(room, out var markerComplete);
                     complete &= markerComplete;
                     foreach (var workspace in workspaces.Where(workspace => paths.Contains(workspace, QueueWorktreeReport.PathComparer)))
                     {
-                        references[workspace].Add("room:" + Path.GetFileName(room));
+                        references[workspace].Add(roomReference);
                         if (continuation) references[workspace].Add("continuation:" + Path.GetFileName(room));
                     }
                 }

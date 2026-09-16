@@ -313,6 +313,47 @@ public sealed class QueueWorktreeReportTests
         }
     }
 
+    [Fact]
+    public async Task Live_room_branch_is_probed_when_the_optional_branch_record_is_absent()
+    {
+        var sandbox = Temp("branch-probe");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var otherClone = await RepoAsync(root, "2333-lane");
+            var room = Path.Combine(BatonPaths.Rooms, "unrecorded-branch-room");
+            Directory.CreateDirectory(room);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new(
+                        "shell", new WorkerContract("implement", [], [], []),
+                        PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                        WorkingDirectory: otherClone.Path),
+                },
+                BatonPaths.RoomBindingsFile(room), Ct);
+            Assert.False(File.Exists(RoomDeliveryBranch.PathFor(room)));
+
+            using (ConcurrencyGuard.Acquire(room, "missing branch record fixture"))
+            {
+                var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct);
+
+                Assert.True(index.Complete);
+                Assert.Contains("room:unrecorded-branch-room", index.ForBranch("2333-lane"));
+                Assert.Empty(index.For(candidate.Path));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
     private static QueueItem Item(
         RepoFixture repo,
         string tag,

@@ -7329,24 +7329,8 @@ launched item refuses with `baton cancel <room-dir>`, the existing room-level re
 cancelled tags report that fact rather than pretending a new cancellation occurred.
 
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
-`git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted (§9) — **at the ceiling its
-repository already carries**, inherited through `InheritedProjectCeiling` exactly as `baton dispatch`
-inherits (#2076), and at `all` only as the fallback for a repository that was **never trusted** — no
-recorded path shares its identity, live or tombstoned — which is the verb's pre-#2076 behaviour kept
-for the checkout an operator has never run `baton trust` against. Either way the add says which on its
-own output: the inheritance line names the source path, and the fallback prints `workspace <path>: no
-trusted repository to inherit from; recorded ceiling all`, because the fallback is a real widening and
-a silent one is the shape the announcement exists to rule out. Two other populations refuse instead,
-with `ProjectNotTrustedException` naming the cause, before anything is queued: the identity probe
-answering nothing (git missing, timed out, or exited non-zero) — for the workspace, or for a
-recorded path whose directory exists when no live entry matched (§9's `CandidateUnknown`, named in
-the refusal's remedy) — since "git
-said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
-failure widen a deliberately narrowed ceiling or hide a tombstone; and a **revoked** repository
-(#2121) — every recorded path of it a tombstone — since
-that is the operator's own withdrawal and the fallback would undo it at the next add. §9's revoked
-state paragraph is the one statement of what a tombstone is and how it clears; this section only
-names which population it puts the add in. Add time because an operator queueing eight items at
+`git worktree add <root>/w<n> <n>-lane`, then applies the fresh-provisioning ceiling rule stated above
+under **Explicit retained issue worktree reuse (#2333)**. Add time because an operator queueing eight items at
 23:00 should learn immediately that the issue does not exist, and because it keeps `gh`/`git` spawning
 in the CLI rather than in the background host. `<root>` — which the issue left undefined — is
 `Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,
