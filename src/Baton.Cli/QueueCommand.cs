@@ -187,6 +187,70 @@ public static class QueueCommand
                 "create it, or pass --issue <n> to have the queue provision a worktree for you.");
         }
 
+        // A recorded project ceiling is part of the effective grant, not a later permission request.
+        // Refuse a known-impossible lane before copying its brief or claiming queue/WIP capacity;
+        // --issue may already have provisioned the named worktree, which remains for a safe retry.
+        if (ProjectCeilingStore.TryGetRecord(workspace, ProjectCeilingStore.DefaultPath) is { } ceiling)
+        {
+            if (ceiling.IsRevoked)
+            {
+                throw new CliArgumentException(
+                    $"Workspace '{workspace}' has a revoked project ceiling and cannot admit role '{options.Role}'.",
+                    $"re-trust that exact workspace if authorized, then re-add '{tag}'; its provisioned worktree remains.");
+            }
+
+            var cappedGrant = ceiling.Cap(role.Grant);
+            var cappedAdmission = TaskRequirementPreflight.Evaluate(
+                requirements, cappedGrant, role.Outputs.Select(output => output.Name));
+            var withheldCategories = new List<string>();
+            if (role.Grant.ReadFiles && !ceiling.ReadFiles)
+            {
+                withheldCategories.Add(nameof(PermissionGrant.ReadFiles));
+            }
+
+            if (role.Grant.WriteFiles && !ceiling.WriteFiles)
+            {
+                withheldCategories.Add(nameof(PermissionGrant.WriteFiles));
+            }
+
+            if (role.Grant.RunShellCommands && !ceiling.RunShellCommands)
+            {
+                withheldCategories.Add(nameof(PermissionGrant.RunShellCommands));
+            }
+
+            if (role.Grant.NetworkAccess && !ceiling.NetworkAccess)
+            {
+                withheldCategories.Add(nameof(PermissionGrant.NetworkAccess));
+            }
+
+            HashSet<string> closedCategories = [];
+            if (!ceiling.WriteFiles)
+            {
+                closedCategories.Add(nameof(PermissionGrant.WriteFiles));
+            }
+
+            if (!ceiling.NetworkAccess)
+            {
+                closedCategories.Add(nameof(PermissionGrant.NetworkAccess));
+            }
+
+            var shellDefeatsCeiling = cappedGrant.CategoriesDefeatedByTheShell(
+                strictCategories: closedCategories);
+            if (cappedAdmission.Result == TaskRequirementAdmission.Refused || shellDefeatsCeiling.Count > 0)
+            {
+                var missing = cappedAdmission.Missing is { Count: > 0 }
+                    ? string.Join(", ", cappedAdmission.Missing)
+                    : "none declared";
+                throw new CliArgumentException(
+                    $"Workspace '{workspace}' project ceiling cannot admit role '{options.Role}': "
+                    + $"missing task requirements {missing}; withheld categories {string.Join(", ", withheldCategories)}; "
+                    + $"shell defeats {string.Join(", ", shellDefeatsCeiling)}.",
+                    $"choose a role that fits this ceiling, or explicitly trust that exact workspace for the needed categories, then re-add '{tag}'; a provisioned worktree remains.");
+            }
+
+            admission = cappedAdmission;
+        }
+
         // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
         // times in one evening (#1934 body); an item that launched days later against whatever the
         // file had become is the failure this copy exists to stop.
