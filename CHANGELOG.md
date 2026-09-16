@@ -9,6 +9,53 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.49.0](https://github.com/philipreese/baton/compare/v0.48.0...v0.49.0) (2026-09-16)
+
+
+### Features
+
+* **conductor:** Durable repository-claim register and CLI ([#2296](https://github.com/philipreese/baton/issues/2296)) ([#2299](https://github.com/philipreese/baton/issues/2299)) ([a9ad5fa](https://github.com/philipreese/baton/commit/a9ad5fae6bc4c654d422dff67e2a61576a95b47e))
+* **dispatch:** Grant verified originating-PR ownership to follow-on rooms ([#2304](https://github.com/philipreese/baton/issues/2304)) ([13dad10](https://github.com/philipreese/baton/commit/13dad10aadcdb9ef55b960fd26c5c7141be09d32))
+* **dispatch:** Record declared task size before first launch ([#2306](https://github.com/philipreese/baton/issues/2306)) ([196f633](https://github.com/philipreese/baton/commit/196f633aa10c8c420e1088b594fb5820ffeed413))
+* **queue:** Retire lifecycle work ([#2288](https://github.com/philipreese/baton/issues/2288)) ([a6a76e6](https://github.com/philipreese/baton/commit/a6a76e64114ebefafcac99a84114c5e853157314))
+* **queue:** Smooth lifecycle flow with WIP-aware finish-first scheduling ([#2336](https://github.com/philipreese/baton/issues/2336)) ([b28bd62](https://github.com/philipreese/baton/commit/b28bd62474845d3db7deb1f029da66653c78f966))
+
+
+### Bug Fixes
+
+* **ci:** Reject literal newlines before PR closing declarations ([#2284](https://github.com/philipreese/baton/issues/2284)) ([be0c089](https://github.com/philipreese/baton/commit/be0c08936c82541da658b3a6330871bb99b8684f))
+* **cli:** terminate probe trees before stream drain ([#2294](https://github.com/philipreese/baton/issues/2294)) ([c672467](https://github.com/philipreese/baton/commit/c6724674b5074a18112c9298cac4693c32290eda))
+* **daemon:** make singleton mutex root-scoped across principals ([#2356](https://github.com/philipreese/baton/issues/2356)) ([91cabb9](https://github.com/philipreese/baton/commit/91cabb9bf751f355b8481b40f91a97a4bd3349fc))
+* **dispatch:** Preserve required artifacts at execution cap ([#2287](https://github.com/philipreese/baton/issues/2287)) ([aaa0deb](https://github.com/philipreese/baton/commit/aaa0deb244ad880975b6f77035e801c439d62ff3))
+* **dispatch:** Preserve required artifacts at execution cap ([#2334](https://github.com/philipreese/baton/issues/2334)) ([24e3f98](https://github.com/philipreese/baton/commit/24e3f9815aa24283200367766ecf391006d7e63d))
+* **dispatch:** Preserve valid artifacts at cap boundary ([#2291](https://github.com/philipreese/baton/issues/2291)) ([622b75c](https://github.com/philipreese/baton/commit/622b75cc09bf3ae57c4a4bbae7ea9bda9936b546))
+* **dispatch:** Separate worker handoff prose from post-execution delivery facts ([#2323](https://github.com/philipreese/baton/issues/2323)) ([77e92e1](https://github.com/philipreese/baton/commit/77e92e16aac2cd2bb51965f1259cc501bb107da6))
+* **queue:** Halt artifactless review failures instead of redispatching unchanged heads ([#2303](https://github.com/philipreese/baton/issues/2303)) ([1eb3fb6](https://github.com/philipreese/baton/commit/1eb3fb6cc90129e76148033b0169656346cfa47f))
+* **queue:** Halt noncanonical review identity instead of buying a stale-head retry ([#2307](https://github.com/philipreese/baton/issues/2307)) ([82a8cb5](https://github.com/philipreese/baton/commit/82a8cb5def39f31f54d2a66ed16d36fa140d104b))
+* **queue:** Halt zero-step failed lanes before continuation ([#2332](https://github.com/philipreese/baton/issues/2332)) ([b1a8853](https://github.com/philipreese/baton/commit/b1a8853cb9a8b483e4387ff6efea2bf7639caf63))
+* **queue:** Keep lifecycle reviewedRef requirements outside editable templates ([#2326](https://github.com/philipreese/baton/issues/2326)) ([89105bf](https://github.com/philipreese/baton/commit/89105bf66cec20fb32d51998cfe43d3f3c053a2f))
+* **queue:** Never strand an automatic fix without its paired re-review ([#2290](https://github.com/philipreese/baton/issues/2290)) ([940fca1](https://github.com/philipreese/baton/commit/940fca10ce77e7ea8823df359df7c587c18c271c))
+* **queue:** Permit exact admission metadata before refusal ([#2349](https://github.com/philipreese/baton/issues/2349)) ([3cdfdcd](https://github.com/philipreese/baton/commit/3cdfdcd05042982375ae022412ba2dd15df5db62))
+* **queue:** Preserve failed rows without refused admission on merged board reads ([#2343](https://github.com/philipreese/baton/issues/2343)) ([6c4b1be](https://github.com/philipreese/baton/commit/6c4b1be15e135f0fc45ea8c2ec04cb372a4fc92f))
+* **queue:** Prevent impossible no-PR continuations ([#2339](https://github.com/philipreese/baton/issues/2339)) ([5727f63](https://github.com/philipreese/baton/commit/5727f63e1922371fb8fdf4a3647eed73b0753490))
+* **queue:** Provision a suffix for reopened issue worktrees ([#2330](https://github.com/philipreese/baton/issues/2330)) ([b20de7e](https://github.com/philipreese/baton/commit/b20de7e880f223fe6c25d5821369ef81f69b0574))
+* **queue:** Provision reopened issues after canonical lane merge ([#2295](https://github.com/philipreese/baton/issues/2295)) ([7440bcc](https://github.com/philipreese/baton/commit/7440bcc3738bbf189e6b0a171391d7579df52b48))
+* **queue:** Recognize pre-room claim stamp in refused proof ([#2351](https://github.com/philipreese/baton/issues/2351)) ([6514362](https://github.com/philipreese/baton/commit/6514362b6b7a9cbbcb561823d29abb84259babf9))
+* **queue:** refuse impossible inherited-ceiling admissions ([#2354](https://github.com/philipreese/baton/issues/2354)) ([3542272](https://github.com/philipreese/baton/commit/3542272526d290964fb2a46bdac6cdef6f747775))
+* **queue:** Reobserve a fresh PR head whose required checks have not materialized ([#2310](https://github.com/philipreese/baton/issues/2310)) ([2a2edd5](https://github.com/philipreese/baton/commit/2a2edd556993b2885244c020e9d878f8744ef184))
+* **queue:** Require measured workspace changes for automatic budget-arrest continuation ([#2253](https://github.com/philipreese/baton/issues/2253)) ([21e1ae9](https://github.com/philipreese/baton/commit/21e1ae920683322f5b96922864c82356e59f467f))
+* **queue:** Retire journal-terminal rooms without a sentinel ([#2337](https://github.com/philipreese/baton/issues/2337)) ([563d086](https://github.com/philipreese/baton/commit/563d08683ade8c74773bbace71f5cc825d6700e9))
+* **queue:** Retire legacy lifecycle WIP with protected proof ([#2345](https://github.com/philipreese/baton/issues/2345)) ([2f292a6](https://github.com/philipreese/baton/commit/2f292a68e8f3abe48094b545811708c81faa57e1))
+* **queue:** Retire merged admission-refused rows ([#2292](https://github.com/philipreese/baton/issues/2292)) ([ae05abb](https://github.com/philipreese/baton/commit/ae05abbb3c0282511234dc15d8bef198661610c4))
+* **queue:** Retire non-live lifecycle rows after a trusted merged-PR read ([#2321](https://github.com/philipreese/baton/issues/2321)) ([589a6e0](https://github.com/philipreese/baton/commit/589a6e0f19e209adba2ed391b1248860ac86e05c))
+* **tool-refresh:** Report dry-run as preview, not active ([#2352](https://github.com/philipreese/baton/issues/2352)) ([92e5232](https://github.com/philipreese/baton/commit/92e523235d72a8216f00f93557bf997a6a7dc0d8))
+* **ui:** Batch Fleet Glass event replay rendering ([#2298](https://github.com/philipreese/baton/issues/2298)) ([f39426d](https://github.com/philipreese/baton/commit/f39426da5d8a23dd22df268f0047a58c2fbbd959))
+
+
+### Performance Improvements
+
+* **gates:** Permit three concurrent full-suite project hosts ([#2341](https://github.com/philipreese/baton/issues/2341)) ([568ca40](https://github.com/philipreese/baton/commit/568ca40e45ccb391cb6896011dd620110874e842))
+
 ## [0.48.0](https://github.com/philipreese/baton/compare/v0.47.0...v0.48.0) (2026-09-13)
 
 
