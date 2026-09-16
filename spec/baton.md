@@ -1679,8 +1679,8 @@ as ordinarily `Succeeded`.
 
 **Post-exit delivery check (#1788).** For a role whose catalog entry sets `WorkerRole.DeliversBranch`
 (today, only `implement`) — a role whose brief convention ends in a push — `MutationInterface` runs one
-more read-only assertion after the worker exits 0 AND the ordinary engine-run verify above has already
-passed or did not run (never instead of it, and never before it): (1) the workspace's `HEAD` is
+read-only delivery assertion after the worker exits 0 and before the ordinary engine-run verify above:
+(1) the workspace's `HEAD` is
 reachable from `origin/<branch>` (`git ls-remote --exit-code --heads origin <branch>`, then `git fetch
 origin +refs/heads/<branch>:refs/remotes/origin/<branch>` and `git merge-base --is-ancestor HEAD
 origin/<branch>`), and (2) when a PR is expected (`--expect-pr`, defaulting to
@@ -1693,6 +1693,16 @@ cannot certify the later exact head and makes this delivery assertion `NotRun`, 
 general PR reader's truthful "some PR is open" answer. Two lanes shipped
 `implement: Succeeded` reports describing a push and a PR while their branch sat only local — the
 motivating measurement.
+
+**Delivery preflight precedes the expensive gate (#2357).** Delivery is a necessary condition for a
+branch-delivering execution. A failed or operator-cancelled delivery assertion settles through the
+existing `DeliveryFailed` or cancellation path without starting workspace verification; an unpushed
+branch cannot be rescued by a build. A positive delivery assertion does not skip or weaken that gate:
+workspace verification still runs, and only after it passes or is positively `NotRun` does Baton append
+the final machine-owned delivery observation. That observation must name the same local and remote
+heads the preflight checked, so a verify command that mutates the branch fails exact-head delivery
+instead of attaching an old pass to a new checkout. Replayed journal evidence follows the same order
+without a fresh remote probe.
 
 **Machine-owned delivery observation (#2309).** The worker's `changes.md` is an early, as-of
 narrative, never a certificate for a later commit, push, or PR change. On the eligible post-exit path
@@ -7197,7 +7207,25 @@ writes no sentinel or room evidence; it only records the queue disposition after
 `baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
 engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeout <minutes>] [--max-tool-steps]
 [--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`, and
-`import <file>`.
+`import <file>`, and `worktrees [--format text|json]`.
+
+**Read-only retained-worktree inventory (#2318).** `queue worktrees` projects every distinct
+resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for
+compatibility: only the exact creation fact `issue-provisioned` confers Baton ownership;
+`operator-supplied`, `imported-unknown`, and historical null are respectively non-owned or
+unknown and are never inferred from names, roots, issue links, or Git state. Text and JSON expose
+the same identity, rows, origin, root containment, expected repository/branch, raw porcelain
+status, substantive cleanliness, bounded byte observation, known active references, and stable
+reason codes.
+
+The command writes no state and never authorizes deletion. A **static candidate** is only a
+read-only observation: every referring row is durably retired or cancelled before launch, no known
+active Baton reference remains, the path is strictly under `Queue.WorktreeRoot`, Git registers
+that exact path to the recorded repository, the attached expected local branch names checkout
+HEAD, and no substantive uncommitted content exists. Failed, missing, conflicting, dirty,
+outside-root, historical, imported, operator-supplied, active, failed/halted, or unavailable
+observations stay retain/unknown. The local Git probes and size walk are bounded; probe failure is
+visible as unknown rather than a candidate.
 
 `--skill <name>` is repeatable on an ordinary dispatch request. Its declaration uses dispatch's own
 normalization — surrounding whitespace is removed, first-seen order is retained, duplicates collapse,

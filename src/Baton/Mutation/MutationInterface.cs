@@ -2366,6 +2366,50 @@ public static class MutationInterface
                 workspaceHeadShaAtStart, openPullRequest: openPullRequest,
                 verifiesWorkspace: binding.VerifiesWorkspace);
 
+            FlowEvent.DeliveryObservationRecorded? recordedDelivery = null;
+            DeliveryCheckOutcome? deliveryOutcomeBeforeVerify = null;
+            if (classification.Verdict == OutcomeVerdict.Succeeded && binding.DeliversBranch)
+            {
+                // Delivery is the cheaper necessary condition. A branch that is not pushed (or has no
+                // required PR) cannot be rescued by an expensive workspace gate, so establish that
+                // fact before starting verify. Passed evidence is observed only after verify below;
+                // comparing its pre-gate checked heads with the post-gate observation preserves the
+                // exact-head invariant if a misbehaving gate mutates the repository.
+                var shippingCeilingExceeded = ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(
+                    usageParser, prepared.OutputDirectory);
+                var priorDeliveryEvents = await eventLogReader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false);
+                recordedDelivery = priorDeliveryEvents.OfType<FlowEvent.DeliveryObservationRecorded>()
+                    .LastOrDefault(observation => observation.ExecutionId == prepared.Request.ExecutionId);
+                if (recordedDelivery is not null)
+                {
+                    var reading = DeliveryVerifier.ReadRecordedEvidence(recordedDelivery);
+                    deliveryOutcomeBeforeVerify = reading.Evidence?.ToOutcome()
+                        ?? new DeliveryCheckOutcome(DeliveryCheckStatus.Failed, Tail: reading.Problem);
+                }
+                else
+                {
+                    deliveryOutcomeBeforeVerify = await DeliveryVerifier.CheckAsync(
+                        binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
+                        shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
+                }
+
+                if (deliveryOutcomeBeforeVerify.Status is DeliveryCheckStatus.Failed or DeliveryCheckStatus.Cancelled)
+                {
+                    if (recordedDelivery is null)
+                    {
+                        deliveryOutcomeBeforeVerify = await RecordDeliveryEvidenceAsync(
+                            prepared, binding, deliveryOutcomeBeforeVerify, eventLogWriter).ConfigureAwait(false);
+                    }
+
+                    if (await ApplyDeliveryOutcomeAsync(
+                            prepared.Request.ExecutionId, deliveryOutcomeBeforeVerify, eventLogWriter,
+                            dispatchCancellationToken).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+                }
+            }
+
             // #1623 (contract: spec/baton.md §3): the engine's own verify
             // step, spawned here -- between Classify returning Succeeded and the outcome event append
             // below -- rather than inside OutcomeClassifier.Classify itself, because Classify also runs
@@ -2458,6 +2502,14 @@ public static class MutationInterface
                                 verifyOutcome.NotRunReason ?? "build lock busy",
                                 BuildLockBusy: true),
                             CancellationToken.None).ConfigureAwait(false);
+                        if (binding.DeliversBranch && recordedDelivery is null)
+                        {
+                            var finalDelivery = await RecordDeliveryEvidenceAsync(
+                                prepared, binding, deliveryOutcomeBeforeVerify!, eventLogWriter).ConfigureAwait(false);
+                            _ = await ApplyDeliveryOutcomeAsync(
+                                prepared.Request.ExecutionId, finalDelivery, eventLogWriter,
+                                dispatchCancellationToken).ConfigureAwait(false);
+                        }
                         return;
                     }
                     else
@@ -2477,108 +2529,20 @@ public static class MutationInterface
                 }
             }
 
-            // #1788: DeliveryVerifier.CheckAsync's own doc names the contract (spec/baton.md §3). Placed
-            // here so it only runs once the block above has fallen through without an early return
-            // (verify passed, was not runnable, or the role declares none) -- never after a VerifyFailed
-            // return.
             if (classification.Verdict == OutcomeVerdict.Succeeded && binding.DeliversBranch)
             {
-                // #1998: read before the check, not after — a shipping command killed at its ceiling is
-                // exactly what produces the branch-not-pushed the check is about to find, and the tail
-                // it writes is the only place that cause survives.
-                var shippingCeilingExceeded = ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(
-                    usageParser, prepared.OutputDirectory);
-                // The output directory is worker-writable. Only an engine-authored journal event can
-                // identify a prior observation on replay; a pre-placed file never skips the probe.
-                var priorDeliveryEvents = await eventLogReader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false);
-                var recorded = priorDeliveryEvents.OfType<FlowEvent.DeliveryObservationRecorded>()
-                    .LastOrDefault(observation => observation.ExecutionId == prepared.Request.ExecutionId);
-                DeliveryCheckOutcome deliveryOutcome;
-                if (recorded is not null)
+                var deliveryOutcome = deliveryOutcomeBeforeVerify!;
+                if (recordedDelivery is null)
                 {
-                    var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
-                    deliveryOutcome = reading.Evidence?.ToOutcome()
-                        ?? new DeliveryCheckOutcome(DeliveryCheckStatus.Failed, Tail: reading.Problem);
+                    deliveryOutcome = await RecordDeliveryEvidenceAsync(
+                        prepared, binding, deliveryOutcome, eventLogWriter).ConfigureAwait(false);
                 }
-                else
+
+                if (await ApplyDeliveryOutcomeAsync(
+                        prepared.Request.ExecutionId, deliveryOutcome, eventLogWriter,
+                        dispatchCancellationToken).ConfigureAwait(false))
                 {
-                    deliveryOutcome = await DeliveryVerifier.CheckAsync(
-                        binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
-                        shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
-                    var evidence = await DeliveryVerifier.ObserveAsync(
-                        binding.Target.WorkingDirectory, binding.ExpectPr, deliveryOutcome, CancellationToken.None)
-                        .ConfigureAwait(false);
-                    if (deliveryOutcome.Status == DeliveryCheckStatus.Passed)
-                    {
-                        if (deliveryOutcome.CheckedLocalHead is null || deliveryOutcome.CheckedRemoteHead is null)
-                        {
-                            evidence = evidence with { ObservationProblem = "passing probe did not retain its exact checked heads" };
-                        }
-                        else if (evidence.LocalHead is not null && evidence.RemoteHead is not null
-                            && (!string.Equals(deliveryOutcome.CheckedLocalHead, evidence.LocalHead, StringComparison.Ordinal)
-                                || !string.Equals(deliveryOutcome.CheckedRemoteHead, evidence.RemoteHead, StringComparison.Ordinal)))
-                        {
-                            // A second valid answer about a different head is not the head the
-                            // ancestry check proved. Never attach that old pass to the new stamp.
-                            const string changedHeads = "delivery heads changed between verification and final observation";
-                            evidence = evidence with
-                            {
-                                Verification = DeliveryCheckStatus.Failed,
-                                VerificationReason = changedHeads,
-                                ObservationProblem = changedHeads,
-                            };
-                        }
-                    }
-                    var observationEvent = evidence.ToRecordedEvent(prepared.Request.ExecutionId);
-                    await eventLogWriter.AppendAsync(observationEvent, CancellationToken.None)
-                        .ConfigureAwait(false);
-                    // The delivery probe and the provenance reads are separate spawns. A Passed
-                    // check with an incomplete final HEAD/remote observation cannot advance a lane
-                    // whose status would truthfully call its machine stamp unknown.
-                    var validatedObservation = DeliveryVerifier.ReadRecordedEvidence(observationEvent);
-                    deliveryOutcome = validatedObservation.Evidence?.ToOutcome()
-                        ?? new DeliveryCheckOutcome(DeliveryCheckStatus.Failed, Tail: validatedObservation.Problem);
-                    try
-                    {
-                        await DeliveryVerifier.WriteEvidenceSnapshotAsync(prepared.OutputDirectory, evidence, CancellationToken.None)
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        Console.Error.WriteLine($"Could not project delivery observation cache: {ex.Message}.");
-                    }
-                }
-                switch (deliveryOutcome.Status)
-                {
-                    // #1788 review: the operator's own cancel landing inside this check's own window --
-                    // mirrors the ordinary verify block's identical arm a few lines up. Never a
-                    // VerifyFailed/VerifyNotRun (both would be a misleading account of an execution the
-                    // operator asked to stop, not one the delivery check itself judged), and never a
-                    // silent fall-through to the Succeeded outcome append below.
-                    case DeliveryCheckStatus.Cancelled when dispatchCancellationToken.IsCancellationRequested:
-                        await eventLogWriter.AppendAsync(
-                                new FlowEvent.ExecutionCancelled(prepared.Request.ExecutionId),
-                                CancellationToken.None).ConfigureAwait(false);
-                        return;
-                    case DeliveryCheckStatus.Failed:
-                        await eventLogWriter.AppendAsync(
-                                new FlowEvent.VerifyFailed(
-                                    prepared.Request.ExecutionId,
-                                    deliveryOutcome.FailingMembers,
-                                    deliveryOutcome.Tail,
-                                    VerifyFailedKind.DeliveryFailed),
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                        return;
-                    case DeliveryCheckStatus.NotRun:
-                        await eventLogWriter.AppendAsync(
-                                new FlowEvent.VerifyNotRun(prepared.Request.ExecutionId, deliveryOutcome.NotRunReason!),
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                        break;
-                    case DeliveryCheckStatus.Passed:
-                    default:
-                        break;
+                    return;
                 }
             }
 
@@ -2646,6 +2610,88 @@ public static class MutationInterface
         finally
         {
             inFlightExecutions.Unregister(prepared.Request.ExecutionId);
+        }
+    }
+
+    private static async Task<DeliveryCheckOutcome> RecordDeliveryEvidenceAsync(
+        PreparedExecution prepared,
+        WorkerBinding.Process binding,
+        DeliveryCheckOutcome deliveryOutcome,
+        IEventLogWriter eventLogWriter)
+    {
+        var evidence = await DeliveryVerifier.ObserveAsync(
+            binding.Target.WorkingDirectory, binding.ExpectPr, deliveryOutcome, CancellationToken.None)
+            .ConfigureAwait(false);
+        if (deliveryOutcome.Status == DeliveryCheckStatus.Passed)
+        {
+            if (deliveryOutcome.CheckedLocalHead is null || deliveryOutcome.CheckedRemoteHead is null)
+            {
+                evidence = evidence with { ObservationProblem = "passing probe did not retain its exact checked heads" };
+            }
+            else if (evidence.LocalHead is not null && evidence.RemoteHead is not null
+                && (!string.Equals(deliveryOutcome.CheckedLocalHead, evidence.LocalHead, StringComparison.Ordinal)
+                    || !string.Equals(deliveryOutcome.CheckedRemoteHead, evidence.RemoteHead, StringComparison.Ordinal)))
+            {
+                // A second valid answer about a different head is not the head the ancestry check
+                // proved. This also catches a verify command that mutates the branch after preflight.
+                const string changedHeads = "delivery heads changed between verification and final observation";
+                evidence = evidence with
+                {
+                    Verification = DeliveryCheckStatus.Failed,
+                    VerificationReason = changedHeads,
+                    ObservationProblem = changedHeads,
+                };
+            }
+        }
+
+        var observationEvent = evidence.ToRecordedEvent(prepared.Request.ExecutionId);
+        await eventLogWriter.AppendAsync(observationEvent, CancellationToken.None).ConfigureAwait(false);
+        var validatedObservation = DeliveryVerifier.ReadRecordedEvidence(observationEvent);
+        var validatedOutcome = validatedObservation.Evidence?.ToOutcome()
+            ?? new DeliveryCheckOutcome(DeliveryCheckStatus.Failed, Tail: validatedObservation.Problem);
+        try
+        {
+            await DeliveryVerifier.WriteEvidenceSnapshotAsync(
+                prepared.OutputDirectory, evidence, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not project delivery observation cache: {ex.Message}.");
+        }
+
+        return validatedOutcome;
+    }
+
+    private static async Task<bool> ApplyDeliveryOutcomeAsync(
+        ExecutionId executionId,
+        DeliveryCheckOutcome deliveryOutcome,
+        IEventLogWriter eventLogWriter,
+        CancellationToken dispatchCancellationToken)
+    {
+        switch (deliveryOutcome.Status)
+        {
+            case DeliveryCheckStatus.Cancelled when dispatchCancellationToken.IsCancellationRequested:
+                await eventLogWriter.AppendAsync(
+                    new FlowEvent.ExecutionCancelled(executionId), CancellationToken.None).ConfigureAwait(false);
+                return true;
+            case DeliveryCheckStatus.Failed:
+                await eventLogWriter.AppendAsync(
+                        new FlowEvent.VerifyFailed(
+                            executionId,
+                            deliveryOutcome.FailingMembers,
+                            deliveryOutcome.Tail,
+                            VerifyFailedKind.DeliveryFailed),
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                return true;
+            case DeliveryCheckStatus.NotRun:
+                await eventLogWriter.AppendAsync(
+                    new FlowEvent.VerifyNotRun(executionId, deliveryOutcome.NotRunReason!), CancellationToken.None)
+                    .ConfigureAwait(false);
+                return false;
+            case DeliveryCheckStatus.Passed:
+            default:
+                return false;
         }
     }
 

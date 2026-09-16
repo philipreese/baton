@@ -96,6 +96,138 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     [Fact]
+    public async Task An_unpushed_delivery_failure_short_circuits_before_workspace_verify()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-before-verify");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget(
+                        "cmd",
+                        ["/c", "git commit --allow-empty -m unpushed -q && echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30),
+                    VerifyCommandOverride: "exit 0",
+                    DeliversBranch: true,
+                    ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var stepState = Assert.Single(finalState.Steps);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(stepState.IndeterminateAwaitingResolution);
+            Assert.Empty(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.Empty(events.OfType<FlowEvent.VerifyPassed>());
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["branch-not-pushed"], failed.FailingMembers);
+            Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
+    public async Task A_pushed_delivery_still_runs_workspace_verify_before_success()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-then-verify");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget(
+                        "cmd",
+                        ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30),
+                    VerifyCommandOverride: "exit 0",
+                    DeliversBranch: true,
+                    ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            var step = Assert.Single(finalState.Steps);
+            Assert.False(step.IndeterminateAwaitingResolution, step.IndeterminateReason ?? "unexpected indeterminate settle");
+            Assert.Equal(StepStatus.Succeeded, step.Status);
+            Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.Single(events.OfType<FlowEvent.VerifyPassed>());
+            Assert.Empty(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_build_lock_blocked_verify_records_and_enforces_the_final_delivery_head(bool mutatesHead)
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-delivery-build-lock-busy-" + mutatesHead);
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var verifyCommand = mutatesHead
+                ? "git commit --allow-empty -m verify-mutated-head -q && echo GATES: BLOCKED 1 of 1 -- build & exit 3"
+                : "echo GATES: BLOCKED 1 of 1 -- build & exit 3";
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget("cmd", ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"], WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30),
+                    VerifyCommandOverride: verifyCommand,
+                    DeliversBranch: true,
+                    ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(Assert.Single(finalState.Steps).IndeterminateAwaitingResolution);
+            Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.True(Assert.Single(events.OfType<FlowEvent.VerifyNotRun>()).BuildLockBusy);
+            var observation = Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+            if (mutatesHead)
+            {
+                Assert.Equal("Failed", observation.Verification);
+                Assert.Contains("delivery heads changed", observation.VerificationReason, StringComparison.Ordinal);
+                Assert.Equal(VerifyFailedKind.DeliveryFailed, Assert.Single(events.OfType<FlowEvent.VerifyFailed>()).Kind);
+            }
+            else
+            {
+                Assert.Equal("Passed", observation.Verification);
+                Assert.Equal(observation.LocalHead, observation.RemoteHead);
+                Assert.Empty(events.OfType<FlowEvent.VerifyFailed>());
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
     public async Task A_role_that_does_not_deliver_a_branch_never_runs_the_check_even_when_unpushed()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-readonly");

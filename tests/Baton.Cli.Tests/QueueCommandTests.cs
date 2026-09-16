@@ -58,6 +58,7 @@ public sealed class QueueCommandTests
             Assert.Equal(adapter, item.Adapter);
             Assert.Equal(model, item.Model);
             Assert.Null(item.Effort);
+            Assert.Equal(WorkspaceOrigins.OperatorSupplied, item.WorkspaceOrigin);
         }
         finally
         {
@@ -579,6 +580,7 @@ public sealed class QueueCommandTests
             Assert.Equal("github.com/owner/repo", item.Repository);
             Assert.Null(item.Stage);
             Assert.Equal("2202-lane", item.Branch);
+            Assert.Equal(WorkspaceOrigins.IssueProvisioned, item.WorkspaceOrigin);
         }
         finally
         {
@@ -1941,6 +1943,7 @@ public sealed class QueueCommandTests
 
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(["house-style", "thorough-review"], item.Skills);
+            Assert.Equal(WorkspaceOrigins.ImportedUnknown, item.WorkspaceOrigin);
         }
         finally
         {
@@ -2594,6 +2597,7 @@ public sealed class QueueCommandTests
                     Tag = "restore-outbox", Role = "implement", Workspace = home,
                     SpecFile = BatonPaths.QueueSpecFile("restore-outbox"), Stage = WorkStage.Implement,
                     State = QueueItemState.Failed,
+                    WorkspaceOrigin = WorkspaceOrigins.IssueProvisioned,
                     Retirement = new QueueRetirement(QueueRetirement.Operator, at, "handled"),
                     DispositionOperations = [retire],
                 }],
@@ -2604,6 +2608,7 @@ public sealed class QueueCommandTests
 
             var item = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
             Assert.Null(item.Retirement);
+            Assert.Equal(WorkspaceOrigins.IssueProvisioned, item.WorkspaceOrigin);
             Assert.Equal([QueueDecisionEntry.Retired, QueueDecisionEntry.Restored], item.DispositionOutbox.Select(x => x.Decision));
             Assert.Equal([QueueDecisionEntry.Retired, QueueDecisionEntry.Restored],
                 (await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct)).Select(x => x.Decision));

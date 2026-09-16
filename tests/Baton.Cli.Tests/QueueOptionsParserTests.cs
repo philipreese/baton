@@ -361,4 +361,12 @@ public sealed class QueueOptionsParserTests
     {
         Assert.Contains("--skill <name>", QueueOptionsParser.Usage, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Worktrees_parses_its_two_output_formats_and_refuses_other_arguments()
+    {
+        Assert.Equal(QueueVerb.Worktrees, QueueOptionsParser.Parse(["worktrees"]).Verb);
+        Assert.Equal(QueueWorktreesOutputFormat.Json, QueueOptionsParser.Parse(["worktrees", "--format", "json"]).Format);
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["worktrees", "--format", "xml"]));
+    }
 }

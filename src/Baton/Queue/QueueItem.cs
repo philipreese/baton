@@ -239,6 +239,14 @@ public sealed record QueueItem
     /// <c>--issue</c> item gets it from the worktree provisioned at add time.</summary>
     public required string Workspace { get; init; }
 
+    /// <summary>
+    /// Durable workspace origin: <see cref="WorkspaceOrigins.IssueProvisioned"/>,
+    /// <see cref="WorkspaceOrigins.OperatorSupplied"/>, <see cref="WorkspaceOrigins.ImportedUnknown"/>,
+    /// or <see langword="null"/> for historical unknown rows (#2318). Never inferred from names, paths,
+    /// issue links, or Git state; historical null is interpreted as unknown.
+    /// </summary>
+    public string? WorkspaceOrigin { get; init; }
+
     /// <summary>Baton's own copy of the spec (<c>BatonPaths.QueueSpecFile</c>). Absolute, so a
     /// relocated <c>~/.baton</c> is a re-add rather than a silently missing file.</summary>
     public required string SpecFile { get; init; }
@@ -376,4 +384,20 @@ public enum QueueItemState
 
     /// <summary>The operator cancelled this request before the scheduler claimed its launch.</summary>
     Cancelled,
+}
+
+/// <summary>Durable workspace origin values persisted on queue items (#2318).</summary>
+public static class WorkspaceOrigins
+{
+    /// <summary>Baton queue add with an issue positively provisioned or reused the workspace.</summary>
+    public const string IssueProvisioned = "issue-provisioned";
+
+    /// <summary>The operator supplied an explicit workspace path.</summary>
+    public const string OperatorSupplied = "operator-supplied";
+
+    /// <summary>A queue import supplied a workspace without Baton creation evidence.</summary>
+    public const string ImportedUnknown = "imported-unknown";
+
+    /// <summary>Interpretation token for historical null provenance.</summary>
+    public const string Unknown = "unknown";
 }

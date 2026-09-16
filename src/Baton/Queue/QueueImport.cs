@@ -152,6 +152,7 @@ public static class QueueImport
                 Issue = entry.Issue,
                 PinModel = entry.PinModel,
                 External = entry.External,
+                WorkspaceOrigin = WorkspaceOrigins.ImportedUnknown,
                 State = entry.Launched ? QueueItemState.Launched : QueueItemState.Queued,
                 LaunchedAt = entry.Launched ? now : null,
                 AddedAt = now,

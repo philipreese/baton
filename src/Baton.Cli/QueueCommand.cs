@@ -68,6 +68,7 @@ public static class QueueCommand
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
             QueueVerb.List => ListAsync(options.Active, output, cancellationToken),
+            QueueVerb.Worktrees => WorktreesAsync(options.Format, output, repositoryDirectory, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
             QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
@@ -235,6 +236,7 @@ public static class QueueCommand
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.
             AutomaticFixUsed = options.Lifecycle ? false : null,
+            WorkspaceOrigin = options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
             AddedAt = DateTimeOffset.UtcNow,
         };
 
@@ -424,6 +426,22 @@ public static class QueueCommand
                 + "runs, losing the reviewer's findings.",
                 "let the daemon advance it, or pick a different tag if this is genuinely new work.");
         }
+    }
+
+    private static async Task<int> WorktreesAsync(
+        QueueWorktreesOutputFormat format,
+        TextWriter output,
+        string? repositoryDirectory,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
+        var sourceRepository = Path.GetFullPath(repositoryDirectory ?? Directory.GetCurrentDirectory());
+        var worktreeRoot = settings.Queue.WorktreeRoot ?? Path.GetDirectoryName(sourceRepository);
+        var report = await QueueWorktreeReport.CreateAsync(
+            snapshot.Items, worktreeRoot, cancellationToken).ConfigureAwait(false);
+        output.WriteLine(format == QueueWorktreesOutputFormat.Json ? report.ToJson() : report.ToText());
+        return 0;
     }
 
     private static async Task<int> ListAsync(bool active, TextWriter output, CancellationToken cancellationToken)
