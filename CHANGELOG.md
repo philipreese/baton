@@ -16,6 +16,10 @@ shared version through `0.14.0`.
 
 * **queue:** audit retained-worktree cleanup candidates ([#2358](https://github.com/philipreese/baton/issues/2358)) ([8232f11](https://github.com/philipreese/baton/commit/8232f119cd10fdf6dcc755a02a673122a641d66b))
 
+### Performance Improvements
+
+* **engine:** check delivery before post-exit workspace verification ([#2357](https://github.com/philipreese/baton/issues/2357)) ([8232f11](https://github.com/philipreese/baton/commit/8232f119cd10fdf6dcc755a02a673122a641d66b))
+
 ## [0.49.0](https://github.com/philipreese/baton/compare/v0.48.0...v0.49.0) (2026-09-16)
 
 
