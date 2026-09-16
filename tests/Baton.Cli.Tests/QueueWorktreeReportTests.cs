@@ -80,7 +80,8 @@ public sealed class QueueWorktreeReportTests
                 },
             };
 
-            var report = await QueueWorktreeReport.CreateAsync(items, root, Ct);
+            var report = await QueueWorktreeReport.CreateAsync(
+                items, root, Ct, livenessProbe: IsolatedProbe(sandbox));
 
             var candidateEntry = Find(report, "candidate");
             Assert.True(candidateEntry.Classification == "candidate",
@@ -144,7 +145,8 @@ public sealed class QueueWorktreeReportTests
                 [Item(repo, "repository-probe-unavailable")],
                 root,
                 Ct,
-                (_, _) => Task.FromResult<Baton.Accounting.RepositoryIdentity?>(null));
+                (_, _) => Task.FromResult<Baton.Accounting.RepositoryIdentity?>(null),
+                IsolatedProbe(sandbox));
 
             AssertReason(report, "repository-probe-unavailable", "repository-probe-unavailable", "unknown");
         }
@@ -168,7 +170,8 @@ public sealed class QueueWorktreeReportTests
             for (var index = 0; index < 400; index++)
                 await File.WriteAllTextAsync(Path.Combine(repo.Path, $"untracked-{index:D4}-{new string('x', 40)}.txt"), "x", Ct);
 
-            var entry = Find(await QueueWorktreeReport.CreateAsync([Item(repo, "many-untracked")], root, Ct), "many-untracked");
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "many-untracked")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "many-untracked");
 
             Assert.Equal("dirty", entry.Git.SubstantiveCleanliness);
             Assert.True(entry.Git.RawStatusTruncated);
@@ -207,8 +210,10 @@ public sealed class QueueWorktreeReportTests
             var beforeRegistration = await GitOutputAsync(repo.Path, "worktree", "list", "--porcelain");
             var beforeState = SnapshotRegularFiles(home);
 
-            var first = await QueueWorktreeReport.CreateAsync([item], root, Ct);
-            var second = await QueueWorktreeReport.CreateAsync([item], root, Ct);
+            var first = await QueueWorktreeReport.CreateAsync(
+                [item], root, Ct, livenessProbe: IsolatedProbe(sandbox));
+            var second = await QueueWorktreeReport.CreateAsync(
+                [item], root, Ct, livenessProbe: IsolatedProbe(sandbox));
 
             Assert.Equal(first.ToJson(), second.ToJson());
             Assert.Equal(beforeFiles, SnapshotRegularFiles(repo.Path));
@@ -256,13 +261,15 @@ public sealed class QueueWorktreeReportTests
 
             using (ConcurrencyGuard.Acquire(room, "classifier fixture"))
             {
-                var held = Find(await QueueWorktreeReport.CreateAsync([Item(repo, "referenced")], root, Ct), "referenced");
+                var held = Find(await QueueWorktreeReport.CreateAsync(
+                    [Item(repo, "referenced")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "referenced");
                 Assert.Contains("room:continuation-room", held.ActiveReferences, StringComparison.Ordinal);
                 Assert.Contains("continuation:continuation-room", held.ActiveReferences, StringComparison.Ordinal);
                 Assert.Equal("retain", held.Classification);
             }
 
-            var released = Find(await QueueWorktreeReport.CreateAsync([Item(repo, "referenced")], root, Ct), "referenced");
+            var released = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "referenced")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "referenced");
             Assert.Equal("none-known", released.ActiveReferences);
             Assert.Equal("candidate", released.Classification);
         }
@@ -300,7 +307,7 @@ public sealed class QueueWorktreeReportTests
             using (ConcurrencyGuard.Acquire(room, "branch ownership fixture"))
             {
                 var index = await QueueWorktreeReferenceIndex.CreateAsync(
-                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct);
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, IsolatedProbe(sandbox));
 
                 Assert.True(index.Complete);
                 Assert.Contains("room:branch-owner-room", index.ForBranch("2333-lane"));
@@ -341,7 +348,7 @@ public sealed class QueueWorktreeReportTests
             using (ConcurrencyGuard.Acquire(room, "missing branch record fixture"))
             {
                 var index = await QueueWorktreeReferenceIndex.CreateAsync(
-                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct);
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, IsolatedProbe(sandbox));
 
                 Assert.True(index.Complete);
                 Assert.Contains("room:unrecorded-branch-room", index.ForBranch("2333-lane"));
@@ -382,7 +389,7 @@ public sealed class QueueWorktreeReportTests
             using (ConcurrencyGuard.Acquire(room, "branch disagreement fixture"))
             {
                 var index = await QueueWorktreeReferenceIndex.CreateAsync(
-                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct);
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, IsolatedProbe(sandbox));
 
                 Assert.False(index.Complete);
                 Assert.Contains("room:switched-branch-room", index.ForBranch("2333-lane"));
@@ -845,6 +852,9 @@ public sealed class QueueWorktreeReportTests
         Directory.CreateDirectory(path);
         return path;
     }
+
+    private static QueueWorktreeLivenessProbe IsolatedProbe(string sandbox) =>
+        QueueWorktreeLivenessProbe.Default with { BuildLockPath = Path.Combine(sandbox, "no-build-lock") };
 
     private static string FindRepoRoot()
     {

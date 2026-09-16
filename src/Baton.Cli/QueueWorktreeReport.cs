@@ -18,11 +18,13 @@ internal sealed record QueueWorktreeReport(string? WorktreeRoot, IReadOnlyList<Q
         IReadOnlyList<QueueItem> items,
         string? root,
         CancellationToken cancellationToken,
-        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null)
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null,
+        QueueWorktreeLivenessProbe? livenessProbe = null)
     {
         repositoryResolver ??= RepositoryIdentityResolver.TryResolveAsync;
         var resolvedRoot = TryFullPath(root);
-        var activeReferences = await QueueWorktreeReferenceIndex.CreateAsync(items, cancellationToken).ConfigureAwait(false);
+        var activeReferences = await QueueWorktreeReferenceIndex.CreateAsync(items, cancellationToken, livenessProbe)
+            .ConfigureAwait(false);
         var groups = items.GroupBy(item => TryFullPath(item.Workspace) ?? item.Workspace, PathComparer)
             .OrderBy(group => group.Key, PathComparer)
             .Select((group, index) => (Index: index, Path: group.Key, Rows: (IReadOnlyList<QueueItem>)group.ToList()))

@@ -38,7 +38,11 @@ public sealed class RetainedIssueWorktreeValidatorTests
                 workspace, 2333, repository, root, WorkerRoleCatalog.For("implement"), false, [], [],
                 TestContext.Current.CancellationToken, Runner,
                 (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/example/baton.git", null)),
-                (_, _, _) => @"C:\Program Files\GitHub CLI\gh.exe");
+                (_, _, _) => @"C:\Program Files\GitHub CLI\gh.exe",
+                QueueWorktreeLivenessProbe.Default with
+                {
+                    BuildLockPath = Path.Combine(root, "no-build-lock"),
+                });
 
             Assert.Equal(workspace, proof.Workspace);
             Assert.Equal("2333-lane", proof.Branch);

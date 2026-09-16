@@ -33,7 +33,8 @@ internal static class RetainedIssueWorktreeValidator
         CancellationToken cancellationToken,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null,
-        Func<string, string?, bool, string>? ghResolver = null)
+        Func<string, string?, bool, string>? ghResolver = null,
+        QueueWorktreeLivenessProbe? livenessProbe = null)
     {
         runner ??= RunAsync;
         repositoryResolver ??= RepositoryIdentityResolver.TryResolveAsync;
@@ -79,7 +80,8 @@ internal static class RetainedIssueWorktreeValidator
             State = QueueItemState.Done,
             Retirement = new QueueRetirement(QueueRetirement.Operator, DateTimeOffset.UtcNow, "validation probe"),
         }).ToList();
-        var references = await QueueWorktreeReferenceIndex.CreateAsync(referenceProbeItems, cancellationToken).ConfigureAwait(false);
+        var references = await QueueWorktreeReferenceIndex.CreateAsync(
+            referenceProbeItems, cancellationToken, livenessProbe).ConfigureAwait(false);
         if (!references.Complete) throw Refusal("room-lock", "room or build-lock liveness evidence could not be read", path);
         if (references.For(path).Count > 0 || references.ForBranch(branch).Count > 0)
             throw Refusal("room-lock", "a live Baton room or build lock owns this workspace or branch", path);
