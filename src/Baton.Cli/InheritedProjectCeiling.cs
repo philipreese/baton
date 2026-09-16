@@ -132,6 +132,34 @@ internal static class InheritedProjectCeiling
         Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
         CancellationToken cancellationToken = default)
     {
+        var result = await InspectAsync(workspacePath, storePath, probe, cancellationToken).ConfigureAwait(false);
+        if (result.Outcome != InheritanceOutcome.Inherited
+            || result.SourcePath is null
+            || result.SourceCeiling is null
+            || result.RepositoryIdentity is null)
+        {
+            return result;
+        }
+
+        // InheritedFrom names the path actually copied, not an earlier link in the chain.
+        var inherited = result.SourceCeiling with { InheritedFrom = result.SourcePath };
+        ProjectCeilingStore.Set(workspacePath, inherited, storePath);
+        var key = ProjectCeilingStore.CanonicalKey(workspacePath);
+        return result with
+        {
+            Fact = $"Project ceiling: '{key}' inherited '{inherited.Describe()}' from '{result.SourcePath}' "
+                + $"(same repository: {result.RepositoryIdentity}) — no 'baton trust' was needed.",
+        };
+    }
+
+    /// <summary>Observes repository-wide ceiling evidence without writing the target workspace.</summary>
+    internal static async Task<InheritanceResult> InspectAsync(
+        string workspacePath,
+        string storePath,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
+        CancellationToken cancellationToken = default,
+        bool unknownOutranksSource = false)
+    {
         ArgumentException.ThrowIfNullOrEmpty(storePath);
         ArgumentNullException.ThrowIfNull(probe);
 
@@ -218,6 +246,15 @@ internal static class InheritedProjectCeiling
             }
         }
 
+        if (unknownOutranksSource && unknownPath is not null)
+        {
+            return new InheritanceResult(
+                InheritanceOutcome.CandidateUnknown,
+                CandidatePath: unknownPath,
+                ProbeFailure: unknownFailure,
+                RepositoryIdentity: identity.Value);
+        }
+
         if (source is null || sourcePath is null)
         {
             // Revoked outranks CandidateUnknown: a matching tombstone is known, so the unknown cannot
@@ -225,23 +262,27 @@ internal static class InheritedProjectCeiling
             // tombstone, which is the one case the never-trusted fallback must not be taken on.
             if (revokedPath is not null && revokedAt is { } at)
             {
-                return new InheritanceResult(InheritanceOutcome.Revoked, RevokedPath: revokedPath, RevokedAt: at);
+                return new InheritanceResult(
+                    InheritanceOutcome.Revoked,
+                    RevokedPath: revokedPath,
+                    RevokedAt: at,
+                    RepositoryIdentity: identity.Value);
             }
 
             return unknownPath is not null
-                ? new InheritanceResult(InheritanceOutcome.CandidateUnknown, CandidatePath: unknownPath, ProbeFailure: unknownFailure)
-                : new InheritanceResult(InheritanceOutcome.NoTrustedSource);
+                ? new InheritanceResult(
+                    InheritanceOutcome.CandidateUnknown,
+                    CandidatePath: unknownPath,
+                    ProbeFailure: unknownFailure,
+                    RepositoryIdentity: identity.Value)
+                : new InheritanceResult(InheritanceOutcome.NoTrustedSource, RepositoryIdentity: identity.Value);
         }
-
-        // InheritedFrom is overwritten rather than carried through: a chain of inheritances names the
-        // path this entry was actually copied from, which is the one an operator can go and inspect.
-        var inherited = source with { InheritedFrom = sourcePath };
-        ProjectCeilingStore.Set(workspacePath, inherited, storePath);
 
         return new InheritanceResult(
             InheritanceOutcome.Inherited,
-            $"Project ceiling: '{key}' inherited '{inherited.Describe()}' from '{sourcePath}' "
-            + $"(same repository: {identity.Value}) — no 'baton trust' was needed.");
+            SourcePath: sourcePath,
+            SourceCeiling: source,
+            RepositoryIdentity: identity.Value);
     }
 
     /// <summary>How many of the four categories a ceiling leaves open — the "narrowest wins" ordering.</summary>
@@ -252,7 +293,11 @@ internal static class InheritedProjectCeiling
         + (ceiling.NetworkAccess ? 1 : 0);
 }
 
-/// <summary>How <see cref="InheritedProjectCeiling.TryInheritAsync"/> ended. Only <see cref="Inherited"/> wrote anything.</summary>
+/// <summary>
+/// How an inheritance lookup ended. <see cref="InheritedProjectCeiling.TryInheritAsync"/> writes on
+/// <see cref="Inherited"/>; the read-only <see cref="InheritedProjectCeiling.InspectAsync"/> returns
+/// the same source evidence without writing it.
+/// </summary>
 internal enum InheritanceOutcome
 {
     /// <summary>The workspace already carries an entry; nothing was probed and nothing was touched.</summary>
@@ -282,12 +327,12 @@ internal enum InheritanceOutcome
     /// </summary>
     Revoked,
 
-    /// <summary>A ceiling was copied and recorded; <see cref="InheritanceResult.Fact"/> is the line to print.</summary>
+    /// <summary>A live source ceiling was found. The mutating lookup copies it and supplies <see cref="InheritanceResult.Fact"/>.</summary>
     Inherited,
 }
 
 /// <param name="Outcome">Which way the lookup ended.</param>
-/// <param name="Fact">The line for the caller's output — set only for <see cref="InheritanceOutcome.Inherited"/>.</param>
+/// <param name="Fact">The line for the caller's output — set only when the mutating lookup persisted an <see cref="InheritanceOutcome.Inherited"/> result.</param>
 /// <param name="RevokedPath">The first tombstoned path (ordinal order) sharing the workspace's identity — set only for <see cref="InheritanceOutcome.Revoked"/>.</param>
 /// <param name="RevokedAt">When <paramref name="RevokedPath"/> was revoked — set only for <see cref="InheritanceOutcome.Revoked"/>.</param>
 /// <param name="CandidatePath">The first recorded path (ordinal order) whose probe failed — set only for <see cref="InheritanceOutcome.CandidateUnknown"/>.</param>
@@ -298,4 +343,7 @@ internal sealed record InheritanceResult(
     string? RevokedPath = null,
     DateTimeOffset? RevokedAt = null,
     string? CandidatePath = null,
-    string? ProbeFailure = null);
+    string? ProbeFailure = null,
+    string? SourcePath = null,
+    ProjectCeiling? SourceCeiling = null,
+    string? RepositoryIdentity = null);

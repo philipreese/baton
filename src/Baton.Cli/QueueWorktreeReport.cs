@@ -18,11 +18,13 @@ internal sealed record QueueWorktreeReport(string? WorktreeRoot, IReadOnlyList<Q
         IReadOnlyList<QueueItem> items,
         string? root,
         CancellationToken cancellationToken,
-        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null)
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null,
+        QueueWorktreeLivenessProbe? livenessProbe = null)
     {
         repositoryResolver ??= RepositoryIdentityResolver.TryResolveAsync;
         var resolvedRoot = TryFullPath(root);
-        var activeReferences = await QueueWorktreeReferenceIndex.CreateAsync(items, cancellationToken).ConfigureAwait(false);
+        var activeReferences = await QueueWorktreeReferenceIndex.CreateAsync(items, cancellationToken, livenessProbe)
+            .ConfigureAwait(false);
         var groups = items.GroupBy(item => TryFullPath(item.Workspace) ?? item.Workspace, PathComparer)
             .OrderBy(group => group.Key, PathComparer)
             .Select((group, index) => (Index: index, Path: group.Key, Rows: (IReadOnlyList<QueueItem>)group.ToList()))
@@ -429,6 +431,7 @@ internal sealed record QueueWorktreeReferenceObservation(IReadOnlyList<string> R
 /// </summary>
 internal sealed record QueueWorktreeReferenceIndex(
     IReadOnlyDictionary<string, IReadOnlyList<string>> References,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> BranchReferences,
     bool Complete)
 {
     private const int MaxRoomsObserved = 10_000;
@@ -437,10 +440,15 @@ internal sealed record QueueWorktreeReferenceIndex(
     public IReadOnlyList<string> For(string path) =>
         References.TryGetValue(path, out var values) ? values : [];
 
+    public IReadOnlyList<string> ForBranch(string branch) =>
+        BranchReferences.TryGetValue(branch, out var values) ? values : [];
+
     public static async Task<QueueWorktreeReferenceIndex> CreateAsync(
         IReadOnlyList<QueueItem> items,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        QueueWorktreeLivenessProbe? probe = null)
     {
+        probe ??= QueueWorktreeLivenessProbe.Default;
         var workspaces = items.Select(item => QueueWorktreeReport.TryFullPath(item.Workspace))
             .Where(path => path is not null)
             .Cast<string>()
@@ -451,128 +459,268 @@ internal sealed record QueueWorktreeReferenceIndex(
             _ => new HashSet<string>(StringComparer.Ordinal),
             QueueWorktreeReport.PathComparer);
         var complete = true;
-        var started = Stopwatch.StartNew();
+        var branchReferences = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        using var probeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        probeTimeout.CancelAfter(probe.Timeout ?? ProbeTimeout);
+        var probeToken = probeTimeout.Token;
 
         try
         {
+            var rooms = await RunBoundedAsync(
+                () => probe.EnumerateDirectories(BatonPaths.Rooms).Take(MaxRoomsObserved + 1).ToList(),
+                probeToken).ConfigureAwait(false);
             var roomCount = 0;
-            if (Directory.Exists(BatonPaths.Rooms))
+            foreach (var room in rooms)
             {
-                foreach (var room in Directory.EnumerateDirectories(BatonPaths.Rooms))
+                cancellationToken.ThrowIfCancellationRequested();
+                if (++roomCount > MaxRoomsObserved || probeToken.IsCancellationRequested)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (++roomCount > MaxRoomsObserved || started.Elapsed > ProbeTimeout)
-                    {
-                        complete = false;
-                        break;
-                    }
+                    complete = false;
+                    break;
+                }
 
-                    bool held;
-                    try { held = ConcurrencyGuard.IsHeld(room); }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                bool held;
+                try
+                {
+                    held = await RunBoundedAsync(() => ConcurrencyGuard.IsHeld(room), probeToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    complete = false;
+                    continue;
+                }
+                if (!held) continue;
+
+                IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings;
+                try
+                {
+                    bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                        BatonPaths.RoomBindingsFile(room), probeToken).WaitAsync(probeToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is WorkerBindingConfigException or IOException or UnauthorizedAccessException)
+                {
+                    complete = false;
+                    continue;
+                }
+
+                var paths = bindings.Values.Select(binding => QueueWorktreeReport.TryFullPath(binding.WorkingDirectory))
+                    .Where(path => path is not null)
+                    .Cast<string>()
+                    .Distinct(QueueWorktreeReport.PathComparer)
+                    .ToList();
+                if (paths.Count == 0)
+                {
+                    complete = false;
+                    continue;
+                }
+
+                var roomReference = "room:" + Path.GetFileName(room);
+                var branches = new HashSet<string>(StringComparer.Ordinal);
+                string? recordedBranch = null;
+                var branchRead = await ReadOptionalTextAsync(
+                    RoomDeliveryBranch.PathFor(room), probe.ReadAllText, probeToken).ConfigureAwait(false);
+                complete &= branchRead.Complete;
+                if (branchRead.Content is not null)
+                {
+                    recordedBranch = branchRead.Content.Trim();
+                    if (recordedBranch.Length > 0) branches.Add(recordedBranch);
+                }
+                foreach (var bindingPath in paths)
+                {
+                    var observed = await probe.ReadBranchAsync(bindingPath, probeToken)
+                        .WaitAsync(probeToken).ConfigureAwait(false);
+                    if (observed is null)
                     {
                         complete = false;
                         continue;
                     }
-                    if (!held) continue;
-
-                    IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings;
-                    try
-                    {
-                        bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
-                            BatonPaths.RoomBindingsFile(room), cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception ex) when (ex is WorkerBindingConfigException or IOException or UnauthorizedAccessException)
-                    {
+                    branches.Add(observed);
+                    if (!string.IsNullOrEmpty(recordedBranch)
+                        && !string.Equals(recordedBranch, observed, StringComparison.Ordinal))
                         complete = false;
-                        continue;
-                    }
-
-                    var paths = bindings.Values.Select(binding => QueueWorktreeReport.TryFullPath(binding.WorkingDirectory))
-                        .Where(path => path is not null)
-                        .Cast<string>()
-                        .Distinct(QueueWorktreeReport.PathComparer)
-                        .ToList();
-                    if (paths.Count == 0)
+                }
+                foreach (var branch in branches)
+                {
+                    if (!branchReferences.TryGetValue(branch, out var branchRooms))
                     {
-                        complete = false;
-                        continue;
+                        branchRooms = new HashSet<string>(StringComparer.Ordinal);
+                        branchReferences.Add(branch, branchRooms);
                     }
+                    branchRooms.Add(roomReference);
+                }
 
-                    var continuation = IsContinuation(room, out var markerComplete);
-                    complete &= markerComplete;
-                    foreach (var workspace in workspaces.Where(workspace => paths.Contains(workspace, QueueWorktreeReport.PathComparer)))
-                    {
-                        references[workspace].Add("room:" + Path.GetFileName(room));
-                        if (continuation) references[workspace].Add("continuation:" + Path.GetFileName(room));
-                    }
+                var continuation = await ObserveContinuationAsync(
+                    room, probe.ReadAllText, probeToken).ConfigureAwait(false);
+                complete &= continuation.Complete;
+                foreach (var workspace in workspaces.Where(workspace => paths.Contains(workspace, QueueWorktreeReport.PathComparer)))
+                {
+                    references[workspace].Add(roomReference);
+                    if (continuation.IsContinuation) references[workspace].Add("continuation:" + Path.GetFileName(room));
                 }
             }
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // A fresh Baton home legitimately has no rooms root yet.
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
+            && probeToken.IsCancellationRequested)
+        {
+            complete = false;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException)
         {
             complete = false;
         }
 
-        ObserveBuildLock(workspaces, references, ref complete);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (probeToken.IsCancellationRequested)
+        {
+            complete = false;
+        }
+        else
+        {
+            try
+            {
+                complete &= await ObserveBuildLockAsync(
+                    workspaces, references, branchReferences, probe, probeToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
+                && probeToken.IsCancellationRequested)
+            {
+                complete = false;
+            }
+        }
         return new QueueWorktreeReferenceIndex(
             references.ToDictionary(
                 pair => pair.Key,
                 pair => (IReadOnlyList<string>)pair.Value.Order(StringComparer.Ordinal).ToList(),
                 QueueWorktreeReport.PathComparer),
+            branchReferences.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<string>)pair.Value.Order(StringComparer.Ordinal).ToList(),
+                StringComparer.Ordinal),
             complete);
     }
 
-    private static bool IsContinuation(string room, out bool complete)
+    private static async Task<ContinuationObservation> ObserveContinuationAsync(
+        string room,
+        Func<string, string> readAllText,
+        CancellationToken cancellationToken)
     {
-        complete = true;
         var marker = Path.Combine(room, ".baton", BatonPaths.RoomMetadataFileName);
-        if (!File.Exists(marker)) return false;
+        var markerRead = await ReadOptionalTextAsync(marker, readAllText, cancellationToken).ConfigureAwait(false);
+        if (markerRead.Content is null) return new ContinuationObservation(false, markerRead.Complete);
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(marker));
-            return document.RootElement.TryGetProperty("ContinuedSessionId", out var value)
+            using var document = JsonDocument.Parse(markerRead.Content);
+            var continuation = document.RootElement.TryGetProperty("ContinuedSessionId", out var value)
                 && value.ValueKind == JsonValueKind.String
                 && !string.IsNullOrWhiteSpace(value.GetString());
+            return new ContinuationObservation(continuation, Complete: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            complete = false;
-            return false;
+            return new ContinuationObservation(false, Complete: false);
         }
     }
 
-    private static void ObserveBuildLock(
+    private static async Task<bool> ObserveBuildLockAsync(
         IReadOnlyList<string> workspaces,
         Dictionary<string, HashSet<string>> references,
-        ref bool complete)
+        Dictionary<string, HashSet<string>> branchReferences,
+        QueueWorktreeLivenessProbe probe,
+        CancellationToken cancellationToken)
     {
-        var lockPath = Environment.GetEnvironmentVariable("BATON_BUILDLOCK_FILE");
+        var lockPath = probe.BuildLockPath ?? Environment.GetEnvironmentVariable("BATON_BUILDLOCK_FILE");
         if (string.IsNullOrWhiteSpace(lockPath)) lockPath = Path.Combine(Path.GetTempPath(), "baton-build.lock");
+        var lockState = await RunBoundedAsync(
+            () => probe.ProbeBuildLock(lockPath), cancellationToken).ConfigureAwait(false);
+        if (lockState is BuildLockProbeResult.Absent or BuildLockProbeResult.Free) return true;
+        if (lockState == BuildLockProbeResult.Unreadable) return false;
+
         var infoPath = lockPath + ".info";
-        if (!File.Exists(infoPath)) return;
+        var infoRead = await ReadOptionalTextAsync(
+            infoPath, probe.ReadAllText, cancellationToken).ConfigureAwait(false);
+        // The sidecar is deliberately best-effort diagnostics written only after the OS lock is
+        // acquired. A held lock without readable identity is active ownership we cannot attribute,
+        // never evidence that no workspace owns it.
+        if (infoRead.Content is null) return false;
 
         try
         {
-            var info = JsonSerializer.Deserialize<BuildLockInfo>(File.ReadAllText(infoPath));
-            if (info is null || !IsLiveProcess(info.Pid)) return;
+            var info = JsonSerializer.Deserialize<BuildLockInfo>(infoRead.Content);
+            if (info is null) return false;
+            var live = await RunBoundedAsync(
+                () => probe.IsLiveProcess(info.Pid), cancellationToken).ConfigureAwait(false);
+            if (!live) return false;
             var cwd = QueueWorktreeReport.TryFullPath(info.Cwd);
             if (cwd is null)
             {
-                complete = false;
-                return;
+                return false;
             }
 
             foreach (var workspace in workspaces.Where(workspace => IsSameOrBeneath(cwd, workspace)))
                 references[workspace].Add("build-lock");
+
+            var branch = await probe.ReadBranchAsync(cwd, cancellationToken)
+                .WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (branch is null) return false;
+            if (!branchReferences.TryGetValue(branch, out var branchLocks))
+            {
+                branchLocks = new HashSet<string>(StringComparer.Ordinal);
+                branchReferences.Add(branch, branchLocks);
+            }
+            branchLocks.Add("build-lock");
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
         {
-            complete = false;
+            return false;
         }
     }
 
-    private static bool IsLiveProcess(int pid)
+    private static async Task<OptionalTextRead> ReadOptionalTextAsync(
+        string path,
+        Func<string, string> readAllText,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var content = await RunBoundedAsync(() => readAllText(path), cancellationToken)
+                .ConfigureAwait(false);
+            return new OptionalTextRead(content, Complete: true);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new OptionalTextRead(Content: null, Complete: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new OptionalTextRead(Content: null, Complete: false);
+        }
+    }
+
+    private static async Task<T> RunBoundedAsync<T>(Func<T> operation, CancellationToken cancellationToken)
+    {
+        var task = Task.Run(operation, CancellationToken.None);
+        try
+        {
+            return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _ = task.ContinueWith(
+                static completed => _ = completed.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw;
+        }
+    }
+
+    internal static bool IsLiveProcessForProbe(int pid)
     {
         try
         {
@@ -582,6 +730,42 @@ internal sealed record QueueWorktreeReferenceIndex(
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             return false;
+        }
+    }
+
+    internal static BuildLockProbeResult ProbeBuildLockForReference(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+            if (!OperatingSystem.IsWindows()) return BuildLockProbeResult.Unreadable;
+            try
+            {
+                stream.Lock(0, 1);
+            }
+            catch (IOException)
+            {
+                return BuildLockProbeResult.Held;
+            }
+            try
+            {
+                stream.Unlock(0, 1);
+                return BuildLockProbeResult.Free;
+            }
+            catch (IOException)
+            {
+                return BuildLockProbeResult.Unreadable;
+            }
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return BuildLockProbeResult.Absent;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+            or NotSupportedException or System.Security.SecurityException)
+        {
+            return BuildLockProbeResult.Unreadable;
         }
     }
 
@@ -597,4 +781,33 @@ internal sealed record QueueWorktreeReferenceIndex(
     private sealed record BuildLockInfo(
         [property: System.Text.Json.Serialization.JsonPropertyName("pid")] int Pid,
         [property: System.Text.Json.Serialization.JsonPropertyName("cwd")] string? Cwd);
+
+    private sealed record OptionalTextRead(string? Content, bool Complete);
+
+    private sealed record ContinuationObservation(bool IsContinuation, bool Complete);
+}
+
+internal sealed record QueueWorktreeLivenessProbe(
+    Func<string, IEnumerable<string>> EnumerateDirectories,
+    Func<string, string> ReadAllText,
+    Func<string, BuildLockProbeResult> ProbeBuildLock,
+    Func<int, bool> IsLiveProcess,
+    Func<string, CancellationToken, Task<string?>> ReadBranchAsync,
+    string? BuildLockPath = null,
+    TimeSpan? Timeout = null)
+{
+    public static QueueWorktreeLivenessProbe Default { get; } = new(
+        Directory.EnumerateDirectories,
+        File.ReadAllText,
+        QueueWorktreeReferenceIndex.ProbeBuildLockForReference,
+        QueueWorktreeReferenceIndex.IsLiveProcessForProbe,
+        WorkspaceHead.TryReadBranchAsync);
+}
+
+internal enum BuildLockProbeResult
+{
+    Absent,
+    Free,
+    Held,
+    Unreadable,
 }

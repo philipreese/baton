@@ -75,6 +75,17 @@ public static class IssueWorktreeProvisioner
     }
 
     /// <summary>
+    /// Resolves the configured root with the same sibling-checkout default used by issue provisioning.
+    /// Retained-worktree validation consumes this value too, so its root boundary cannot differ from
+    /// the provisioner that originally selected the checkout.
+    /// </summary>
+    internal static string ResolveWorktreeRoot(string? configuredRoot, string repositoryDirectory) =>
+        configuredRoot ?? Path.GetDirectoryName(Path.GetFullPath(repositoryDirectory))
+            ?? throw new CliArgumentException(
+                $"Cannot derive a worktree root from '{repositoryDirectory}' — it has no parent directory.",
+                "set Queue.WorktreeRoot in ~/.baton/settings.json to say where w<n> worktrees belong.");
+
+    /// <summary>
     /// The issue's title and body, for the implement brief <c>baton queue add --lifecycle</c> renders
     /// when no <c>--spec</c> is given. Through the SAME runner every other spawn here uses, so this adds
     /// no process-spawn site of its own.
@@ -94,7 +105,7 @@ public static class IssueWorktreeProvisioner
         ArgumentException.ThrowIfNullOrEmpty(repositoryDirectory);
         ArgumentException.ThrowIfNullOrEmpty(repository);
 
-        runner ??= RunAsync;
+        runner ??= RunRetainedProbeAsync;
         var (exit, output) = await runner(
             "gh",
             ["issue", "view", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -152,6 +163,10 @@ public static class IssueWorktreeProvisioner
     /// add</c>'s own writer. Null is <see cref="Console.Out"/>. See <see cref="TrustAsync"/> for why the
     /// line cannot be left to the later dispatch.
     /// </param>
+    /// <param name="deterministicSourceCeiling">
+    /// True for lifecycle provisioning, whose implementation workspace must derive only from the
+    /// invocation checkout; false preserves ordinary issue-add repository-wide inheritance.
+    /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
     /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing (for the workspace or for a recorded path), or the repository is revoked (#2121), so no ceiling was recorded — see the type remarks.</exception>
     public static async Task<ProvisionedIssueWorktree> ProvisionAsync(
@@ -162,18 +177,16 @@ public static class IssueWorktreeProvisioner
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
         TextWriter? output = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool deterministicSourceCeiling = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
         ArgumentException.ThrowIfNullOrEmpty(repositoryDirectory);
         ArgumentException.ThrowIfNullOrEmpty(repository);
 
-        runner ??= RunAsync;
+        runner ??= RunRetainedProbeAsync;
 
-        var root = worktreeRoot ?? Path.GetDirectoryName(Path.GetFullPath(repositoryDirectory))
-            ?? throw new CliArgumentException(
-                $"Cannot derive a worktree root from '{repositoryDirectory}' — it has no parent directory.",
-                "set Queue.WorktreeRoot in ~/.baton/settings.json to say where w<n> worktrees belong.");
+        var root = ResolveWorktreeRoot(worktreeRoot, repositoryDirectory);
 
         var firstWorkspace = Path.Combine(root, $"w{issue}");
         var firstBranch = BranchNameFor(issue);
@@ -187,7 +200,7 @@ public static class IssueWorktreeProvisioner
             if (await CanReuseCanonicalWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
                     .ConfigureAwait(false))
             {
-                await TrustAsync(firstWorkspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await TrustAsync(firstWorkspace, repositoryDirectory, deterministicSourceCeiling, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
                 return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
             }
         }
@@ -228,7 +241,7 @@ public static class IssueWorktreeProvisioner
                 "git", ["worktree", "add", workspace, branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
             if (worktreeExit == 0)
             {
-                await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await TrustAsync(workspace, repositoryDirectory, deterministicSourceCeiling, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
                 return new ProvisionedIssueWorktree(workspace, branch);
             }
 
@@ -342,10 +355,10 @@ public static class IssueWorktreeProvisioner
     }
 
     /// <summary>
-    /// Records <paramref name="workspace"/>'s ceiling: the source repository's own, when a path in that
-    /// repository is already trusted, and unrestricted when the repository was never trusted — see the
-    /// type remarks for why that fallback is a widening rather than a refusal, and why a probe that
-    /// answers nothing or a revoked repository is a refusal rather than the fallback. Writes nothing when the workspace already
+    /// Records <paramref name="workspace"/>'s ceiling. Lifecycle provisioning uses the exact
+    /// <paramref name="sourceRepository"/> as its deterministic authority; ordinary issue adds retain
+    /// repository-wide narrowest-source inheritance. Both use unrestricted only for a repository
+    /// proven never trusted, and refuse unknown or revoked evidence. Writes nothing when the workspace already
     /// carries an entry (<see cref="InheritanceOutcome.AlreadyTrusted"/>), which is what makes a re-add
     /// of a live lane leave its ceiling as the operator last set it rather than resetting it to <c>all</c>.
     /// </summary>
@@ -358,6 +371,8 @@ public static class IssueWorktreeProvisioner
     /// </remarks>
     internal static async Task TrustAsync(
         string workspace,
+        string sourceRepository,
+        bool deterministicSourceCeiling,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
         string? storePath = null,
         TextWriter? output = null,
@@ -369,38 +384,103 @@ public static class IssueWorktreeProvisioner
         await TrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var result = await InheritedProjectCeiling.TryInheritAsync(workspace, storePath, probe, cancellationToken)
-                .ConfigureAwait(false);
-            switch (result.Outcome)
+            if (!deterministicSourceCeiling)
             {
-                case InheritanceOutcome.Inherited:
-                    (output ?? Console.Out).WriteLine(result.Fact);
-                    return;
-                case InheritanceOutcome.AlreadyTrusted:
-                    return;
+                var inherited = await InheritedProjectCeiling.TryInheritAsync(
+                    workspace, storePath, probe, cancellationToken).ConfigureAwait(false);
+                switch (inherited.Outcome)
+                {
+                    case InheritanceOutcome.Inherited:
+                        (output ?? Console.Out).WriteLine(inherited.Fact);
+                        return;
+                    case InheritanceOutcome.AlreadyTrusted:
+                        return;
+                    case InheritanceOutcome.NoIdentity:
+                        throw new ProjectNotTrustedException(workspace,
+                            "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+                    case InheritanceOutcome.CandidateUnknown:
+                        throw new ProjectNotTrustedException(
+                            workspace, inherited.CandidatePath!, inherited.ProbeFailure ?? "repository identity is unreadable");
+                    case InheritanceOutcome.Revoked:
+                        throw new ProjectNotTrustedException(workspace, inherited.RevokedPath!, inherited.RevokedAt!.Value);
+                    case InheritanceOutcome.NoTrustedSource:
+                        ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
+                        (output ?? Console.Out).WriteLine(
+                            $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
+                        return;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(inherited), inherited.Outcome, "Unhandled inheritance outcome.");
+                }
+            }
+
+            var own = ProjectCeilingStore.TryGetRecord(workspace, storePath);
+            if (own is { IsRevoked: false }) return;
+            // Audit the whole repository identity without writing. The exact invocation checkout is
+            // the only source we will copy, but unknown/revoked sibling evidence still blocks the
+            // never-trusted `all` fallback.
+            var observation = await InheritedProjectCeiling.InspectAsync(
+                workspace, storePath, probe, cancellationToken, unknownOutranksSource: true).ConfigureAwait(false);
+            switch (observation.Outcome)
+            {
                 case InheritanceOutcome.NoIdentity:
-                    throw new ProjectNotTrustedException(
-                        workspace,
+                    throw new ProjectNotTrustedException(workspace,
                         "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
                 case InheritanceOutcome.CandidateUnknown:
-                    // #2121: nothing live matched and a recorded path that cannot be identified might be the
-                    // tombstone, so the never-trusted fallback below is not known to apply. The exception's
-                    // own remedy names that path (not the workspace, which probed fine) so the operator can
-                    // repair it or `baton trust <path> --forget` the record.
-                    throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
+                    throw new ProjectNotTrustedException(
+                        workspace, observation.CandidatePath!, observation.ProbeFailure ?? "repository identity is unreadable");
                 case InheritanceOutcome.Revoked:
-                    // #2121: the fallback below is for a repository the operator never trusted, and this one
-                    // the operator revoked. The refusal names the tombstone so the operator knows which
-                    // revocation `baton trust` would be undoing.
-                    throw new ProjectNotTrustedException(workspace, result.RevokedPath!, result.RevokedAt!.Value);
-                case InheritanceOutcome.NoTrustedSource:
-                    ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
-                    (output ?? Console.Out).WriteLine(
-                        $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
+                    throw new ProjectNotTrustedException(workspace, observation.RevokedPath!, observation.RevokedAt!.Value);
+                case InheritanceOutcome.AlreadyTrusted:
                     return;
-                default:
-                    throw new ArgumentOutOfRangeException(nameof(result), result.Outcome, "Unhandled inheritance outcome.");
             }
+
+            RepositoryIdentity? sourceIdentity;
+            try
+            {
+                sourceIdentity = await probe(sourceRepository, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new ProjectNotTrustedException(workspace,
+                    $"the exact source checkout repository probe threw: {ex.Message}.");
+            }
+            if (sourceIdentity is null || observation.RepositoryIdentity is null
+                || !string.Equals(sourceIdentity.Value, observation.RepositoryIdentity, StringComparison.Ordinal))
+                throw new ProjectNotTrustedException(workspace,
+                    "the exact source checkout could not be proven to be the same repository as the new worktree.");
+
+            // #2333: the invocation checkout is the sole deterministic bootstrap authority. A
+            // temporary review sibling can block an unsafe fallback, but can never donate its grant.
+            var source = ProjectCeilingStore.TryGetRecord(sourceRepository, storePath);
+            if (source is { IsRevoked: true })
+                throw new ProjectNotTrustedException(workspace, ProjectCeilingStore.CanonicalKey(sourceRepository), source.RevokedAt!.Value);
+            if (source is not null)
+            {
+                var inherited = source with { InheritedFrom = ProjectCeilingStore.CanonicalKey(sourceRepository) };
+                ProjectCeilingStore.Set(workspace, inherited, storePath);
+                (output ?? Console.Out).WriteLine(
+                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from source repository {ProjectCeilingStore.CanonicalKey(sourceRepository)}");
+                return;
+            }
+
+            var sourceKey = ProjectCeilingStore.CanonicalKey(sourceRepository);
+            if (observation.Outcome == InheritanceOutcome.Inherited
+                && observation.SourceCeiling is { } derived
+                && string.Equals(derived.InheritedFrom, sourceKey, StringComparison.OrdinalIgnoreCase))
+            {
+                ProjectCeilingStore.Set(workspace, derived with { InheritedFrom = sourceKey }, storePath);
+                (output ?? Console.Out).WriteLine(
+                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from deterministic source bootstrap {sourceKey}");
+                return;
+            }
+            if (observation.Outcome == InheritanceOutcome.Inherited)
+                throw new ProjectNotTrustedException(workspace,
+                    $"the exact source checkout '{sourceKey}' has no recorded ceiling, while another checkout of this repository does; sibling trust is not a deterministic bootstrap authority.");
+
+            ProjectCeilingStore.Set(
+                workspace, ProjectCeiling.Unrestricted with { InheritedFrom = sourceKey }, storePath);
+            (output ?? Console.Out).WriteLine(
+                $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: source repository has no recorded ceiling; recorded ceiling all");
         }
         finally
         {
@@ -414,7 +494,7 @@ public static class IssueWorktreeProvisioner
     /// by the caller's token. A timeout kills the child and surfaces as a non-zero exit with the
     /// output collected so far, so the refusal message above still names something.
     /// </summary>
-    private static async Task<(int ExitCode, string Output)> RunAsync(
+    internal static async Task<(int ExitCode, string Output)> RunRetainedProbeAsync(
         string fileName, IReadOnlyList<string> arguments, string workingDirectory, CancellationToken cancellationToken)
     {
         var startInfo = ChildProcessStartInfo.Create(fileName, startInfo =>

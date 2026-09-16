@@ -50,6 +50,76 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
     }
 
     [Fact]
+    public async Task Provision_uses_the_exact_source_even_when_a_sibling_is_narrower()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var review = MakeDirectory("review-worktree");
+        var worktree = Path.Combine(_root, "w2333");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Set(
+            review,
+            new ProjectCeiling(true, false, false, false),
+            ProjectCeilingStore.DefaultPath);
+
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2333, repository, _root, CapturedRepository, Runner(worktree),
+            Probe(commonDir, repository, review, worktree), TextWriter.Null,
+            TestContext.Current.CancellationToken, deterministicSourceCeiling: true);
+
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
+        Assert.NotNull(recorded);
+        Assert.True(recorded.IsUnrestricted);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
+    }
+
+    [Fact]
+    public async Task Provision_refuses_an_arbitrary_sibling_when_the_exact_source_is_unrecorded()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var review = MakeDirectory("review-worktree");
+        var worktree = Path.Combine(_root, "w2333");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(review, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+
+        var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() =>
+            IssueWorktreeProvisioner.ProvisionAsync(
+                2333, repository, _root, CapturedRepository, Runner(worktree),
+                Probe(commonDir, repository, review, worktree), TextWriter.Null,
+                TestContext.Current.CancellationToken, deterministicSourceCeiling: true));
+
+        Assert.Contains("exact source checkout", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
+    }
+
+    [Fact]
+    public async Task Provision_refuses_an_unreadable_record_even_when_the_exact_source_is_trusted()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var unreadable = MakeDirectory("unreadable-worktree");
+        var worktree = Path.Combine(_root, "w2333");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Set(unreadable, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe = (path, _) =>
+            path.Equals(unreadable, StringComparison.OrdinalIgnoreCase)
+                ? throw new InvalidOperationException("identity probe failed")
+                : Task.FromResult(RepositoryIdentity.From(null, commonDir));
+
+        var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() =>
+            IssueWorktreeProvisioner.ProvisionAsync(
+                2333, repository, _root, CapturedRepository, Runner(worktree), probe,
+                TextWriter.Null, TestContext.Current.CancellationToken, deterministicSourceCeiling: true));
+
+        Assert.Contains(unreadable, refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("identity probe failed", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
+    }
+
+    [Fact]
     public async Task Provision_falls_back_to_the_unrestricted_ceiling_when_no_trusted_sibling_matches()
     {
         using var home = new IsolatedBatonHome();
@@ -207,7 +277,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
     /// never-trusted fallback the revoked arm exists to keep it from.
     /// </summary>
     [Fact]
-    public async Task Provision_refuses_rather_than_falling_back_when_a_recorded_path_cannot_be_identified()
+    public async Task Provision_refuses_a_revoked_source_repository_even_when_an_old_probe_is_unreadable()
     {
         using var home = new IsolatedBatonHome();
         var repository = MakeDirectory("baton");
@@ -226,18 +296,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             output, TestContext.Current.CancellationToken));
 
         Assert.Equal(worktree, refusal.ProjectPath);
-        Assert.Contains(ProjectCeilingStore.CanonicalKey(repository), refusal.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("git rev-parse timed out after 10s", refusal.Message, StringComparison.Ordinal);
-        // The remedy names the RECORDED path, not the workspace: the workspace probed fine, and the
-        // try-line is what the operator acts on (#2121 re-review, L2).
-        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), refusal.CandidatePath);
-        Assert.Equal(
-            $"repair '{ProjectCeilingStore.CanonicalKey(repository)}' so 'git' can identify it, or baton trust "
-            + $"\"{ProjectCeilingStore.CanonicalKey(repository)}\" --forget to drop its record if that checkout is gone, "
-            + $"then retry — or baton trust \"{worktree}\" --ceiling all (or a comma-separated subset of "
-            + "ReadFiles,WriteFiles,RunShellCommands,NetworkAccess) to record one by hand.",
-            refusal.TryInvocation);
-        Assert.DoesNotContain($"'{worktree}' is a git checkout", refusal.TryInvocation, StringComparison.Ordinal);
+        Assert.Contains("revoked", refusal.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
         Assert.Equal(string.Empty, output.ToString());
     }

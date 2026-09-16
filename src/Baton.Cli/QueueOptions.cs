@@ -38,9 +38,10 @@ public enum QueueWorktreesOutputFormat
 /// <c>--issue &lt;n&gt;</c>: provision a worktree from this GitHub issue. See
 /// <see cref="IssueWorktreeProvisioner"/> for when that happens and why then, and for the ceiling the
 /// worktree is trusted at — its repository's own, inherited, with <c>all</c> only as the announced
-/// fallback. Mutually exclusive with <paramref name="WorkspaceDirectory"/>.
+/// fallback. With <c>--lifecycle</c>, it may accompany <paramref name="WorkspaceDirectory"/> to name
+/// one exact retained issue worktree; that is validation-backed reuse, never discovery.
 /// </param>
-/// <param name="WorkspaceDirectory">An already-existing directory the worker runs in. Mutually exclusive with <paramref name="Issue"/>.</param>
+/// <param name="WorkspaceDirectory">An already-existing directory the worker runs in. It is mutually exclusive with <paramref name="Issue"/> except for explicit lifecycle retained-worktree reuse.</param>
 /// <param name="ScopeClass">The tier table's scope class; validated against <c>QueueTierTable.ScopeClasses</c> by the parser.</param>
 /// <param name="Adapter">Explicit adapter, overriding the tier's.</param>
 /// <param name="Model">Explicit model, overriding the tier's. Never promoted or substituted — <c>QueueTierTable</c>'s remarks say why.</param>
@@ -57,7 +58,8 @@ public enum QueueWorktreesOutputFormat
 /// request — one the scheduler advances through implement → review → fix → re-review from the PR's and
 /// the verdict's state. <b>This flag is the one spelling of that choice</b>; there is no
 /// <c>--kind work</c> alias, because two ways to say one thing is one of them going stale. Requires
-/// <c>--issue</c>, refuses <c>--role</c> (the stage picks it), and makes <c>--spec</c> optional.
+/// <c>--issue</c>, refuses <c>--role</c> (the stage picks it), and makes <c>--spec</c> optional. An
+/// explicit <c>--workspace</c> alongside the issue requests retained-worktree validation instead of provisioning.
 /// </param>
 /// <param name="StageSelections">Explicit lifecycle-stage axes. Null distinguishes an older persisted
 /// item from a newly added lifecycle item that intentionally leaves every stage at its tier.</param>

@@ -155,6 +155,20 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
+    public void Add_accepts_an_issue_and_exact_workspace_for_an_explicit_lifecycle_retry()
+    {
+        var options = QueueOptionsParser.Parse([
+            "add", "2276-lane-retry", "--issue", "2276", "--workspace", "C:\\repos\\w2276-2", "--lifecycle",
+            "--declared-size", "small", "--size-rationale", "retry the retained zero-step lane",
+        ]);
+
+        Assert.True(options.Lifecycle);
+        Assert.Equal(2276, options.Issue);
+        Assert.Equal("C:\\repos\\w2276-2", options.WorkspaceDirectory);
+        Assert.Equal("implement", options.Role);
+    }
+
+    [Fact]
     public void Add_refuses_neither_an_issue_nor_a_workspace()
     {
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(

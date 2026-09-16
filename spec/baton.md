@@ -7209,6 +7209,36 @@ engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeou
 [--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`, and
 `import <file>`, and `worktrees [--format text|json]`.
 
+**Explicit retained issue worktree reuse (#2333).** `queue add --issue <n> --workspace <dir>
+--lifecycle` is the only retained-checkout form: `--issue` supplies the issue, rendered lifecycle
+brief and PR identity; `--workspace` supplies the exact existing checkout. The command never scans
+for an old suffix. Before it writes a spec or queue row, provisions a worktree, or changes trust, the
+issue-worktree validator normalizes the path and proves it is strictly beneath the configured root, a
+registered worktree of the issue repository, attached to exactly `<n>-lane` or `<n>-lane-<positive
+suffix>`, clean under the ordinary substantive status contract, and internally consistent at HEAD.
+It also proves there is no live room, build lock, queued/launched row, unretired started lifecycle, or
+open PR for that path or branch. A terminal state does not release a lifecycle that still carries
+started/unretired evidence; only genuinely inactive predecessor rows are retained as evidence rather
+than an ownership veto. The PR query uses an absolute, link-free `gh` resolved outside the candidate
+workspace. Every Git,
+queue, room, lock, PR, and exact-path trust probe fails closed with the failed evidence source and a
+copy/paste-safe remedy. The exact path must already have a non-revoked recorded ceiling that admits
+the initial stage grant; a repository sibling's ceiling is not evidence. The persisted item records
+the observed repository, path, branch, HEAD, ceiling/provenance and inactive predecessor tags as
+explicit retained-worktree reuse. Because Baton did not create this checkout, the queue row records
+`operator-supplied`, never cleanup-owned `issue-provisioned`. An open PR remains the existing explicit
+continuation path.
+
+Fresh `queue add --issue <n> --lifecycle` continues to provision a new issue worktree. Its initial
+ceiling uses the exact checkout from which the operator invoked the command as its sole bootstrap
+authority, never an arbitrary same-repository checkout; a temporary review checkout cannot become
+implementation authority. The repository-wide scan remains a fail-closed audit: an unreadable
+candidate or an identity with only revoked records refuses, and a trusted sibling with no provenance
+from the exact invocation checkout refuses rather than being copied. If the exact checkout has a live
+record, that exact ceiling is copied even when a sibling is narrower. If the repository is proven
+never trusted, the historical unrestricted bootstrap is recorded with the exact invocation checkout
+as provenance; concurrent provisions may copy only that deterministic bootstrap lineage.
+
 **Read-only retained-worktree inventory (#2318).** `queue worktrees` projects every distinct
 resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for
 compatibility: only the exact creation fact `issue-provisioned` confers Baton ownership;
@@ -7299,24 +7329,10 @@ launched item refuses with `baton cancel <room-dir>`, the existing room-level re
 cancelled tags report that fact rather than pretending a new cancellation occurred.
 
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
-`git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted (§9) — **at the ceiling its
-repository already carries**, inherited through `InheritedProjectCeiling` exactly as `baton dispatch`
-inherits (#2076), and at `all` only as the fallback for a repository that was **never trusted** — no
-recorded path shares its identity, live or tombstoned — which is the verb's pre-#2076 behaviour kept
-for the checkout an operator has never run `baton trust` against. Either way the add says which on its
-own output: the inheritance line names the source path, and the fallback prints `workspace <path>: no
-trusted repository to inherit from; recorded ceiling all`, because the fallback is a real widening and
-a silent one is the shape the announcement exists to rule out. Two other populations refuse instead,
-with `ProjectNotTrustedException` naming the cause, before anything is queued: the identity probe
-answering nothing (git missing, timed out, or exited non-zero) — for the workspace, or for a
-recorded path whose directory exists when no live entry matched (§9's `CandidateUnknown`, named in
-the refusal's remedy) — since "git
-said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
-failure widen a deliberately narrowed ceiling or hide a tombstone; and a **revoked** repository
-(#2121) — every recorded path of it a tombstone — since
-that is the operator's own withdrawal and the fallback would undo it at the next add. §9's revoked
-state paragraph is the one statement of what a tombstone is and how it clears; this section only
-names which population it puts the add in. Add time because an operator queueing eight items at
+`git worktree add <root>/w<n> <n>-lane`, then records trust. A lifecycle add applies the deterministic
+fresh-provisioning ceiling rule stated above under **Explicit retained issue worktree reuse (#2333)**;
+an ordinary non-lifecycle add retains §9's repository-wide narrowest-source inheritance and
+never-trusted fallback. Add time because an operator queueing eight items at
 23:00 should learn immediately that the issue does not exist, and because it keeps `gh`/`git` spawning
 in the CLI rather than in the background host. `<root>` — which the issue left undefined — is
 `Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,

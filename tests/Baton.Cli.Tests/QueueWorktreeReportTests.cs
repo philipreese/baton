@@ -80,7 +80,8 @@ public sealed class QueueWorktreeReportTests
                 },
             };
 
-            var report = await QueueWorktreeReport.CreateAsync(items, root, Ct);
+            var report = await QueueWorktreeReport.CreateAsync(
+                items, root, Ct, livenessProbe: IsolatedProbe(sandbox));
 
             var candidateEntry = Find(report, "candidate");
             Assert.True(candidateEntry.Classification == "candidate",
@@ -144,7 +145,8 @@ public sealed class QueueWorktreeReportTests
                 [Item(repo, "repository-probe-unavailable")],
                 root,
                 Ct,
-                (_, _) => Task.FromResult<Baton.Accounting.RepositoryIdentity?>(null));
+                (_, _) => Task.FromResult<Baton.Accounting.RepositoryIdentity?>(null),
+                IsolatedProbe(sandbox));
 
             AssertReason(report, "repository-probe-unavailable", "repository-probe-unavailable", "unknown");
         }
@@ -168,7 +170,8 @@ public sealed class QueueWorktreeReportTests
             for (var index = 0; index < 400; index++)
                 await File.WriteAllTextAsync(Path.Combine(repo.Path, $"untracked-{index:D4}-{new string('x', 40)}.txt"), "x", Ct);
 
-            var entry = Find(await QueueWorktreeReport.CreateAsync([Item(repo, "many-untracked")], root, Ct), "many-untracked");
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "many-untracked")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "many-untracked");
 
             Assert.Equal("dirty", entry.Git.SubstantiveCleanliness);
             Assert.True(entry.Git.RawStatusTruncated);
@@ -207,8 +210,10 @@ public sealed class QueueWorktreeReportTests
             var beforeRegistration = await GitOutputAsync(repo.Path, "worktree", "list", "--porcelain");
             var beforeState = SnapshotRegularFiles(home);
 
-            var first = await QueueWorktreeReport.CreateAsync([item], root, Ct);
-            var second = await QueueWorktreeReport.CreateAsync([item], root, Ct);
+            var first = await QueueWorktreeReport.CreateAsync(
+                [item], root, Ct, livenessProbe: IsolatedProbe(sandbox));
+            var second = await QueueWorktreeReport.CreateAsync(
+                [item], root, Ct, livenessProbe: IsolatedProbe(sandbox));
 
             Assert.Equal(first.ToJson(), second.ToJson());
             Assert.Equal(beforeFiles, SnapshotRegularFiles(repo.Path));
@@ -256,15 +261,482 @@ public sealed class QueueWorktreeReportTests
 
             using (ConcurrencyGuard.Acquire(room, "classifier fixture"))
             {
-                var held = Find(await QueueWorktreeReport.CreateAsync([Item(repo, "referenced")], root, Ct), "referenced");
+                var held = Find(await QueueWorktreeReport.CreateAsync(
+                    [Item(repo, "referenced")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "referenced");
                 Assert.Contains("room:continuation-room", held.ActiveReferences, StringComparison.Ordinal);
                 Assert.Contains("continuation:continuation-room", held.ActiveReferences, StringComparison.Ordinal);
                 Assert.Equal("retain", held.Classification);
             }
 
-            var released = Find(await QueueWorktreeReport.CreateAsync([Item(repo, "referenced")], root, Ct), "referenced");
+            var released = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "referenced")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "referenced");
             Assert.Equal("none-known", released.ActiveReferences);
             Assert.Equal("candidate", released.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Live_room_owns_its_recorded_branch_even_from_another_clone_path()
+    {
+        var sandbox = Temp("branch-owner");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var otherClone = await RepoAsync(root, "2333-lane");
+            var room = Path.Combine(BatonPaths.Rooms, "branch-owner-room");
+            Directory.CreateDirectory(room);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new(
+                        "shell", new WorkerContract("implement", [], [], []),
+                        PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                        WorkingDirectory: otherClone.Path),
+                },
+                BatonPaths.RoomBindingsFile(room), Ct);
+            await File.WriteAllTextAsync(RoomDeliveryBranch.PathFor(room), "2333-lane", Ct);
+
+            using (ConcurrencyGuard.Acquire(room, "branch ownership fixture"))
+            {
+                var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, IsolatedProbe(sandbox));
+
+                Assert.True(index.Complete);
+                Assert.Contains("room:branch-owner-room", index.ForBranch("2333-lane"));
+                Assert.Empty(index.For(candidate.Path));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Live_room_branch_is_probed_when_the_optional_branch_record_is_absent()
+    {
+        var sandbox = Temp("branch-probe");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var otherClone = await RepoAsync(root, "2333-lane");
+            var room = Path.Combine(BatonPaths.Rooms, "unrecorded-branch-room");
+            Directory.CreateDirectory(room);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new(
+                        "shell", new WorkerContract("implement", [], [], []),
+                        PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                        WorkingDirectory: otherClone.Path),
+                },
+                BatonPaths.RoomBindingsFile(room), Ct);
+            Assert.False(File.Exists(RoomDeliveryBranch.PathFor(room)));
+
+            using (ConcurrencyGuard.Acquire(room, "missing branch record fixture"))
+            {
+                var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, IsolatedProbe(sandbox));
+
+                Assert.True(index.Complete);
+                Assert.Contains("room:unrecorded-branch-room", index.ForBranch("2333-lane"));
+                Assert.Empty(index.For(candidate.Path));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Live_room_branch_disagreement_is_incomplete_and_indexes_both_claims()
+    {
+        var sandbox = Temp("branch-disagreement");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var switchedClone = await RepoAsync(root, "2333-lane");
+            var room = Path.Combine(BatonPaths.Rooms, "switched-branch-room");
+            Directory.CreateDirectory(room);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new(
+                        "shell", new WorkerContract("implement", [], [], []),
+                        PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                        WorkingDirectory: switchedClone.Path),
+                },
+                BatonPaths.RoomBindingsFile(room), Ct);
+            await File.WriteAllTextAsync(RoomDeliveryBranch.PathFor(room), "original-branch", Ct);
+
+            using (ConcurrencyGuard.Acquire(room, "branch disagreement fixture"))
+            {
+                var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, IsolatedProbe(sandbox));
+
+                Assert.False(index.Complete);
+                Assert.Contains("room:switched-branch-room", index.ForBranch("2333-lane"));
+                Assert.Contains("room:switched-branch-room", index.ForBranch("original-branch"));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Unreadable_rooms_root_makes_the_liveness_index_incomplete()
+    {
+        var sandbox = Temp("rooms-root-denied");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                EnumerateDirectories = _ => throw new UnauthorizedAccessException("fixture denied"),
+                BuildLockPath = Path.Combine(sandbox, "no-build-lock"),
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.False(index.Complete);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Unreadable_build_lock_sidecar_makes_the_liveness_index_incomplete()
+    {
+        var sandbox = Temp("build-lock-denied");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var infoPath = lockPath + ".info";
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = lockPath,
+                ProbeBuildLock = _ => BuildLockProbeResult.Held,
+                ReadAllText = path => string.Equals(path, infoPath, StringComparison.OrdinalIgnoreCase)
+                    ? throw new UnauthorizedAccessException("fixture denied")
+                    : File.ReadAllText(path),
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.False(index.Complete);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Live_build_lock_owns_its_branch_even_from_another_clone_path()
+    {
+        var sandbox = Temp("build-lock-branch-owner");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var otherClone = await RepoAsync(root, "2333-lane");
+            await File.WriteAllTextAsync(
+                lockPath + ".info",
+                JsonSerializer.Serialize(new { pid = 42, cwd = otherClone.Path }),
+                Ct);
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = lockPath,
+                ProbeBuildLock = _ => BuildLockProbeResult.Held,
+                IsLiveProcess = _ => true,
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate with { Branch = "2333-lane" }, "candidate")], Ct, probe);
+
+            Assert.True(index.Complete);
+            Assert.Contains("build-lock", index.ForBranch("2333-lane"));
+            Assert.Empty(index.For(candidate.Path));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Held_build_lock_without_a_sidecar_makes_the_liveness_index_incomplete()
+    {
+        var sandbox = Temp("build-lock-no-sidecar");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = lockPath,
+                ProbeBuildLock = _ => BuildLockProbeResult.Held,
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.False(index.Complete);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Free_build_lock_ignores_a_stale_sidecar()
+    {
+        var sandbox = Temp("build-lock-stale-sidecar");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            await File.WriteAllTextAsync(
+                lockPath + ".info",
+                JsonSerializer.Serialize(new { pid = 42, cwd = candidate.Path }),
+                Ct);
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = lockPath,
+                ProbeBuildLock = _ => BuildLockProbeResult.Free,
+                IsLiveProcess = _ => true,
+            };
+
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.True(index.Complete);
+            Assert.Empty(index.For(candidate.Path));
+            Assert.Empty(index.ForBranch(candidate.Branch));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Shared_liveness_deadline_cancels_a_stuck_branch_probe_and_fails_closed()
+    {
+        var sandbox = Temp("branch-probe-deadline");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var room = Path.Combine(BatonPaths.Rooms, "stuck-branch-room");
+            Directory.CreateDirectory(room);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new(
+                        "shell", new WorkerContract("implement", [], [], []),
+                        PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                        WorkingDirectory: candidate.Path),
+                },
+                BatonPaths.RoomBindingsFile(room), Ct);
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = Path.Combine(sandbox, "no-build-lock"),
+                Timeout = TimeSpan.FromMilliseconds(50),
+                ReadBranchAsync = async (_, cancellationToken) =>
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1), cancellationToken);
+                    return "unreachable";
+                },
+            };
+
+            using (ConcurrencyGuard.Acquire(room, "stuck branch fixture"))
+            {
+                var started = Stopwatch.StartNew();
+                var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate, "candidate")], Ct, probe);
+
+                Assert.False(index.Complete);
+                Assert.True(started.Elapsed < TimeSpan.FromSeconds(2), $"probe took {started.Elapsed}");
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Shared_liveness_deadline_bounds_a_stuck_synchronous_filesystem_probe()
+    {
+        var sandbox = Temp("synchronous-probe-deadline");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        using var releaseProbe = new ManualResetEventSlim();
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = Path.Combine(sandbox, "no-build-lock"),
+                Timeout = TimeSpan.FromMilliseconds(50),
+                EnumerateDirectories = _ =>
+                {
+                    releaseProbe.Wait();
+                    return [];
+                },
+            };
+
+            var started = Stopwatch.StartNew();
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+
+            Assert.False(index.Complete);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(2), $"probe took {started.Elapsed}");
+        }
+        finally
+        {
+            releaseProbe.Set();
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Actual_python_build_lock_is_observed_held_and_missing_identity_fails_closed()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var sandbox = Temp("python-build-lock");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var lockPath = Path.Combine(sandbox, "build.lock");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        Process? holder = null;
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            var start = new ProcessStartInfo("python")
+            {
+                WorkingDirectory = FindRepoRoot(),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            start.ArgumentList.Add("tools/buildlock.py");
+            start.ArgumentList.Add("python");
+            start.ArgumentList.Add("-c");
+            start.ArgumentList.Add("import time; time.sleep(30)");
+            start.Environment["BATON_BUILDLOCK_FILE"] = lockPath;
+            holder = Process.Start(start) ?? throw new InvalidOperationException("Could not start Python build-lock holder.");
+
+            var heldDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+            while (DateTimeOffset.UtcNow < heldDeadline
+                && (QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath) != BuildLockProbeResult.Held
+                    || !File.Exists(lockPath + ".info")))
+            {
+                if (holder.HasExited) Assert.Fail($"build-lock holder exited {holder.ExitCode}");
+                // wait-ok: polling cadence only; heldDeadline is the 10-second failure ceiling.
+                await Task.Delay(50, Ct);
+            }
+            Assert.Equal(BuildLockProbeResult.Held, QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath));
+            Assert.True(File.Exists(lockPath + ".info"), "build-lock holder did not publish its sidecar");
+
+            FileCleanup.EnsureDeleted(lockPath + ".info");
+            var probe = QueueWorktreeLivenessProbe.Default with { BuildLockPath = lockPath };
+            var index = await QueueWorktreeReferenceIndex.CreateAsync(
+                [Item(candidate, "candidate")], Ct, probe);
+            Assert.False(index.Complete);
+
+            holder.Kill(entireProcessTree: true);
+            await holder.WaitForExitAsync(Ct);
+            var freeDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+            while (DateTimeOffset.UtcNow < freeDeadline
+                && QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath) != BuildLockProbeResult.Free)
+            {
+                // wait-ok: polling cadence only; freeDeadline is the 5-second failure ceiling.
+                await Task.Delay(50, Ct);
+            }
+            Assert.Equal(BuildLockProbeResult.Free, QueueWorktreeReferenceIndex.ProbeBuildLockForReference(lockPath));
+        }
+        finally
+        {
+            if (holder is { HasExited: false }) holder.Kill(entireProcessTree: true);
+            holder?.Dispose();
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_is_not_converted_into_an_incomplete_snapshot()
+    {
+        var sandbox = Temp("branch-probe-caller-cancelled");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            var probe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = Path.Combine(sandbox, "no-build-lock"),
+            };
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate, "candidate")], cancelled.Token, probe));
         }
         finally
         {
@@ -379,6 +851,21 @@ public sealed class QueueWorktreeReportTests
         var path = Path.Combine(Path.GetTempPath(), $"queue-worktrees-{name}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static QueueWorktreeLivenessProbe IsolatedProbe(string sandbox) =>
+        QueueWorktreeLivenessProbe.Default with { BuildLockPath = Path.Combine(sandbox, "no-build-lock") };
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "Baton.slnx"))) return directory.FullName;
+            directory = directory.Parent;
+        }
+
+        throw new FileNotFoundException("Could not locate repo root containing Baton.slnx.");
     }
 
     private sealed record RepoFixture(string Path, string Branch, string Repository);

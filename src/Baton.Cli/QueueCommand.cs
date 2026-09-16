@@ -35,14 +35,15 @@ public static class QueueCommand
             cancellationToken,
             repositoryDirectory,
             RepositoryIdentityResolver.TryResolveAsync,
-            static (issue, sourceRepository, worktreeRoot, repository, writer, token) =>
+            static (issue, sourceRepository, worktreeRoot, repository, lifecycle, writer, token) =>
                 IssueWorktreeProvisioner.ProvisionAsync(
                     issue,
                     sourceRepository,
                     worktreeRoot,
                     repository,
                     output: writer,
-                    cancellationToken: token));
+                    cancellationToken: token,
+                    deterministicSourceCeiling: lifecycle));
 
     /// <summary>
     /// Test seam for the complete queue-add route. Production supplies the canonical repository
@@ -55,7 +56,7 @@ public static class QueueCommand
         CancellationToken cancellationToken,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
+        Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile = null)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -84,7 +85,7 @@ public static class QueueCommand
         TextWriter output,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
+        Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile,
         CancellationToken cancellationToken)
     {
@@ -156,29 +157,41 @@ public static class QueueCommand
         // would otherwise already have replaced the running lane's brief by the time the refusal was
         // raised, which is the exact record that refusal exists to protect. This read is the early
         // half; the mutate re-checks under the file lock, which is where the authority stays.
+        var queueSnapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         RefuseIfNotReplaceable(
-            (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
-                .Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)),
-            tag);
+            queueSnapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)), tag);
 
         var sourceRepository = repositoryDirectory ?? Directory.GetCurrentDirectory();
+        var effectiveWorktreeRoot = options.Issue is not null
+            ? IssueWorktreeProvisioner.ResolveWorktreeRoot(settings.Queue.WorktreeRoot, sourceRepository)
+            : null;
         var issueRepository = options.Issue is not null
             ? await ResolveIssueRepositoryAsync(sourceRepository, repositoryResolver, cancellationToken).ConfigureAwait(false)
             : null;
 
-        // Provisioning first, before anything is written to the queue: a `gh issue develop` that fails
-        // must leave no half-added item behind, the same pre-provision-refusal placement
-        // DispatchCommand's own drain/continue checks use.
-        var provisioned = options.Issue is { } issue
+        // An issue plus a lifecycle workspace is the explicit retained-checkout form. Its validator
+        // owns all Git, liveness, PR and exact-ceiling evidence and runs before any trust/provision/spec/queue mutation.
+        var retained = options is { Lifecycle: true, Issue: { }, WorkspaceDirectory: { } };
+        var retainedProof = retained
+            ? await RetainedIssueWorktreeValidator.ValidateAsync(
+                options.WorkspaceDirectory!, options.Issue!.Value, issueRepository!, effectiveWorktreeRoot,
+                role, settings.Queue.RequireDeclaredRequirements, requirements, queueSnapshot.Items, cancellationToken)
+                .ConfigureAwait(false)
+            : null;
+
+        // Fresh issue adds retain their original provisioning route. Explicit retained reuse never
+        // invokes this delegate, so it cannot create a suffix or alter the path's trust record.
+        var provisioned = options.Issue is { } issue && !retained
             ? await issueProvisioner(
                 issue,
                 sourceRepository,
-                settings.Queue.WorktreeRoot,
+                effectiveWorktreeRoot,
                 issueRepository!,
+                options.Lifecycle,
                 output,
                 cancellationToken).ConfigureAwait(false)
             : null;
-        var workspace = provisioned?.Workspace ?? Path.GetFullPath(options.WorkspaceDirectory!);
+        var workspace = retainedProof?.Workspace ?? provisioned?.Workspace ?? Path.GetFullPath(options.WorkspaceDirectory!);
 
         if (!Directory.Exists(workspace))
         {
@@ -189,7 +202,7 @@ public static class QueueCommand
 
         // A recorded project ceiling is part of the effective grant, not a permission request.
         // Refuse before spec/queue/WIP writes. --issue may already have provisioned the named path.
-        var projectAdmission = RecordedProjectCeilingAdmission.Evaluate(
+        var projectAdmission = retainedProof?.Admission ?? RecordedProjectCeilingAdmission.Evaluate(
             admissionItem with { Workspace = workspace }, role, settings.Queue.RequireDeclaredRequirements);
         if (projectAdmission.Admission.Result == TaskRequirementAdmission.Refused)
         {
@@ -235,12 +248,22 @@ public static class QueueCommand
             Stage = options.Lifecycle ? WorkStage.Implement : null,
             // Every --issue row needs the provisioner's exact branch. Lifecycle rows use it for
             // advancement; ordinary rows retain the same durable anchor for later PR discovery.
-            Branch = provisioned?.Branch,
+            Branch = retainedProof?.Branch ?? provisioned?.Branch,
             Repository = issueRepository,
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.
             AutomaticFixUsed = options.Lifecycle ? false : null,
-            WorkspaceOrigin = options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
+            // A retained checkout was supplied by the operator. Baton proved it safe to reuse, but
+            // did not create it and therefore must never later treat it as cleanup-owned.
+            WorkspaceOrigin = retainedProof is not null
+                ? WorkspaceOrigins.OperatorSupplied
+                : options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
+            RetainedWorktreeReuse = retainedProof is null ? null : new RetainedWorktreeReuse(
+                retainedProof.Repository, retainedProof.Branch, retainedProof.Head, new RetainedWorktreeCeiling(
+                    retainedProof.Ceiling.ReadFiles, retainedProof.Ceiling.WriteFiles,
+                    retainedProof.Ceiling.RunShellCommands, retainedProof.Ceiling.NetworkAccess,
+                    retainedProof.Ceiling.InheritedFrom),
+                retainedProof.TerminalPredecessorTags),
             AddedAt = DateTimeOffset.UtcNow,
         };
 
@@ -278,6 +301,12 @@ public static class QueueCommand
             // running lane's own record would be overwritten.
             var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
             RefuseIfNotReplaceable(existing, tag);
+
+            if (retainedProof is not null)
+            {
+                RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership(
+                    snapshot.Items, retainedProof.Workspace, retainedProof.Branch);
+            }
 
             // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
             // inside the queue's authoritative mutation so a cancellation that wins the same lock is
