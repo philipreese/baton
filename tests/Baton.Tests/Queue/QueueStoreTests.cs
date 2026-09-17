@@ -61,6 +61,35 @@ public sealed class QueueStoreTests
     }
 
     [Fact]
+    public async Task Worktree_cleanup_claim_is_exact_path_exclusive_and_receipted()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            var claim = await QueueStore.TryClaimWorktreeCleanupAsync(
+                path, @"C:\repos\worktrees\retired", "github.com/example/repo", "2151-lane", "abc123", Ct);
+            var duplicate = await QueueStore.TryClaimWorktreeCleanupAsync(
+                path, @"C:\repos\worktrees\retired", "github.com/example/repo", "2151-lane", "abc123", Ct);
+
+            var acquired = Assert.IsType<QueueWorktreeCleanupClaim>(claim);
+            Assert.Null(duplicate);
+            Assert.True(await QueueStore.HasActiveWorktreeCleanupClaimAsync(path, acquired.Path, Ct));
+
+            await QueueStore.CompleteWorktreeCleanupAsync(path, acquired, "refused", "final-recheck-not-candidate", Ct);
+            var read = await QueueStore.LoadAsync(path, Ct);
+
+            Assert.False(await QueueStore.HasActiveWorktreeCleanupClaimAsync(path, acquired.Path, Ct));
+            Assert.Single(read.WorktreeCleanupClaims!);
+            Assert.Single(read.WorktreeCleanupReceipts!);
+            Assert.Equal("final-recheck-not-candidate", read.WorktreeCleanupReceipts![0].ReasonCode);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
     public async Task Lifecycle_selection_intent_and_the_legacy_compatibility_shape_survive_a_restart()
     {
         var path = TempQueuePath();

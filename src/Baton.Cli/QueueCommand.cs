@@ -70,7 +70,7 @@ public static class QueueCommand
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
             QueueVerb.List => ListAsync(options.Active, output, cancellationToken),
-            QueueVerb.Worktrees => WorktreesAsync(options.Format, output, repositoryDirectory, cancellationToken),
+            QueueVerb.Worktrees => WorktreesAsync(options.Format, options.Apply, output, repositoryDirectory, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
             QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
@@ -467,6 +467,7 @@ public static class QueueCommand
 
     private static async Task<int> WorktreesAsync(
         QueueWorktreesOutputFormat format,
+        bool apply,
         TextWriter output,
         string? repositoryDirectory,
         CancellationToken cancellationToken)
@@ -477,8 +478,94 @@ public static class QueueCommand
         var worktreeRoot = settings.Queue.WorktreeRoot ?? Path.GetDirectoryName(sourceRepository);
         var report = await QueueWorktreeReport.CreateAsync(
             snapshot.Items, worktreeRoot, cancellationToken).ConfigureAwait(false);
-        output.WriteLine(format == QueueWorktreesOutputFormat.Json ? report.ToJson() : report.ToText());
-        return 0;
+        if (!apply)
+        {
+            output.WriteLine(format == QueueWorktreesOutputFormat.Json ? report.ToJson() : report.ToText());
+            return 0;
+        }
+
+        var dispositions = new Dictionary<string, string>(QueueWorktreeReport.PathComparer);
+        foreach (var candidate in report.Workspaces.Where(entry => entry.Classification == "candidate"))
+        {
+            dispositions[candidate.Path] = await ApplyWorktreeCandidateAsync(
+                candidate, sourceRepository, worktreeRoot, cancellationToken).ConfigureAwait(false);
+        }
+
+        var applied = report with
+        {
+            Workspaces = report.Workspaces.Select(entry => dispositions.TryGetValue(entry.Path, out var disposition)
+                ? entry with { CleanupDisposition = disposition }
+                : entry).ToList(),
+        };
+        output.WriteLine(format == QueueWorktreesOutputFormat.Json ? applied.ToJson() : applied.ToText());
+        return dispositions.Values.Any(disposition => disposition is "retained" or "refused") ? 1 : 0;
+    }
+
+    private static async Task<string> ApplyWorktreeCandidateAsync(
+        QueueWorktreeEntry candidate,
+        string sourceRepository,
+        string? worktreeRoot,
+        CancellationToken cancellationToken)
+    {
+        var repository = candidate.Git.ExpectedRepository;
+        var branch = candidate.Git.ExpectedBranch;
+        var head = candidate.Git.Head;
+        if (repository is null || branch is null || head is null)
+        {
+            return "refused";
+        }
+
+        var claim = await QueueStore.TryClaimWorktreeCleanupAsync(
+            BatonPaths.QueueFile, candidate.Path, repository, branch, head, cancellationToken).ConfigureAwait(false);
+        if (claim is null)
+        {
+            return "race-lost";
+        }
+
+        // A workspace is removed only while Baton holds a durable claim for that exact resolved path and a final recheck still proves every condition that made the same report classify it as a static candidate. Missing, stale, conflicting, or unavailable evidence removes nothing.
+        var current = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var recheck = await QueueWorktreeReport.CreateAsync(current.Items, worktreeRoot, cancellationToken).ConfigureAwait(false);
+        var entry = recheck.Workspaces.SingleOrDefault(workspace => QueueWorktreeReport.PathComparer.Equals(workspace.Path, claim.Path));
+        if (entry is not { Classification: "candidate" }
+            || !string.Equals(entry.Git.ExpectedRepository, claim.Repository, StringComparison.Ordinal)
+            || !string.Equals(entry.Git.ExpectedBranch, claim.Branch, StringComparison.Ordinal)
+            || !string.Equals(entry.Git.Head, claim.Head, StringComparison.Ordinal))
+        {
+            await QueueStore.CompleteWorktreeCleanupAsync(
+                BatonPaths.QueueFile, claim, "refused", "final-recheck-not-candidate", cancellationToken).ConfigureAwait(false);
+            return "refused";
+        }
+
+        var removal = await IssueWorktreeProvisioner.RunRetainedProbeAsync(
+            "git", ["worktree", "remove", claim.Path], sourceRepository, cancellationToken).ConfigureAwait(false);
+        if (removal.ExitCode != 0)
+        {
+            await QueueStore.CompleteWorktreeCleanupAsync(
+                BatonPaths.QueueFile, claim, "retained", "git-worktree-remove-failed", cancellationToken).ConfigureAwait(false);
+            return "retained";
+        }
+
+        var registered = await IssueWorktreeProvisioner.RunRetainedProbeAsync(
+            "git", ["worktree", "list", "--porcelain"], sourceRepository, cancellationToken).ConfigureAwait(false);
+        var branchHead = await IssueWorktreeProvisioner.RunRetainedProbeAsync(
+            "git", ["rev-parse", "--verify", "refs/heads/" + claim.Branch], sourceRepository, cancellationToken).ConfigureAwait(false);
+        var absentFromRegistration = registered.ExitCode == 0
+            && !registered.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.StartsWith("worktree ", StringComparison.Ordinal))
+                .Select(line => QueueWorktreeReport.TryFullPath(line[9..]))
+                .Any(path => QueueWorktreeReport.PathComparer.Equals(path, claim.Path));
+        var branchPreserved = branchHead.ExitCode == 0
+            && string.Equals(branchHead.Output.Trim(), claim.Head, StringComparison.Ordinal);
+        if (Directory.Exists(claim.Path) || !absentFromRegistration || !branchPreserved)
+        {
+            await QueueStore.CompleteWorktreeCleanupAsync(
+                BatonPaths.QueueFile, claim, "retained", "postcondition-contradictory", cancellationToken).ConfigureAwait(false);
+            return "retained";
+        }
+
+        await QueueStore.CompleteWorktreeCleanupAsync(
+            BatonPaths.QueueFile, claim, "removed", "removed", cancellationToken).ConfigureAwait(false);
+        return "removed";
     }
 
     private static async Task<int> ListAsync(bool active, TextWriter output, CancellationToken cancellationToken)

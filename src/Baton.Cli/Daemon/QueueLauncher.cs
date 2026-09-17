@@ -102,6 +102,12 @@ public static class QueueLauncher
         ArgumentNullException.ThrowIfNull(request);
 
         var item = request.Item;
+        if (await QueueStore.HasActiveWorktreeCleanupClaimAsync(
+                BatonPaths.QueueFile, item.Workspace, cancellationToken).ConfigureAwait(false))
+        {
+            return new QueueLaunchOutcome(null, Error: $"workspace '{item.Workspace}' is held by an active cleanup claim");
+        }
+
         if (!File.Exists(item.SpecFile))
         {
             return new QueueLaunchOutcome(null, Error: $"spec file '{item.SpecFile}' is gone");

@@ -20,7 +20,7 @@ public static class QueueOptionsParser
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
-        "baton queue list [--active] | baton queue worktrees [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
+        "baton queue list [--active] | baton queue worktrees [--apply] [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -87,16 +87,31 @@ public static class QueueOptionsParser
     private static QueueOptions ParseWorktrees(IReadOnlyList<string> args)
     {
         if (args.Count == 1) return new QueueOptions(QueueVerb.Worktrees);
-        if (args.Count == 3 && args[1] == "--format")
+        var apply = false;
+        var formatSpecified = false;
+        var format = QueueWorktreesOutputFormat.Text;
+        for (var i = 1; i < args.Count; i++)
         {
-            return args[2] switch
+            switch (args[i])
             {
-                "text" => new QueueOptions(QueueVerb.Worktrees),
-                "json" => new QueueOptions(QueueVerb.Worktrees, Format: QueueWorktreesOutputFormat.Json),
-                _ => throw new CliArgumentException($"'--format' must be 'text' or 'json', got '{args[2]}'. {Usage}"),
-            };
+                case "--apply" when !apply:
+                    apply = true;
+                    break;
+                case "--format" when !formatSpecified && i + 1 < args.Count:
+                    formatSpecified = true;
+                    format = args[++i] switch
+                    {
+                        "text" => QueueWorktreesOutputFormat.Text,
+                        "json" => QueueWorktreesOutputFormat.Json,
+                        _ => throw new CliArgumentException($"'--format' must be 'text' or 'json', got '{args[i]}'. {Usage}"),
+                    };
+                    break;
+                default:
+                    throw new CliArgumentException($"'baton queue worktrees' takes '--apply' and/or '--format text|json'. {Usage}");
+            }
         }
-        throw new CliArgumentException($"'baton queue worktrees' takes no arguments or '--format text|json'. {Usage}");
+
+        return new QueueOptions(QueueVerb.Worktrees, Format: format, Apply: apply);
     }
 
     private static QueueOptions ParseCancel(IReadOnlyList<string> args)

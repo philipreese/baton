@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Baton.Accounting;
 using Baton.Concurrency;
 using Baton.Queue;
@@ -63,7 +64,8 @@ internal sealed record QueueWorktreeReport(string? WorktreeRoot, IReadOnlyList<Q
         + $"  origin: {entry.Origin}; beneath root: {entry.BeneathConfiguredRoot}; directory: {entry.Directory}\n"
         + $"  rows: {string.Join(", ", entry.Rows.Select(row => $"{row.Tag}/{row.State}/{row.Stage ?? "none"}; origin={row.Origin}; retired={row.Retired}; repository={row.Repository ?? "unknown"}; branch={row.Branch ?? "unknown"}"))}\n"
         + $"  git: {entry.Git.Registration}; head: {entry.Git.Head ?? "unknown"}; expected repository: {entry.Git.ExpectedRepository ?? "unknown"}; observed repository: {entry.Git.Repository ?? "unknown"}; expected branch: {entry.Git.ExpectedBranch ?? "unknown"}; raw status: {entry.Git.RawStatus ?? "unknown"}; truncated: {entry.Git.RawStatusTruncated}\n"
-        + $"  substantive cleanliness: {entry.Git.SubstantiveCleanliness}; active references: {entry.ActiveReferences}; reference observation: {(entry.ActiveReferencesComplete ? "complete" : "unknown")}; size: {entry.SizeBytes?.ToString() ?? "unknown"} ({entry.SizeReason ?? "observed"})")));
+        + $"  substantive cleanliness: {entry.Git.SubstantiveCleanliness}; active references: {entry.ActiveReferences}; reference observation: {(entry.ActiveReferencesComplete ? "complete" : "unknown")}; size: {entry.SizeBytes?.ToString() ?? "unknown"} ({entry.SizeReason ?? "observed"})"
+        + (entry.CleanupDisposition is { } disposition ? $"; cleanup: {disposition}" : string.Empty))));
 
     internal static string? TryFullPath(string? path)
     {
@@ -109,7 +111,8 @@ internal sealed record QueueWorktreeEntry(
     bool ActiveReferencesComplete,
     string Classification,
     IReadOnlyList<string> ReasonCodes,
-    IReadOnlyList<QueueWorktreeRow> Rows)
+    IReadOnlyList<QueueWorktreeRow> Rows,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CleanupDisposition = null)
 {
     private const int MaxFilesMeasured = 10_000;
     private const int MaxDirectoriesMeasured = 10_000;
