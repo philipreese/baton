@@ -33,13 +33,19 @@ namespace Baton.Cli.Tests.TestSupport;
 /// run a local fake process under a shipped adapter name while exercising that adapter's real stream
 /// parser metadata, instead of making an unsupported fake parser turn a measured count into null.
 /// </param>
+/// <param name="deliverBranch">
+/// When true, the fake models a successful branch-delivering implement worker by creating and pushing
+/// one empty commit before it writes contract outputs. The fixture workspace must already have an
+/// upstream branch; the default remains false so non-delivery tests do not acquire git side effects.
+/// </param>
 internal sealed class ContractOutputWorkerAdapter(
     bool satisfyOutputs,
     IReadOnlyDictionary<string, string>? outputFixtures = null,
     IReadOnlyList<WorkerCapabilityItem>? capabilities = null,
     int failureExitCode = 0,
     bool bindsDispatchedWorkspaceReadable = false,
-    string? stdoutFixture = null) : IWorkerAdapter
+    string? stdoutFixture = null,
+    bool deliverBranch = false) : IWorkerAdapter
 {
     public bool BindsDispatchedWorkspaceReadable => bindsDispatchedWorkspaceReadable;
 
@@ -55,6 +61,12 @@ internal sealed class ContractOutputWorkerAdapter(
     public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
     {
         var commands = new List<string>();
+        if (deliverBranch && string.Equals(contract.WorkerName, "implement", StringComparison.Ordinal))
+        {
+            commands.Add("git -c user.email=test@example.invalid -c user.name=Test commit --allow-empty -q -m fixture");
+            commands.Add("git push -q");
+        }
+
         if (stdoutFixture is not null)
         {
             commands.Add($"type {stdoutFixture}");

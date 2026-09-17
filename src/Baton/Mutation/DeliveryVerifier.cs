@@ -9,8 +9,9 @@ namespace Baton.Mutation;
 /// Which of <see cref="DeliveryVerifier.CheckAsync"/>'s four verdicts applies. Mirrors
 /// <see cref="VerifyOutcome"/>'s own shape (pass / fail-with-members / not-run-with-reason / cancelled)
 /// rather than reusing that record directly — a delivery check names no gate command and carries no
-/// <see cref="VerifyFailedKind"/> of its own; the caller (<c>MutationInterface</c>) picks
-/// <see cref="Domain.VerifyFailedKind.DeliveryFailed"/> for it.
+/// <see cref="VerifyFailedKind"/> of its own; the caller (<c>MutationInterface</c>) maps a conclusive
+/// failure to <see cref="Domain.VerifyFailedKind.DeliveryFailed"/> and an unavailable final observation
+/// to <see cref="Domain.VerifyFailedKind.DeliveryNotRun"/>.
 /// </summary>
 public enum DeliveryCheckStatus
 {
@@ -26,8 +27,8 @@ public enum DeliveryCheckStatus
 
 /// <summary>
 /// The result of one <see cref="DeliveryVerifier.CheckAsync"/> call (#1788). <see cref="FailingMembers"/>
-/// is populated only for <see cref="DeliveryCheckStatus.Failed"/>, using exactly the two names the issue
-/// names (<c>branch-not-pushed</c>, <c>pr-not-open</c>) — never a third, and never fabricated for a
+/// is populated only for <see cref="DeliveryCheckStatus.Failed"/>, using the delivery members
+/// (<c>revision-not-created</c>, <c>branch-not-pushed</c>, and <c>pr-not-open</c>) — never fabricated for a
 /// <see cref="DeliveryCheckStatus.NotRun"/> verdict. <see cref="Tail"/> is a short, human-readable line
 /// per failing member, meant to become the room's <c>verifyTail</c> the same way
 /// <see cref="VerifyOutcome.Tail"/> does. <see cref="NotRunReason"/> is populated only for
@@ -149,16 +150,23 @@ public static class DeliveryVerifier
     /// <c>branch-not-pushed</c> tail SAYS: the cause the room can act on rather than the symptom a
     /// conductor then has to reconstruct.
     /// </param>
+    /// <param name="workspaceHeadShaAtStart">
+    /// The exact revision journalled before this attempt began. When present, a passing delivery must
+    /// move local <c>HEAD</c> away from it; an unchanged revision is a typed
+    /// <c>revision-not-created</c> failure even when the branch was already pushed.
+    /// </param>
     public static async Task<DeliveryCheckOutcome> CheckAsync(
         string? workingDirectory,
         bool expectPr,
         CancellationToken cancellationToken,
         string gitProgram = "git",
         string ghProgram = "gh",
-        bool shippingCeilingExceeded = false)
+        bool shippingCeilingExceeded = false,
+        string? workspaceHeadShaAtStart = null)
     {
         var outcome = await CheckCoreAsync(
-            workingDirectory, expectPr, cancellationToken, gitProgram, ghProgram, shippingCeilingExceeded).ConfigureAwait(false);
+            workingDirectory, expectPr, cancellationToken, gitProgram, ghProgram, shippingCeilingExceeded,
+            workspaceHeadShaAtStart).ConfigureAwait(false);
 
         // #1788 review: cancellation wins over whatever the accumulated verdict happened to compute --
         // the same precedence VerifyRunner.RunProcessAsync's own post-capture check applies, so an
@@ -375,9 +383,31 @@ public static class DeliveryVerifier
     private static bool IsObjectId(string? value) =>
         value is { Length: 40 or 64 } && value.All(char.IsAsciiHexDigit);
 
+    private static async Task<string> DescribeWorkspaceStateAsync(
+        string gitProgram, string workingDirectory, CancellationToken cancellationToken)
+    {
+        var status = await RunAsync(
+            gitProgram, ["status", "--porcelain", "--untracked-files=all"], workingDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        if (!status.Spawned || status.ExitCode != 0)
+        {
+            return "workspace state could not be measured";
+        }
+
+        var lines = status.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        var untracked = lines.Count(line => line.StartsWith("??", StringComparison.Ordinal));
+        var tracked = lines.Length - untracked;
+        return tracked == 0 && untracked == 0
+            ? "workspace is clean"
+            : $"workspace changes remain (tracked: {tracked}, untracked: {untracked})";
+    }
+
+    private static string ShortObjectId(string? objectId) =>
+        objectId is { Length: > 12 } ? objectId[..12] : objectId ?? "unknown";
+
     private static async Task<DeliveryCheckOutcome> CheckCoreAsync(
         string? workingDirectory, bool expectPr, CancellationToken cancellationToken, string gitProgram, string ghProgram,
-        bool shippingCeilingExceeded)
+        bool shippingCeilingExceeded, string? workspaceHeadShaAtStart)
     {
         if (string.IsNullOrWhiteSpace(workingDirectory))
         {
@@ -416,6 +446,27 @@ public static class DeliveryVerifier
                 "branch-not-pushed: the workspace has no checked-out branch (detached HEAD) — commit onto a named branch and push it before this lane can settle Succeeded.");
         }
 
+        // A delivery attempt must create a revision before remote state can certify it. Check this
+        // before ls-remote so a never-pushed, unchanged dirty workspace reports the same typed
+        // no-op failure as an already-pushed branch; the absence of a remote ref is secondary evidence.
+        if (IsObjectId(workspaceHeadShaAtStart))
+        {
+            var attemptHeadResult = await RunAsync(
+                gitProgram, ["rev-parse", "HEAD"], workingDirectory, cancellationToken).ConfigureAwait(false);
+            var attemptHead = attemptHeadResult.Output.Trim();
+            if (attemptHeadResult.Spawned && attemptHeadResult.ExitCode == 0
+                && IsObjectId(attemptHead)
+                && string.Equals(attemptHead, workspaceHeadShaAtStart, StringComparison.OrdinalIgnoreCase))
+            {
+                var workspaceState = await DescribeWorkspaceStateAsync(
+                    gitProgram, workingDirectory, cancellationToken).ConfigureAwait(false);
+                return new DeliveryCheckOutcome(
+                    DeliveryCheckStatus.Failed,
+                    ["revision-not-created"],
+                    $"revision-not-created: local HEAD {ShortObjectId(attemptHead)} did not advance from the attempt-start HEAD; {workspaceState}");
+            }
+        }
+
         var failingMembers = new List<string>();
         var tailLines = new List<string>();
         var notRunReasons = new List<string>();
@@ -443,7 +494,8 @@ public static class DeliveryVerifier
         else
         {
             var pushed = await CheckPushedAsync(
-                gitProgram, workingDirectory, branch, shippingCeilingExceeded, cancellationToken).ConfigureAwait(false);
+                gitProgram, workingDirectory, branch, shippingCeilingExceeded, workspaceHeadShaAtStart,
+                cancellationToken).ConfigureAwait(false);
             if (pushed.Status == DeliveryCheckStatus.Failed)
             {
                 failingMembers.AddRange(pushed.FailingMembers!);
@@ -481,6 +533,18 @@ public static class DeliveryVerifier
                 notRunReasons.Add("exact PR number/head was unavailable in the first open PR reading");
             }
             else checkedPr = pr;
+        }
+
+        if (checkedPush is not null && checkedPr is not null
+            && !string.Equals(checkedPr.Head, checkedPush.CheckedLocalHead, StringComparison.OrdinalIgnoreCase))
+        {
+            // A readable open PR is not enough: it must point at the revision this attempt delivered.
+            // Keep the established PR delivery member so lifecycle consumers retain the same typed
+            // failure path while the tail names the stale head precisely.
+            failingMembers.Add("pr-not-open");
+            tailLines.Add(
+                $"pr-not-open: open PR #{checkedPr.Number} points at {ShortObjectId(checkedPr.Head)} "
+                + $"rather than delivered HEAD {ShortObjectId(checkedPush.CheckedLocalHead)} — update the PR before this lane can settle Succeeded.");
         }
 
         if (failingMembers.Count > 0)
@@ -525,7 +589,7 @@ public static class DeliveryVerifier
     /// </summary>
     private static async Task<DeliveryCheckOutcome> CheckPushedAsync(
         string gitProgram, string workingDirectory, string branch, bool shippingCeilingExceeded,
-        CancellationToken cancellationToken)
+        string? workspaceHeadShaAtStart, CancellationToken cancellationToken)
     {
         // Name the exact local object BEFORE the fetch/ancestry probe. A later HEAD change cannot
         // inherit this verdict merely because the symbolic name moved during separate spawns.
@@ -536,6 +600,17 @@ public static class DeliveryVerifier
         {
             return new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
                 NotRunReason: "could not read the exact local HEAD for delivery verification");
+        }
+
+        if (IsObjectId(workspaceHeadShaAtStart)
+            && string.Equals(localHead, workspaceHeadShaAtStart, StringComparison.OrdinalIgnoreCase))
+        {
+            var workspaceState = await DescribeWorkspaceStateAsync(
+                gitProgram, workingDirectory, cancellationToken).ConfigureAwait(false);
+            return new DeliveryCheckOutcome(
+                DeliveryCheckStatus.Failed,
+                ["revision-not-created"],
+                $"revision-not-created: local HEAD {ShortObjectId(localHead)} did not advance from the attempt-start HEAD; {workspaceState}");
         }
         // spec/baton.md §3 states why the explicit refspec form is used here rather than a bare
         // `git fetch origin <branch>`.

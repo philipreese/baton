@@ -30,10 +30,11 @@ public sealed class WorkItemLifecycleTests
         bool? workspaceChanged = null,
         IndeterminateProducer? indeterminateProducer = null,
         bool? workerStepsRecorded = null,
-        string? attemptBaseRevision = null) =>
+        string? attemptBaseRevision = null,
+        IReadOnlyList<string>? deliveryFailingMembers = null) =>
         new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead,
             prObserved, prOpen, prDraft, requiredChecks, workspaceChanged, indeterminateProducer,
-            workerStepsRecorded, attemptBaseRevision);
+            workerStepsRecorded, attemptBaseRevision, deliveryFailingMembers);
 
     /// <summary>
     /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
@@ -396,6 +397,19 @@ public sealed class WorkItemLifecycleTests
 
         Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
         Assert.Equal(WorkStage.Continue, transition.NextStage);
+    }
+
+    [Fact]
+    public void A_revision_not_created_delivery_failure_continues_even_when_the_pr_and_workspace_match()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement,
+            outcome: WorkflowOutcome.Indeterminate,
+            deliveryFailingMembers: ["revision-not-created"]));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.Continue, transition.NextStage);
+        Assert.DoesNotContain("re-review", transition.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

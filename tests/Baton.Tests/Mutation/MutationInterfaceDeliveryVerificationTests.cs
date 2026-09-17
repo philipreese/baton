@@ -20,7 +20,7 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     private static readonly StepId Implementer = new("implementer");
 
     [Fact]
-    public async Task A_delivers_branch_role_that_pushed_cleanly_settles_Succeeded()
+    public async Task A_delivers_branch_role_that_advanced_and_pushed_cleanly_settles_Succeeded()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-pass");
         var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
@@ -30,7 +30,10 @@ public sealed class MutationInterfaceDeliveryVerificationTests
             {
                 ["implementer"] = new WorkerBinding.Process(
                     new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
-                    new CoreDispatchTarget("cmd", ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"], WorkingDirectory: workspace),
+                    new CoreDispatchTarget(
+                        "cmd",
+                        ["/c", "echo delivered>delivery.txt && git add delivery.txt && git commit -m delivered -q && git push -q origin HEAD && echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        WorkingDirectory: workspace),
                     TimeSpan.FromSeconds(30),
                     DeliversBranch: true,
                     ExpectPr: false),
@@ -42,6 +45,138 @@ public sealed class MutationInterfaceDeliveryVerificationTests
             var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
             Assert.Empty(events.OfType<FlowEvent.VerifyFailed>());
             Assert.Empty(events.OfType<FlowEvent.VerifyNotRun>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
+    public async Task A_dirty_workspace_with_unchanged_HEAD_fails_delivery_and_keeps_the_lane_indeterminate()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-dirty-unchanged");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["implementer"] = new WorkerBinding.Process(
+                    new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
+                    new CoreDispatchTarget(
+                        "cmd",
+                        ["/c", "echo changed>>README.md && echo stray>untracked.txt && echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        WorkingDirectory: workspace),
+                    TimeSpan.FromSeconds(30),
+                    ChangesTree: true,
+                    DeliversBranch: true,
+                    ExpectPr: false),
+            };
+
+            var finalState = await RunSingleStepPumpAsync(roomDirectory, artifactsRoot, logPath, bindings);
+            var step = Assert.Single(finalState.Steps);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+
+            Assert.True(step.IndeterminateAwaitingResolution);
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["revision-not-created"], failed.FailingMembers);
+            Assert.Contains("tracked", failed.Tail, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("untracked", failed.Tail, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
+    public async Task A_clean_workspace_with_unchanged_HEAD_fails_delivery_instead_of_manufacturing_success()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-clean-unchanged");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var finalState = await RunSingleStepPumpAsync(
+                roomDirectory, artifactsRoot, logPath,
+                DeliveryBinding(workspace, "echo done>%BATON_OUTPUT_DIR%\\changes.md"));
+            var step = Assert.Single(finalState.Steps);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+
+            Assert.True(step.IndeterminateAwaitingResolution);
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["revision-not-created"], failed.FailingMembers);
+            Assert.Contains("clean", failed.Tail, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
+    public async Task A_missing_final_delivery_observation_followed_by_a_passing_gate_still_fails_delivery()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-missing-final-observation");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var finalState = await RunSingleStepPumpAsync(
+                roomDirectory, artifactsRoot, logPath,
+                DeliveryBinding(workspace,
+                    "echo delivered>delivery.txt && git add delivery.txt && git commit -m delivered -q && git push -q origin HEAD && echo done>%BATON_OUTPUT_DIR%\\changes.md",
+                    "rmdir /s /q .git & exit 0"));
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(Assert.Single(finalState.Steps).IndeterminateAwaitingResolution);
+            Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.Single(events.OfType<FlowEvent.VerifyPassed>());
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Contains("delivery", failed.Tail, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
+    public async Task A_notrun_delivery_preflight_still_runs_verify_before_the_final_notrun_settles_the_lane()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-notrun-before-verify");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            DirectoryCleanup.DeleteRecursively(origin);
+            var finalState = await RunSingleStepPumpAsync(
+                roomDirectory, artifactsRoot, logPath,
+                DeliveryBinding(workspace,
+                    "git commit --allow-empty -m delivered -q && echo done>%BATON_OUTPUT_DIR%\\changes.md",
+                    "echo verified>verify-ran.txt & exit 0"));
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(Assert.Single(finalState.Steps).IndeterminateAwaitingResolution);
+            Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.Single(events.OfType<FlowEvent.VerifyPassed>());
+            Assert.True(File.Exists(Path.Combine(workspace, "verify-ran.txt")));
+            Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+            Assert.Empty(events.OfType<FlowEvent.VerifyNotRun>());
+            Assert.Equal(VerifyFailedKind.DeliveryNotRun,
+                Assert.Single(events.OfType<FlowEvent.VerifyFailed>()).Kind);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
         }
         finally
         {
@@ -149,7 +284,7 @@ public sealed class MutationInterfaceDeliveryVerificationTests
                     new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
                     new CoreDispatchTarget(
                         "cmd",
-                        ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        ["/c", "echo delivered>delivery.txt && git add delivery.txt && git commit -m delivered -q && git push -q origin HEAD && echo done>%BATON_OUTPUT_DIR%\\changes.md"],
                         WorkingDirectory: workspace),
                     TimeSpan.FromSeconds(30),
                     VerifyCommandOverride: "exit 0",
@@ -192,7 +327,10 @@ public sealed class MutationInterfaceDeliveryVerificationTests
             {
                 ["implementer"] = new WorkerBinding.Process(
                     new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
-                    new CoreDispatchTarget("cmd", ["/c", "echo done>%BATON_OUTPUT_DIR%\\changes.md"], WorkingDirectory: workspace),
+                    new CoreDispatchTarget(
+                        "cmd",
+                        ["/c", "echo delivered>delivery.txt && git add delivery.txt && git commit -m delivered -q && git push -q origin HEAD && echo done>%BATON_OUTPUT_DIR%\\changes.md"],
+                        WorkingDirectory: workspace),
                     TimeSpan.FromSeconds(30),
                     VerifyCommandOverride: verifyCommand,
                     DeliversBranch: true,
@@ -417,7 +555,8 @@ public sealed class MutationInterfaceDeliveryVerificationTests
             var handoffBefore = await File.ReadAllTextAsync(handoffPath, TestContext.Current.CancellationToken);
             var reread = await DeliveryVerifier.ReadEvidenceAsync(outputDirectory, TestContext.Current.CancellationToken);
 
-            Assert.Equal(DeliveryCheckStatus.Passed, reread.Evidence!.Verification);
+            Assert.Equal(DeliveryCheckStatus.Failed, reread.Evidence!.Verification);
+            Assert.Equal(["revision-not-created"], reread.Evidence.FailingMembers);
             Assert.Equal(reread.Evidence.LocalHead, reread.Evidence.RemoteHead);
             Assert.Equal(evidenceBefore, await File.ReadAllTextAsync(evidencePath, TestContext.Current.CancellationToken));
             Assert.Equal(handoffBefore, await File.ReadAllTextAsync(handoffPath, TestContext.Current.CancellationToken));
@@ -425,12 +564,14 @@ public sealed class MutationInterfaceDeliveryVerificationTests
         finally { DirectoryCleanup.DeleteRecursively(roomDirectory); DirectoryCleanup.DeleteRecursively(workspace); DirectoryCleanup.DeleteRecursively(origin); }
     }
 
-    private static IReadOnlyDictionary<string, WorkerBinding> DeliveryBinding(string workspace, string command) =>
+    private static IReadOnlyDictionary<string, WorkerBinding> DeliveryBinding(
+        string workspace, string command, string? verifyCommandOverride = null) =>
         new Dictionary<string, WorkerBinding>
         {
             ["implementer"] = new WorkerBinding.Process(
                 new WorkerContract("implementer", [], [new ProducedOutput("changes.md")], []),
                 new CoreDispatchTarget("cmd", ["/c", command], WorkingDirectory: workspace), TimeSpan.FromSeconds(30),
+                VerifyCommandOverride: verifyCommandOverride,
                 DeliversBranch: true, ExpectPr: false),
         };
 

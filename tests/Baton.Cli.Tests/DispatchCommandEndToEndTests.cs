@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.Vendors;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
@@ -1200,14 +1201,16 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
                 check = { cmd = "cmd /c exit 0" }
                 """,
                 TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
             var outputPath = Path.Combine(testRoot, "changes-out.md");
-            var options = new DispatchOptions("implement", specPath, roomDirectory, Adapter: "fake", OutputPath: outputPath);
+            var options = new DispatchOptions(
+                "implement", specPath, roomDirectory, Adapter: "fake", OutputPath: outputPath, ExpectPr: false);
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
-                ["fake"] = new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true),
+                ["fake"] = new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true, deliverBranch: true),
             };
 
             using var consoleOutput = new StringWriter();
@@ -1247,14 +1250,16 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
             // is not inside a pixi project) -- that absence is the whole fixture.
             var workspace = Path.Combine(testRoot, "workspace");
             Directory.CreateDirectory(workspace);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
             var outputPath = Path.Combine(testRoot, "changes-out.md");
-            var options = new DispatchOptions("implement", specPath, roomDirectory, Adapter: "fake", OutputPath: outputPath);
+            var options = new DispatchOptions(
+                "implement", specPath, roomDirectory, Adapter: "fake", OutputPath: outputPath, ExpectPr: false);
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
-                ["fake"] = new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true),
+                ["fake"] = new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true, deliverBranch: true),
             };
 
             using var consoleOutput = new StringWriter();
@@ -1811,6 +1816,43 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
         var path = Path.Combine(directory, "spec.md");
         await File.WriteAllTextAsync(path, content, TestContext.Current.CancellationToken);
         return path;
+    }
+
+    private static async Task InitPushedGitWorkspaceAsync(string directory)
+    {
+        var origin = Path.Combine(Path.GetDirectoryName(directory)!, "origin.git");
+        await RunGitAsync(Path.GetDirectoryName(directory)!, "init", "--bare", "-q", origin);
+        await RunGitAsync(directory, "init", "-q");
+        await RunGitAsync(directory, "add", ".");
+        await RunGitAsync(
+            directory, "-c", "user.email=test@example.invalid", "-c", "user.name=Test",
+            "commit", "--allow-empty", "-q", "-m", "base");
+        await RunGitAsync(directory, "remote", "add", "origin", origin);
+        await RunGitAsync(directory, "push", "-q", "-u", "origin", "HEAD");
+    }
+
+    private static async Task RunGitAsync(string workingDirectory, params string[] args)
+    {
+        var startInfo = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start git — is it on PATH? These tests need git.");
+        var (_, stderr) = await BoundedProcessWait.RunToExitAsync(
+            process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {stderr.Trim()}");
+        }
     }
 
     /// <summary>

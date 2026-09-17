@@ -175,6 +175,7 @@ public sealed class WorkItemAdvancer
 
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
+        var deliveryFailingMembers = ReadDeliveryFailingMembers(sentinel);
         await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
             .ConfigureAwait(false);
 
@@ -269,7 +270,7 @@ public sealed class WorkItemAdvancer
             reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
             sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null,
-            item.AttemptBaseRevision);
+            item.AttemptBaseRevision, deliveryFailingMembers);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
@@ -1419,6 +1420,33 @@ public sealed class WorkItemAdvancer
     {
         return sentinel?.Outputs?.FirstOrDefault(p => string.Equals(
             Path.GetFileName(p), CostLedgerStore.VerdictOutputName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Carries the terminal sentinel's engine-owned delivery members into the pure lifecycle. The
+    /// sentinel can contain more than one execution after a resume, so prefer entries belonging to a
+    /// terminal step execution; legacy sentinels without step execution ids use their only available
+    /// delivery observations rather than dropping a typed failure.
+    /// </summary>
+    private static IReadOnlyList<string>? ReadDeliveryFailingMembers(WorkflowStatusView? sentinel)
+    {
+        if (sentinel?.Delivery is not { Count: > 0 } deliveries)
+        {
+            return null;
+        }
+
+        var stepExecutions = sentinel.Steps
+            .Select(step => step.Execution)
+            .Where(execution => execution is { Length: > 0 })
+            .ToHashSet(StringComparer.Ordinal);
+        var relevant = stepExecutions.Count == 0
+            ? deliveries
+            : deliveries.Where(delivery => stepExecutions.Contains(delivery.Execution));
+        var members = relevant
+            .SelectMany(delivery => delivery.AuthoritativeObservation.FailingMembers ?? [])
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        return members.Length == 0 ? null : members;
     }
 
     /// <summary>

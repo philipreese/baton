@@ -39,6 +39,29 @@ if (args is ["rev-parse", "HEAD"])
     await Console.Out.WriteLineAsync(HermeticHead);
     return 0;
 }
+if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_OPEN_PR") == "1"
+    && args is ["pr", "list", "--head", _, "--json", "number,headRefOid"])
+{
+    var headStart = new ProcessStartInfo("git")
+    {
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+    };
+    headStart.ArgumentList.Add("rev-parse");
+    headStart.ArgumentList.Add("HEAD");
+    using var headProcess = Process.Start(headStart)
+        ?? throw new InvalidOperationException("Could not start git for the hermetic gh fixture.");
+    var head = (await headProcess.StandardOutput.ReadToEndAsync()).Trim();
+    await headProcess.WaitForExitAsync();
+    if (headProcess.ExitCode != 0)
+    {
+        return headProcess.ExitCode;
+    }
+
+    await Console.Out.WriteLineAsync($$"""[{"number":2362,"headRefOid":"{{head}}"}]""");
+    return 0;
+}
 if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER") == "1"
     && args is ["-c", "credential.interactive=false", "ls-remote", "--exit-code", "--heads", "origin", "2190-verified-pr-ownership"])
 {

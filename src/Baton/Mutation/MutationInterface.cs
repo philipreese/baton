@@ -1261,6 +1261,24 @@ public static class MutationInterface
                                 continue;
                             }
 
+                            // A replayed passing stamp is still bound by the durable attempt-start
+                            // revision. Older code could stamp a pre-existing pushed branch as passed;
+                            // once the start fact exists, that stale success must take the same typed
+                            // delivery-failure path as the live preflight.
+                            if (evidence.Verification == DeliveryCheckStatus.Passed
+                                && workspaceHeadShaAtStart is { Length: 40 or 64 }
+                                && string.Equals(evidence.LocalHead, workspaceHeadShaAtStart, StringComparison.OrdinalIgnoreCase))
+                            {
+                                await eventLogWriter.AppendAsync(
+                                    new FlowEvent.VerifyFailed(
+                                        executionId,
+                                        ["revision-not-created"],
+                                        "revision-not-created: the recorded delivery HEAD did not advance from the attempt-start HEAD",
+                                        VerifyFailedKind.DeliveryFailed),
+                                    ioCancellationToken).ConfigureAwait(false);
+                                continue;
+                            }
+
                             switch (evidence.Verification)
                             {
                                 case DeliveryCheckStatus.Failed:
@@ -1275,9 +1293,12 @@ public static class MutationInterface
                                     continue;
                                 case DeliveryCheckStatus.NotRun:
                                     await eventLogWriter.AppendAsync(
-                                        new FlowEvent.VerifyNotRun(executionId, evidence.VerificationReason
-                                            ?? "delivery observation did not run"), ioCancellationToken).ConfigureAwait(false);
-                                    break;
+                                        new FlowEvent.VerifyFailed(
+                                            executionId,
+                                            Tail: evidence.VerificationReason ?? "delivery observation did not run",
+                                            Kind: VerifyFailedKind.DeliveryNotRun),
+                                        ioCancellationToken).ConfigureAwait(false);
+                                    continue;
                                 case DeliveryCheckStatus.Passed:
                                     break;
                                 default:
@@ -2148,17 +2169,22 @@ public static class MutationInterface
             // see OutcomeClassifier.Classify's own changesTreeWorkingDirectory parameter doc for why.
             var changesTreeWorkingDirectory = binding.ChangesTree ? binding.Target.WorkingDirectory : null;
 
-            // #1373: read HERE, before the worker is spawned, because "new commits since this attempt
-            // started" has no meaning read afterwards. Best-effort by construction (ResolveBaseCommit
+            // #1373/#2362: read HERE, before the worker is spawned, because "new commits since this
+            // attempt started" has no meaning read afterwards. Branch-delivering roles use their
+            // target workspace even when they do not request the separate ChangesTree measurement;
+            // delivery still needs an attempt-start revision to reject a pre-existing pushed branch.
+            // Best-effort by construction (ResolveBaseCommit
             // returns null on any git failure rather than throwing), and a null only costs the probe its
             // exact commit count -- OutcomeClassifier.Classify falls back to the worktree's provisioned
             // base and then to the reflog heuristic, both of which still answer in the fail-closed
             // direction. Off the intent-append path deliberately: this shells out to git, and the loop
             // that appends ExecutionRequestAccepted for a whole round must not wait on one.
             var mutationProbePath = worktreePath ?? changesTreeWorkingDirectory;
-            var workspaceHeadShaAtStart = mutationProbePath is null
+            var attemptStartProbePath = mutationProbePath
+                ?? (binding.DeliversBranch ? binding.Target.WorkingDirectory : null);
+            var workspaceHeadShaAtStart = attemptStartProbePath is null
                 ? null
-                : Workspaces.WorktreeProvisioner.ResolveBaseCommit(mutationProbePath, "HEAD");
+                : Workspaces.WorktreeProvisioner.ResolveBaseCommit(attemptStartProbePath, "HEAD");
 
             // #1373 follow-up (spec/baton.md §3): journaled here, still off the round's own
             // intent-append loop -- this method runs per-execution, not inside PrepareExecutionAsync's
@@ -2390,10 +2416,12 @@ public static class MutationInterface
                 {
                     deliveryOutcomeBeforeVerify = await DeliveryVerifier.CheckAsync(
                         binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
-                        shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
+                        shippingCeilingExceeded: shippingCeilingExceeded,
+                        workspaceHeadShaAtStart: workspaceHeadShaAtStart).ConfigureAwait(false);
                 }
 
-                if (deliveryOutcomeBeforeVerify.Status is DeliveryCheckStatus.Failed or DeliveryCheckStatus.Cancelled)
+                if (deliveryOutcomeBeforeVerify.Status is DeliveryCheckStatus.Failed
+                    or DeliveryCheckStatus.Cancelled)
                 {
                     if (recordedDelivery is null)
                     {
@@ -2686,9 +2714,13 @@ public static class MutationInterface
                 return true;
             case DeliveryCheckStatus.NotRun:
                 await eventLogWriter.AppendAsync(
-                    new FlowEvent.VerifyNotRun(executionId, deliveryOutcome.NotRunReason!), CancellationToken.None)
+                    new FlowEvent.VerifyFailed(
+                        executionId,
+                        Tail: deliveryOutcome.NotRunReason ?? "delivery observation did not run",
+                        Kind: VerifyFailedKind.DeliveryNotRun),
+                    CancellationToken.None)
                     .ConfigureAwait(false);
-                return false;
+                return true;
             case DeliveryCheckStatus.Passed:
             default:
                 return false;

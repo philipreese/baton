@@ -173,7 +173,9 @@ public sealed class WorkItemAdvancerTests
 
     /// <summary>Writes a settled room: the sentinel plus, when asked, the verdict the sentinel's own
     /// <c>outputs</c> point at — the same path <c>WatchFireService</c> reads one from.</summary>
-    private static async Task<string> WriteSettledRoomAsync(string home, string outcome, string? verdictJson)
+    private static async Task<string> WriteSettledRoomAsync(
+        string home, string outcome, string? verdictJson,
+        IReadOnlyList<ExecutionDeliveryStatusView>? delivery = null)
     {
         var room = Path.Combine(home, "rooms", "queue-1934-lane-" + Guid.NewGuid().ToString("n")[..8]);
         Directory.CreateDirectory(room);
@@ -186,7 +188,7 @@ public sealed class WorkItemAdvancerTests
             outputs.Add(verdictPath);
         }
 
-        await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(outcome, [], outputs, null), Ct);
+        await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(outcome, [], outputs, null, Delivery: delivery), Ct);
         return room;
     }
 
@@ -1504,6 +1506,45 @@ public sealed class WorkItemAdvancerTests
             {
                 Assert.Contains("automatic continuation", reason, StringComparison.Ordinal);
             }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_revision_not_created_delivery_failure_continues_a_matching_pr_and_workspace()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(
+                home,
+                WorkflowOutcome.Indeterminate,
+                verdictJson: null,
+                delivery:
+                [
+                    new ExecutionDeliveryStatusView(
+                        "delivery-execution",
+                        new DeliveryObservationStatusView(
+                            "failed",
+                            FailingMembers: ["revision-not-created"],
+                            Reason: "revision-not-created: no new revision"))
+                ]);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+
+            var facts = await Advancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(QueueDecisionEntry.Advanced, Assert.Single(facts).Decision);
+            Assert.Contains("continue", facts[0].Reason!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("re-review", facts[0].Reason!, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

@@ -833,6 +833,7 @@ public class MutationInterfaceCrashRecoveryTests
     [InlineData("missing", false)]
     [InlineData("passed", true)]
     [InlineData("failed", false)]
+    [InlineData("not-run", false)]
     [InlineData("invalid", false)]
     public async Task A_replayed_delivery_exit_uses_only_its_journalled_observation(string observationCase, bool expectSuccess)
     {
@@ -858,6 +859,8 @@ public class MutationInterfaceCrashRecoveryTests
                     head, "lane", head, null, "Passed"),
                 "failed" => new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
                     head, "lane", null, null, "Failed", ["branch-not-pushed"], "branch-not-pushed"),
+                "not-run" => new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
+                    head, "lane", null, null, "NotRun", null, "delivery check unavailable"),
                 "invalid" => new FlowEvent.DeliveryObservationRecorded(executionId, DateTimeOffset.UtcNow.ToString("O"),
                     null, null, null, null, "Invalid"),
                 _ => null,
@@ -881,10 +884,54 @@ public class MutationInterfaceCrashRecoveryTests
             {
                 Assert.True(step.IndeterminateAwaitingResolution);
                 Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
-                var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
-                Assert.Equal(observationCase == "failed" ? VerifyFailedKind.DeliveryFailed : VerifyFailedKind.EngineRestart,
-                    failure.Kind);
+                if (observationCase == "not-run")
+                {
+                    var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+                    Assert.Equal(VerifyFailedKind.DeliveryNotRun, failure.Kind);
+                    Assert.Equal("delivery check unavailable", failure.Tail);
+                }
+                else
+                {
+                    var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+                    Assert.Equal(observationCase == "failed"
+                            ? VerifyFailedKind.DeliveryFailed
+                            : VerifyFailedKind.EngineRestart,
+                        failure.Kind);
+                }
             }
+        }
+        finally { DirectoryCleanup.DeleteRecursively(roomDirectory); }
+    }
+
+    [Fact]
+    public async Task A_replayed_pass_cannot_survive_when_the_recorded_HEAD_equals_attempt_start()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-delivery-revision-replay");
+            var executionId = await AcceptRequestAsync(writer, workflowId, artifactsRoot, A, deliversBranch: true);
+            const string head = "0123456789abcdef0123456789abcdef01234567";
+            await writer.AppendAsync(new FlowEvent.ExecutionAttemptStarted(executionId, head), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionStarted(executionId, Pid: 4242), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionExited(executionId, ExitCode: 0, CoreExitReason.Natural), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new FlowEvent.DeliveryObservationRecorded(
+                executionId, DateTimeOffset.UtcNow.ToString("O"), head, "lane", head, null, "Passed"),
+                TestContext.Current.CancellationToken);
+
+            var state = await MutationInterface.StartWorkflowAsync(workflowId, roomDirectory, snapshot,
+                MakeBindings(), artifactsRoot, reader, writer, new StubCoreDispatcher(),
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.True(Assert.Single(state.Steps).IndeterminateAwaitingResolution);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["revision-not-created"], failed.FailingMembers);
         }
         finally { DirectoryCleanup.DeleteRecursively(roomDirectory); }
     }

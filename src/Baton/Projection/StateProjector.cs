@@ -665,6 +665,7 @@ public static class StateProjector
             VerifyFailedKind.EngineRestart => "Verify did not complete across an engine restart — awaiting conductor resolution.",
             VerifyFailedKind.TimedOut => "Verify timed out — awaiting conductor resolution.",
             VerifyFailedKind.Cancelled => "Verify cancelled — awaiting conductor resolution.",
+            VerifyFailedKind.DeliveryNotRun => "Required delivery observation did not complete — awaiting conductor resolution.",
             _ => verifyFailed.FailingMembers is { Count: > 0 }
                 ? $"Verify failed ({string.Join(", ", verifyFailed.FailingMembers)}) — awaiting conductor resolution."
                 : "Verify failed — awaiting conductor resolution.",
