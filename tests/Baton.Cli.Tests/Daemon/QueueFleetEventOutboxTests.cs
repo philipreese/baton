@@ -108,6 +108,31 @@ public sealed class QueueFleetEventOutboxTests : IDisposable
         Assert.False(File.Exists(LivePath));
     }
 
+    [Theory]
+    [InlineData("base-b")]
+    [InlineData(null)]
+    public async Task A_contradictory_pending_base_revision_fails_closed(string? contradictoryBaseRevision)
+    {
+        var snapshot = Snapshot(FleetEventKind.AttemptStarted);
+        var contradictory = Draft(FleetEventKind.AttemptStarted) with
+        {
+            AttemptBaseRevision = contradictoryBaseRevision,
+        };
+        snapshot = snapshot with
+        {
+            PendingFleetEvents = [Serialize(contradictory)],
+        };
+        await SaveAsync(snapshot);
+
+        var error = await Assert.ThrowsAsync<QueueFleetEventOutboxException>(
+            () => new QueueFleetEventOutbox(Log().Append).PumpAsync(QueuePath, Ct));
+
+        Assert.Equal("attempt-a", error.AttemptId);
+        Assert.Equal("work-a", error.WorkTag);
+        Assert.Contains("contradicts", error.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(LivePath));
+    }
+
     [Fact]
     public async Task A_started_fact_before_durable_admission_fails_closed()
     {
