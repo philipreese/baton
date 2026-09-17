@@ -121,7 +121,8 @@ public static class DaemonHost
         // #2324: one deep room-observation module shared by the independent hosted loops. The loops
         // keep their own cadence and business failures; only discovery and unchanged-room projection
         // are coalesced behind this seam.
-        builder.Services.AddSingleton(_ => new DaemonRoomInventory());
+        builder.Services.AddSingleton(services => new DaemonRoomInventory(
+            services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping));
 
         // #1025: room retention sweep (journal compaction)
         builder.Services.AddHostedService<RoomRetentionSweep>();

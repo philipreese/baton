@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Baton.Cli.Daemon;
+using Baton.Cli.Mcp;
 using Baton.CrashTestHost;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -113,6 +114,47 @@ public sealed class DaemonLoopDriverTests
         var ticks = ledger.Snapshot().ToDictionary(tick => tick.Service, StringComparer.Ordinal);
         Assert.Equal(["room-registry"], ticks["first"].LatePhases.Select(phase => phase.Name));
         Assert.Equal(["child-process"], ticks["second"].LatePhases.Select(phase => phase.Name));
+    }
+
+    [Fact]
+    public async Task Shared_inventory_scan_keeps_room_scan_phase_attribution()
+    {
+        var clock = new StepTimeProvider();
+        var ledger = new DaemonTickLedger(() => DateTimeOffset.UnixEpoch);
+        using var stop = new CancellationTokenSource();
+        var driver = new DaemonLoopDriver(ledger, clock, (_, _) => CancelDelayAsync(stop));
+        var inventory = new DaemonRoomInventory(
+            _ => Task.FromResult<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>(
+                [new FleetStatusTool.DiscoveredRoom("room-a", null)]),
+            (room, _, _) =>
+            {
+                clock.Advance(TimeSpan.FromSeconds(12));
+                return Task.FromResult<FleetRoomStatusView?>(new(room, room, State: "Running"));
+            },
+            () => new DaemonRoomInventory.DiscoveryVersion(default, default),
+            _ => new DaemonRoomInventory.RoomVersion(default, default, default, default),
+            _ => true,
+            () => DateTimeOffset.UnixEpoch);
+
+        await driver.RunAsync(
+            "inventory-consumer",
+            async cancellationToken =>
+            {
+                await inventory.ObserveAsync(
+                    DaemonRoomInventory.InventoryScope.Active,
+                    DaemonRoomInventory.InventoryFreshness.Current,
+                    cancellationToken);
+                return TimeSpan.FromSeconds(10);
+            },
+            () => TimeSpan.FromSeconds(10),
+            _ => TimeSpan.FromSeconds(10),
+            _ => { },
+            stop.Token);
+
+        var tick = Assert.Single(ledger.Snapshot());
+        var phase = Assert.Single(tick.LatePhases);
+        Assert.Equal("room-scan", phase.Name);
+        Assert.Equal(TimeSpan.FromSeconds(12), phase.Elapsed);
     }
 
     [Fact]

@@ -206,6 +206,34 @@ public sealed class DaemonRoomInventoryTests
     }
 
     [Fact]
+    public async Task Current_reader_detects_a_new_active_room_inside_the_last_complete_reuse_window()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var discoveryRevision = 1;
+        var rooms = new List<FleetStatusTool.DiscoveredRoom>();
+        var inventory = Inventory(
+            () => now,
+            () => Version(discoveryRevision),
+            _ => ActiveVersion(1),
+            room => View(room, "Running"),
+            () => rooms);
+
+        Assert.Empty(await inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.Active,
+            DaemonRoomInventory.InventoryFreshness.Current,
+            Ct));
+
+        discoveryRevision++;
+        rooms = [new FleetStatusTool.DiscoveredRoom("room-a", null)];
+        var current = await inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.Active,
+            DaemonRoomInventory.InventoryFreshness.Current,
+            Ct);
+
+        Assert.Equal("Running", Assert.Single(current).View.State);
+    }
+
+    [Fact]
     public async Task Terminal_room_rerun_is_visible_to_the_active_scope()
     {
         var now = DateTimeOffset.UtcNow;
@@ -289,6 +317,42 @@ public sealed class DaemonRoomInventoryTests
     }
 
     [Fact]
+    public async Task Slow_consumer_business_does_not_block_another_last_complete_reader()
+    {
+        var inventory = Inventory(
+            () => DateTimeOffset.UtcNow,
+            () => Version(1),
+            _ => TerminalVersion(1),
+            room => View(room, "Succeeded"),
+            () => [new FleetStatusTool.DiscoveredRoom("room-a", null)]);
+        var businessEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBusiness = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task SlowConsumerAsync()
+        {
+            await inventory.ObserveAsync(
+                DaemonRoomInventory.InventoryScope.All,
+                DaemonRoomInventory.InventoryFreshness.LastComplete,
+                Ct);
+            businessEntered.TrySetResult();
+            await releaseBusiness.Task;
+        }
+
+        var slowConsumer = SlowConsumerAsync();
+        await businessEntered.Task.WaitAsync(Ct);
+
+        var independentReader = inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.All,
+            DaemonRoomInventory.InventoryFreshness.LastComplete,
+            Ct);
+        Assert.True(independentReader.IsCompletedSuccessfully);
+        Assert.Equal("Succeeded", Assert.Single(await independentReader).View.State);
+
+        releaseBusiness.TrySetResult();
+        await slowConsumer;
+    }
+
+    [Fact]
     public async Task Current_reader_fails_closed_when_refresh_fails()
     {
         var inventory = new DaemonRoomInventory(
@@ -306,6 +370,47 @@ public sealed class DaemonRoomInventoryTests
                 Ct));
 
         Assert.Contains("inventory unavailable", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Daemon_lifetime_cancels_a_shared_refresh()
+    {
+        using var lifetime = new CancellationTokenSource();
+        var observationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observationCanceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inventory = new DaemonRoomInventory(
+            _ => Task.FromResult<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>(
+                [new FleetStatusTool.DiscoveredRoom("room-a", null)]),
+            async (_, _, cancellationToken) =>
+            {
+                observationEntered.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    return null;
+                }
+                catch (OperationCanceledException)
+                {
+                    observationCanceled.TrySetResult();
+                    throw;
+                }
+            },
+            () => Version(1),
+            _ => ActiveVersion(1),
+            _ => true,
+            () => DateTimeOffset.UtcNow,
+            lifetime.Token);
+
+        var refresh = inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.Active,
+            DaemonRoomInventory.InventoryFreshness.Current,
+            Ct);
+        await observationEntered.Task.WaitAsync(Ct);
+
+        lifetime.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => refresh);
+        await observationCanceled.Task.WaitAsync(Ct);
     }
 
     private static DaemonRoomInventory Inventory(

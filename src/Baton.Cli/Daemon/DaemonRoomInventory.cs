@@ -21,6 +21,7 @@ internal sealed class DaemonRoomInventory
     private readonly Func<string, RoomVersion> _roomVersion;
     private readonly Func<string, bool> _roomExists;
     private readonly Func<DateTimeOffset> _now;
+    private readonly CancellationToken _lifetimeToken;
 
     private DiscoverySnapshot? _discovery;
     private Task<DiscoverySnapshot>? _discoveryRefresh;
@@ -30,13 +31,19 @@ internal sealed class DaemonRoomInventory
         new(BatonPaths.RecordKeyComparer);
 
     internal DaemonRoomInventory()
+        : this(CancellationToken.None)
+    {
+    }
+
+    internal DaemonRoomInventory(CancellationToken lifetimeToken)
         : this(
             cancellationToken => FleetStatusTool.DiscoverRoomsAsync([], cancellationToken),
             FleetStatusTool.ProcessRoomAsync,
             ReadDiscoveryVersion,
             ReadRoomVersion,
             Directory.Exists,
-            () => DateTimeOffset.UtcNow)
+            () => DateTimeOffset.UtcNow,
+            lifetimeToken)
     {
     }
 
@@ -46,7 +53,8 @@ internal sealed class DaemonRoomInventory
         Func<DiscoveryVersion> discoveryVersion,
         Func<string, RoomVersion> roomVersion,
         Func<string, bool> roomExists,
-        Func<DateTimeOffset> now)
+        Func<DateTimeOffset> now,
+        CancellationToken lifetimeToken = default)
     {
         _discover = discover;
         _observe = observe;
@@ -54,6 +62,7 @@ internal sealed class DaemonRoomInventory
         _roomVersion = roomVersion;
         _roomExists = roomExists;
         _now = now;
+        _lifetimeToken = lifetimeToken;
     }
 
     /// <summary>
@@ -77,7 +86,9 @@ internal sealed class DaemonRoomInventory
             published = _published;
             refresh = _refresh;
 
-            if (published is not null && _now() - published.CompletedAt < ReuseWindow)
+            if (freshness == InventoryFreshness.LastComplete
+                && published is not null
+                && _now() - published.CompletedAt < ReuseWindow)
             {
                 return SelectScope(published.Rooms, scope);
             }
@@ -141,7 +152,7 @@ internal sealed class DaemonRoomInventory
                     }
                 }
 
-                var view = await _observe(room.RoomDir, true, CancellationToken.None)
+                var view = await _observe(room.RoomDir, true, _lifetimeToken)
                     .ConfigureAwait(false);
                 if (view is null)
                 {
@@ -175,6 +186,10 @@ internal sealed class DaemonRoomInventory
             }
 
             completion.TrySetResult(snapshot);
+        }
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+        {
+            completion.TrySetCanceled(_lifetimeToken);
         }
         catch (Exception ex)
         {
@@ -232,7 +247,7 @@ internal sealed class DaemonRoomInventory
     {
         try
         {
-            var rooms = await _discover(CancellationToken.None).ConfigureAwait(false);
+            var rooms = await _discover(_lifetimeToken).ConfigureAwait(false);
             var snapshot = new DiscoverySnapshot(rooms, version);
             lock (_gate)
             {
@@ -240,6 +255,10 @@ internal sealed class DaemonRoomInventory
             }
 
             completion.TrySetResult(snapshot);
+        }
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+        {
+            completion.TrySetCanceled(_lifetimeToken);
         }
         catch (Exception ex)
         {
