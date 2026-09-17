@@ -29,10 +29,11 @@ public sealed class WorkItemLifecycleTests
         string? requiredChecks = PullRequestChecks.Passing,
         bool? workspaceChanged = null,
         IndeterminateProducer? indeterminateProducer = null,
-        bool? workerStepsRecorded = null) =>
+        bool? workerStepsRecorded = null,
+        string? attemptBaseRevision = null) =>
         new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead,
             prObserved, prOpen, prDraft, requiredChecks, workspaceChanged, indeterminateProducer,
-            workerStepsRecorded);
+            workerStepsRecorded, attemptBaseRevision);
 
     /// <summary>
     /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
@@ -65,6 +66,44 @@ public sealed class WorkItemLifecycleTests
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
         Assert.Contains("no pull request is open", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Fix, null, CurrentHead)]
+    [InlineData(WorkStage.Fix, PreviousHead, null)]
+    [InlineData(WorkStage.Continue, null, CurrentHead)]
+    [InlineData(WorkStage.Continue, PreviousHead, null)]
+    public void A_repair_or_continuation_with_unreadable_revision_evidence_stops_for_the_operator(
+        WorkStage stage, string? attemptBaseRevision, string? workspaceHead)
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            stage,
+            workspaceHead: workspaceHead,
+            attemptBaseRevision: attemptBaseRevision));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.Contains("no distinct revision", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("unknown", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Fix, WorkStage.ReReview)]
+    [InlineData(WorkStage.Continue, WorkStage.Review)]
+    public void A_repair_or_continuation_distinguishes_an_unchanged_attempt_base_from_a_distinct_one(
+        WorkStage stage, WorkStage expectedNextStage)
+    {
+        // These observations deliberately hold outcome, PR state, PR head, and workspace head fixed.
+        // Only the captured attempt base changes, so the pair proves this rule rather than pushed-ness
+        // or the terminal word chooses whether a reviewer is spent.
+        var unchanged = WorkItemLifecycle.Decide(At(stage, attemptBaseRevision: CurrentHead));
+        var distinct = WorkItemLifecycle.Decide(At(stage, attemptBaseRevision: PreviousHead));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, unchanged.Kind);
+        Assert.Null(unchanged.NextStage);
+        Assert.Equal(WorkItemTransitionKind.Dispatch, distinct.Kind);
+        Assert.Equal(expectedNextStage, distinct.NextStage);
     }
 
     [Fact]
@@ -366,7 +405,7 @@ public sealed class WorkItemLifecycleTests
     public void A_zero_step_failed_mutating_lane_with_no_pr_stops_for_pr_reconciliation(WorkStage stage)
     {
         var transition = WorkItemLifecycle.Decide(At(stage, outcome: WorkflowOutcome.Failed,
-            pr: null, prHead: null, workerStepsRecorded: false));
+            pr: null, prHead: null, workerStepsRecorded: false, attemptBaseRevision: PreviousHead));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
         Assert.Null(transition.NextStage);
@@ -512,13 +551,13 @@ public sealed class WorkItemLifecycleTests
         // that keeps failing the same way would continue forever.
         var below = WorkItemLifecycle.Decide(At(
             WorkStage.Continue, outcome: WorkflowOutcome.Failed, workspaceHead: "0000111122223333",
-            round: WorkStages.MaxRounds - 1));
+            round: WorkStages.MaxRounds - 1, attemptBaseRevision: CurrentHead));
 
         Assert.Equal(WorkStage.Continue, below.NextStage);
 
         var atCeiling = WorkItemLifecycle.Decide(At(
             WorkStage.Continue, outcome: WorkflowOutcome.Failed, workspaceHead: "0000111122223333",
-            round: WorkStages.MaxRounds));
+            round: WorkStages.MaxRounds, attemptBaseRevision: CurrentHead));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, atCeiling.Kind);
         Assert.Contains("continue", atCeiling.Reason, StringComparison.Ordinal);
@@ -537,8 +576,10 @@ public sealed class WorkItemLifecycleTests
             workspaceHead: "0000111122223333"));
         var secondContinue = WorkItemLifecycle.Decide(At(
             WorkStage.Continue, outcome: WorkflowOutcome.Failed,
-            workspaceHead: "0000111122223333", round: firstContinue.Round));
-        var review = WorkItemLifecycle.Decide(At(WorkStage.Continue, round: secondContinue.Round));
+            workspaceHead: "0000111122223333", round: firstContinue.Round,
+            attemptBaseRevision: CurrentHead));
+        var review = WorkItemLifecycle.Decide(At(
+            WorkStage.Continue, round: secondContinue.Round, attemptBaseRevision: PreviousHead));
         var fix = WorkItemLifecycle.Decide(At(
             WorkStage.Review, verdict: Verdict(ReviewDecision.Block), round: review.Round));
 
@@ -546,7 +587,8 @@ public sealed class WorkItemLifecycleTests
         Assert.True(fix.UsesAutomaticFix);
 
         var pairedReReview = WorkItemLifecycle.Decide(At(
-            WorkStage.Fix, round: fix.Round, automaticFixUsed: true));
+            WorkStage.Fix, round: fix.Round, automaticFixUsed: true,
+            attemptBaseRevision: PreviousHead));
 
         Assert.Equal(WorkItemTransitionKind.Dispatch, pairedReReview.Kind);
         Assert.Equal(WorkStage.ReReview, pairedReReview.NextStage);
@@ -585,7 +627,8 @@ public sealed class WorkItemLifecycleTests
             WorkStage.Review, verdict: Verdict(ReviewDecision.Block), round: review.Round));
         Assert.Equal(WorkStage.Fix, fix.NextStage);
 
-        var reReview = WorkItemLifecycle.Decide(At(WorkStage.Fix, round: fix.Round));
+        var reReview = WorkItemLifecycle.Decide(At(
+            WorkStage.Fix, round: fix.Round, attemptBaseRevision: PreviousHead));
         Assert.Equal(WorkItemTransitionKind.Dispatch, reReview.Kind);
         Assert.True(reReview.Round <= WorkStages.MaxRounds);
 

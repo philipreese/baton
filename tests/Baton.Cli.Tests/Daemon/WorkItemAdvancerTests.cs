@@ -979,7 +979,14 @@ public sealed class WorkItemAdvancerTests
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
-            await SeedAsync(home, WorkStage.Fix, room, round: WorkStages.MaxRounds, automaticFixUsed: true);
+            var seeded = await SeedAsync(home, WorkStage.Fix, room, round: WorkStages.MaxRounds,
+                automaticFixUsed: true);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with { AttemptBaseRevision = MergeSha }],
+                }, Ct);
 
             var fact = Assert.Single(await new WorkItemAdvancer(
                     new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
@@ -1426,7 +1433,15 @@ public sealed class WorkItemAdvancerTests
             var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
             await QueueStore.MutateAsync(
                 BatonPaths.QueueFile,
-                s => s with { Items = [afterBlock with { State = QueueItemState.Done, RoomDirectory = fixRoom }] },
+                s => s with
+                {
+                    Items = [afterBlock with
+                    {
+                        State = QueueItemState.Done,
+                        RoomDirectory = fixRoom,
+                        AttemptBaseRevision = MergeSha,
+                    }],
+                },
                 Ct);
 
             await advancer.AdvanceAsync(Now.AddMinutes(5), Ct);
@@ -1749,7 +1764,12 @@ public sealed class WorkItemAdvancerTests
                 BatonPaths.QueueFile,
                 s => s with
                 {
-                    Items = [s.Items.Single() with { State = QueueItemState.Failed, RoomDirectory = fixRoom }],
+                    Items = [s.Items.Single() with
+                    {
+                        State = QueueItemState.Failed,
+                        RoomDirectory = fixRoom,
+                        AttemptBaseRevision = PushedSha,
+                    }],
                 },
                 Ct);
 
@@ -2003,6 +2023,118 @@ public sealed class WorkItemAdvancerTests
                 }).AdvanceAsync(Now, Ct);
 
             Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Fix, WorkflowOutcome.Indeterminate, true)]
+    [InlineData(WorkStage.Fix, WorkflowOutcome.Cancelled, false)]
+    [InlineData(WorkStage.Fix, WorkflowOutcome.Failed, false)]
+    [InlineData(WorkStage.Continue, WorkflowOutcome.Indeterminate, true)]
+    [InlineData(WorkStage.Continue, WorkflowOutcome.Cancelled, false)]
+    [InlineData(WorkStage.Continue, WorkflowOutcome.Failed, false)]
+    public async Task A_repair_or_continuation_without_a_distinct_authoritative_revision_halts_without_re_review_or_revision_fact(
+        WorkStage stage, string outcome, bool arrested)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = arrested
+                ? await WriteArrestedRoomAsync(home, workspaceChanged: false)
+                : await WriteSettledRoomAsync(home, outcome, verdictJson: null);
+            var seeded = await SeedAsync(home, stage, room, QueueItemState.Failed, round: 2,
+                automaticFixUsed: true);
+            var priorVerdict = Path.Combine(home, "prior-verdict.json");
+            await File.WriteAllTextAsync(priorVerdict, BlockingVerdict, Ct);
+            var attemptId = new FleetAttemptId($"attempt-no-revision-{WorkStages.Token(stage)}-{outcome}");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with
+                    {
+                        AttemptId = attemptId,
+                        AttemptBaseRevision = FullPushedSha,
+                        LastVerdict = priorVerdict,
+                    }],
+                }, Ct);
+            var events = new List<FleetEventDraft>();
+
+            var facts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                }).AdvanceAsync(Now, Ct);
+
+            var halted = await ReadBackAsync();
+            Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Failed, facts[0].Decision);
+            Assert.Equal(stage, halted.Stage);
+            Assert.Equal(QueueItemState.Failed, halted.State);
+            Assert.True(halted.Halted);
+            Assert.Equal(room, halted.RoomDirectory);
+            Assert.Equal(attemptId, halted.AttemptId);
+            Assert.Equal(FullPushedSha, halted.AttemptBaseRevision);
+            Assert.Equal(priorVerdict, halted.LastVerdict);
+            Assert.Contains("no distinct revision", halted.Error, StringComparison.Ordinal);
+            Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Fix, WorkStage.ReReview)]
+    [InlineData(WorkStage.Continue, WorkStage.Review)]
+    public async Task A_succeeded_repair_or_continuation_with_a_distinct_authoritative_revision_queues_review_and_records_it(
+        WorkStage stage, WorkStage expectedNextStage)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, stage, room, round: 2, automaticFixUsed: true);
+            var attemptId = new FleetAttemptId($"attempt-distinct-revision-{WorkStages.Token(stage)}");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with
+                    {
+                        AttemptId = attemptId,
+                        AttemptBaseRevision = MergeSha,
+                    }],
+                }, Ct);
+            var events = new List<FleetEventDraft>();
+
+            var facts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                }).AdvanceAsync(Now, Ct);
+
+            var queued = await ReadBackAsync();
+            Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Advanced, facts[0].Decision);
+            Assert.Equal(expectedNextStage, queued.Stage);
+            Assert.Equal(QueueItemState.Queued, queued.State);
+            var revision = Assert.Single(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+            Assert.Equal(attemptId, revision.AttemptId);
+            Assert.Equal(new FleetRevisionId(FullPushedSha), revision.RevisionId);
         }
         finally
         {
