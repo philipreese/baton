@@ -221,6 +221,15 @@ reconstructing a reference of its own.
 
 A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
 
+**One-shot CLI filesystem failures are ordinary command failures, not process crashes (#2387).**
+For operator commands inside `Program.cs`'s one-shot command boundary, an `IOException` or
+`UnauthorizedAccessException` that reaches that boundary prints one concise diagnostic on stderr and
+returns nonzero; it never escapes as a managed stack trace or Windows Application Error dialog. This
+operational catch follows the typed `BatonFlowException`, room-held, and stale-sentinel catches, so it
+does not replace their narrower messages or exit codes, and it is not a catch-all for programming
+errors. The daemon, vendor hook commands, MCP host, and codex broker are intercepted before this
+one-shot boundary and keep their distinct lifetime and output contracts.
+
 - **`baton run <workflow-file> --bindings <bindings-file> [--room-dir <dir>] [--workflow-id <id>]
   [--echo-worker] [--wait] [--wait-timeout <minutes>]`** — runs an authored `WorkflowDefinition` to a
   terminal state or a pause (`src/Baton.Cli/RunOptionsParser.cs`). `--wait-timeout` (#1378) bounds how
