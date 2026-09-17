@@ -260,6 +260,7 @@ internal sealed class QueueFleetEventOutbox
             || !string.Equals(draft.Model, envelope.Model, StringComparison.Ordinal)
             || !string.Equals(draft.Effort, envelope.Effort, StringComparison.Ordinal)
             || !string.Equals(draft.Stage, StageToken(envelope.Stage), StringComparison.Ordinal)
+            || !string.Equals(draft.AttemptBaseRevision, envelope.AttemptBaseRevision, StringComparison.Ordinal)
             || !Same(draft.EffectiveGrant, envelope.EffectiveGrant)
             || !Same(draft.RequestedRequirements, envelope.RequestedRequirements)
             || !Same(draft.MissingCapabilities, envelope.MissingCapabilities)
