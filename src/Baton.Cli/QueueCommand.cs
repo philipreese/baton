@@ -24,6 +24,14 @@ namespace Baton.Cli;
 /// </remarks>
 public static class QueueCommand
 {
+    /// <summary>
+    /// Test-only controls for the narrow interval after a cleanup claim is durable and before its
+    /// mandatory final recheck. Production supplies no controls and always uses the Git probe below.
+    /// </summary>
+    internal sealed record WorktreeApplyTestHooks(
+        Func<QueueWorktreeCleanupClaim, CancellationToken, Task>? AfterClaim = null,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? RunProbeAsync = null);
+
     public static Task<int> ExecuteAsync(
         QueueOptions options,
         TextWriter output,
@@ -58,7 +66,8 @@ public static class QueueCommand
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile = null,
-        IGhCliRunner? ghRunner = null)
+        IGhCliRunner? ghRunner = null,
+        WorktreeApplyTestHooks? worktreeApplyTestHooks = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -70,7 +79,8 @@ public static class QueueCommand
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
             QueueVerb.List => ListAsync(options.Active, output, cancellationToken),
-            QueueVerb.Worktrees => WorktreesAsync(options.Format, options.Apply, output, repositoryDirectory, cancellationToken),
+            QueueVerb.Worktrees => WorktreesAsync(
+                options.Format, options.Apply, output, repositoryDirectory, cancellationToken, worktreeApplyTestHooks),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
             QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
@@ -470,7 +480,8 @@ public static class QueueCommand
         bool apply,
         TextWriter output,
         string? repositoryDirectory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WorktreeApplyTestHooks? worktreeApplyTestHooks = null)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
@@ -514,14 +525,14 @@ public static class QueueCommand
                 BatonPaths.QueueFile, adopted, "race-lost", "abandoned-claim-recovered",
                 cancellationToken: cancellationToken, observedBytes: candidate.SizeBytes).ConfigureAwait(false);
             dispositions[candidate.Path] = await ApplyWorktreeCandidateAsync(
-                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken).ConfigureAwait(false);
+                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
         }
 
         foreach (var candidate in report.Workspaces.Where(entry =>
                      entry.Classification == "candidate" && !dispositions.ContainsKey(entry.Path)))
         {
             dispositions[candidate.Path] = await ApplyWorktreeCandidateAsync(
-                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken).ConfigureAwait(false);
+                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
         }
 
         var applied = report with
@@ -539,7 +550,8 @@ public static class QueueCommand
         string sourceRepository,
         string? worktreeRoot,
         IReadOnlyList<QueueItem> observedItems,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WorktreeApplyTestHooks? worktreeApplyTestHooks)
     {
         var repository = candidate.Git.ExpectedRepository;
         var branch = candidate.Git.ExpectedBranch;
@@ -559,6 +571,11 @@ public static class QueueCommand
             return "race-lost";
         }
 
+        if (worktreeApplyTestHooks?.AfterClaim is { } afterClaim)
+        {
+            await afterClaim(claim, cancellationToken).ConfigureAwait(false);
+        }
+
         // A workspace is removed only while Baton holds a durable claim for that exact resolved path and a final recheck still proves every condition that made the same report classify it as a static candidate. Missing, stale, conflicting, or unavailable evidence removes nothing.
         var current = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var recheck = await QueueWorktreeReport.CreateAsync(current.Items, worktreeRoot, cancellationToken).ConfigureAwait(false);
@@ -574,7 +591,8 @@ public static class QueueCommand
             return "refused";
         }
 
-        var owningCheckout = await ResolveOwningCheckoutAsync(claim, cancellationToken).ConfigureAwait(false);
+        var runProbe = worktreeApplyTestHooks?.RunProbeAsync ?? IssueWorktreeProvisioner.RunRetainedProbeAsync;
+        var owningCheckout = await ResolveOwningCheckoutAsync(claim, cancellationToken, runProbe).ConfigureAwait(false);
         if (owningCheckout is null)
         {
             await QueueStore.CompleteWorktreeCleanupAsync(
@@ -583,7 +601,7 @@ public static class QueueCommand
             return "refused";
         }
 
-        var removal = await IssueWorktreeProvisioner.RunRetainedProbeAsync(
+        var removal = await runProbe(
             "git", ["worktree", "remove", claim.Path], owningCheckout, cancellationToken).ConfigureAwait(false);
         if (removal.ExitCode != 0)
         {
@@ -593,9 +611,9 @@ public static class QueueCommand
             return "retained";
         }
 
-        var registered = await IssueWorktreeProvisioner.RunRetainedProbeAsync(
+        var registered = await runProbe(
             "git", ["worktree", "list", "--porcelain"], owningCheckout, cancellationToken).ConfigureAwait(false);
-        var branchHead = await IssueWorktreeProvisioner.RunRetainedProbeAsync(
+        var branchHead = await runProbe(
             "git", ["rev-parse", "--verify", "refs/heads/" + claim.Branch], owningCheckout, cancellationToken).ConfigureAwait(false);
         var absentFromRegistration = registered.ExitCode == 0
             && !registered.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
@@ -620,9 +638,10 @@ public static class QueueCommand
 
     private static async Task<string?> ResolveOwningCheckoutAsync(
         QueueWorktreeCleanupClaim claim,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> runProbe)
     {
-        var commonDirectory = await IssueWorktreeProvisioner.RunRetainedProbeAsync(
+        var commonDirectory = await runProbe(
             "git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], claim.Path, cancellationToken)
             .ConfigureAwait(false);
         if (commonDirectory.ExitCode != 0 || string.IsNullOrWhiteSpace(commonDirectory.Output)) return null;
