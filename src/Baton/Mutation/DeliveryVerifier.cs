@@ -9,8 +9,9 @@ namespace Baton.Mutation;
 /// Which of <see cref="DeliveryVerifier.CheckAsync"/>'s four verdicts applies. Mirrors
 /// <see cref="VerifyOutcome"/>'s own shape (pass / fail-with-members / not-run-with-reason / cancelled)
 /// rather than reusing that record directly — a delivery check names no gate command and carries no
-/// <see cref="VerifyFailedKind"/> of its own; the caller (<c>MutationInterface</c>) picks
-/// <see cref="Domain.VerifyFailedKind.DeliveryFailed"/> for it.
+/// <see cref="VerifyFailedKind"/> of its own; the caller (<c>MutationInterface</c>) maps a conclusive
+/// failure to <see cref="Domain.VerifyFailedKind.DeliveryFailed"/> and an unavailable final observation
+/// to <see cref="Domain.VerifyFailedKind.DeliveryNotRun"/>.
 /// </summary>
 public enum DeliveryCheckStatus
 {
