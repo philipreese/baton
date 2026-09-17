@@ -38,6 +38,7 @@ internal sealed class DaemonTickLedger
     private readonly Func<DateTimeOffset> _clock;
     private readonly Action<string> _log;
     private readonly ConcurrentDictionary<string, ServiceTick> _ticks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ActiveTickRegistration> _active = new(StringComparer.Ordinal);
     private readonly DateTimeOffset _startedAt;
     private IReadOnlyList<string>? _glassBoundPrefixes;
 
@@ -57,10 +58,17 @@ internal sealed class DaemonTickLedger
     /// that service's own cadence — the ledger keeps it so the heartbeat file and (since the same
     /// issue's logging change) the over-interval line can be judged per service rather than against one
     /// fleet-wide number.</summary>
-    internal void RecordTick(string service, TimeSpan elapsed, TimeSpan interval)
+    internal void RecordTick(
+        string service,
+        TimeSpan elapsed,
+        TimeSpan interval,
+        IReadOnlyList<DaemonPhase>? latePhases = null,
+        IReadOnlyList<InFlightSample>? lateSamples = null)
     {
         var completedAt = _clock();
-        _ticks[service] = new ServiceTick(completedAt, elapsed, interval);
+        var phases = latePhases is { Count: > 0 } ? [.. latePhases] : Array.Empty<DaemonPhase>();
+        var samples = lateSamples is { Count: > 0 } ? [.. lateSamples] : Array.Empty<InFlightSample>();
+        _ticks[service] = new ServiceTick(completedAt, elapsed, interval, phases, samples);
 
         // #1981's third item: a tick that outruns its own interval is the growth the 2026-09-06 stall
         // left no trace of -- `daemon.log` could not say whether the room walk had been getting slower
@@ -69,10 +77,51 @@ internal sealed class DaemonTickLedger
         // logging it every pass would bury the signal in exactly the file that has to stay readable.
         if (interval > TimeSpan.Zero && elapsed > interval)
         {
+            var attribution = phases.Length == 0
+                ? "; no phase attribution was captured"
+                : "; phases: " + string.Join(
+                    ", ", phases.Select(phase =>
+                        $"{phase.Name}={phase.Elapsed.TotalSeconds:F1}s/{phase.Count}x"));
+            var sampled = samples.Length == 0
+                ? string.Empty
+                : $"; independently sampled {samples.Length}x while in flight, latest: "
+                  + Describe(samples[^1]);
             _log($"{service}: tick took {elapsed.TotalSeconds:F1}s, longer than its own "
-                 + $"{interval.TotalSeconds:F0}s interval");
+                 + $"{interval.TotalSeconds:F0}s interval{attribution}{sampled}");
         }
     }
+
+    /// <summary>Registers one currently executing loop pass. The watchdog samples these registrations
+    /// from its dedicated thread, so thread-pool starvation can be observed while the affected loop
+    /// is still waiting rather than reconstructed only after it returns.</summary>
+    internal ActiveTickRegistration BeginTick(string service, Func<ActiveTick> snapshot)
+    {
+        var registration = new ActiveTickRegistration(this, service, snapshot);
+        _active[service] = registration;
+        return registration;
+    }
+
+    /// <summary>Captures overdue in-flight operations with the host counters sampled on the watchdog's
+    /// dedicated thread. Samples stay in memory and ride the completed tick's ordinary log/heartbeat;
+    /// the watchdog itself performs no extra filesystem or console write on a healthy pass.</summary>
+    internal void SampleActive(HostLoadSample load)
+    {
+        foreach (var registration in _active.Values)
+        {
+            var active = registration.Snapshot();
+            if (active.Elapsed > active.Interval)
+            {
+                registration.AddSample(new InFlightSample(
+                    load.SampledAt,
+                    active.Phase,
+                    active.PhaseElapsed,
+                    load));
+            }
+        }
+    }
+
+    internal IReadOnlyList<ActiveTick> SnapshotActive() =>
+        [.. _active.Values.Select(registration => registration.Snapshot())];
 
     /// <summary>Every service's last completed tick, newest first. A snapshot — the watchdog reasons
     /// over a stable list rather than a dictionary that can change under it mid-verdict.</summary>
@@ -119,12 +168,35 @@ internal sealed class DaemonTickLedger
         foreach (var tick in Snapshot())
         {
             newest ??= tick.CompletedAt;
-            services[tick.Service] = new JsonObject
+            var service = new JsonObject
             {
                 ["lastTickMs"] = Math.Round(tick.Elapsed.TotalMilliseconds, 1),
                 ["completedAt"] = tick.CompletedAt.ToString("O"),
                 ["intervalMs"] = Math.Round(tick.Interval.TotalMilliseconds, 1),
             };
+            if (tick.LatePhases.Count > 0)
+            {
+                service["latePhases"] = new JsonArray(
+                    [.. tick.LatePhases.Select(phase => (JsonNode?)new JsonObject
+                    {
+                        ["name"] = phase.Name,
+                        ["elapsedMs"] = Math.Round(phase.Elapsed.TotalMilliseconds, 1),
+                        ["count"] = phase.Count,
+                    })]);
+            }
+            if (tick.LateSamples.Count > 0)
+            {
+                service["lateSamples"] = new JsonArray(
+                    [.. tick.LateSamples.Select(sample => (JsonNode?)new JsonObject
+                    {
+                        ["sampledAt"] = sample.SampledAt.ToString("O"),
+                        ["phase"] = sample.Phase,
+                        ["phaseElapsedMs"] = Math.Round(sample.PhaseElapsed.TotalMilliseconds, 1),
+                        ["hostLoad"] = sample.HostLoad.ToJson(),
+                    })]);
+            }
+
+            services[tick.Service] = service;
         }
 
         var body = new JsonObject
@@ -149,8 +221,90 @@ internal sealed class DaemonTickLedger
 
     /// <summary>One service's most recent completed tick. <see cref="Service"/> is filled in by
     /// <see cref="Snapshot"/> from the dictionary key, so the stored value carries no copy of it.</summary>
-    internal sealed record ServiceTick(DateTimeOffset CompletedAt, TimeSpan Elapsed, TimeSpan Interval)
+    internal sealed record ServiceTick(
+        DateTimeOffset CompletedAt,
+        TimeSpan Elapsed,
+        TimeSpan Interval,
+        IReadOnlyList<DaemonPhase> LatePhases,
+        IReadOnlyList<InFlightSample> LateSamples)
     {
         internal string Service { get; init; } = string.Empty;
+    }
+
+    /// <summary>A completed named operation inside a late tick.</summary>
+    internal sealed record DaemonPhase(string Name, TimeSpan Elapsed, int Count = 1);
+
+    internal sealed record ActiveTick(
+        string Service,
+        TimeSpan Elapsed,
+        TimeSpan Interval,
+        string? Phase,
+        TimeSpan PhaseElapsed);
+
+    internal sealed record InFlightSample(
+        DateTimeOffset SampledAt,
+        string? Phase,
+        TimeSpan PhaseElapsed,
+        HostLoadSample HostLoad);
+
+    internal sealed class ActiveTickRegistration
+    {
+        private const int MaxSamples = 8;
+        private readonly DaemonTickLedger _owner;
+        private readonly string _service;
+        private readonly Func<ActiveTick> _snapshot;
+        private readonly object _gate = new();
+        private readonly List<InFlightSample> _samples = [];
+        private int _completed;
+
+        internal ActiveTickRegistration(DaemonTickLedger owner, string service, Func<ActiveTick> snapshot)
+        {
+            _owner = owner;
+            _service = service;
+            _snapshot = snapshot;
+        }
+
+        internal ActiveTick Snapshot() => _snapshot();
+
+        internal void AddSample(InFlightSample sample)
+        {
+            lock (_gate)
+            {
+                if (Volatile.Read(ref _completed) != 0)
+                {
+                    return;
+                }
+
+                if (_samples.Count == MaxSamples)
+                {
+                    _samples.RemoveAt(0);
+                }
+
+                _samples.Add(sample);
+            }
+        }
+
+        internal IReadOnlyList<InFlightSample> Complete()
+        {
+            if (Interlocked.Exchange(ref _completed, 1) == 0
+                && _owner._active.TryGetValue(_service, out var current)
+                && ReferenceEquals(current, this))
+            {
+                _owner._active.TryRemove(_service, out _);
+            }
+
+            lock (_gate)
+            {
+                return [.. _samples];
+            }
+        }
+    }
+
+    private static string Describe(InFlightSample sample)
+    {
+        var phase = sample.Phase is null
+            ? "no named phase"
+            : $"{sample.Phase} for {sample.PhaseElapsed.TotalSeconds:F1}s";
+        return $"{phase}; {sample.HostLoad.Describe()}";
     }
 }

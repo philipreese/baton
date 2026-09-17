@@ -37,6 +37,7 @@ public sealed class DeliveryPoller : BackgroundService
 
     private readonly IGhCliRunner _gh;
     private readonly WorkItemAdvancer _boardObservationAdvancer;
+    private readonly DaemonLoopDriver _loopDriver;
     private bool _ghMissingWarned;
     private readonly HashSet<string> _missingProjectRootWarnedRooms = new(StringComparer.Ordinal);
 
@@ -50,10 +51,14 @@ public sealed class DeliveryPoller : BackgroundService
     {
     }
 
-    internal DeliveryPoller(IGhCliRunner gh, WorkItemAdvancer boardObservationAdvancer)
+    internal DeliveryPoller(
+        IGhCliRunner gh,
+        WorkItemAdvancer boardObservationAdvancer,
+        DaemonLoopDriver? loopDriver = null)
     {
         _gh = gh;
         _boardObservationAdvancer = boardObservationAdvancer;
+        _loopDriver = loopDriver ?? new DaemonLoopDriver();
     }
 
     public static TimeSpan GetInterval()
@@ -71,35 +76,17 @@ public sealed class DeliveryPoller : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var started = Stopwatch.GetTimestamp();
-            try
+        await _loopDriver.RunAsync(
+            nameof(DeliveryPoller),
+            async cancellationToken =>
             {
-                await PollOnceAsync(stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"DeliveryPoller: sweep iteration failed: {ex.Message}");
-            }
-
-            // #1981: DaemonTickLedger owns what this report is for.
-            DaemonTickLedger.Instance.RecordTick(
-                nameof(DeliveryPoller), Stopwatch.GetElapsedTime(started), GetInterval());
-
-            try
-            {
-                await Task.Delay(GetInterval(), stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-        }
+                await PollOnceAsync(cancellationToken).ConfigureAwait(false);
+                return GetInterval();
+            },
+            GetInterval,
+            _ => GetInterval(),
+            ex => Console.Error.WriteLine($"DeliveryPoller: sweep iteration failed: {ex.Message}"),
+            stoppingToken).ConfigureAwait(false);
     }
 
     /// <summary>One tick's worth of work over every discovered room — public entry point for tests.</summary>
@@ -110,9 +97,12 @@ public sealed class DeliveryPoller : BackgroundService
         // a slow forge can delay this diagnostic sweep, never an unrelated lane launch.
         try
         {
-            await _boardObservationAdvancer
-                .RefreshPullRequestObservationsAsync(DateTimeOffset.UtcNow, cancellationToken)
-                .ConfigureAwait(false);
+            using (DaemonLoopDriver.EnterPhase("forge-observation"))
+            {
+                await _boardObservationAdvancer
+                    .RefreshPullRequestObservationsAsync(DateTimeOffset.UtcNow, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -123,7 +113,11 @@ public sealed class DeliveryPoller : BackgroundService
             Console.Error.WriteLine($"DeliveryPoller: queue-board refresh failed: {ex.Message}");
         }
 
-        var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered;
+        using (DaemonLoopDriver.EnterPhase("room-discovery"))
+        {
+            discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+        }
         foreach (var room in discovered)
         {
             try
@@ -151,8 +145,12 @@ public sealed class DeliveryPoller : BackgroundService
     internal async Task PollRoomAsync(
         FleetStatusTool.DiscoveredRoom room, CancellationToken cancellationToken, TextWriter? warningSink = null)
     {
-        var view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: true, cancellationToken)
-            .ConfigureAwait(false);
+        FleetRoomStatusView? view;
+        using (DaemonLoopDriver.EnterPhase("room-scan"))
+        {
+            view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: true, cancellationToken)
+                .ConfigureAwait(false);
+        }
         if (view is null)
         {
             return;
@@ -167,7 +165,11 @@ public sealed class DeliveryPoller : BackgroundService
         }
 
         var logPath = Path.Combine(room.RoomDir, BatonPaths.FlowLogFileName);
-        var events = await new FlowEventLogReader(logPath).ReadAllAsync(cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<FlowEvent> events;
+        using (DaemonLoopDriver.EnterPhase("room-journal"))
+        {
+            events = await new FlowEventLogReader(logPath).ReadAllAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         if (events.Any(e => e is FlowEvent.DeliveryMerged))
         {
@@ -194,11 +196,15 @@ public sealed class DeliveryPoller : BackgroundService
             return;
         }
 
-        var result = await _gh.RunAsync(
-                workingDirectory,
-                ["pr", "view", prArgument, "--json", "state,statusCheckRollup"],
-                cancellationToken)
-            .ConfigureAwait(false);
+        GhCliResult result;
+        using (DaemonLoopDriver.EnterPhase("forge-observation"))
+        {
+            result = await _gh.RunAsync(
+                    workingDirectory,
+                    ["pr", "view", prArgument, "--json", "state,statusCheckRollup"],
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         if (!result.Started)
         {

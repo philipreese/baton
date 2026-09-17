@@ -52,6 +52,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
     private readonly Func<CancellationToken, Task>? _afterFailureMutation;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
+    private readonly DaemonLoopDriver _loopDriver;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
@@ -77,7 +78,8 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<CancellationToken, Task>? afterFailureMutation = null,
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
         Func<string, CancellationToken, Task<string?>>? workspaceHead = null,
-        Func<string, IReadOnlyList<string>>? workspaceLocks = null)
+        Func<string, IReadOnlyList<string>>? workspaceLocks = null,
+        DaemonLoopDriver? loopDriver = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
@@ -90,6 +92,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _afterFailureMutation = afterFailureMutation;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
         _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
+        _loopDriver = loopDriver ?? new DaemonLoopDriver();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -113,39 +116,13 @@ public sealed class QueueSchedulerService : BackgroundService
                 + $"until they settle on their own: {ex.Message}");
         }
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var started = Stopwatch.GetTimestamp();
-            TimeSpan interval;
-            try
-            {
-                interval = await TickOnceAsync(stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"QueueSchedulerService: iteration failed: {ex.Message}");
-                interval = TimeSpan.FromSeconds(QueueSettings.DefaultTickSeconds);
-            }
-
-            // #1981 (rules: DaemonTickLedger). `interval` here is this tick's OWN next-delay decision,
-            // which TickOnceAsync returns -- so the heartbeat file reports the cadence this service is
-            // actually running at rather than a fixed default it may not be using.
-            DaemonTickLedger.Instance.RecordTick(
-                nameof(QueueSchedulerService), Stopwatch.GetElapsedTime(started), interval);
-
-            try
-            {
-                await Task.Delay(interval, stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-        }
+        await _loopDriver.RunAsync(
+            nameof(QueueSchedulerService),
+            TickOnceAsync,
+            () => TimeSpan.FromSeconds(QueueSettings.DefaultTickSeconds),
+            _ => TimeSpan.FromSeconds(QueueSettings.DefaultTickSeconds),
+            ex => Console.Error.WriteLine($"QueueSchedulerService: iteration failed: {ex.Message}"),
+            stoppingToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -198,7 +175,11 @@ public sealed class QueueSchedulerService : BackgroundService
             // candidate this same tick rather than one tick later.
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
 
-            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            QueueSnapshot snapshot;
+            using (DaemonLoopDriver.EnterPhase("queue-store"))
+            {
+                snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            }
             var now = _now();
             var liveWeight = await _liveWeight(cancellationToken).ConfigureAwait(false);
             var freeGb = _freeGb();
@@ -397,32 +378,35 @@ public sealed class QueueSchedulerService : BackgroundService
             // first wins and this scheduler never starts a lane from its stale candidate.
             var launchClaimed = false;
             IReadOnlyList<QueueItem>? claimedItems = null;
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+            using (DaemonLoopDriver.EnterPhase("queue-store"))
             {
-                var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-                if (current?.State != QueueItemState.Queued
-                    || current.Retirement is not null
-                    || !HasSameAdmissionDeclaration(current, item, admittedDeclaration))
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
                 {
-                    return snapshot;
-                }
+                    var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+                    if (current?.State != QueueItemState.Queued
+                        || current.Retirement is not null
+                        || !HasSameAdmissionDeclaration(current, item, admittedDeclaration))
+                    {
+                        return snapshot;
+                    }
 
-                launchClaimed = true;
-                claimedItems = Replace(snapshot.Items, item.Tag, existing => existing with
-                {
-                    State = QueueItemState.Launched,
-                    RoomDirectory = roomDirectory,
-                    LaunchedAt = now,
-                    Error = null,
-                    LastAdmission = admission,
-                    AttemptId = attemptId,
-                    AttemptBaseRevision = attemptBaseRevision,
-                });
-                return snapshot with
-                {
-                    Items = claimedItems,
-                };
-            }, CancellationToken.None).ConfigureAwait(false);
+                    launchClaimed = true;
+                    claimedItems = Replace(snapshot.Items, item.Tag, existing => existing with
+                    {
+                        State = QueueItemState.Launched,
+                        RoomDirectory = roomDirectory,
+                        LaunchedAt = now,
+                        Error = null,
+                        LastAdmission = admission,
+                        AttemptId = attemptId,
+                        AttemptBaseRevision = attemptBaseRevision,
+                    });
+                    return snapshot with
+                    {
+                        Items = claimedItems,
+                    };
+                }, CancellationToken.None).ConfigureAwait(false);
+            }
 
             if (!launchClaimed)
             {
@@ -446,8 +430,11 @@ public sealed class QueueSchedulerService : BackgroundService
             QueueLaunchOutcome outcome;
             try
             {
-                outcome = await _launch(new QueueLaunchRequest(item, tier, roomDirectory), CancellationToken.None)
-                    .ConfigureAwait(false);
+                using (DaemonLoopDriver.EnterPhase("worker-launch"))
+                {
+                    outcome = await _launch(new QueueLaunchRequest(item, tier, roomDirectory), CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -571,7 +558,10 @@ public sealed class QueueSchedulerService : BackgroundService
         IReadOnlyList<QueueDecisionEntry> facts;
         try
         {
-            facts = await _advancer.AdvanceAsync(_now(), cancellationToken).ConfigureAwait(false);
+            using (DaemonLoopDriver.EnterPhase("work-item-advance"))
+            {
+                facts = await _advancer.AdvanceAsync(_now(), cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -597,11 +587,16 @@ public sealed class QueueSchedulerService : BackgroundService
     /// <see cref="QueueStore.MutateAsync"/> on an already-cancelled token never runs its delegate at
     /// all — which is how a shutdown mid-launch used to lose the launch entirely.
     /// </summary>
-    private static Task MarkAsync(string tag, Func<QueueItem, QueueItem> update) =>
-        QueueStore.MutateAsync(
-            BatonPaths.QueueFile,
-            s => s with { Items = Replace(s.Items, tag, update) },
-            CancellationToken.None);
+    private static async Task MarkAsync(string tag, Func<QueueItem, QueueItem> update)
+    {
+        using (DaemonLoopDriver.EnterPhase("queue-store"))
+        {
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = Replace(s.Items, tag, update) },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+    }
 
     private async Task FailAsync(
         QueueItem item,
@@ -618,27 +613,30 @@ public sealed class QueueSchedulerService : BackgroundService
         // mark writes the room the dispatch was GOING to use, and a refusal that never provisioned it
         // must not leave that path behind as if a room existed to go and read.
         var failed = false;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        using (DaemonLoopDriver.EnterPhase("queue-store"))
         {
-            var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-            if (current?.Retirement is not null)
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
-                return snapshot;
-            }
-
-            failed = current is not null;
-            return snapshot with
-            {
-                Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+                if (current?.Retirement is not null)
                 {
-                    State = QueueItemState.Failed,
-                    Error = error,
-                    RoomDirectory = room,
-                    LastAdmission = admission ?? existing.LastAdmission,
-                    AttemptId = attemptId ?? existing.AttemptId,
-                }),
-            };
-        }, CancellationToken.None).ConfigureAwait(false);
+                    return snapshot;
+                }
+
+                failed = current is not null;
+                return snapshot with
+                {
+                    Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                    {
+                        State = QueueItemState.Failed,
+                        Error = error,
+                        RoomDirectory = room,
+                        LastAdmission = admission ?? existing.LastAdmission,
+                        AttemptId = attemptId ?? existing.AttemptId,
+                    }),
+                };
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
 
         if (!failed)
         {
@@ -674,29 +672,32 @@ public sealed class QueueSchedulerService : BackgroundService
         FleetAttemptId attemptId)
     {
         var failed = false;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        using (DaemonLoopDriver.EnterPhase("queue-store"))
         {
-            var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-            if (current?.State != QueueItemState.Queued
-                || current.Retirement is not null
-                || !HasSameAdmissionDeclaration(current, item))
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
-                return snapshot;
-            }
-
-            failed = true;
-            return snapshot with
-            {
-                Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+                if (current?.State != QueueItemState.Queued
+                    || current.Retirement is not null
+                    || !HasSameAdmissionDeclaration(current, item))
                 {
-                    State = QueueItemState.Failed,
-                    Error = error,
-                    RoomDirectory = null,
-                    LastAdmission = admission,
-                    AttemptId = attemptId,
-                }),
-            };
-        }, CancellationToken.None).ConfigureAwait(false);
+                    return snapshot;
+                }
+
+                failed = true;
+                return snapshot with
+                {
+                    Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                    {
+                        State = QueueItemState.Failed,
+                        Error = error,
+                        RoomDirectory = null,
+                        LastAdmission = admission,
+                        AttemptId = attemptId,
+                    }),
+                };
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
 
         if (!failed)
         {
@@ -741,7 +742,11 @@ public sealed class QueueSchedulerService : BackgroundService
     /// </remarks>
     internal async Task ResolveFinishedItemsAsync(CancellationToken cancellationToken)
     {
-        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        QueueSnapshot snapshot;
+        using (DaemonLoopDriver.EnterPhase("queue-store"))
+        {
+            snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        }
         var launched = snapshot.Items
             .Where(i => i.State == QueueItemState.Launched && i.RoomDirectory is { Length: > 0 })
             .ToList();
@@ -792,14 +797,17 @@ public sealed class QueueSchedulerService : BackgroundService
             return;
         }
 
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+        using (DaemonLoopDriver.EnterPhase("queue-store"))
         {
-            Items = s.Items
-                .Select(i => resolved.TryGetValue(i.Tag, out var outcome) && i.State == QueueItemState.Launched
-                    ? i with { State = outcome.State, Error = outcome.Error }
-                    : i)
-                .ToList(),
-        }, cancellationToken).ConfigureAwait(false);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = s.Items
+                    .Select(i => resolved.TryGetValue(i.Tag, out var outcome) && i.State == QueueItemState.Launched
+                        ? i with { State = outcome.State, Error = outcome.Error }
+                        : i)
+                    .ToList(),
+            }, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -956,13 +964,16 @@ public sealed class QueueSchedulerService : BackgroundService
     {
         try
         {
-            await QueueStore.RecordIfCurrentAsync(
-                BatonPaths.QueueFile,
-                snapshot => snapshot.Items.Any(item => string.Equals(item.Tag, tag, StringComparison.Ordinal)
-                    && item.Retirement is null),
-                () => _lastVerdictKey = QueueDecisionLedgerStore.AppendUnderQueueLock(
-                    entry, _lastVerdictKey, BatonPaths.QueueDecisionLedgerFile, cancellationToken),
-                CancellationToken.None).ConfigureAwait(false);
+            using (DaemonLoopDriver.EnterPhase("queue-store"))
+            {
+                await QueueStore.RecordIfCurrentAsync(
+                    BatonPaths.QueueFile,
+                    snapshot => snapshot.Items.Any(item => string.Equals(item.Tag, tag, StringComparison.Ordinal)
+                        && item.Retirement is null),
+                    () => _lastVerdictKey = QueueDecisionLedgerStore.AppendUnderQueueLock(
+                        entry, _lastVerdictKey, BatonPaths.QueueDecisionLedgerFile, cancellationToken),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
         {
@@ -978,7 +989,11 @@ public sealed class QueueSchedulerService : BackgroundService
     /// </summary>
     private static async Task ReconcileCancelledItemsAsync(CancellationToken cancellationToken)
     {
-        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        QueueSnapshot snapshot;
+        using (DaemonLoopDriver.EnterPhase("queue-store"))
+        {
+            snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        }
         try
         {
             await QueueDecisionLedgerStore.ReconcileCancellationsAsync(
@@ -1148,11 +1163,19 @@ public sealed class QueueSchedulerService : BackgroundService
     private static async Task<double> CountLiveWeightAsync(CancellationToken cancellationToken)
     {
         var total = 0.0;
-        var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered;
+        using (DaemonLoopDriver.EnterPhase("room-discovery"))
+        {
+            discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+        }
         foreach (var room in discovered)
         {
-            var view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: false, cancellationToken)
-                .ConfigureAwait(false);
+            FleetRoomStatusView? view;
+            using (DaemonLoopDriver.EnterPhase("room-scan"))
+            {
+                view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: false, cancellationToken)
+                    .ConfigureAwait(false);
+            }
             if (view is null || view.State != "Running")
             {
                 continue;

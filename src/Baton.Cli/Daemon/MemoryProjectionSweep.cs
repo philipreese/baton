@@ -17,9 +17,10 @@ public sealed class MemoryProjectionSweep : BackgroundService
     private readonly string? _claudeHome;
     private readonly string? _userHome;
     private readonly Action<string, byte[]>? _projectionWriter;
+    private readonly DaemonLoopDriver _loopDriver;
 
     public MemoryProjectionSweep()
-        : this(() => DateTime.UtcNow, null, null, null)
+        : this(() => DateTime.UtcNow, null, null, null, null)
     {
     }
 
@@ -27,21 +28,30 @@ public sealed class MemoryProjectionSweep : BackgroundService
         Func<DateTime> utcNow,
         string? claudeHome,
         string? userHome,
-        Action<string, byte[]>? projectionWriter)
+        Action<string, byte[]>? projectionWriter,
+        DaemonLoopDriver? loopDriver = null)
     {
         _utcNow = utcNow;
         _claudeHome = claudeHome;
         _userHome = userHome;
         _projectionWriter = projectionWriter;
+        _loopDriver = loopDriver ?? new DaemonLoopDriver();
     }
 
     /// <summary>One bounded pass, exposed for fixture-only retry and restart tests.</summary>
     internal async Task SweepOnceAsync(TextWriter? diagnostics = null, CancellationToken cancellationToken = default)
     {
         diagnostics ??= Console.Error;
-        var blockedByImport = await MemoryImportOperationStore
-            .RecoverPendingAsync(diagnostics, cancellationToken).ConfigureAwait(false);
-        foreach (var location in CanonicalStoreInventory.Scan(BatonPaths.Root))
+        IReadOnlySet<string> blockedByImport;
+        IReadOnlyList<CanonicalStoreLocation> locations;
+        using (DaemonLoopDriver.EnterPhase("memory-store"))
+        {
+            blockedByImport = await MemoryImportOperationStore
+                .RecoverPendingAsync(diagnostics, cancellationToken).ConfigureAwait(false);
+            locations = [.. CanonicalStoreInventory.Scan(BatonPaths.Root)];
+        }
+
+        foreach (var location in locations)
         {
             if (location.OperationProblems is { Count: > 0 }
                 || blockedByImport.Contains(location.Slug)
@@ -50,9 +60,14 @@ public sealed class MemoryProjectionSweep : BackgroundService
                 continue;
             }
 
-            var stored = await MemoryStore.ReadAllAsync(location.EntriesFile, cancellationToken).ConfigureAwait(false);
-            var obligation = await MemoryProjectionObligationStore.ReadAsync(location.Slug, cancellationToken)
-                .ConfigureAwait(false);
+            IReadOnlyList<MemoryEntry> stored;
+            MemoryProjectionObligation? obligation;
+            using (DaemonLoopDriver.EnterPhase("memory-store"))
+            {
+                stored = await MemoryStore.ReadAllAsync(location.EntriesFile, cancellationToken).ConfigureAwait(false);
+                obligation = await MemoryProjectionObligationStore.ReadAsync(location.Slug, cancellationToken)
+                    .ConfigureAwait(false);
+            }
             var repository = MemoryStoreIdentity.Resolve(
                 location.Slug, location.Repository, stored, obligation);
             if (repository is null)
@@ -73,21 +88,25 @@ public sealed class MemoryProjectionSweep : BackgroundService
                     [location.Slug] = obligation,
                 };
 
-            var exitCode = await MemorySyncCommand.ExecuteAsync(
-                new MemorySyncOptions(
-                    repository,
-                    Apply: true,
-                    Check: false,
-                    MemoryAuditOutputFormat.Text,
-                    RepositoryFactsDirectory: null,
-                    Help: false),
-                output,
-                _claudeHome,
-                cancellationToken,
-                _userHome,
-                claimed,
-                _projectionWriter,
-                _utcNow).ConfigureAwait(false);
+            int exitCode;
+            using (DaemonLoopDriver.EnterPhase("memory-projection"))
+            {
+                exitCode = await MemorySyncCommand.ExecuteAsync(
+                    new MemorySyncOptions(
+                        repository,
+                        Apply: true,
+                        Check: false,
+                        MemoryAuditOutputFormat.Text,
+                        RepositoryFactsDirectory: null,
+                        Help: false),
+                    output,
+                    _claudeHome,
+                    cancellationToken,
+                    _userHome,
+                    claimed,
+                    _projectionWriter,
+                    _utcNow).ConfigureAwait(false);
+            }
 
             if (exitCode == 0)
             {
@@ -95,8 +114,12 @@ public sealed class MemoryProjectionSweep : BackgroundService
             }
 
             diagnostics.Write(output.ToString());
-            var after = await MemoryProjectionObligationStore.ReadAsync(location.Slug, cancellationToken)
-                .ConfigureAwait(false);
+            MemoryProjectionObligation? after;
+            using (DaemonLoopDriver.EnterPhase("memory-store"))
+            {
+                after = await MemoryProjectionObligationStore.ReadAsync(location.Slug, cancellationToken)
+                    .ConfigureAwait(false);
+            }
             if (after?.Status == MemoryProjectionObligationStatus.Escalated)
             {
                 diagnostics.WriteLine(
@@ -108,33 +131,16 @@ public sealed class MemoryProjectionSweep : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var started = Stopwatch.GetTimestamp();
-            try
+        await _loopDriver.RunAsync(
+            nameof(MemoryProjectionSweep),
+            async cancellationToken =>
             {
-                await SweepOnceAsync(cancellationToken: stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"MemoryProjectionSweep: sweep iteration failed: {ex.Message}");
-            }
-
-            DaemonTickLedger.Instance.RecordTick(
-                nameof(MemoryProjectionSweep), Stopwatch.GetElapsedTime(started), Interval);
-
-            try
-            {
-                await Task.Delay(Interval, stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-        }
+                await SweepOnceAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+                return Interval;
+            },
+            () => Interval,
+            _ => Interval,
+            ex => Console.Error.WriteLine($"MemoryProjectionSweep: sweep iteration failed: {ex.Message}"),
+            stoppingToken).ConfigureAwait(false);
     }
 }

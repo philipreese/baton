@@ -4279,15 +4279,25 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   projection-staleness reading, and `DaemonWatchdog`'s own doc has why killing the daemon over one
   loop is the worse trade. The supervision thread wakes every projection interval or every 30 s,
   whichever is shorter, so a widened projection interval does not widen the fleet arm's reaction.
+  On each wake that dedicated thread also samples every driver-owned tick already beyond its own
+  interval, including its current named phase and the same host counters below. Those bounded
+  in-memory samples ride the tick's eventual log and heartbeat; the watchdog performs no extra
+  healthy-pass console or filesystem write that could itself wedge supervision.
   **The heartbeat's schema, stated here once:** `tickCompletedAt` (newest completion across
   services), `startedAt` (process start), `services` (per service: `lastTickMs`, `completedAt`,
-  `intervalMs`), `hostLoad` (#2082: `sampledAt`, `threadPoolPendingWorkItems`,
+  `intervalMs`, and, only when that tick exceeded its interval, bounded aggregated `latePhases`
+  entries with `name`, total `elapsedMs`, and `count`, plus bounded `lateSamples` entries with
+  `sampledAt`, current `phase`, `phaseElapsedMs`, and that sample's `hostLoad`), `hostLoad` (#2082:
+  `sampledAt`, `threadPoolPendingWorkItems`,
   `threadPoolThreads`, `gcTotalMemoryBytes`, `workingSetBytes` — the process's own counters at the
   sample's capture instant), and `glassBoundPrefixes` (#2130: the prefixes `GlassHttpService`
   actually bound, as reported to `DaemonTickLedger.RecordGlassBoundPrefixes`; omitted, not an empty
   array, until that service has completed its one-time bind pass — the listener off reads
-  differently from the listener on with every prefix refused). These are process-counter reads; capture has been
-  tested on a healthy pool, not drilled against a wedged pool.
+  differently from the listener on with every prefix refused). These are process-counter reads. An
+  isolated-process control constrains the worker pool to two occupied threads and proves that two
+  independent driver continuations both miss cadence, retain separate phase attribution, and recover
+  on the next tick after the pool is released; real registry-lock and child-process controls produce
+  the narrower one-loop signature.
   A service's `lastTickMs` against its `intervalMs` is the host-load signal that predates the freeze:
   on 2026-09-08 `FleetProjectionWriter` had reached 10.97 s against 30 s in the last body written
   before every loop stopped. The watchdog's verdict line (`{Root}/fleet/watchdog.txt`) carries a
