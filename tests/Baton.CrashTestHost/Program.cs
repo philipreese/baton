@@ -1,8 +1,11 @@
 using System.Diagnostics;
+using System.Text.Json;
+using Baton.Cli.Daemon;
 using Baton.CrashTestHost;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Status;
 using Baton.Store;
 
 // M10 Phase 4 (issue #72): a small, test-only pump host standing in for Baton.Cli, which is still a
@@ -156,6 +159,25 @@ if (args.Length == 2 && args[0] is "spawn-contained" or "spawn-detached")
     return await SpawnArmAsync(args[0], args[1]);
 }
 
+if (args is ["daemon-loop-threadpool-control"])
+{
+    return await RunDaemonLoopThreadPoolControlAsync();
+}
+if (args is ["daemon-loop-registry-control"])
+{
+    return await RunDaemonLoopRegistryControlAsync();
+}
+if (args is ["daemon-loop-child-control"])
+{
+    return await RunDaemonLoopChildControlAsync();
+}
+if (args is ["daemon-loop-child-wait"])
+{
+    await Console.Out.WriteLineAsync("ready");
+    _ = await Console.In.ReadLineAsync();
+    return 0;
+}
+
 if (args.Length != 6)
 {
     await Console.Error.WriteLineAsync(
@@ -236,6 +258,285 @@ static async Task<int> SpawnArmAsync(string mode, string pidFile)
     return 0;
 }
 
+// #2324: isolated-process control for the shared-loop seam. Restricting the pool would corrupt the
+// test runner itself, so this lives in the killable host. Two independent loop continuations queue
+// behind the only two workers, both record the same virtual-time miss, and both recover on the next
+// tick after the workers are released. No wall-clock cadence or sub-minute sleep is asserted.
+static async Task<int> RunDaemonLoopThreadPoolControlAsync()
+{
+    ThreadPool.GetMinThreads(out _, out var minimumIo);
+    ThreadPool.GetMaxThreads(out _, out var maximumIo);
+    if (!ThreadPool.SetMinThreads(2, minimumIo) || !ThreadPool.SetMaxThreads(2, maximumIo))
+    {
+        await Console.Error.WriteLineAsync("could not constrain the isolated worker pool");
+        return 2;
+    }
+
+    var clock = new ControlTimeProvider();
+    var ledger = new DaemonTickLedger(() => DateTimeOffset.UnixEpoch);
+    var releaseTicks = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var ticksEntered = new CountdownEvent(2);
+    using var blockersEntered = new CountdownEvent(2);
+    using var releaseBlockers = new ManualResetEventSlim();
+    using var firstStop = new CancellationTokenSource();
+    using var secondStop = new CancellationTokenSource();
+    var observations = new List<object>();
+    var observationGate = new object();
+
+    Task StartLoopAsync(string service, CancellationTokenSource stop)
+    {
+        var pass = 0;
+        var driver = new DaemonLoopDriver(
+            ledger,
+            clock,
+            (_, _) =>
+            {
+                if (pass >= 2)
+                {
+                    stop.Cancel();
+                    return Task.FromCanceled(stop.Token);
+                }
+
+                return Task.CompletedTask;
+            });
+
+        return driver.RunAsync(
+            service,
+            async _ =>
+            {
+                pass++;
+                if (pass == 1)
+                {
+                    using (DaemonLoopDriver.EnterPhase("runtime-continuation"))
+                    {
+                        ticksEntered.Signal();
+                        await releaseTicks.Task.ConfigureAwait(false);
+                    }
+                }
+
+                return TimeSpan.FromSeconds(10);
+            },
+            () => TimeSpan.FromSeconds(10),
+            _ => TimeSpan.FromSeconds(10),
+            _ => { },
+            stop.Token,
+            () =>
+            {
+                var tick = ledger.Snapshot().Single(candidate => candidate.Service == service);
+                lock (observationGate)
+                {
+                    observations.Add(new
+                    {
+                        service,
+                        elapsedMs = tick.Elapsed.TotalMilliseconds,
+                        phases = tick.LatePhases.Select(phase => phase.Name).ToArray(),
+                    });
+                }
+            });
+    }
+
+    var first = StartLoopAsync("first", firstStop);
+    var second = StartLoopAsync("second", secondStop);
+    if (!ticksEntered.Wait(TimeSpan.FromSeconds(5)))
+    {
+        return 3;
+    }
+
+    for (var index = 0; index < 2; index++)
+    {
+        ThreadPool.UnsafeQueueUserWorkItem(_ =>
+        {
+            blockersEntered.Signal();
+            releaseBlockers.Wait();
+        }, null);
+    }
+
+    if (!blockersEntered.Wait(TimeSpan.FromSeconds(5)))
+    {
+        return 4;
+    }
+
+    clock.Advance(TimeSpan.FromSeconds(25));
+    releaseTicks.SetResult();
+    var continuationsWereStarved = !first.IsCompleted && !second.IsCompleted;
+    releaseBlockers.Set();
+    await Task.WhenAll(first, second).ConfigureAwait(false);
+
+    await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new
+    {
+        continuationsWereStarved,
+        observations,
+    }));
+    return continuationsWereStarved ? 0 : 5;
+}
+
+// The two differential controls below use the real blocking primitive they name. Only the affected
+// loop advances across the virtual 25-second interval; the unrelated loop completes at zero. That
+// signature is deliberately narrower than the thread-pool control, where both continuations miss.
+static async Task<int> RunDaemonLoopRegistryControlAsync()
+{
+    var registry = Path.Combine(Path.GetTempPath(), $"baton-registry-control-{Guid.NewGuid():N}.jsonl");
+    await File.WriteAllTextAsync(registry, string.Empty);
+    try
+    {
+        var clock = new ControlTimeProvider();
+        var ledger = new DaemonTickLedger(() => DateTimeOffset.UnixEpoch);
+        using var slowStop = new CancellationTokenSource();
+        using var fastStop = new CancellationTokenSource();
+        using var attempted = new ManualResetEventSlim();
+        using var acquired = new ManualResetEventSlim();
+        var slowDriver = new DaemonLoopDriver(ledger, clock, (_, _) => CancelControlDelayAsync(slowStop));
+        var fastDriver = new DaemonLoopDriver(ledger, clock, (_, _) => CancelControlDelayAsync(fastStop));
+        Task? slowRun = null;
+        Task? fastRun = null;
+
+        MutexGuardedFileLock.RunUnderLock(registry, "baton-room-registry", TimeSpan.FromSeconds(5), () =>
+        {
+            slowRun = slowDriver.RunAsync(
+                "registry",
+                async _ =>
+                {
+                    using (DaemonLoopDriver.EnterPhase("room-registry"))
+                    {
+                        await Task.Run(() =>
+                        {
+                            attempted.Set();
+                            MutexGuardedFileLock.RunUnderLock(
+                                registry,
+                                "baton-room-registry",
+                                TimeSpan.FromSeconds(5),
+                                () =>
+                                {
+                                    acquired.Set();
+                                });
+                        });
+                    }
+
+                    return TimeSpan.FromSeconds(10);
+                },
+                () => TimeSpan.FromSeconds(10),
+                _ => TimeSpan.FromSeconds(10),
+                _ => { },
+                slowStop.Token);
+
+            // Queue a second real lock contender with an explicit pre-wait signal. The contender's
+            // action cannot run while this outer action owns the same named mutex.
+            if (!attempted.Wait(TimeSpan.FromSeconds(5)) || acquired.IsSet)
+            {
+                throw new InvalidOperationException("Registry control did not establish contention.");
+            }
+
+            fastRun = fastDriver.RunAsync(
+                "unrelated",
+                _ => Task.FromResult(TimeSpan.FromSeconds(10)),
+                () => TimeSpan.FromSeconds(10),
+                _ => TimeSpan.FromSeconds(10),
+                _ => { },
+                fastStop.Token);
+            clock.Advance(TimeSpan.FromSeconds(25));
+        });
+
+        await Task.WhenAll(slowRun!, fastRun!).ConfigureAwait(false);
+        if (!acquired.IsSet)
+        {
+            return 6;
+        }
+
+        return await WriteDifferentialControlResultAsync(ledger).ConfigureAwait(false);
+    }
+    finally
+    {
+        Baton.Tests.Shared.FileCleanup.Delete(registry);
+    }
+}
+
+static async Task<int> RunDaemonLoopChildControlAsync()
+{
+    var clock = new ControlTimeProvider();
+    var ledger = new DaemonTickLedger(() => DateTimeOffset.UnixEpoch);
+    using var slowStop = new CancellationTokenSource();
+    using var fastStop = new CancellationTokenSource();
+    using var childReady = new ManualResetEventSlim();
+    var releaseChild = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var slowDriver = new DaemonLoopDriver(ledger, clock, (_, _) => CancelControlDelayAsync(slowStop));
+    var fastDriver = new DaemonLoopDriver(ledger, clock, (_, _) => CancelControlDelayAsync(fastStop));
+
+    var slowRun = slowDriver.RunAsync(
+        "child",
+        async cancellationToken =>
+        {
+            using (DaemonLoopDriver.EnterPhase("child-process"))
+            {
+                var start = new ProcessStartInfo("dotnet")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                };
+                start.ArgumentList.Add(typeof(Scenarios).Assembly.Location);
+                start.ArgumentList.Add("daemon-loop-child-wait");
+                using var child = Process.Start(start)
+                    ?? throw new InvalidOperationException("Could not start child-process control.");
+                var ready = await child.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+                if (ready != "ready")
+                {
+                    throw new InvalidOperationException($"Child-process control reported '{ready}'.");
+                }
+
+                childReady.Set();
+                await releaseChild.Task.ConfigureAwait(false);
+                await child.StandardInput.WriteLineAsync("release").ConfigureAwait(false);
+                child.StandardInput.Close();
+                await child.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return TimeSpan.FromSeconds(10);
+        },
+        () => TimeSpan.FromSeconds(10),
+        _ => TimeSpan.FromSeconds(10),
+        _ => { },
+        slowStop.Token);
+
+    if (!childReady.Wait(TimeSpan.FromSeconds(5)))
+    {
+        return 7;
+    }
+
+    var fastRun = fastDriver.RunAsync(
+        "unrelated",
+        _ => Task.FromResult(TimeSpan.FromSeconds(10)),
+        () => TimeSpan.FromSeconds(10),
+        _ => TimeSpan.FromSeconds(10),
+        _ => { },
+        fastStop.Token);
+    clock.Advance(TimeSpan.FromSeconds(25));
+    releaseChild.SetResult();
+    await Task.WhenAll(slowRun, fastRun).ConfigureAwait(false);
+    return await WriteDifferentialControlResultAsync(ledger).ConfigureAwait(false);
+}
+
+static Task CancelControlDelayAsync(CancellationTokenSource stop)
+{
+    stop.Cancel();
+    return Task.FromCanceled(stop.Token);
+}
+
+static async Task<int> WriteDifferentialControlResultAsync(DaemonTickLedger ledger)
+{
+    var observations = ledger.Snapshot()
+        .OrderBy(tick => tick.Service, StringComparer.Ordinal)
+        .Select(tick => new
+        {
+            service = tick.Service,
+            elapsedMs = tick.Elapsed.TotalMilliseconds,
+            phases = tick.LatePhases.Select(phase => phase.Name).ToArray(),
+        })
+        .ToArray();
+    await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new { observations }));
+    return 0;
+}
+
 // Written beside and renamed into place, so the test's poll never sees the file exist while this
 // host still holds it open for writing: a direct write is created empty first, and a reader that
 // opens it in that window gets a sharing violation (CI run 34243412086, windows-shard-flow).
@@ -310,4 +611,15 @@ static async Task WatchForCancelSignalAsync(
     {
         await Console.Error.WriteLineAsync($"WatchForCancelSignalAsync failed: {ex}").ConfigureAwait(false);
     }
+}
+
+sealed class ControlTimeProvider : TimeProvider
+{
+    private long _timestamp;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+    public override long GetTimestamp() => Volatile.Read(ref _timestamp);
+
+    public void Advance(TimeSpan elapsed) => Interlocked.Add(ref _timestamp, elapsed.Ticks);
 }

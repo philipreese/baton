@@ -54,9 +54,10 @@ namespace Baton.Cli.Daemon;
 public sealed class FleetProjectionWriter : BackgroundService
 {
     private readonly Func<double?> _freeGb;
+    private readonly DaemonLoopDriver _loopDriver;
 
     public FleetProjectionWriter()
-        : this(null)
+        : this(null, null)
     {
     }
 
@@ -66,8 +67,11 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// <c>queue</c> section that no fixture on disk can fix, so a test drives it as a delegate rather
     /// than asserting around whatever this machine happens to have free.
     /// </summary>
-    internal FleetProjectionWriter(Func<double?>? freeGb) =>
+    internal FleetProjectionWriter(Func<double?>? freeGb, DaemonLoopDriver? loopDriver = null)
+    {
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
+        _loopDriver = loopDriver ?? new DaemonLoopDriver();
+    }
 
     public const string IntervalSecondsEnvironmentVariable = "BATON_FLEET_PROJECTION_INTERVAL_SECONDS";
 
@@ -152,40 +156,18 @@ public sealed class FleetProjectionWriter : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var started = Stopwatch.GetTimestamp();
-            try
+        await _loopDriver.RunAsync(
+            nameof(FleetProjectionWriter),
+            async cancellationToken =>
             {
-                await WriteOnceAsync(stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"FleetProjectionWriter: iteration failed: {ex.Message}");
-            }
-
-            // #1981: recorded even when the tick above threw -- what the watchdog measures is whether
-            // the LOOP is still turning over, and a tick that fails loudly every 30s is a different
-            // fault from one that never comes back. The heartbeat file is written from here, at the end
-            // of the projection tick, because this is the daemon's fastest-cadence full pass over the
-            // rooms: DaemonTickLedger and BatonPaths.FleetHeartbeatFile carry the rest of the rules.
-            DaemonTickLedger.Instance.RecordTick(
-                nameof(FleetProjectionWriter), Stopwatch.GetElapsedTime(started), GetInterval());
-            WriteHeartbeat();
-
-            try
-            {
-                await Task.Delay(GetInterval(), stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-        }
+                await WriteOnceAsync(cancellationToken).ConfigureAwait(false);
+                return GetInterval();
+            },
+            GetInterval,
+            _ => GetInterval(),
+            ex => Console.Error.WriteLine($"FleetProjectionWriter: iteration failed: {ex.Message}"),
+            stoppingToken,
+            WriteHeartbeat).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -215,8 +197,16 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// <summary>One tick's worth of work — public entry point for tests, and what <see cref="ExecuteAsync"/> loops.</summary>
     internal async Task WriteOnceAsync(CancellationToken cancellationToken = default)
     {
-        var json = await BuildProjectionJsonAsync(cancellationToken).ConfigureAwait(false);
-        WriteAtomic(BatonPaths.FleetProjectionFile, json);
+        string json;
+        using (DaemonLoopDriver.EnterPhase("fleet-projection"))
+        {
+            json = await BuildProjectionJsonAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        using (DaemonLoopDriver.EnterPhase("projection-write"))
+        {
+            WriteAtomic(BatonPaths.FleetProjectionFile, json);
+        }
     }
 
     /// <param name="diagnostics">Sink for the one-per-process missing-denylist log line (#1816) —
@@ -226,7 +216,11 @@ public sealed class FleetProjectionWriter : BackgroundService
     internal async Task<string> BuildProjectionJsonAsync(CancellationToken cancellationToken, TextWriter? diagnostics = null)
     {
         diagnostics ??= Console.Error;
-        var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered;
+        using (DaemonLoopDriver.EnterPhase("room-discovery"))
+        {
+            discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+        }
         var roomsArray = new JsonArray();
         var timelines = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
@@ -248,8 +242,12 @@ public sealed class FleetProjectionWriter : BackgroundService
 
         foreach (var room in discovered)
         {
-            var view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: true, cancellationToken)
-                .ConfigureAwait(false);
+            FleetRoomStatusView? view;
+            using (DaemonLoopDriver.EnterPhase("room-scan"))
+            {
+                view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: true, cancellationToken)
+                    .ConfigureAwait(false);
+            }
             if (view is null)
             {
                 continue;
@@ -398,7 +396,11 @@ public sealed class FleetProjectionWriter : BackgroundService
                 return QueueSectionResult.Unavailable(QueueUnavailableNoQueueFile);
             }
 
-            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            QueueSnapshot snapshot;
+            using (DaemonLoopDriver.EnterPhase("queue-store"))
+            {
+                snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            }
             var settings = (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
                 .ConfigureAwait(false)).Queue;
             var lastDecision = await ReadNewestDecisionAsync(cancellationToken).ConfigureAwait(false);

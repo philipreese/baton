@@ -54,6 +54,7 @@
          Mcp/Daemon sources. DaemonHost's test-only RunDaemonAsync(args, onHostBuilt) overload is
          internal. -->
     <InternalsVisibleTo Include="Baton.Cli.Tests" />
+    <InternalsVisibleTo Include="Baton.CrashTestHost" />
   </ItemGroup>
 
   <!-- No native-lib packaging step exists because there is no native lib to package: the

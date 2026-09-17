@@ -209,7 +209,9 @@ internal sealed class DaemonWatchdog : IHostedService
         var interval = _interval();
         // Capture before judging, on every pass, so a trip never runs this code for the first time.
         // spec/baton.md §7 records the measurement scope of capture on this dedicated thread.
-        var verdict = Evaluate(_ledger, now, interval, _sampleLoad(now));
+        var load = _sampleLoad(now);
+        _ledger.SampleActive(load);
+        var verdict = Evaluate(_ledger, now, interval, load);
         if (verdict is null)
         {
             return false;
@@ -344,9 +346,19 @@ internal sealed class DaemonWatchdog : IHostedService
             ? $"{ticks[^1].Service}, last completed {ticks[^1].CompletedAt:O} ({(now - ticks[^1].CompletedAt).TotalSeconds:F0}s ago, its interval is {ticks[^1].Interval.TotalSeconds:F0}s)"
             : "every registered service — none has ever reported a tick";
         var host = load is null ? "" : $"Host now: {load.Describe()}. ";
+        var active = ledger.SnapshotActive();
+        var activeDescription = active.Count == 0
+            ? string.Empty
+            : "In flight: " + string.Join(
+                "; ",
+                active.Select(tick => tick.Phase is null
+                    ? $"{tick.Service} for {tick.Elapsed.TotalSeconds:F0}s (no named phase)"
+                    : $"{tick.Service} for {tick.Elapsed.TotalSeconds:F0}s, {tick.Phase} for {tick.PhaseElapsed.TotalSeconds:F0}s"))
+              + ". ";
 
         return $"DaemonWatchdog: no service has completed a tick in {silence.TotalSeconds:F0}s ({bound}). "
                + $"Last to complete: {lastCompleted}. Longest silent: {quietest}. {host}"
+               + activeDescription
                + $"Exiting {HungExitCode} so the baton-daemon scheduled task's repeating trigger relaunches the daemon; "
                + $"{BatonPaths.FleetHeartbeatFile} holds the per-service durations and the host-load sample as of the last projection tick that finished.";
     }

@@ -242,6 +242,37 @@ public class DaemonWatchdogTests
         Assert.Empty(order);
     }
 
+    [Fact]
+    public void AHealthyWatchdogPass_SamplesAnOverdueActivePhaseWithoutTripping()
+    {
+        var clock = new FixtureClock(T0);
+        var ledger = new DaemonTickLedger(() => clock.Now);
+        var load = new HostLoadSample(T0.AddSeconds(31), 41, 2, 128, 256);
+        var watchdog = new DaemonWatchdog(
+            ledger,
+            () => clock.Now,
+            () => Interval,
+            _ => { },
+            _ => { },
+            sampleLoad: _ => load);
+        var registration = ledger.BeginTick(
+            nameof(QueueSchedulerService),
+            () => new DaemonTickLedger.ActiveTick(
+                nameof(QueueSchedulerService),
+                TimeSpan.FromSeconds(31),
+                Interval,
+                "queue-store",
+                TimeSpan.FromSeconds(30)));
+        clock.Advance(TimeSpan.FromSeconds(31));
+
+        Assert.False(watchdog.CheckOnce());
+
+        var sample = Assert.Single(registration.Complete());
+        Assert.Equal("queue-store", sample.Phase);
+        Assert.Equal(TimeSpan.FromSeconds(30), sample.PhaseElapsed);
+        Assert.Equal(load, sample.HostLoad);
+    }
+
     /// <summary>A daemon that wedges before any service has completed a first tick still trips —
     /// measured from process start, so "nothing has ever ticked" is a hang, not a grace period.</summary>
     [Fact]
@@ -360,6 +391,50 @@ public class DaemonWatchdogTests
         Assert.Contains(nameof(FleetProjectionWriter), line);
         Assert.Contains("47.5s", line);
         Assert.Contains("30s interval", line);
+    }
+
+    [Fact]
+    public void ALateTicksLogAndHeartbeat_CarryItsBoundedPhaseAttribution()
+    {
+        var clock = new FixtureClock(T0);
+        var lines = new List<string>();
+        var ledger = new DaemonTickLedger(() => clock.Now, lines.Add);
+        DaemonTickLedger.DaemonPhase[] phases =
+        [
+            new("room-registry", TimeSpan.FromSeconds(11.25)),
+            new("worker-launch", TimeSpan.FromSeconds(31.5)),
+        ];
+        var sampledLoad = new HostLoadSample(T0.AddSeconds(40), 41, 2, 128, 256);
+        DaemonTickLedger.InFlightSample[] samples =
+        [
+            new(T0.AddSeconds(40), "worker-launch", TimeSpan.FromSeconds(24), sampledLoad),
+        ];
+
+        ledger.RecordTick(
+            nameof(QueueSchedulerService),
+            TimeSpan.FromSeconds(47.5),
+            Interval,
+            phases,
+            samples);
+
+        var line = Assert.Single(lines);
+        Assert.Contains("room-registry=11.2s", line);
+        Assert.Contains("worker-launch=31.5s", line);
+        Assert.Contains("independently sampled 1x while in flight", line);
+        Assert.Contains("worker-launch for 24.0s", line);
+
+        var root = JsonNode.Parse(ledger.RenderHeartbeatJson(HostLoadSample.Capture(clock.Now)))!.AsObject();
+        var rendered = root["services"]![nameof(QueueSchedulerService)]!["latePhases"]!.AsArray();
+        Assert.Equal("room-registry", rendered[0]!["name"]!.GetValue<string>());
+        Assert.Equal(11_250, rendered[0]!["elapsedMs"]!.GetValue<double>());
+        Assert.Equal(1, rendered[0]!["count"]!.GetValue<int>());
+        Assert.Equal("worker-launch", rendered[1]!["name"]!.GetValue<string>());
+        Assert.Equal(31_500, rendered[1]!["elapsedMs"]!.GetValue<double>());
+        var renderedSample = Assert.Single(
+            root["services"]![nameof(QueueSchedulerService)]!["lateSamples"]!.AsArray());
+        Assert.Equal("worker-launch", renderedSample!["phase"]!.GetValue<string>());
+        Assert.Equal(24_000, renderedSample["phaseElapsedMs"]!.GetValue<double>());
+        Assert.Equal(sampledLoad, HostLoadSample.FromJson(renderedSample["hostLoad"]));
     }
 
     [Fact]

@@ -17,6 +17,7 @@
          builder, so the killed run and the in-process recovery run bind against the identical
          WorkflowDefinitionSnapshot). -->
     <ProjectReference Include="..\..\src\Baton\Baton.csproj" />
+    <ProjectReference Include="..\..\src\Baton.Cli\Baton.Cli.csproj" />
   </ItemGroup>
 
 </Project>
