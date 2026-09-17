@@ -990,7 +990,7 @@ public static class QueueCommand
         && string.Equals(current.Branch, observed.Branch, StringComparison.Ordinal)
         && current.PullRequest == observed.PullRequest
         && current.AttemptBaseRevision == observed.AttemptBaseRevision
-        && Equals(current.AttemptEnvelope, observed.AttemptEnvelope)
+        && SameAttemptEnvelope(observed.AttemptEnvelope, current.AttemptEnvelope)
         && current.LaunchMayHaveBegunAt == observed.LaunchMayHaveBegunAt
         && current.AttemptAdmissionFactDurable == observed.AttemptAdmissionFactDurable
         && current.AttemptStartedFactDurable == observed.AttemptStartedFactDurable
@@ -999,6 +999,40 @@ public static class QueueCommand
         && current.LaunchRecoveryKind == observed.LaunchRecoveryKind
         && current.Halted == observed.Halted
         && current.ReconciliationKind == observed.ReconciliationKind;
+
+    private static bool SameAttemptEnvelope(QueueAttemptEnvelope? observed, QueueAttemptEnvelope? current)
+    {
+        if (observed is null || current is null)
+        {
+            return observed is null && current is null;
+        }
+
+        return observed.AttemptId == current.AttemptId
+            && observed.ParentAttemptId == current.ParentAttemptId
+            && string.Equals(observed.WorkId, current.WorkId, StringComparison.Ordinal)
+            && observed.Issue == current.Issue
+            && observed.PullRequest == current.PullRequest
+            && observed.Stage == current.Stage
+            && string.Equals(observed.DeclaredRole, current.DeclaredRole, StringComparison.Ordinal)
+            && string.Equals(observed.Adapter, current.Adapter, StringComparison.Ordinal)
+            && string.Equals(observed.Model, current.Model, StringComparison.Ordinal)
+            && string.Equals(observed.Effort, current.Effort, StringComparison.Ordinal)
+            && SameAttemptEnvelopeList(observed.EffectiveGrant, current.EffectiveGrant)
+            && SameAttemptEnvelopeList(observed.RequestedRequirements, current.RequestedRequirements)
+            && SameAttemptEnvelopeList(observed.MissingCapabilities, current.MissingCapabilities)
+            && string.Equals(observed.AdmissionDecision, current.AdmissionDecision, StringComparison.Ordinal)
+            && string.Equals(observed.RoomDirectory, current.RoomDirectory, StringComparison.Ordinal)
+            && string.Equals(observed.RoomId, current.RoomId, StringComparison.Ordinal)
+            && string.Equals(observed.AttemptBaseRevision, current.AttemptBaseRevision, StringComparison.Ordinal)
+            && observed.FactTimestamp == current.FactTimestamp;
+    }
+
+    private static bool SameAttemptEnvelopeList(
+        IReadOnlyList<string>? observed,
+        IReadOnlyList<string>? current) =>
+        observed is null || current is null
+            ? observed is null && current is null
+            : observed.SequenceEqual(current, StringComparer.Ordinal);
 
     /// <summary>
     /// Protected invariant: a historical roomless next stage may leave WIP only when its exact
