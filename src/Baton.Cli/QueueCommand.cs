@@ -907,17 +907,28 @@ public static class QueueCommand
                 $"Queue item '{tag}' has no recorded repository and branch identity for explicit merged-PR retirement; the queue row was not changed.");
         }
 
-        var currentRepository = await repositoryResolver(observed.Workspace, cancellationToken).ConfigureAwait(false);
-        if (currentRepository?.RemoteValue is not { Length: > 0 } resolvedRepository)
+        var canonicalRepository = RepositoryIdentity.TryCanonicalize(observed.Repository);
+        if (!string.Equals(canonicalRepository, observed.Repository, StringComparison.Ordinal)
+            || observed.Repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase))
         {
             throw new CliArgumentException(
-                $"Queue item '{tag}' has no resolvable repository identity for explicit merged-PR retirement; the queue row was not changed.");
+                $"Queue item '{tag}' has a malformed recorded repository identity for explicit merged-PR retirement; the queue row was not changed.");
         }
 
-        if (!string.Equals(resolvedRepository, observed.Repository, StringComparison.Ordinal))
+        if (Directory.Exists(observed.Workspace))
         {
-            throw new CliArgumentException(
-                $"Queue item '{tag}' repository identity '{resolvedRepository}' does not match recorded '{observed.Repository}'; the queue row was not changed.");
+            var currentRepository = await repositoryResolver(observed.Workspace, cancellationToken).ConfigureAwait(false);
+            if (currentRepository?.RemoteValue is not { Length: > 0 } resolvedRepository)
+            {
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' has no resolvable repository identity for explicit merged-PR retirement; the queue row was not changed.");
+            }
+
+            if (!string.Equals(resolvedRepository, observed.Repository, StringComparison.Ordinal))
+            {
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' repository identity '{resolvedRepository}' does not match recorded '{observed.Repository}'; the queue row was not changed.");
+            }
         }
 
         var observedAt = DateTimeOffset.UtcNow;

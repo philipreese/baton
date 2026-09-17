@@ -2987,6 +2987,137 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task Explicit_merged_pr_retirement_uses_persisted_repository_when_workspace_is_missing()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-missing-worktree";
+            const int pullRequest = 2380;
+            var item = ExplicitRetirementItem(home, tag) with
+            {
+                Workspace = Path.Combine(home, "deleted-worktree"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+
+            var gh = new ExplicitRetirementGh(MergedPullRequestJson(pullRequest));
+            var resolverCalls = 0;
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "superseded by merged PR", MergedPullRequest: pullRequest),
+                output,
+                Ct,
+                home,
+                (_, _) =>
+                {
+                    resolverCalls++;
+                    return Task.FromResult<RepositoryIdentity?>(null);
+                },
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+
+            var retired = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.False(QueueScheduler.IsActiveLifecycle(retired));
+            Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
+            Assert.Equal(pullRequest, retired.PullRequest);
+            Assert.Equal(0, resolverCalls);
+            Assert.Single(gh.Calls);
+            Assert.Equal("github.com/example/repo", gh.Calls[0][^1]);
+            Assert.Equal(Environment.CurrentDirectory, Assert.Single(gh.WorkingDirectories));
+            Assert.True(Directory.Exists(gh.WorkingDirectories[0]));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Explicit_merged_pr_retirement_refuses_a_contradictory_existing_workspace_without_mutation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-contradictory-worktree";
+            const int pullRequest = 2380;
+            var item = ExplicitRetirementItem(home, tag);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+            var queueBefore = await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct);
+            var gh = new ExplicitRetirementGh(MergedPullRequestJson(pullRequest));
+            var resolverCalls = 0;
+            var contradictoryRepository = RepositoryIdentity.From("https://github.com/other/repo", null)!;
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "contradictory workspace", MergedPullRequest: pullRequest),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) =>
+                {
+                    resolverCalls++;
+                    return Task.FromResult<RepositoryIdentity?>(contradictoryRepository);
+                },
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+
+            Assert.Contains("does not match recorded", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(1, resolverCalls);
+            Assert.Empty(gh.Calls);
+            Assert.Equal(queueBefore, await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct));
+            var unchanged = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Null(unchanged.Retirement);
+            Assert.Null(unchanged.PullRequest);
+            Assert.Empty((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations ?? []);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Explicit_merged_pr_retirement_refuses_a_malformed_roomless_repository_without_mutation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-malformed-repository";
+            const int pullRequest = 2380;
+            var item = ExplicitRetirementItem(home, tag) with
+            {
+                Workspace = Path.Combine(home, "deleted-worktree"),
+                Repository = "github.com/Example/Repo",
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+            var queueBefore = await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct);
+            var gh = new ExplicitRetirementGh(MergedPullRequestJson(pullRequest));
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "malformed repository", MergedPullRequest: pullRequest),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(null),
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+
+            Assert.Contains("malformed recorded repository identity", refusal.Message, StringComparison.Ordinal);
+            Assert.Empty(gh.Calls);
+            Assert.Equal(queueBefore, await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct));
+            Assert.Empty((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations ?? []);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     private static QueueItem ExplicitRetirementItem(string home, string tag) => new()
     {
         Tag = tag,
@@ -3052,10 +3183,12 @@ public sealed class QueueCommandTests
         Func<Task>? beforeReturn = null) : IGhCliRunner
     {
         public List<string[]> Calls { get; } = [];
+        public List<string> WorkingDirectories { get; } = [];
 
         public async Task<GhCliResult> RunAsync(
             string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
+            WorkingDirectories.Add(workingDirectory);
             Calls.Add(args.ToArray());
             if (beforeReturn is not null)
             {
