@@ -18,9 +18,10 @@ namespace Baton.Cli.Tests.TestSupport;
 /// </summary>
 internal sealed class GrantConsumingContractOutputWorkerAdapter(
     bool satisfyOutputs,
-    IReadOnlyDictionary<string, string>? outputFixtures = null) : IWorkerAdapter, IPermissionGrantTranslator
+    IReadOnlyDictionary<string, string>? outputFixtures = null,
+    bool deliverBranch = false) : IWorkerAdapter, IPermissionGrantTranslator
 {
-    private readonly ContractOutputWorkerAdapter _inner = new(satisfyOutputs, outputFixtures);
+    private readonly ContractOutputWorkerAdapter _inner = new(satisfyOutputs, outputFixtures, deliverBranch: deliverBranch);
 
     public bool WithheldWritesReachTheOutbox => true;
 

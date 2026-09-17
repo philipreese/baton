@@ -51,10 +51,16 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
         // fake that records the base it was handed, so the whole injection chain is proven without a
         // live LLM and without git producing a real diff.
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-tmpl-{Guid.NewGuid():N}");
+        var oldPath = Environment.GetEnvironmentVariable("PATH");
+        var oldOpenPr = Environment.GetEnvironmentVariable("BATON_CRASH_TEST_OPEN_PR");
         try
         {
             var workspace = Path.Combine(testRoot, "workspace");
             var expectedHead = await InitGitWorkspaceAsync(workspace);
+            var trustedBin = Path.Combine(testRoot, "trusted-bin");
+            InstallHermeticGh(trustedBin);
+            Environment.SetEnvironmentVariable("PATH", trustedBin + Path.PathSeparator + oldPath);
+            Environment.SetEnvironmentVariable("BATON_CRASH_TEST_OPEN_PR", "1");
 
             // A minimal conforming ReviewVerdict (decision 0043: the engine checks only that it PARSES
             // as one — ReviewedRef required, empty Findings valid). Written with a real file API and
@@ -69,7 +75,8 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
             {
                 ["fake"] = new ContractOutputWorkerAdapter(
                     satisfyOutputs: true,
-                    outputFixtures: new Dictionary<string, string> { ["verdict.json"] = verdictFixture }),
+                    outputFixtures: new Dictionary<string, string> { ["verdict.json"] = verdictFixture },
+                    deliverBranch: true),
                 [WorkflowTemplateComposer.CaptureAdapter] = capture,
             };
             var roomDirectory = Path.Combine(testRoot, "task");
@@ -111,6 +118,8 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
         }
         finally
         {
+            Environment.SetEnvironmentVariable("PATH", oldPath);
+            Environment.SetEnvironmentVariable("BATON_CRASH_TEST_OPEN_PR", oldOpenPr);
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
     }
@@ -437,7 +446,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
         }
     }
 
-    /// <summary>Creates a git repo at <paramref name="directory"/> with one empty commit; returns its HEAD SHA.</summary>
+    /// <summary>Creates a pushed git fixture at <paramref name="directory"/>; returns its initial HEAD SHA.</summary>
     private static async Task<string> InitGitWorkspaceAsync(string directory)
     {
         Directory.CreateDirectory(directory);
@@ -463,12 +472,42 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
             gates-quiet = { cmd = "cmd /c exit 0" }
             """);
 
+        var origin = Path.Combine(Path.GetDirectoryName(directory)!, "origin.git");
+        await RunGitAsync(Path.GetDirectoryName(directory)!, "init", "--bare", "-q", origin);
         await RunGitAsync(directory, "init", "-q");
+        await RunGitAsync(directory, "add", ".");
         // -c identity keeps the commit independent of any (absent) global git config on the runner.
         await RunGitAsync(
             directory, "-c", "user.email=test@example.invalid", "-c", "user.name=Test",
-            "commit", "--allow-empty", "-q", "-m", "base");
+            "commit", "-q", "-m", "base");
+        await RunGitAsync(directory, "remote", "add", "origin", origin);
+        await RunGitAsync(directory, "push", "-q", "-u", "origin", "HEAD");
         return await RunGitAsync(directory, "rev-parse", "HEAD");
+    }
+
+    private static void InstallHermeticGh(string destination)
+    {
+        Directory.CreateDirectory(destination);
+        var sourceDirectory = Path.GetDirectoryName(typeof(Baton.CrashTestHost.Scenarios).Assembly.Location)!;
+        const string hostPrefix = "Baton.CrashTestHost";
+        foreach (var source in Directory.EnumerateFiles(sourceDirectory))
+        {
+            var name = Path.GetFileName(source);
+            if (name.StartsWith(hostPrefix, StringComparison.Ordinal)
+                || name.Equals("Baton.dll", StringComparison.Ordinal))
+            {
+                File.Copy(source, Path.Combine(destination, name));
+            }
+        }
+
+        var suffix = OperatingSystem.IsWindows() ? ".exe" : string.Empty;
+        var sourceHost = Path.Combine(destination, hostPrefix + suffix);
+        var gh = Path.Combine(destination, "gh" + suffix);
+        File.Copy(sourceHost, gh);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(gh, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
     }
 
     private static async Task<string> RunGitAsync(string workingDirectory, params string[] args)
