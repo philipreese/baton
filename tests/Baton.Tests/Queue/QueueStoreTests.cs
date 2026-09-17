@@ -90,6 +90,27 @@ public sealed class QueueStoreTests
     }
 
     [Fact]
+    public async Task Worktree_cleanup_operation_lease_is_exclusive_and_crash_recoverable()
+    {
+        var path = TempQueuePath();
+        const string workspace = @"C:\repos\worktrees\retired";
+        try
+        {
+            using var first = await QueueStore.TryAcquireWorktreeCleanupOperationAsync(path, workspace, Ct);
+            Assert.NotNull(first);
+            Assert.Null(await QueueStore.TryAcquireWorktreeCleanupOperationAsync(path, workspace, Ct));
+
+            first.Dispose();
+            using var recovered = await QueueStore.TryAcquireWorktreeCleanupOperationAsync(path, workspace, Ct);
+            Assert.NotNull(recovered);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
     public async Task Legacy_cleanup_claims_and_receipts_reload_with_explicit_observation_defaults()
     {
         var path = TempQueuePath();

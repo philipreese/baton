@@ -30,6 +30,7 @@ public static class QueueCommand
     /// </summary>
     internal sealed record WorktreeApplyTestHooks(
         Func<QueueWorktreeCleanupClaim, CancellationToken, Task>? AfterClaim = null,
+        Func<QueueWorktreeCleanupClaim, CancellationToken, Task>? BeforeProtectedRemoval = null,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? RunProbeAsync = null,
         QueueWorktreeLivenessProbe? LivenessProbe = null);
 
@@ -504,8 +505,11 @@ public static class QueueCommand
         foreach (var active in await QueueStore.GetActiveWorktreeCleanupClaimsAsync(
                      BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
         {
-            var adopted = await QueueStore.TryAdoptWorktreeCleanupClaimAsync(
+            using var recoveryLease = await QueueStore.TryAcquireWorktreeCleanupOperationAsync(
                 BatonPaths.QueueFile, active.Path, cancellationToken).ConfigureAwait(false);
+            if (recoveryLease is null) continue;
+            var adopted = await QueueStore.TryAdoptWorktreeCleanupClaimAsync(
+                BatonPaths.QueueFile, active.Path, recoveryLease, cancellationToken).ConfigureAwait(false);
             if (adopted is null || adopted.Id != active.Id) continue;
 
             var candidate = report.Workspaces.SingleOrDefault(entry =>
@@ -518,16 +522,16 @@ public static class QueueCommand
             {
                 await QueueStore.CompleteWorktreeCleanupAsync(
                     BatonPaths.QueueFile, adopted, "refused", "abandoned-claim-final-recheck-not-candidate",
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    cancellationToken: cancellationToken, ownerId: recoveryLease.OwnerId).ConfigureAwait(false);
                 dispositions[adopted.Path] = "refused";
                 continue;
             }
 
             await QueueStore.CompleteWorktreeCleanupAsync(
                 BatonPaths.QueueFile, adopted, "race-lost", "abandoned-claim-recovered",
-                cancellationToken: cancellationToken, observedBytes: candidate.SizeBytes).ConfigureAwait(false);
+                cancellationToken: cancellationToken, observedBytes: candidate.SizeBytes, ownerId: recoveryLease.OwnerId).ConfigureAwait(false);
             dispositions[candidate.Path] = await ApplyWorktreeCandidateAsync(
-                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
+                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken, worktreeApplyTestHooks, recoveryLease).ConfigureAwait(false);
         }
 
         foreach (var candidate in report.Workspaces.Where(entry =>
@@ -553,7 +557,8 @@ public static class QueueCommand
         string? worktreeRoot,
         IReadOnlyList<QueueItem> observedItems,
         CancellationToken cancellationToken,
-        WorktreeApplyTestHooks? worktreeApplyTestHooks)
+        WorktreeApplyTestHooks? worktreeApplyTestHooks,
+        QueueWorktreeCleanupOperationLease? existingLease = null)
     {
         var repository = candidate.Git.ExpectedRepository;
         var branch = candidate.Git.ExpectedBranch;
@@ -563,35 +568,34 @@ public static class QueueCommand
             return "refused";
         }
 
+        using var acquiredLease = existingLease is null
+            ? await QueueStore.TryAcquireWorktreeCleanupOperationAsync(BatonPaths.QueueFile, candidate.Path, cancellationToken).ConfigureAwait(false)
+            : null;
+        var lease = existingLease ?? acquiredLease;
+        if (lease is null) return "race-lost";
+
         var claim = await QueueStore.TryClaimWorktreeCleanupAsync(
             BatonPaths.QueueFile, candidate.Path, repository, branch, head,
             cancellationToken: cancellationToken,
             queueRevision: QueueStore.ComputeRevision(observedItems),
-            classification: candidate.Classification).ConfigureAwait(false);
-        if (claim is null)
-        {
-            return "race-lost";
-        }
+            classification: candidate.Classification,
+            ownerId: lease.OwnerId).ConfigureAwait(false);
+        if (claim is null) return "race-lost";
 
         if (worktreeApplyTestHooks?.AfterClaim is { } afterClaim)
         {
             await afterClaim(claim, cancellationToken).ConfigureAwait(false);
         }
 
-        // A workspace is removed only while Baton holds a durable claim for that exact resolved path and a final recheck still proves every condition that made the same report classify it as a static candidate. Missing, stale, conflicting, or unavailable evidence removes nothing.
-        var current = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        var recheck = await QueueWorktreeReport.CreateAsync(
-            current.Items, worktreeRoot, cancellationToken,
-            livenessProbe: worktreeApplyTestHooks?.LivenessProbe).ConfigureAwait(false);
-        var entry = recheck.Workspaces.SingleOrDefault(workspace => QueueWorktreeReport.PathComparer.Equals(workspace.Path, claim.Path));
-        if (entry is not { Classification: "candidate" }
-            || !string.Equals(entry.Git.ExpectedRepository, claim.Repository, StringComparison.Ordinal)
-            || !string.Equals(entry.Git.ExpectedBranch, claim.Branch, StringComparison.Ordinal)
-            || !string.Equals(entry.Git.Head, claim.Head, StringComparison.Ordinal))
+        // A workspace is removed only while Baton holds this OS-fenced durable claim for that exact
+        // resolved path and a final recheck still proves every condition that made the same report
+        // classify it as a static candidate. Missing, stale, conflicting, or unavailable evidence removes nothing.
+        var entry = await RecheckClaimAsync(claim, worktreeRoot, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
+        if (entry is null)
         {
             await QueueStore.CompleteWorktreeCleanupAsync(
                 BatonPaths.QueueFile, claim, "refused", "final-recheck-not-candidate",
-                cancellationToken: cancellationToken, observedBytes: entry?.SizeBytes).ConfigureAwait(false);
+                cancellationToken: cancellationToken, ownerId: lease.OwnerId).ConfigureAwait(false);
             return "refused";
         }
 
@@ -601,7 +605,26 @@ public static class QueueCommand
         {
             await QueueStore.CompleteWorktreeCleanupAsync(
                 BatonPaths.QueueFile, claim, "refused", "owning-repository-unavailable",
-                cancellationToken: cancellationToken, observedBytes: entry.SizeBytes).ConfigureAwait(false);
+                cancellationToken: cancellationToken, observedBytes: entry.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
+            return "refused";
+        }
+
+        if (worktreeApplyTestHooks?.BeforeProtectedRemoval is { } beforeProtectedRemoval)
+        {
+            await beforeProtectedRemoval(claim, cancellationToken).ConfigureAwait(false);
+        }
+
+        // The lease remains held for this last protected proof and the mutation. It excludes another
+        // Baton apply/recovery while the active claim excludes launch and provisioning; Git retains
+        // its non-force cleanliness and registration checks during the removal itself.
+        entry = await RecheckClaimAsync(claim, worktreeRoot, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
+        var owned = await QueueStore.IsWorktreeCleanupClaimActiveAndOwnedAsync(
+            BatonPaths.QueueFile, claim, lease.OwnerId, cancellationToken).ConfigureAwait(false);
+        if (entry is null || !owned)
+        {
+            await QueueStore.CompleteWorktreeCleanupAsync(
+                BatonPaths.QueueFile, claim, "refused", owned ? "final-protected-recheck-not-candidate" : "cleanup-claim-ownership-lost",
+                cancellationToken: cancellationToken, observedBytes: entry?.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
             return "refused";
         }
 
@@ -611,7 +634,7 @@ public static class QueueCommand
         {
             await QueueStore.CompleteWorktreeCleanupAsync(
                 BatonPaths.QueueFile, claim, "retained", "git-worktree-remove-failed",
-                cancellationToken: cancellationToken, observedBytes: entry.SizeBytes).ConfigureAwait(false);
+                cancellationToken: cancellationToken, observedBytes: entry.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
             return "retained";
         }
 
@@ -630,14 +653,32 @@ public static class QueueCommand
         {
             await QueueStore.CompleteWorktreeCleanupAsync(
                 BatonPaths.QueueFile, claim, "retained", "postcondition-contradictory",
-                cancellationToken: cancellationToken, observedBytes: entry.SizeBytes).ConfigureAwait(false);
+                cancellationToken: cancellationToken, observedBytes: entry.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
             return "retained";
         }
 
         await QueueStore.CompleteWorktreeCleanupAsync(
             BatonPaths.QueueFile, claim, "removed", "removed",
-            cancellationToken: cancellationToken, observedBytes: entry.SizeBytes).ConfigureAwait(false);
+            cancellationToken: cancellationToken, observedBytes: entry.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
         return "removed";
+    }
+
+    private static async Task<QueueWorktreeEntry?> RecheckClaimAsync(
+        QueueWorktreeCleanupClaim claim,
+        string? worktreeRoot,
+        CancellationToken cancellationToken,
+        WorktreeApplyTestHooks? hooks)
+    {
+        var current = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var recheck = await QueueWorktreeReport.CreateAsync(
+            current.Items, worktreeRoot, cancellationToken, livenessProbe: hooks?.LivenessProbe).ConfigureAwait(false);
+        var entry = recheck.Workspaces.SingleOrDefault(workspace => QueueWorktreeReport.PathComparer.Equals(workspace.Path, claim.Path));
+        return entry is { Classification: "candidate" }
+            && string.Equals(entry.Git.ExpectedRepository, claim.Repository, StringComparison.Ordinal)
+            && string.Equals(entry.Git.ExpectedBranch, claim.Branch, StringComparison.Ordinal)
+            && string.Equals(entry.Git.Head, claim.Head, StringComparison.Ordinal)
+            ? entry
+            : null;
     }
 
     private static async Task<string?> ResolveOwningCheckoutAsync(

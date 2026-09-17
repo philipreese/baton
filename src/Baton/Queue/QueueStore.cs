@@ -43,7 +43,8 @@ public sealed record QueueWorktreeCleanupClaim(
     string Head,
     DateTimeOffset ClaimedAt,
     string QueueRevision = "",
-    string Classification = "candidate");
+    string Classification = "candidate",
+    string OwnerId = "");
 
 /// <summary>The durable, idempotent outcome of one cleanup claim.</summary>
 public sealed record QueueWorktreeCleanupReceipt(
@@ -82,6 +83,7 @@ public static class QueueStore
     public const string LockNamePrefix = "baton-queue";
 
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
+    private const string CleanupOperationLockDirectorySuffix = ".cleanup-operations";
 
     internal static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -137,7 +139,8 @@ public static class QueueStore
         string head,
         CancellationToken cancellationToken = default,
         string? queueRevision = null,
-        string? classification = null)
+        string? classification = null,
+        string? ownerId = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(queueFile);
         ArgumentException.ThrowIfNullOrEmpty(path);
@@ -176,28 +179,94 @@ public static class QueueStore
                 head,
                 DateTimeOffset.UtcNow,
                 rev,
-                cls);
+                cls,
+                ownerId ?? string.Empty);
             return snapshot with { WorktreeCleanupClaims = claims.Append(acquired).ToList() };
         }, cancellationToken).ConfigureAwait(false);
         return acquired;
     }
 
     /// <summary>
-    /// Returns any active (unreceipted) claim for <paramref name="path"/> to adopt for recheck and settlement.
+    /// Atomically transfers an active (unreceipted) claim to an operation that has already acquired
+    /// the exact-path cleanup lease. Lease absence is the crash/abandonment proof.
     /// </summary>
     public static async Task<QueueWorktreeCleanupClaim?> TryAdoptWorktreeCleanupClaimAsync(
+        string queueFile,
+        string path,
+        QueueWorktreeCleanupOperationLease lease,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(queueFile);
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        ArgumentNullException.ThrowIfNull(lease);
+        var canonicalPath = Path.GetFullPath(path);
+        if (!lease.IsHeld || !QueueWorktreePathComparer.Equals(lease.Path, canonicalPath))
+        {
+            throw new InvalidOperationException("Cleanup claim recovery requires the held lease for its exact path.");
+        }
+        QueueWorktreeCleanupClaim? adopted = null;
+        await MutateAsync(queueFile, snapshot =>
+        {
+            var receipts = snapshot.WorktreeCleanupReceipts ?? [];
+            var claims = snapshot.WorktreeCleanupClaims ?? [];
+            var current = claims.LastOrDefault(claim =>
+                QueueWorktreePathComparer.Equals(Path.GetFullPath(claim.Path), canonicalPath)
+                && !receipts.Any(receipt => receipt.ClaimId == claim.Id));
+            if (current is null) return snapshot;
+            adopted = current with { OwnerId = lease.OwnerId };
+            return snapshot with
+            {
+                WorktreeCleanupClaims = claims.Select(claim => claim.Id == current.Id ? adopted : claim).ToList(),
+            };
+        }, cancellationToken).ConfigureAwait(false);
+        return adopted;
+    }
+
+    /// <summary>
+    /// Acquires the operating-system lease that serializes all cleanup operations for one exact path.
+    /// An OS close on process death is the evidence a later apply needs before recovering an active claim.
+    /// </summary>
+    public static Task<QueueWorktreeCleanupOperationLease?> TryAcquireWorktreeCleanupOperationAsync(
         string queueFile,
         string path,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(queueFile);
         ArgumentException.ThrowIfNullOrEmpty(path);
+        cancellationToken.ThrowIfCancellationRequested();
         var canonicalPath = Path.GetFullPath(path);
+        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonicalPath))).ToLowerInvariant();
+        var lockDirectory = queueFile + CleanupOperationLockDirectorySuffix;
+        Directory.CreateDirectory(lockDirectory);
+        var lockPath = Path.Combine(lockDirectory, digest + ".lock");
+        try
+        {
+            var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            return Task.FromResult<QueueWorktreeCleanupOperationLease?>(
+                new QueueWorktreeCleanupOperationLease(Guid.NewGuid().ToString("N"), canonicalPath, stream));
+        }
+        catch (IOException)
+        {
+            return Task.FromResult<QueueWorktreeCleanupOperationLease?>(null);
+        }
+    }
+
+    /// <summary>Checks under the queue lock that the exact claim remains active and lease-owned.</summary>
+    public static async Task<bool> IsWorktreeCleanupClaimActiveAndOwnedAsync(
+        string queueFile,
+        QueueWorktreeCleanupClaim claim,
+        string ownerId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(queueFile);
+        ArgumentNullException.ThrowIfNull(claim);
+        ArgumentException.ThrowIfNullOrEmpty(ownerId);
         var snapshot = await LoadAsync(queueFile, cancellationToken).ConfigureAwait(false);
         var receipts = snapshot.WorktreeCleanupReceipts ?? [];
-        return (snapshot.WorktreeCleanupClaims ?? []).LastOrDefault(claim =>
-            QueueWorktreePathComparer.Equals(Path.GetFullPath(claim.Path), canonicalPath)
-            && !receipts.Any(receipt => receipt.ClaimId == claim.Id));
+        return (snapshot.WorktreeCleanupClaims ?? []).Any(current => current.Id == claim.Id
+            && string.Equals(current.OwnerId, ownerId, StringComparison.Ordinal)
+            && !receipts.Any(receipt => receipt.ClaimId == current.Id));
     }
 
     /// <summary>
@@ -239,7 +308,8 @@ public static class QueueStore
         string reasonCode,
         CancellationToken cancellationToken = default,
         long? observedBytes = null,
-        DateTimeOffset? completedAt = null)
+        DateTimeOffset? completedAt = null,
+        string? ownerId = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(queueFile);
         ArgumentNullException.ThrowIfNull(claim);
@@ -249,7 +319,8 @@ public static class QueueStore
         return MutateAsync(queueFile, snapshot =>
         {
             var claims = snapshot.WorktreeCleanupClaims ?? [];
-            if (!claims.Any(current => current.Id == claim.Id)) return snapshot;
+            if (!claims.Any(current => current.Id == claim.Id
+                && (string.IsNullOrEmpty(current.OwnerId) || string.Equals(current.OwnerId, ownerId, StringComparison.Ordinal)))) return snapshot;
             var receipts = snapshot.WorktreeCleanupReceipts ?? [];
             if (receipts.Any(receipt => receipt.ClaimId == claim.Id)) return snapshot;
             var receipt = new QueueWorktreeCleanupReceipt(
@@ -384,6 +455,7 @@ public static class QueueStore
         {
             QueueRevision = claim.QueueRevision ?? string.Empty,
             Classification = string.IsNullOrWhiteSpace(claim.Classification) ? "candidate" : claim.Classification,
+            OwnerId = claim.OwnerId ?? string.Empty,
         }).ToList();
         var receipts = snapshot.WorktreeCleanupReceipts?.Select(receipt => receipt with
         {
@@ -447,5 +519,30 @@ public sealed class QueueStoreException : BatonFlowException
     public QueueStoreException(string message, Exception innerException)
         : base(message, innerException)
     {
+    }
+}
+
+/// <summary>One exact-path cleanup operation's crash-released operating-system lease.</summary>
+public sealed class QueueWorktreeCleanupOperationLease : IDisposable
+{
+    private readonly FileStream _stream;
+    private bool _disposed;
+
+    internal QueueWorktreeCleanupOperationLease(string ownerId, string path, FileStream stream)
+    {
+        OwnerId = ownerId;
+        Path = path;
+        _stream = stream;
+    }
+
+    public string OwnerId { get; }
+    public string Path { get; }
+    public bool IsHeld => !_disposed;
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _stream.Dispose();
     }
 }

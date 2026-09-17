@@ -103,6 +103,32 @@ public sealed class QueueWorktreeApplyTests
     }
 
     [Fact]
+    public async Task Apply_does_not_adopt_or_settle_a_live_claimant()
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+        var claimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = ExecuteAsync(fixture, apply: true, new QueueCommand.WorktreeApplyTestHooks(
+            AfterClaim: async (_, token) =>
+            {
+                claimed.SetResult();
+                await release.Task.WaitAsync(token);
+            }));
+
+        await claimed.Task.WaitAsync(Ct);
+        var second = await ExecuteAsync(fixture, apply: true);
+
+        Assert.Equal(0, second.ExitCode);
+        Assert.Equal("race-lost", CleanupDisposition(second.Output, fixture.Worktree));
+        Assert.Empty((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).WorktreeCleanupReceipts ?? []);
+        Assert.True(Directory.Exists(fixture.Worktree));
+
+        release.SetResult();
+        Assert.Equal(0, (await first).ExitCode);
+    }
+
+    [Fact]
     public async Task Apply_refuses_an_abandoned_claim_when_its_fresh_recheck_changed()
     {
         await using var fixture = ApplyFixture.Create();
@@ -170,6 +196,67 @@ public sealed class QueueWorktreeApplyTests
         var receipt = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).WorktreeCleanupReceipts!);
         Assert.Equal("refused", receipt.Disposition);
         Assert.Equal("final-recheck-not-candidate", receipt.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData("head")]
+    [InlineData("registration")]
+    public async Task Apply_last_protected_recheck_refuses_drift_before_invoking_removal(string change)
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+        var calls = new List<string[]>();
+        var hooks = new QueueCommand.WorktreeApplyTestHooks(
+            BeforeProtectedRemoval: async (_, token) =>
+            {
+                if (change == "head") await GitAsync(fixture.Worktree, token, "checkout", "--detach", "-q");
+                else await GitAsync(fixture.Source, token, "worktree", "move", fixture.Worktree, fixture.MovedWorktree);
+            },
+            RunProbeAsync: async (file, arguments, cwd, token) =>
+            {
+                calls.Add(arguments.ToArray());
+                return await IssueWorktreeProvisioner.RunRetainedProbeAsync(file, arguments, cwd, token);
+            });
+
+        var (exit, output) = await ExecuteAsync(fixture, apply: true, hooks);
+
+        Assert.Equal(1, exit);
+        Assert.Equal("refused", CleanupDisposition(output, fixture.Worktree));
+        Assert.DoesNotContain(calls, call => call.SequenceEqual(["worktree", "remove", fixture.Worktree]));
+        Assert.True(Directory.Exists(change == "registration" ? fixture.MovedWorktree : fixture.Worktree));
+        var receipt = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).WorktreeCleanupReceipts!);
+        Assert.Equal("final-protected-recheck-not-candidate", receipt.ReasonCode);
+    }
+
+    [Fact]
+    public async Task Apply_claim_ownership_loss_blocks_removal()
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+        var calls = new List<string[]>();
+        var hooks = new QueueCommand.WorktreeApplyTestHooks(
+            BeforeProtectedRemoval: async (_, token) =>
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    WorktreeCleanupClaims = snapshot.WorktreeCleanupClaims!.Select(claim => claim with
+                    {
+                        OwnerId = "replacement-owner",
+                    }).ToList(),
+                }, token);
+            },
+            RunProbeAsync: async (file, arguments, cwd, token) =>
+            {
+                calls.Add(arguments.ToArray());
+                return await IssueWorktreeProvisioner.RunRetainedProbeAsync(file, arguments, cwd, token);
+            });
+
+        var (exit, output) = await ExecuteAsync(fixture, apply: true, hooks);
+
+        Assert.Equal(1, exit);
+        Assert.Equal("refused", CleanupDisposition(output, fixture.Worktree));
+        Assert.True(Directory.Exists(fixture.Worktree));
+        Assert.DoesNotContain(calls, call => call.SequenceEqual(["worktree", "remove", fixture.Worktree]));
     }
 
     [Theory]
