@@ -212,7 +212,13 @@ public sealed record MemoryEntry(
     string? AssertedBy = null,
     [property: JsonPropertyName("importOperationId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ImportOperationId = null)
+    string? ImportOperationId = null,
+    [property: JsonPropertyName("memoryAddDispatchId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? MemoryAddDispatchId = null,
+    [property: JsonPropertyName("issue")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? Issue = null)
 {
     /// <summary>
     /// The id of the entry a given source file produces for a given subject: a 32-hex-character

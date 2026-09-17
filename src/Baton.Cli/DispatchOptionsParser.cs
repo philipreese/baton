@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using Baton.Domain;
+using Baton.Queue;
 
 namespace Baton.Cli;
 
@@ -81,6 +82,8 @@ public static class DispatchOptionsParser
         string? overrideRunwayReason = null;
         string? originatingPullRequest = null;
         string? originatingPullRequestBranch = null;
+        string? memoryAddDispatch = null;
+        string? memoryAddRepository = null;
         var attachments = new List<string>();
         var skills = new List<string>();
         var requirements = new List<string>();
@@ -206,6 +209,14 @@ public static class DispatchOptionsParser
                 case "--originating-pr-branch":
                     originatingPullRequestBranch = RequireValue(args, ref i, arg);
                     break;
+                // Conductor-only transport. The command gate independently requires the matching
+                // durable queue row, so typing these flags cannot manufacture authority.
+                case "--memory-add-dispatch":
+                    memoryAddDispatch = RequireValue(args, ref i, arg);
+                    break;
+                case "--memory-add-repository":
+                    memoryAddRepository = RequireValue(args, ref i, arg);
+                    break;
                 case "--override-runway":
                     overrideRunwayReason = RequireOverrideRunwayReason(RequireValue(args, ref i, arg));
                     break;
@@ -282,6 +293,19 @@ public static class DispatchOptionsParser
             roomDirectoryPath = Path.Combine(Baton.Status.BatonPaths.Rooms, uniqueName);
         }
 
+        if ((memoryAddDispatch is null) != (memoryAddRepository is null))
+        {
+            throw new CliArgumentException("The queue memory-add transport requires both its dispatch identity and repository.");
+        }
+
+        var memoryAddGrant = memoryAddDispatch is null
+            ? null
+            : new MemoryAddDispatchGrant(memoryAddDispatch, memoryAddRepository!);
+        if (memoryAddGrant is not null && !memoryAddGrant.IsWellFormed)
+        {
+            throw new CliArgumentException("The queue memory-add transport is malformed.");
+        }
+
         return new DispatchOptions(
             name ?? string.Empty, specFilePath, RoomDirectoryPath.Resolve(roomDirectoryPath), adapter, workflowId,
             workspaceDirectory is null ? null : Path.GetFullPath(workspaceDirectory),
@@ -307,7 +331,8 @@ public static class DispatchOptionsParser
             requirements.Count > 0 ? NormalizeRequirements(requirements) : null,
             ParseTaskSizeDeclaration(declaredSize, sizeRationale),
             originatingPullRequest,
-            originatingPullRequestBranch);
+            originatingPullRequestBranch,
+            memoryAddGrant);
     }
 
     internal static TaskSizeDeclaration? ParseTaskSizeDeclaration(string? declaredSize, string? sizeRationale)

@@ -1382,7 +1382,7 @@ public static class DispatchCommand
         // #1082: vendor/model/effort are three independent axes over the role's instructions ([0017]).
         // #1576: attach validation, the spec/grant lint, and the Materialize call itself all go through
         // the seam RedispatchCommand's own --spec path now shares (RoleSpecMaterializer).
-        return RoleSpecMaterializer.Materialize(
+        var materialized = RoleSpecMaterializer.Materialize(
             role, spec, options.Adapter, workingDirectory: workspaceDirectory,
             modelOverride: options.Model, effortOverride: options.Effort, outputOverride: options.OutputPath,
             timeoutOverride: options.Timeout, attachments: options.Attachments, roomDirectoryPath: options.RoomDirectoryPath,
@@ -1395,6 +1395,20 @@ public static class DispatchCommand
             skills: options.Skills,
             // #2110: the role's own default_skills ride ahead of --skill unless opted out.
             attachDefaultSkills: !options.NoDefaultSkills);
+
+        if (options.MemoryAddGrant is not { } memoryAddGrant)
+        {
+            return materialized;
+        }
+
+        // This is the room-side half of the queue grant. The memory command still reads the queue
+        // row itself, so a hand-authored binding or forged internal argv has no authority.
+        return (
+            materialized.Definition,
+            materialized.Bindings.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value with { MemoryAddGrant = memoryAddGrant },
+                StringComparer.Ordinal));
     }
 
     /// <summary>

@@ -592,6 +592,11 @@ public static class QueueLauncher
         Add("--override-runway", options.OverrideRunwayReason);
         Add("--originating-pr", options.OriginatingPullRequest);
         Add("--originating-pr-branch", options.OriginatingPullRequestBranch);
+        if (options.MemoryAddGrant is { } memoryAddGrant)
+        {
+            Add("--memory-add-dispatch", memoryAddGrant.DispatchId);
+            Add("--memory-add-repository", memoryAddGrant.Repository);
+        }
         if (options.DeclaredTaskSize is { } declaredSize)
         {
             Add("--declared-size", declaredSize.Size.ToString().ToLowerInvariant());
@@ -996,7 +1001,8 @@ public static class QueueLauncher
                 && item.PullRequest is { } pullRequest
                 ? OriginatingPullRequestVerifier.CanonicalReference(repository, pullRequest)
                 : null,
-            OriginatingPullRequestBranch: followOn ? item.Branch : null);
+            OriginatingPullRequestBranch: followOn ? item.Branch : null,
+            MemoryAddGrant: item.MemoryAddGrant);
     }
 
     /// <summary>The queue-add decision is the launch authority; later tier-file changes retain only policy metadata.</summary>

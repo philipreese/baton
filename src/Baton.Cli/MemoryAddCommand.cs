@@ -81,17 +81,45 @@ public static class MemoryAddCommand
                 "will not guess a subject — run it inside the checkout the memory is about, or name " +
                 "the repository. " + MemoryAddOptionsParser.Usage);
 
+        var laneAuthorization = assertedByOverride is null
+            ? await MemoryAddLaneGrantGate.TryAuthorizeAsync(
+                Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable), cancellationToken).ConfigureAwait(false)
+            : null;
+        if (Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable) is { Length: > 0 }
+            && assertedByOverride is null && laneAuthorization is null)
+        {
+            output.WriteLine("REFUSED  worker memory add requires the current room's exact durable memory-add grant.");
+            return 1;
+        }
+        if (laneAuthorization is not null && !string.Equals(repository, laneAuthorization.Repository, StringComparison.Ordinal))
+        {
+            output.WriteLine("REFUSED  a worker memory-add grant may write only its recorded repository.");
+            return 1;
+        }
+
         var slug = FleetMemory.SlugFor(repository);
         var entriesFile = BatonPaths.MemoryEntriesFile(slug);
         var entry = AuthoredMemory.Create(
-            repository, options.Text, options.Kind, assertedByOverride ?? MemoryLaneAssertion.Resolve(),
-            DateTime.UtcNow);
+            repository, options.Text, options.Kind, laneAuthorization?.AssertedBy ?? assertedByOverride ?? MemoryLaneAssertion.Resolve(),
+            DateTime.UtcNow, laneAuthorization?.DispatchId, laneAuthorization?.DispatchId, laneAuthorization?.Issue);
 
         // Read-then-append, and the ledger's own id check under its lock is the backstop: two adds of
         // one text racing would both pass this read and the second append would write nothing. What the
         // read buys is the REPORT — MemoryStore.AppendAsync returns no count, so without it a duplicate
         // add exits 0 saying it wrote a row that was already there.
         var stored = await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false);
+        if (laneAuthorization is not null
+            && stored.FirstOrDefault(existing => string.Equals(existing.SourcePath, entry.SourcePath, StringComparison.OrdinalIgnoreCase)) is { } keyed)
+        {
+            if (string.Equals(keyed.Id, entry.Id, StringComparison.Ordinal))
+            {
+                output.WriteLine($"ADDED    {keyed.Id} already committed; retry returned the canonical entry.");
+                return 0;
+            }
+
+            output.WriteLine("REFUSED  this durable memory-add grant was already used for a different normalized payload.");
+            return 1;
+        }
         if (stored.FirstOrDefault(e => string.Equals(e.Id, entry.Id, StringComparison.Ordinal)) is { } existing)
         {
             output.WriteLine(

@@ -1,4 +1,5 @@
 using Baton.Domain;
+using Baton.Queue;
 
 namespace Baton.Cli;
 
@@ -196,4 +197,5 @@ public sealed record DispatchOptions(
     IReadOnlyList<string>? Requirements = null,
     TaskSizeDeclaration? DeclaredTaskSize = null,
     string? OriginatingPullRequest = null,
-    string? OriginatingPullRequestBranch = null);
+    string? OriginatingPullRequestBranch = null,
+    MemoryAddDispatchGrant? MemoryAddGrant = null);

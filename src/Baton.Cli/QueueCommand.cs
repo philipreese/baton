@@ -126,14 +126,20 @@ public static class QueueCommand
         // declaration before that side effect, not merely later in the daemon; the scheduler repeats
         // it for imported/hand-edited rows and any role-catalog change between add and launch.
         var role = WorkerRoleCatalog.For(options.Role!);
+        var admissionRequirements = requirements
+            .Where(requirement => !string.Equals(requirement, TaskRequirements.MemoryAdd, StringComparison.Ordinal))
+            .ToArray();
         var admissionItem = new QueueItem
         {
             Tag = options.Tag!,
             Role = options.Role!,
             Workspace = "",
             SpecFile = "",
-            Requirements = requirements,
+            Requirements = admissionRequirements,
         };
+        // `memory-add` is not a role capability. Its explicit queue declaration is conductor
+        // approval, narrowed below to the issue repository and a new durable dispatch identity.
+        var requestsMemoryAdd = requirements.Contains(TaskRequirements.MemoryAdd, StringComparer.Ordinal);
         var admission = TaskRequirementPreflight.Evaluate(
             admissionItem, role, settings.Queue.RequireDeclaredRequirements);
         if (admission.Result == TaskRequirementAdmission.Refused)
@@ -171,6 +177,10 @@ public static class QueueCommand
         var issueRepository = options.Issue is not null
             ? await ResolveIssueRepositoryAsync(sourceRepository, repositoryResolver, cancellationToken).ConfigureAwait(false)
             : null;
+        if (requestsMemoryAdd && issueRepository is null)
+        {
+            throw new CliArgumentException("'--require memory-add' requires --issue so the grant has one canonical repository.");
+        }
 
         // An issue plus a lifecycle workspace is the explicit retained-checkout form. Its validator
         // owns all Git, liveness, PR and exact-ceiling evidence and runs before any trust/provision/spec/queue mutation.
@@ -178,7 +188,7 @@ public static class QueueCommand
         var retainedProof = retained
             ? await RetainedIssueWorktreeValidator.ValidateAsync(
                 options.WorkspaceDirectory!, options.Issue!.Value, issueRepository!, effectiveWorktreeRoot,
-                role, settings.Queue.RequireDeclaredRequirements, requirements, queueSnapshot.Items, cancellationToken)
+                role, settings.Queue.RequireDeclaredRequirements, admissionRequirements, queueSnapshot.Items, cancellationToken)
                 .ConfigureAwait(false)
             : null;
 
@@ -239,6 +249,9 @@ public static class QueueCommand
             DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
             Skills = options.Skills,
             Requirements = requirements,
+            MemoryAddGrant = requestsMemoryAdd
+                ? new MemoryAddDispatchGrant(Guid.NewGuid().ToString("N"), issueRepository!)
+                : null,
             LastAdmission = admission,
             StageSelections = stageSelections,
             LifecyclePin = options.LifecyclePin,
