@@ -1944,6 +1944,7 @@ public sealed class CodexDynamicToolPolicyTests
         string pullRequest, DeliveryCheckStatus expected)
     {
         const string ownPullRequestUrl = "https://github.com/aer-works/baton/pull/2368";
+        const string deliveredBranch = "2190-verified-pr-ownership";
         using var fixture = new PolicyFixture(
             WorkerRoleCatalog.For("implement").Grant, ["changes.md"], directGhOutput: ownPullRequestUrl);
         var origin = Path.Combine(fixture.Root, "origin.git");
@@ -1951,13 +1952,13 @@ public sealed class CodexDynamicToolPolicyTests
         RunGitSetup(fixture.Workspace, "init");
         RunGitSetup(fixture.Workspace, "config", "user.email", "fixture@example.test");
         RunGitSetup(fixture.Workspace, "config", "user.name", "Fixture");
-        RunGitSetup(fixture.Workspace, "checkout", "-b", "2368-lane");
+        RunGitSetup(fixture.Workspace, "checkout", "-b", deliveredBranch);
         RunGitSetup(fixture.Workspace, "add", ".");
         RunGitSetup(fixture.Workspace, "commit", "-m", "implement fixture work");
         RunGitSetup(fixture.Workspace, "remote", "add", "origin", origin);
 
         var push = await fixture.ExecuteAsync(
-            CodexDynamicToolPolicy.RunCommandTool, new { command = "git push origin 2368-lane" });
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"git push origin {deliveredBranch}" });
         var create = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool,
             new { command = "gh pr create --draft --body-file body.md" });
