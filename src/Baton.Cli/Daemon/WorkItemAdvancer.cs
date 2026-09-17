@@ -1164,13 +1164,12 @@ public sealed class WorkItemAdvancer
             return (null, "the lifecycle item has no trusted repository identity");
         }
 
-        if (!Directory.Exists(item.Workspace))
-        {
-            return (null, $"workspace '{item.Workspace}' is unavailable");
-        }
-
         var reading = await ReadPullRequestSnapshotAsync(
-            item with { PullRequest = pullRequest }, cancellationToken).ConfigureAwait(false);
+            item with
+            {
+                PullRequest = pullRequest,
+                Workspace = ExistingGhWorkingDirectory(item.Workspace),
+            }, cancellationToken).ConfigureAwait(false);
         if (!reading.Succeeded)
         {
             return (null, reading.Error ?? $"GitHub PR lookup for #{pullRequest} failed");
@@ -1186,6 +1185,9 @@ public sealed class WorkItemAdvancer
             item.Repository, pullRequest, PullRequestObservationStates.Merged,
             reading.HeadSha, observedAt, observedAt, Error: null), null);
     }
+
+    private static string ExistingGhWorkingDirectory(string workspace) =>
+        Directory.Exists(workspace) ? workspace : Environment.CurrentDirectory;
 
     private async Task<PullRequestObservation> ReadPullRequestSnapshotAsync(
         QueueItem item, CancellationToken cancellationToken)
@@ -1269,9 +1271,10 @@ public sealed class WorkItemAdvancer
 
     /// <summary>
     /// Validates the PR identity before any number can reach queue persistence or a readiness mutation.
-    /// Every command is explicitly scoped to <see cref="QueueItem.Repository"/> after a live workspace
-    /// identity comparison; the remaining identity is the exact number (once persisted),
-    /// same-repository head, recorded branch, and the lifecycle's <c>main</c> base.
+    /// Every command is explicitly scoped to the canonical <see cref="QueueItem.Repository"/>. A present
+    /// workspace is also compared with that identity before the lookup; an absent historical workspace
+    /// relies on the caller's persisted-identity validation. The remaining identity is the exact number
+    /// (once persisted), same-repository head, recorded branch, and the lifecycle's <c>main</c> base.
     /// </summary>
     private static bool TryReadPullRequest(
         JsonElement root,
