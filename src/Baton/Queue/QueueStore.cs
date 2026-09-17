@@ -20,7 +20,10 @@ public sealed record QueueSnapshot(
     [property: JsonPropertyName("held")] bool Held = false,
     [property: JsonPropertyName("pullRequestObservations")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<QueuePullRequestObservation>? PullRequestObservations = null)
+    IReadOnlyList<QueuePullRequestObservation>? PullRequestObservations = null,
+    [property: JsonPropertyName("pendingFleetEvents")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<JsonElement>? PendingFleetEvents = null)
 {
     public static readonly QueueSnapshot Empty = new([]);
 }

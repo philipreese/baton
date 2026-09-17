@@ -52,6 +52,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
     private readonly Func<CancellationToken, Task>? _afterFailureMutation;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
+    private readonly QueueFleetEventOutbox _fleetOutbox;
     private readonly DaemonLoopDriver _loopDriver;
 
     private DateTimeOffset? _lastLaunchAt;
@@ -91,6 +92,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _beforeLaunchClaim = beforeLaunchClaim;
         _afterFailureMutation = afterFailureMutation;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
+        _fleetOutbox = new QueueFleetEventOutbox(_appendFleetEvent);
         _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
         _loopDriver = loopDriver ?? new DaemonLoopDriver();
     }
@@ -161,6 +163,14 @@ public sealed class QueueSchedulerService : BackgroundService
             .ConfigureAwait(false)).Queue;
         var interval = TimeSpan.FromSeconds(settings.EffectiveTickSeconds);
 
+        // Queue state and fleet history are deliberately separate files. Drain the queue-owned
+        // outbox before resolving, advancing, or selecting anything so a committed attempt fact is
+        // durable before a later action can replace its envelope.
+        using (DaemonLoopDriver.EnterPhase("fleet-event-outbox"))
+        {
+            await _fleetOutbox.PumpAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        }
+
         // A claim can be lost to an operator cancellation after a candidate is chosen. One fresh pass
         // keeps the next static candidate launchable in this tick; further churn returns to the daemon
         // loop so its heartbeat and configured delay cannot be starved by an endless race.
@@ -208,128 +218,213 @@ public sealed class QueueSchedulerService : BackgroundService
             var item = decision.Item!;
             var admittedDeclaration = item.DeclaredTaskSize;
             QueueTierResolution tier;
-            WorkerRole role;
-            try
+            TaskRequirementAdmission admission;
+            FleetAttemptId attemptId;
+            string? attemptBaseRevision;
+            QueueAttemptEnvelope envelope;
+            string roomDirectory;
+
+            // A queue commit may have completed before the daemon stopped. Resume that exact
+            // envelope after its admission draft is pumped; never resolve a newer tier or grant.
+            if (item.AttemptEnvelope is { } retained)
             {
-                role = WorkerRoleCatalog.For(item.Role);
-                tier = item.Stage is { } stage
-                    ? QueueTierTable.ResolveForStage(
-                        item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
-                    : QueueTierTable.Resolve(
-                        item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
-                // A persisted decision is the launch authority. Refreshing configuration here may
-                // still validate the row and the runway gate may still hold it, but no scheduler tick
-                // may silently re-rank the worker selected at queue-add time.
-                if (item.WorkerAssignment is { } frozen)
+                if (item.State == QueueItemState.Queued
+                    && item.AttemptRefusedFactDurable
+                    && !QueueFleetEventOutbox.HasPendingFor(snapshot, retained.AttemptId))
                 {
-                    tier = QueueLauncher.ApplyFrozenAssignment(item, tier);
+                    await ResetRetryableRefusedAttemptAsync(item.Tag, retained.AttemptId).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (item.LaunchMayHaveBegunAt is not null)
+                {
+                    if (Directory.Exists(retained.RoomDirectory))
+                    {
+                        await MarkStartedAsync(item.Tag, retained.AttemptId, retained.RoomDirectory!, _now()).ConfigureAwait(false);
+                        await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await HaltAmbiguousLaunchAsync(item).ConfigureAwait(false);
+                    }
+                    continue;
+                }
+
+                if (item.State != QueueItemState.Queued
+                    || item.Retirement is not null
+                    || retained.AdmissionDecision != TaskRequirementAdmission.Admitted
+                    || !item.AttemptAdmissionFactDurable
+                    || retained.RoomDirectory is not { Length: > 0 })
+                {
+                    // Failed lifecycle rows are reconciled by WorkItemAdvancer. A malformed current
+                    // attempt is not launch authority and therefore cannot fall through to defaults.
+                    continue;
+                }
+
+                envelope = retained;
+                tier = TierFromEnvelope(envelope);
+                admission = AdmissionFromEnvelope(envelope, item.LastAdmission);
+                attemptId = envelope.AttemptId;
+                attemptBaseRevision = envelope.AttemptBaseRevision;
+                roomDirectory = envelope.RoomDirectory;
+                item = item with
+                {
+                    LastAdmission = admission,
+                    AttemptId = attemptId,
+                    AttemptBaseRevision = attemptBaseRevision,
+                    RoomDirectory = roomDirectory,
+                };
+                try
+                {
+                    item = item with { Skills = QueueLauncher.NormalizeSkillsForLaunch(item) };
+                }
+                catch (CliArgumentException ex)
+                {
+                    var remedy = ex.TryInvocation is { Length: > 0 } ? $" Try: {ex.TryInvocation}" : string.Empty;
+                    await FailAsync(
+                        item, ex.Message + remedy, room: null, now, decision, tier, cancellationToken)
+                        .ConfigureAwait(false);
+                    return interval;
                 }
             }
-            catch (KeyNotFoundException ex)
+            else
             {
-                await FailAsync(
-                    item, ex.Message, room: null, now, decision,
-                    new QueueTierResolution(null, item.Adapter, item.Model, item.Effort, false, null),
-                    cancellationToken).ConfigureAwait(false);
-                return interval;
-            }
+                WorkerRole role;
+                try
+                {
+                    role = WorkerRoleCatalog.For(item.Role);
+                    tier = item.Stage is { } stage
+                        ? QueueTierTable.ResolveForStage(
+                            item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
+                        : QueueTierTable.Resolve(
+                            item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+                    // A persisted decision is the launch authority. Refreshing configuration here may
+                    // still validate the row and the runway gate may still hold it, but no scheduler tick
+                    // may silently re-rank the worker selected at queue-add time.
+                    tier = QueueLauncher.ApplyFrozenAssignment(item, tier);
+                }
+                catch (KeyNotFoundException ex)
+                {
+                    await FailAsync(
+                        item, ex.Message, room: null, now, decision,
+                        new QueueTierResolution(null, item.Adapter, item.Model, item.Effort, false, null),
+                        cancellationToken).ConfigureAwait(false);
+                    return interval;
+                }
 
-            // Fail closed, per spec/baton.md §13's tier-resolution ruling. Reachable only through a
-            // hand-edited queue file, since QueueOptionsParser already refuses the scope class -- which is
-            // why the daemon checks anyway rather than trusting the verb that wrote the item.
-            if (item.ScopeClass is { Length: > 0 } scopeClass && tier.TierKey is not null
-                && QueueTierTable.LookupTier(tier.TierKey, settings, WorkerRoleCatalog.QueueTierFor) is null)
-            {
-                await FailAsync(
-                    item, $"no tier is configured for '{tier.TierKey}' (scope class '{scopeClass}', role '{item.Role}')",
-                    room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
-                return interval;
-            }
+                // Fail closed, per spec/baton.md §13's tier-resolution ruling. Reachable only through a
+                // hand-edited queue file, since QueueOptionsParser already refuses the scope class -- which is
+                // why the daemon checks anyway rather than trusting the verb that wrote the item.
+                if (item.ScopeClass is { Length: > 0 } scopeClass && tier.TierKey is not null
+                    && QueueTierTable.LookupTier(tier.TierKey, settings, WorkerRoleCatalog.QueueTierFor) is null)
+                {
+                    await FailAsync(
+                        item, $"no tier is configured for '{tier.TierKey}' (scope class '{scopeClass}', role '{item.Role}')",
+                        room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
+                    return interval;
+                }
 
-            // Queue add and import validate skills, but saved rows can predate that validation or be
-            // hand-edited. Re-apply the shared launch policy before claiming a room: an invalid row
-            // becomes one actionable Failed item rather than crashing the daemon or entering a launch
-            // retry loop, and a valid row reaches the launcher in dispatch-normalized form.
-            try
-            {
-                item = item with { Skills = QueueLauncher.NormalizeSkillsForLaunch(item) };
-            }
-            catch (CliArgumentException ex)
-            {
-                var remedy = ex.TryInvocation is { Length: > 0 } ? $" Try: {ex.TryInvocation}" : string.Empty;
-                await FailAsync(
-                    item, ex.Message + remedy, room: null, now, decision, tier, cancellationToken)
+                // Queue add and import validate skills, but saved rows can predate that validation or be
+                // hand-edited. Re-apply the shared launch policy before claiming a room.
+                try
+                {
+                    item = item with { Skills = QueueLauncher.NormalizeSkillsForLaunch(item) };
+                }
+                catch (CliArgumentException ex)
+                {
+                    var remedy = ex.TryInvocation is { Length: > 0 } ? $" Try: {ex.TryInvocation}" : string.Empty;
+                    await FailAsync(
+                        item, ex.Message + remedy, room: null, now, decision, tier, cancellationToken)
+                        .ConfigureAwait(false);
+                    return interval;
+                }
+
+                // #2142: imported and hand-edited legacy rows bypass queue add, so apply the same
+                // final-tuple policy before claiming a room or spawning a lane.
+                if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+                {
+                    var remedy = WorkerInvocationModelPolicy.TryInvocation(tier.Adapter) is { } suggestion
+                        ? $" Re-add the item with {suggestion}"
+                        : string.Empty;
+                    await FailAsync(
+                        item, refusal + remedy,
+                        room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
+                    return interval;
+                }
+
+                // The role catalog is read on every admission, rather than trusting the grant that was
+                // current when queue add ran. This check remains before a room claim or vendor spawn.
+                attemptId = FleetAttemptId.New();
+                var projectPreflight = RecordedProjectCeilingAdmission.Evaluate(
+                    item, role, settings.RequireDeclaredRequirements);
+                admission = projectPreflight.Admission;
+                if (admission.Result == TaskRequirementAdmission.Refused)
+                {
+                    var missing = admission.Missing is { Count: > 0 }
+                        ? string.Join(", ", admission.Missing)
+                        : "an invalid requirement declaration";
+                    var admissionRefusal = projectPreflight.CeilingFound
+                        ? projectPreflight.RefusalMessage(item.Workspace, item.Role)
+                            + " Choose a role that fits the recorded ceiling or explicitly correct trust for that exact workspace; requirements never grant authority."
+                        : $"task requirements are incompatible with role '{item.Role}'s effective grant: missing {missing}. "
+                            + "Choose a role whose grant supplies the requirement, or amend the task declaration; requirements never grant authority.";
+                    envelope = CreateEnvelope(item, tier, attemptId, admission, now, room: null, baseRevision: null);
+                    var refused = await CommitAdmissionAsync(
+                        item, envelope, AdmissionEvent(envelope), admission, QueueItemState.Failed, admissionRefusal,
+                        AttemptFact(
+                            FleetEventKind.AttemptRefused,
+                            envelope,
+                            now,
+                            admissionRefusal,
+                            room: null,
+                            usage: null,
+                            artifacts: null))
+                        .ConfigureAwait(false);
+                    if (refused is not null)
+                    {
+                        await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
+                        if (_afterFailureMutation is not null)
+                        {
+                            await _afterFailureMutation(cancellationToken).ConfigureAwait(false);
+                        }
+
+                        await RecordIfNotRetiredAsync(item.Tag,
+                            new QueueDecisionEntry(
+                                now, item.Tag, QueueDecisionEntry.Failed, admissionRefusal,
+                                decision.LiveWeight, decision.FreeGb, decision.FloorGb,
+                                tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride,
+                                tier.OverrideReason, Room: null, tier.SelectionSource, admission),
+                            cancellationToken).ConfigureAwait(false);
+                    }
+
+                    return interval;
+                }
+
+                // Only a stage allowed to author code receives a pre-attempt revision baseline.
+                attemptBaseRevision = item.Stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue
+                    ? await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false)
+                    : null;
+                roomDirectory = QueueLauncher.RoomDirectoryFor(item);
+                envelope = CreateEnvelope(item, tier, attemptId, admission, now, roomDirectory, attemptBaseRevision);
+                var admitted = await CommitAdmissionAsync(
+                    item, envelope, AdmissionEvent(envelope), admission, QueueItemState.Queued, error: null)
                     .ConfigureAwait(false);
-                return interval;
+                if (admitted is null)
+                {
+                    continue;
+                }
+
+                // Keep the pre-launch queue row retireable, while giving the launcher the exact
+                // retained binding it must observe once this tick wins the launch claim.
+                item = admitted with
+                {
+                    LastAdmission = admission,
+                    AttemptId = attemptId,
+                    AttemptBaseRevision = attemptBaseRevision,
+                    RoomDirectory = roomDirectory,
+                };
+                await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
             }
-
-            // #2142: imported and hand-edited legacy rows bypass queue add, so apply the same
-            // final-tuple policy before claiming a room or spawning a lane. This is a refusal, not a
-            // fallback: the item records the actionable repair and no vendor process is started.
-            if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
-            {
-                var remedy = WorkerInvocationModelPolicy.TryInvocation(tier.Adapter) is { } suggestion
-                    ? $" Re-add the item with {suggestion}"
-                    : string.Empty;
-                await FailAsync(
-                    item, refusal + remedy,
-                    room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
-                return interval;
-            }
-
-            // The role catalog is read on every admission, rather than trusting the grant that was
-            // current when queue add ran. A role change between those moments is exactly the stale
-            // authority this preflight is meant to catch, and this check is still before a room claim,
-            // worktree operation, or vendor spawn.
-            var attemptId = FleetAttemptId.New();
-            var projectPreflight = RecordedProjectCeilingAdmission.Evaluate(
-                item, role, settings.RequireDeclaredRequirements);
-            var admission = projectPreflight.Admission;
-            if (admission.Result == TaskRequirementAdmission.Refused)
-            {
-                var missing = admission.Missing is { Count: > 0 }
-                    ? string.Join(", ", admission.Missing)
-                    : "an invalid requirement declaration";
-                var admissionRefusal = projectPreflight.CeilingFound
-                    ? projectPreflight.RefusalMessage(item.Workspace, item.Role)
-                        + " Choose a role that fits the recorded ceiling or explicitly correct trust for that exact workspace; requirements never grant authority."
-                    : $"task requirements are incompatible with role '{item.Role}'s effective grant: missing {missing}. "
-                        + "Choose a role whose grant supplies the requirement, or amend the task declaration; requirements never grant authority.";
-                await _appendFleetEvent(
-                    AdmissionEvent(item, tier, attemptId, admission, now), cancellationToken)
-                    .ConfigureAwait(false);
-                await FailAsync(
-                    item,
-                    admissionRefusal,
-                    room: null, now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
-                return interval;
-            }
-
-            // Only a stage allowed to author code receives a pre-attempt revision baseline. Review
-            // and re-review can observe an existing HEAD but can never become its producer merely by
-            // finishing while it is checked out.
-            var attemptBaseRevision = item.Stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue
-                ? await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false)
-                : null;
-            item = item with
-            {
-                LastAdmission = admission,
-                AttemptId = attemptId,
-                AttemptBaseRevision = attemptBaseRevision,
-            };
-
-            // The producer records the admitted declaration before a process can exist. A later
-            // cancellation may win the queue claim, but that does not erase the admission decision
-            // that was actually made; its attempt id simply never gains a room.
-            await _appendFleetEvent(AdmissionEvent(item, tier, attemptId, admission, now), cancellationToken)
-                .ConfigureAwait(false);
-
-            // The launch is RECORDED BEFORE IT IS STARTED, and started under the same token it was recorded
-            // under -- spec/baton.md §13 states that ruling and the duplicate-worker failure it closes.
-            // What belongs here rather than there: the two writes are deliberately asymmetric. The ITEM is
-            // written first, because it is what the next daemon reads to pick candidates; the LEDGER row
-            // waits for the outcome, below.
-            var roomDirectory = QueueLauncher.RoomDirectoryFor(item);
             // #2115's final pre-launch Git-lock refusal; spec/baton.md §13 owns the safety boundary.
             IReadOnlyList<string> workspaceLocks;
             try
@@ -384,10 +479,40 @@ public sealed class QueueSchedulerService : BackgroundService
                 {
                     var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                     if (current?.State != QueueItemState.Queued
-                        || current.Retirement is not null
-                        || !HasSameAdmissionDeclaration(current, item, admittedDeclaration))
+                        || current.Retirement is not null)
                     {
                         return snapshot;
+                    }
+
+                    if (!HasSameAdmissionDeclaration(current, item, admittedDeclaration))
+                    {
+                        // Admission belongs to the exact declaration it inspected. If that row is
+                        // replaced before the launch claim, retire only this unlaunched envelope and
+                        // let the next scheduling pass admit the replacement from scratch. The
+                        // admission fact has already been pumped, so clearing the queue binding does
+                        // not erase history or risk replaying a worker that may have started.
+                        if (current.AttemptEnvelope?.AttemptId != attemptId
+                            || current.LaunchMayHaveBegunAt is not null)
+                        {
+                            return snapshot;
+                        }
+
+                        claimedItems = Replace(snapshot.Items, item.Tag, existing => existing with
+                        {
+                            ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
+                            AttemptId = null,
+                            AttemptBaseRevision = null,
+                            AttemptEnvelope = null,
+                            LaunchMayHaveBegunAt = null,
+                            AttemptAdmissionFactDurable = false,
+                            AttemptStartedFactDurable = false,
+                            AttemptRefusedFactDurable = false,
+                            AttemptSettledFactDurable = false,
+                            LaunchRecoveryKind = null,
+                            LastAdmission = null,
+                            RoomDirectory = null,
+                        });
+                        return snapshot with { Items = claimedItems };
                     }
 
                     launchClaimed = true;
@@ -396,6 +521,7 @@ public sealed class QueueSchedulerService : BackgroundService
                         State = QueueItemState.Launched,
                         RoomDirectory = roomDirectory,
                         LaunchedAt = now,
+                        LaunchMayHaveBegunAt = now,
                         Error = null,
                         LastAdmission = admission,
                         AttemptId = attemptId,
@@ -443,11 +569,13 @@ public sealed class QueueSchedulerService : BackgroundService
                 // and the room id on the item is how an operator finds out.
                 var shutdownFailure = $"the daemon shut down while launching into room '{roomDirectory}'; check that room before "
                     + "re-adding this item, because the lane may have started";
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, shutdownFailure), CancellationToken.None)
-                    .ConfigureAwait(false);
-                await FailAsync(
-                    item, shutdownFailure, roomDirectory, now, recordedDecision, tier,
+                await HaltAmbiguousLaunchAsync(item, shutdownFailure).ConfigureAwait(false);
+                await RecordIfNotRetiredAsync(item.Tag,
+                    new QueueDecisionEntry(
+                        now, item.Tag, QueueDecisionEntry.Failed, shutdownFailure,
+                        recordedDecision.LiveWeight, recordedDecision.FreeGb, recordedDecision.FloorGb,
+                        tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
+                        roomDirectory, tier.SelectionSource, admission),
                     CancellationToken.None).ConfigureAwait(false);
                 return interval;
             }
@@ -458,33 +586,24 @@ public sealed class QueueSchedulerService : BackgroundService
                 // rather than unwound into the loop's catch-all, which would leave the item launched with
                 // nothing said about why (#1939 review).
                 var launchFailure = $"the launch into room '{roomDirectory}' threw {ex.GetType().Name}: {ex.Message}";
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, launchFailure), CancellationToken.None)
-                    .ConfigureAwait(false);
-                await FailAsync(
-                    item, launchFailure,
-                    Directory.Exists(roomDirectory) ? roomDirectory : null, now, recordedDecision, tier,
+                await HaltAmbiguousLaunchAsync(item, launchFailure).ConfigureAwait(false);
+                await RecordIfNotRetiredAsync(item.Tag,
+                    new QueueDecisionEntry(
+                        now, item.Tag, QueueDecisionEntry.Failed, launchFailure,
+                        recordedDecision.LiveWeight, recordedDecision.FreeGb, recordedDecision.FloorGb,
+                        tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
+                        roomDirectory, tier.SelectionSource, admission),
                     CancellationToken.None).ConfigureAwait(false);
                 return interval;
             }
 
             if (outcome.RunwayHeld)
             {
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, "runway-held"), CancellationToken.None)
-                    .ConfigureAwait(false);
-                // The item goes back to QUEUED, undoing the pre-launch mark above: nothing was dispatched,
-                // so it must be the candidate again next tick (Q5's arm). _lastLaunchAt stays advanced, so
-                // the gap paces the retry -- a held vendor must not be re-asked every TickSeconds.
-                await MarkAsync(item.Tag, existing => existing with
-                {
-                    State = QueueItemState.Queued,
-                    RoomDirectory = null,
-                    LaunchedAt = null,
-                    ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
-                    AttemptId = null,
-                    AttemptBaseRevision = null,
-                }).ConfigureAwait(false);
+                // A runway hold is a modeled no-launch result for this admitted attempt. Publish its
+                // refusal before clearing the envelope; the next retry receives a fresh attempt id.
+                await MarkRunwayHeldAsync(item.Tag, attemptId, now).ConfigureAwait(false);
+                await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
+                await ResetRetryableRefusedAttemptAsync(item.Tag, attemptId).ConfigureAwait(false);
                 await RecordAsync(
                     new QueueDecisionEntry(
                         now, item.Tag, QueueDecisionEntry.Waited,
@@ -506,9 +625,6 @@ public sealed class QueueSchedulerService : BackgroundService
 
             if (outcome.Error is { Length: > 0 } error)
             {
-                await _appendFleetEvent(
-                    AttemptRefusedEvent(item, tier, attemptId, now, error), CancellationToken.None)
-                    .ConfigureAwait(false);
                 // outcome.RoomDirectory, not the path above: the launcher reports it only when the dispatch
                 // actually provisioned the room, and a refusal that never got that far must leave the item
                 // pointing at nothing rather than at a directory that does not exist.
@@ -517,9 +633,8 @@ public sealed class QueueSchedulerService : BackgroundService
                 return interval;
             }
 
-            await _appendFleetEvent(
-                AttemptStartedEvent(item, tier, attemptId, outcome.RoomDirectory ?? roomDirectory, now),
-                CancellationToken.None).ConfigureAwait(false);
+            await MarkStartedAsync(item.Tag, attemptId, outcome.RoomDirectory ?? roomDirectory, _now()).ConfigureAwait(false);
+            await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
 
             // The item is already marked launched, above. All that is left is the fact.
             await RecordIfNotRetiredAsync(item.Tag,
@@ -598,6 +713,35 @@ public sealed class QueueSchedulerService : BackgroundService
         }
     }
 
+    private static Task MarkStartedAsync(
+        string tag, FleetAttemptId attemptId, string room, DateTimeOffset occurredAt) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+            if (current?.AttemptEnvelope is not { } envelope || envelope.AttemptId != attemptId)
+            {
+                return snapshot;
+            }
+
+            var updated = current with
+            {
+                State = QueueItemState.Launched,
+                RoomDirectory = room,
+                LaunchMayHaveBegunAt = null,
+            };
+            var next = snapshot with { Items = Replace(snapshot.Items, tag, _ => updated) };
+            return QueueFleetEventOutbox.Enqueue(
+                next,
+                AttemptFact(
+                    FleetEventKind.AttemptStarted,
+                    envelope,
+                    occurredAt,
+                    outcome: null,
+                    room,
+                    usage: null,
+                    artifacts: null));
+        }, CancellationToken.None);
+
     private async Task FailAsync(
         QueueItem item,
         string error,
@@ -618,23 +762,35 @@ public sealed class QueueSchedulerService : BackgroundService
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-                if (current?.Retirement is not null)
+                if (current is null || current.Retirement is not null)
                 {
                     return snapshot;
                 }
 
-                failed = current is not null;
-                return snapshot with
+                failed = true;
+                var existing = current!;
+                var updated = existing with
                 {
-                    Items = Replace(snapshot.Items, item.Tag, existing => existing with
-                    {
-                        State = QueueItemState.Failed,
-                        Error = error,
-                        RoomDirectory = room,
-                        LastAdmission = admission ?? existing.LastAdmission,
-                        AttemptId = attemptId ?? existing.AttemptId,
-                    }),
+                    State = QueueItemState.Failed,
+                    Error = error,
+                    RoomDirectory = room,
+                    LastAdmission = admission ?? existing.LastAdmission,
+                    AttemptId = attemptId ?? existing.AttemptId,
+                    LaunchMayHaveBegunAt = null,
                 };
+                var next = snapshot with { Items = Replace(snapshot.Items, item.Tag, _ => updated) };
+                return updated.AttemptEnvelope is { } envelope
+                    ? QueueFleetEventOutbox.Enqueue(
+                        next,
+                        AttemptFact(
+                            FleetEventKind.AttemptRefused,
+                            envelope,
+                            now,
+                            error,
+                            room: null,
+                            usage: null,
+                            artifacts: null))
+                    : next;
             }, CancellationToken.None).ConfigureAwait(false);
         }
 
@@ -685,17 +841,27 @@ public sealed class QueueSchedulerService : BackgroundService
                 }
 
                 failed = true;
-                return snapshot with
+                var updated = current with
                 {
-                    Items = Replace(snapshot.Items, item.Tag, existing => existing with
-                    {
-                        State = QueueItemState.Failed,
-                        Error = error,
-                        RoomDirectory = null,
-                        LastAdmission = admission,
-                        AttemptId = attemptId,
-                    }),
+                    State = QueueItemState.Failed,
+                    Error = error,
+                    RoomDirectory = null,
+                    LastAdmission = admission,
+                    AttemptId = attemptId,
                 };
+                var next = snapshot with { Items = Replace(snapshot.Items, item.Tag, _ => updated) };
+                return updated.AttemptEnvelope is { } envelope
+                    ? QueueFleetEventOutbox.Enqueue(
+                        next,
+                        AttemptFact(
+                            FleetEventKind.AttemptRefused,
+                            envelope,
+                            now,
+                            error,
+                            room: null,
+                            usage: null,
+                            artifacts: null))
+                    : next;
             }, CancellationToken.None).ConfigureAwait(false);
         }
 
@@ -742,6 +908,11 @@ public sealed class QueueSchedulerService : BackgroundService
     /// </remarks>
     internal async Task ResolveFinishedItemsAsync(CancellationToken cancellationToken)
     {
+        using (DaemonLoopDriver.EnterPhase("fleet-event-outbox"))
+        {
+            await _fleetOutbox.PumpAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        }
+
         QueueSnapshot snapshot;
         using (DaemonLoopDriver.EnterPhase("queue-store"))
         {
@@ -755,15 +926,35 @@ public sealed class QueueSchedulerService : BackgroundService
             return;
         }
 
-        var resolved = new Dictionary<string, (QueueItemState State, string? Error)>(StringComparer.Ordinal);
+        var resolved = new Dictionary<string, (QueueItemState State, string? Error, WorkflowStatusView? Terminal)>(StringComparer.Ordinal);
         foreach (var item in launched)
         {
-            if (item.AttemptId is { } attemptId && Directory.Exists(item.RoomDirectory!))
+            if (item.AttemptEnvelope is { } recoveringEnvelope
+                && item.LaunchMayHaveBegunAt is not null)
             {
-                // Restart recovery for a daemon that died after the room was provisioned but before
-                // the first start append. The dedupe key makes an ordinary tick a no-op.
+                if (Directory.Exists(item.RoomDirectory!))
+                {
+                    await MarkStartedAsync(item.Tag, recoveringEnvelope.AttemptId, item.RoomDirectory!, _now())
+                        .ConfigureAwait(false);
+                    await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await HaltAmbiguousLaunchAsync(item).ConfigureAwait(false);
+                }
+                continue;
+            }
+
+            if (item.AttemptEnvelope is { } envelope && !item.AttemptStartedFactDurable && Directory.Exists(item.RoomDirectory!))
+            {
+                await MarkStartedAsync(item.Tag, envelope.AttemptId, item.RoomDirectory!, _now()).ConfigureAwait(false);
+                await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            if (item.AttemptEnvelope is null && item.AttemptId is { } legacyAttemptId && Directory.Exists(item.RoomDirectory!))
+            {
                 await _appendFleetEvent(
-                    AttemptStartedEvent(item, tier: null, attemptId, item.RoomDirectory!, item.LaunchedAt ?? _now()),
+                    AttemptStartedEvent(item, tier: null, legacyAttemptId, item.RoomDirectory!, item.LaunchedAt ?? _now()),
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -771,16 +962,14 @@ public sealed class QueueSchedulerService : BackgroundService
                 ?? await TryProjectTerminalAsync(item.RoomDirectory!, cancellationToken).ConfigureAwait(false);
             if (terminal is not null)
             {
-                if (item.AttemptId is { } settledAttemptId)
+                var outcome = ClassifyTerminal(terminal, item.RoomDirectory!);
+                if (item.AttemptEnvelope is null && item.AttemptId is { } legacySettlementAttemptId)
                 {
-                    // Append before the queue transition. If the append is interrupted, the retained
-                    // Launched row retries it next tick; if the queue write is interrupted afterward,
-                    // the same key makes replay idempotent.
                     await _appendFleetEvent(
-                        AttemptSettledEvent(item, settledAttemptId, terminal, _now()), cancellationToken)
+                        AttemptSettledEvent(item, legacySettlementAttemptId, terminal, _now()), cancellationToken)
                         .ConfigureAwait(false);
                 }
-                resolved[item.Tag] = ClassifyTerminal(terminal, item.RoomDirectory!);
+                resolved[item.Tag] = (outcome.State, outcome.Error, terminal);
                 continue;
             }
 
@@ -788,7 +977,7 @@ public sealed class QueueSchedulerService : BackgroundService
             {
                 resolved[item.Tag] = (QueueItemState.Failed,
                     $"room {item.RoomDirectory} was never created — the dispatch refused or faulted before it "
-                    + "provisioned the room, so nothing ran; re-add the item once you know why");
+                    + "provisioned the room, so nothing ran; re-add the item once you know why", null);
             }
         }
 
@@ -799,15 +988,36 @@ public sealed class QueueSchedulerService : BackgroundService
 
         using (DaemonLoopDriver.EnterPhase("queue-store"))
         {
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s =>
             {
-                Items = s.Items
-                    .Select(i => resolved.TryGetValue(i.Tag, out var outcome) && i.State == QueueItemState.Launched
-                        ? i with { State = outcome.State, Error = outcome.Error }
-                        : i)
-                    .ToList(),
+                var next = s with
+                {
+                    Items = s.Items
+                        .Select(i => resolved.TryGetValue(i.Tag, out var outcome) && i.State == QueueItemState.Launched
+                            ? i with { State = outcome.State, Error = outcome.Error }
+                            : i)
+                        .ToList(),
+                };
+                foreach (var (tag, outcome) in resolved)
+                {
+                    var updated = next.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+                    if (updated?.AttemptEnvelope is { } currentEnvelope && outcome.Terminal is not null)
+                    {
+                        next = QueueFleetEventOutbox.Enqueue(
+                            next,
+                            AttemptSettledFact(
+                                currentEnvelope,
+                                updated.RoomDirectory!,
+                                outcome.Terminal,
+                                _now()));
+                    }
+                }
+
+                return next;
             }, cancellationToken).ConfigureAwait(false);
         }
+
+        await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1039,6 +1249,263 @@ public sealed class QueueSchedulerService : BackgroundService
     private static Task<FleetEvent?> AppendOperationalFleetEventAsync(
         FleetEventDraft draft, CancellationToken cancellationToken) =>
         FleetEventLog.OpenOperational().Append(draft, cancellationToken);
+
+    private static QueueTierResolution TierFromEnvelope(QueueAttemptEnvelope envelope) =>
+        new(null, envelope.Adapter, envelope.Model, envelope.Effort, false, null);
+
+    private static TaskRequirementAdmission AdmissionFromEnvelope(
+        QueueAttemptEnvelope envelope,
+        TaskRequirementAdmission? current) =>
+        new(
+            envelope.RequestedRequirements,
+            envelope.EffectiveGrant,
+            envelope.AdmissionDecision,
+            envelope.MissingCapabilities,
+            current?.VendorUsage);
+
+    private static QueueAttemptEnvelope CreateEnvelope(
+        QueueItem item,
+        QueueTierResolution tier,
+        FleetAttemptId attemptId,
+        TaskRequirementAdmission admission,
+        DateTimeOffset at,
+        string? room,
+        string? baseRevision) =>
+        new(
+            attemptId,
+            item.ParentAttemptId,
+            item.Tag,
+            item.Issue,
+            item.PullRequest,
+            item.Stage,
+            item.Role,
+            tier.Adapter,
+            tier.Model,
+            tier.Effort,
+            admission.EffectiveGrant,
+            admission.Requested,
+            admission.Missing,
+            admission.Result,
+            room,
+            room is null ? null : BatonPaths.RecordKey(room),
+            baseRevision,
+            at);
+
+    private async Task<QueueItem?> CommitAdmissionAsync(
+        QueueItem item,
+        QueueAttemptEnvelope envelope,
+        FleetEventDraft admissionEvent,
+        TaskRequirementAdmission admission,
+        QueueItemState state,
+        string? error,
+        FleetEventDraft? transitionEvent = null)
+    {
+        QueueItem? committed = null;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(candidate =>
+                string.Equals(candidate.Tag, item.Tag, StringComparison.Ordinal));
+            if (current?.State != QueueItemState.Queued
+                || current.AttemptEnvelope is not null
+                || current.Retirement is not null
+                || !HasSameAdmissionDeclaration(current, item))
+            {
+                return snapshot;
+            }
+
+            committed = current with
+            {
+                State = state,
+                Error = error,
+                Skills = item.Skills,
+                AttemptId = state == QueueItemState.Failed ? envelope.AttemptId : current.AttemptId,
+                AttemptBaseRevision = state == QueueItemState.Failed
+                    ? envelope.AttemptBaseRevision
+                    : current.AttemptBaseRevision,
+                // The envelope reserves the intended room binding. The queue row gains a room only
+                // at the launch claim, so cancellation and merged retirement can still win before
+                // any worker may have begun.
+                RoomDirectory = null,
+                LastAdmission = state == QueueItemState.Failed ? admission : current.LastAdmission,
+                AttemptEnvelope = envelope,
+                LaunchMayHaveBegunAt = null,
+                AttemptAdmissionFactDurable = false,
+                AttemptStartedFactDurable = false,
+                AttemptRefusedFactDurable = false,
+                AttemptSettledFactDurable = false,
+                LaunchRecoveryKind = null,
+            };
+            var queued = snapshot with { Items = Replace(snapshot.Items, item.Tag, _ => committed) };
+            queued = QueueFleetEventOutbox.Enqueue(queued, admissionEvent);
+            return transitionEvent is null
+                ? queued
+                : QueueFleetEventOutbox.Enqueue(queued, transitionEvent);
+        }, CancellationToken.None).ConfigureAwait(false);
+        return committed;
+    }
+
+    private Task PumpFleetEventsAsync(CancellationToken cancellationToken) =>
+        _fleetOutbox.PumpAsync(BatonPaths.QueueFile, cancellationToken);
+
+    private static Task HaltAmbiguousLaunchAsync(QueueItem item, string? detail = null) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = Replace(snapshot.Items, item.Tag, current => current.AttemptEnvelope?.AttemptId == item.AttemptEnvelope?.AttemptId
+                ? current with
+                {
+                    State = QueueItemState.Failed,
+                    Halted = true,
+                    LaunchRecoveryKind = QueueLaunchRecoveryKind.AmbiguousEvidence,
+                    Error = detail
+                        ?? $"attempt '{item.AttemptEnvelope!.AttemptId.Value}' may have begun but has no authoritative room evidence; recovery halted",
+                }
+                : current),
+        }, CancellationToken.None);
+
+    private static Task MarkRunwayHeldAsync(string tag, FleetAttemptId attemptId, DateTimeOffset occurredAt) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+            if (current?.AttemptEnvelope is not { } envelope
+                || envelope.AttemptId != attemptId
+                || current.State != QueueItemState.Launched)
+            {
+                return snapshot;
+            }
+
+            var updated = current with
+            {
+                State = QueueItemState.Queued,
+                RoomDirectory = null,
+                LaunchedAt = null,
+                LaunchMayHaveBegunAt = null,
+            };
+            var next = snapshot with { Items = Replace(snapshot.Items, tag, _ => updated) };
+            return QueueFleetEventOutbox.Enqueue(
+                next,
+                AttemptFact(
+                    FleetEventKind.AttemptRefused,
+                    envelope,
+                    occurredAt,
+                    QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
+                    room: null,
+                    usage: null,
+                    artifacts: null));
+        }, CancellationToken.None);
+
+    private static Task ResetRetryableRefusedAttemptAsync(string tag, FleetAttemptId attemptId) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = Replace(snapshot.Items, tag, current =>
+                current.State == QueueItemState.Queued
+                && current.AttemptEnvelope?.AttemptId == attemptId
+                && current.AttemptRefusedFactDurable
+                && !QueueFleetEventOutbox.HasPendingFor(snapshot, attemptId)
+                    ? current with
+                    {
+                        ParentAttemptId = attemptId,
+                        AttemptId = null,
+                        AttemptBaseRevision = null,
+                        AttemptEnvelope = null,
+                        AttemptAdmissionFactDurable = false,
+                        AttemptStartedFactDurable = false,
+                        AttemptRefusedFactDurable = false,
+                        AttemptSettledFactDurable = false,
+                        LaunchRecoveryKind = null,
+                    }
+                    : current),
+        }, CancellationToken.None);
+
+    private static FleetEventDraft AdmissionEvent(QueueAttemptEnvelope envelope) =>
+        AttemptFact(
+            FleetEventKind.AdmissionDecided,
+            envelope,
+            envelope.FactTimestamp,
+            outcome: null,
+            room: null,
+            usage: null,
+            artifacts: null);
+
+    private static FleetEventDraft AttemptSettledFact(
+        QueueAttemptEnvelope envelope,
+        string room,
+        WorkflowStatusView terminal,
+        DateTimeOffset observedAt)
+    {
+        var executions = terminal.Steps
+            .Where(step => step.Execution is { Length: > 0 })
+            .GroupBy(step => step.Execution!, StringComparer.Ordinal)
+            .ToList();
+        var execution = executions.Count == 1 ? executions[0].First() : null;
+        var usage = execution?.Usage;
+        return AttemptFact(
+            FleetEventKind.AttemptSettled,
+            envelope,
+            observedAt,
+            terminal.State,
+            room,
+            usage is null
+                ? null
+                : new FleetEventUsage(
+                    usage.TokensIn,
+                    usage.TokensOut,
+                    usage.CacheReadTokens,
+                    usage.CacheCreationTokens,
+                    usage.ThinkingTokens,
+                    usage.Turns,
+                    usage.ToolSteps,
+                    usage.RefusedToolSteps,
+                    usage.RepeatedToolSteps),
+            terminal.Outputs.Count == 0 ? null : terminal.Outputs,
+            executionId: execution is null ? null : new ExecutionId(execution.Execution!),
+            outcomeDetail: terminal.Error,
+            elapsedMilliseconds: usage?.WallClockMs);
+    }
+
+    private static FleetEventDraft AttemptFact(
+        FleetEventKind kind,
+        QueueAttemptEnvelope envelope,
+        DateTimeOffset occurredAt,
+        string? outcome,
+        string? room,
+        FleetEventUsage? usage,
+        IReadOnlyList<string>? artifacts,
+        ExecutionId? executionId = null,
+        string? outcomeDetail = null,
+        long? elapsedMilliseconds = null) =>
+        new(
+            kind,
+            kind switch
+            {
+                FleetEventKind.AdmissionDecided => $"admission:{envelope.AttemptId.Value}",
+                FleetEventKind.AttemptStarted => $"attempt-started:{envelope.AttemptId.Value}",
+                FleetEventKind.AttemptRefused => $"attempt-refused:{envelope.AttemptId.Value}",
+                FleetEventKind.AttemptSettled => $"attempt-settled:{envelope.AttemptId.Value}",
+                _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+            },
+            occurredAt,
+            AttemptId: envelope.AttemptId,
+            ParentAttemptId: envelope.ParentAttemptId,
+            WorkId: new FleetWorkId(envelope.WorkId),
+            RoomId: room is null ? null : new FleetRoomId(BatonPaths.RecordKey(room)),
+            ExecutionId: executionId,
+            IssueId: envelope.Issue,
+            PullRequestId: envelope.PullRequest,
+            Vendor: envelope.Adapter,
+            Model: envelope.Model,
+            Effort: envelope.Effort,
+            DeclaredRole: envelope.DeclaredRole,
+            EffectiveGrant: envelope.EffectiveGrant,
+            RequestedRequirements: envelope.RequestedRequirements,
+            MissingCapabilities: envelope.MissingCapabilities,
+            AdmissionDecision: envelope.AdmissionDecision,
+            Outcome: outcome,
+            OutcomeDetail: outcomeDetail,
+            ElapsedMilliseconds: elapsedMilliseconds,
+            Usage: usage,
+            ArtifactReferences: artifacts,
+            Stage: envelope.Stage is { } stage ? WorkStages.Token(stage) : null,
+            AttemptBaseRevision: envelope.AttemptBaseRevision);
 
     private static FleetEventDraft AdmissionEvent(
         QueueItem item,

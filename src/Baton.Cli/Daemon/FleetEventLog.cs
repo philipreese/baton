@@ -213,7 +213,9 @@ public sealed record FleetEventDraft(
     string? CheckName = null,
     string? CheckStatus = null,
     DateTimeOffset? CheckStartedAt = null,
-    DateTimeOffset? CheckCompletedAt = null);
+    DateTimeOffset? CheckCompletedAt = null,
+    string? Stage = null,
+    string? AttemptBaseRevision = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -282,7 +284,11 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("checkStartedAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckStartedAt = null,
     [property: JsonPropertyName("checkCompletedAt")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckCompletedAt = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckCompletedAt = null,
+    [property: JsonPropertyName("stage")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Stage = null,
+    [property: JsonPropertyName("attemptBaseRevision")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AttemptBaseRevision = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -292,7 +298,8 @@ public sealed record FleetEvent(
         draft.MissingCapabilities, draft.AdmissionDecision, draft.Outcome, draft.OutcomeDetail, draft.ReviewVerdict,
         draft.CheckConclusion, draft.ElapsedMilliseconds, draft.LastMeaningfulProgressAt?.ToUniversalTime(),
         draft.Usage, draft.ArtifactReferences, draft.RevisionKind, draft.CheckRunId, draft.CheckName,
-        draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime());
+        draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime(),
+        draft.Stage, draft.AttemptBaseRevision);
 }
 
 /// <summary>
@@ -325,6 +332,12 @@ public sealed class FleetEventLog
     private const string LockNamePrefix = "baton-fleet-events";
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
+    private static readonly JsonSerializerOptions DraftJson = new()
+    {
+        WriteIndented = false,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
 
     private readonly string _livePath;
     private readonly string _rolloverPath;
@@ -412,6 +425,12 @@ public sealed class FleetEventLog
     }
 
     internal static string Serialize(FleetEvent entry) => JsonSerializer.Serialize(entry, Json);
+
+    internal static string SerializeDraft(FleetEventDraft draft) => JsonSerializer.Serialize(draft, DraftJson);
+
+    internal static FleetEventDraft DeserializeDraft(JsonElement draft) =>
+        draft.Deserialize<FleetEventDraft>(DraftJson)
+        ?? throw new JsonException("Expected a fleet event draft object.");
 
     private FleetEvent? AppendLocked(FleetEventDraft draft)
     {
