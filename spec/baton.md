@@ -1699,14 +1699,18 @@ general PR reader's truthful "some PR is open" answer. Two lanes shipped
 motivating measurement.
 
 **Delivery preflight precedes the expensive gate (#2357).** Delivery is a necessary condition for a
-branch-delivering execution. A failed or operator-cancelled delivery assertion settles through the
+branch-delivering execution. A conclusively failed or operator-cancelled delivery assertion settles through the
 existing `DeliveryFailed` or cancellation path without starting workspace verification; an unpushed
 branch cannot be rescued by a build. A positive delivery assertion does not skip or weaken that gate:
 workspace verification still runs, and only after it passes or is positively `NotRun` does Baton append
 the final machine-owned delivery observation. That observation must name the same local and remote
 heads the preflight checked, so a verify command that mutates the branch fails exact-head delivery
-instead of attaching an old pass to a new checkout. Replayed journal evidence follows the same order
-without a fresh remote probe.
+instead of attaching an old pass to a new checkout. An unavailable preflight is not a conclusive
+delivery failure: workspace verification still runs and the final machine observation gets one chance
+to establish the facts. If that final observation remains `NotRun`, Baton appends `VerifyFailed` with
+`VerifyFailedKind.DeliveryNotRun` and settles `Indeterminate`; it cannot append `ExecutionSucceeded`.
+This is distinct from both a typed `DeliveryFailed` and the ordinary verify command's diagnostic-only
+`VerifyNotRun`. Replayed journal evidence follows the same terminal distinction without a fresh remote probe.
 
 **Machine-owned delivery observation (#2309).** The worker's `changes.md` is an early, as-of
 narrative, never a certificate for a later commit, push, or PR change. On the eligible post-exit path

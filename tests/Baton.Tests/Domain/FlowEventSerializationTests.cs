@@ -107,6 +107,7 @@ public class FlowEventSerializationTests
         yield return [new FlowEvent.VerifyFailed(ExecutionId, null, "timed out", VerifyFailedKind.TimedOut)];
         yield return [new FlowEvent.VerifyFailed(ExecutionId, null, "cancelled", VerifyFailedKind.Cancelled)];
         yield return [new FlowEvent.VerifyFailed(ExecutionId, null, "restart", VerifyFailedKind.EngineRestart)];
+        yield return [new FlowEvent.VerifyFailed(ExecutionId, null, "delivery unavailable", VerifyFailedKind.DeliveryNotRun)];
         // #1788
         yield return [new FlowEvent.VerifyFailed(ExecutionId, ["branch-on-origin"], "1788-lane is 1 commit ahead of origin", VerifyFailedKind.DeliveryFailed)];
         // #1702

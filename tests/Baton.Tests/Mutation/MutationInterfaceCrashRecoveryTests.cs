@@ -884,11 +884,20 @@ public class MutationInterfaceCrashRecoveryTests
             {
                 Assert.True(step.IndeterminateAwaitingResolution);
                 Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
-                var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
-                Assert.Equal(observationCase is "failed" or "not-run"
-                        ? VerifyFailedKind.DeliveryFailed
-                        : VerifyFailedKind.EngineRestart,
-                    failure.Kind);
+                if (observationCase == "not-run")
+                {
+                    var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+                    Assert.Equal(VerifyFailedKind.DeliveryNotRun, failure.Kind);
+                    Assert.Equal("delivery check unavailable", failure.Tail);
+                }
+                else
+                {
+                    var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+                    Assert.Equal(observationCase == "failed"
+                            ? VerifyFailedKind.DeliveryFailed
+                            : VerifyFailedKind.EngineRestart,
+                        failure.Kind);
+                }
             }
         }
         finally { DirectoryCleanup.DeleteRecursively(roomDirectory); }

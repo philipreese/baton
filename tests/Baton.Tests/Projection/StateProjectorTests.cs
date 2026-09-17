@@ -2086,6 +2086,7 @@ public class StateProjectorTests
     [InlineData(VerifyFailedKind.EngineRestart, "Verify did not complete across an engine restart — awaiting conductor resolution.")]
     [InlineData(VerifyFailedKind.TimedOut, "Verify timed out — awaiting conductor resolution.")]
     [InlineData(VerifyFailedKind.Cancelled, "Verify cancelled — awaiting conductor resolution.")]
+    [InlineData(VerifyFailedKind.DeliveryNotRun, "Required delivery observation did not complete — awaiting conductor resolution.")]
     public void VerifyFailed_with_non_gate_kind_records_corresponding_IndeterminateReason(
         VerifyFailedKind kind, string expectedReason)
     {

@@ -154,6 +154,39 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     [Fact]
+    public async Task A_notrun_delivery_preflight_still_runs_verify_before_the_final_notrun_settles_the_lane()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-notrun-before-verify");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            DirectoryCleanup.DeleteRecursively(origin);
+            var finalState = await RunSingleStepPumpAsync(
+                roomDirectory, artifactsRoot, logPath,
+                DeliveryBinding(workspace,
+                    "git commit --allow-empty -m delivered -q && echo done>%BATON_OUTPUT_DIR%\\changes.md",
+                    "echo verified>verify-ran.txt & exit 0"));
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(Assert.Single(finalState.Steps).IndeterminateAwaitingResolution);
+            Assert.Single(events.OfType<FlowEvent.VerifyStarted>());
+            Assert.Single(events.OfType<FlowEvent.VerifyPassed>());
+            Assert.True(File.Exists(Path.Combine(workspace, "verify-ran.txt")));
+            Assert.Single(events.OfType<FlowEvent.DeliveryObservationRecorded>());
+            Assert.Empty(events.OfType<FlowEvent.VerifyNotRun>());
+            Assert.Equal(VerifyFailedKind.DeliveryNotRun,
+                Assert.Single(events.OfType<FlowEvent.VerifyFailed>()).Kind);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
     public async Task A_delivers_branch_role_that_commits_without_pushing_settles_Indeterminate_with_branch_not_pushed()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-fail");

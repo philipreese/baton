@@ -1295,9 +1295,9 @@ public static class MutationInterface
                                     await eventLogWriter.AppendAsync(
                                         new FlowEvent.VerifyFailed(
                                             executionId,
-                                            evidence.FailingMembers,
-                                            evidence.VerificationReason ?? "delivery observation did not run",
-                                            VerifyFailedKind.DeliveryFailed), ioCancellationToken).ConfigureAwait(false);
+                                            Tail: evidence.VerificationReason ?? "delivery observation did not run",
+                                            Kind: VerifyFailedKind.DeliveryNotRun),
+                                        ioCancellationToken).ConfigureAwait(false);
                                     continue;
                                 case DeliveryCheckStatus.Passed:
                                     break;
@@ -2421,7 +2421,6 @@ public static class MutationInterface
                 }
 
                 if (deliveryOutcomeBeforeVerify.Status is DeliveryCheckStatus.Failed
-                    or DeliveryCheckStatus.NotRun
                     or DeliveryCheckStatus.Cancelled)
                 {
                     if (recordedDelivery is null)
@@ -2717,9 +2716,9 @@ public static class MutationInterface
                 await eventLogWriter.AppendAsync(
                     new FlowEvent.VerifyFailed(
                         executionId,
-                        deliveryOutcome.FailingMembers,
-                        deliveryOutcome.NotRunReason ?? "delivery observation did not run",
-                        VerifyFailedKind.DeliveryFailed), CancellationToken.None)
+                        Tail: deliveryOutcome.NotRunReason ?? "delivery observation did not run",
+                        Kind: VerifyFailedKind.DeliveryNotRun),
+                    CancellationToken.None)
                     .ConfigureAwait(false);
                 return true;
             case DeliveryCheckStatus.Passed:
