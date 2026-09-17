@@ -25,13 +25,32 @@ public sealed class DirectGhPullRequestCreateTests
             compiled.Arguments);
     }
 
+    [Fact]
+    public void Documented_standalone_draft_body_file_command_compiles_to_exact_argv()
+    {
+        var compiled = DirectGhPullRequestCreate.Compile(
+            "gh pr create --draft --body-file pr-body.md",
+            Provenance);
+
+        Assert.True(compiled.IsCreateCommand);
+        Assert.Null(compiled.Refusal);
+        Assert.Equal(
+            ["pr", "create", "--draft", "--body-file", "pr-body.md", "--repo",
+             "aer-works/baton", "--head", "2190-verified-pr-ownership"],
+            compiled.Arguments);
+    }
+
     [Theory]
     [InlineData("gh pr create --title \"$(whoami)\"")]
     [InlineData("gh pr create --title \"`whoami`\"")]
     [InlineData("gh pr create --fill | tee pr.txt")]
     [InlineData("gh pr create --fill > pr.txt")]
     [InlineData("gh pr create --fill && echo done")]
+    [InlineData("cd worktree && gh pr create --draft --body-file pr-body.md")]
     [InlineData("git push && gh pr create --fill")]
+    [InlineData("gh pr create --draft --body-file $(echo pr-body.md)")]
+    [InlineData("gh pr create --draft --body-file pr-body.md > result.txt")]
+    [InlineData("gh pr create --draft --body-file body(file).md")]
     [InlineData(".\\gh pr create --fill")]
     [InlineData("./gh pr create --fill")]
     [InlineData("gh pr create --title 'single quoted'")]

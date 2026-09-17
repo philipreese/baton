@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Status;
 using Baton.Tests.Shared;
 
@@ -1886,11 +1887,11 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     /// <summary>
-    /// The #2190 production shape end to end through a hermetic fake: a preselected executable
-    /// outside the workspace receives exact argv, including a quoted Windows title as one value.
-    /// Its attributed, successful, repository-matching output opens exactly one repository-qualified
-    /// read. The interpreter prefix is an explicit internal test seam; production accepts only a
-    /// native file named gh/gh.exe and supplies no prefix.
+    /// #2368 regression for #2363 / PR #2367: the Codex implement fixture follows the shipped
+    /// standalone draft/body-file form end to end through a hermetic fake. A preselected executable
+    /// outside the workspace receives exact argv; its attributed, successful, repository-matching
+    /// output opens a selectorless read of exactly that PR. The interpreter prefix is an explicit
+    /// internal test seam; production accepts only a native file named gh/gh.exe and supplies no prefix.
     /// </summary>
     [Fact]
     public async Task The_broker_learns_ownership_only_from_direct_verified_gh_create()
@@ -1906,16 +1907,16 @@ public sealed class CodexDynamicToolPolicyTests
             CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
         var create = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool,
-            new { command = "gh pr create --draft --title \"fix(codex): Example [proof]\" --body-file body.md" });
+            new { command = "gh pr create --draft --body-file body.md" });
         var after = await fixture.ExecuteAsync(
-            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view" });
 
         Assert.False(before.Success);
         Assert.Contains("has not opened a pull request yet", before.Text, StringComparison.Ordinal);
         Assert.True(create.Success, create.Text);
         Assert.Equal(
-            ["pr", "create", "--draft", "--title", "fix(codex): Example [proof]", "--body-file",
-             "body.md", "--repo", "aer-works/baton", "--head", "2190-verified-pr-ownership"],
+            ["pr", "create", "--draft", "--body-file", "body.md", "--repo", "aer-works/baton",
+             "--head", "2190-verified-pr-ownership"],
             File.ReadAllLines(fixture.DirectGhArguments));
         Assert.True(after.Success, after.Text);
         Assert.DoesNotContain(OwnPullRequestOnlyRule.Rule, after.Text, StringComparison.Ordinal);
@@ -1925,6 +1926,68 @@ public sealed class CodexDynamicToolPolicyTests
             CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 1994" });
         Assert.False(sibling.Success);
         Assert.Contains("This room opened aer-works/baton#2005", sibling.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2368's delivery arm: this is the whole Codex implement route, rather than the broker and
+    /// delivery fixtures independently reporting green. The lane pushes its real local branch, opens
+    /// its own draft through the attributed direct-create seam, then reads only that PR selectorlessly.
+    /// Settlement sees the fake forge's branch-scoped answer and accepts only the exact delivered head.
+    /// The three controls distinguish no matching PR (including a foreign one) from a stale PR head.
+    /// </summary>
+    [Theory]
+    [InlineData("own", DeliveryCheckStatus.Passed)]
+    [InlineData("absent", DeliveryCheckStatus.Failed)]
+    [InlineData("foreign", DeliveryCheckStatus.Failed)]
+    [InlineData("stale", DeliveryCheckStatus.Failed)]
+    public async Task A_codex_implement_delivery_requires_its_own_PR_at_the_pushed_head(
+        string pullRequest, DeliveryCheckStatus expected)
+    {
+        const string ownPullRequestUrl = "https://github.com/aer-works/baton/pull/2368";
+        const string deliveredBranch = "2190-verified-pr-ownership";
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant, ["changes.md"], directGhOutput: ownPullRequestUrl);
+        var origin = Path.Combine(fixture.Root, "origin.git");
+        RunGitSetup(fixture.Root, "init", "--bare", origin);
+        RunGitSetup(fixture.Workspace, "init");
+        RunGitSetup(fixture.Workspace, "config", "user.email", "fixture@example.test");
+        RunGitSetup(fixture.Workspace, "config", "user.name", "Fixture");
+        RunGitSetup(fixture.Workspace, "checkout", "-b", deliveredBranch);
+        RunGitSetup(fixture.Workspace, "add", ".");
+        RunGitSetup(fixture.Workspace, "commit", "-m", "implement fixture work");
+        RunGitSetup(fixture.Workspace, "remote", "add", "origin", origin);
+
+        var push = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"git push origin {deliveredBranch}" });
+        var create = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = "gh pr create --draft --body-file body.md" });
+        var gh = ShimGh(fixture.Workspace, ownPullRequestUrl);
+        var selectorlessRead = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view" });
+
+        Assert.True(push.Success, push.Text);
+        Assert.True(create.Success, create.Text);
+        Assert.True(selectorlessRead.Success, selectorlessRead.Text);
+        Assert.Equal(
+            ["pr", "create", "--draft", "--body-file", "body.md", "--repo", "aer-works/baton",
+             "--head", "2190-verified-pr-ownership"],
+            File.ReadAllLines(fixture.DirectGhArguments));
+
+        var deliveredHead = RunGitSetup(fixture.Workspace, "rev-parse", "HEAD").Trim();
+        var reportedHead = pullRequest == "stale" ? new string('b', 40) : deliveredHead;
+        var deliveryGh = WriteDeliveryGh(fixture.Root, pullRequest is "absent" or "foreign"
+            ? "[]"
+            : $$"""[{"number":2368,"headRefOid":"{{reportedHead}}"}]""");
+
+        var delivery = await DeliveryVerifier.CheckAsync(
+            fixture.Workspace, expectPr: true, TestContext.Current.CancellationToken, ghProgram: deliveryGh);
+
+        Assert.Equal(expected, delivery.Status);
+        if (expected == DeliveryCheckStatus.Failed)
+        {
+            Assert.Equal(["pr-not-open"], delivery.FailingMembers);
+        }
     }
 
     [Fact]
@@ -2214,6 +2277,13 @@ public sealed class CodexDynamicToolPolicyTests
             | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
             | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return "./gh";
+    }
+
+    private static string WriteDeliveryGh(string directory, string jsonOutput)
+    {
+        var path = Path.Combine(directory, $"delivery-gh-{Guid.NewGuid():N}.cmd");
+        File.WriteAllText(path, $"@echo off\r\necho {jsonOutput}\r\nexit /b 0\r\n");
+        return path;
     }
 
     [Fact]
@@ -2765,7 +2835,7 @@ public sealed class CodexDynamicToolPolicyTests
             bufferSize: 4096,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
 
-    private static void RunGitSetup(string directory, params string[] arguments)
+    private static string RunGitSetup(string directory, params string[] arguments)
     {
         var startInfo = new System.Diagnostics.ProcessStartInfo("git")
         {
@@ -2789,6 +2859,7 @@ public sealed class CodexDynamicToolPolicyTests
             throw new IOException(
                 $"Git fixture setup failed with exit {process.ExitCode}: {stdout}{stderr}");
         }
+        return stdout;
     }
 
     private static string CommandOutputReference(string text)

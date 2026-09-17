@@ -283,6 +283,11 @@ public sealed class RoleDefaultSkillsTests : IDisposable
             Path.Combine(ShippedSkillsDirectory, "baton-implement")).Content;
 
         Assert.Contains("gh pr create --draft", content, StringComparison.Ordinal);
+        Assert.Contains("gh pr create --draft --body-file <file>", content, StringComparison.Ordinal);
+        Assert.Contains("real-newline body file", content, StringComparison.Ordinal);
+        Assert.Contains("push separately", content, StringComparison.Ordinal);
+        Assert.Contains("never use `cd`, chaining, substitution, redirection, or unquoted parentheses", content, StringComparison.Ordinal);
+        Assert.Contains("gh pr view` without a selector", content, StringComparison.Ordinal);
         Assert.Contains("End-of-implementation self-check", content, StringComparison.Ordinal);
         Assert.Contains("Confirm final HEAD is pushed", content, StringComparison.Ordinal);
         Assert.Contains("Re-read the stored PR body against the final commit", content, StringComparison.Ordinal);
