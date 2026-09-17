@@ -118,6 +118,11 @@ public static class DaemonHost
         // second settings load — the same daemonSettings already loaded for the concurrency caps above.
         builder.Services.AddSingleton(daemonSettings);
 
+        // #2324: one deep room-observation module shared by the independent hosted loops. The loops
+        // keep their own cadence and business failures; only discovery and unchanged-room projection
+        // are coalesced behind this seam.
+        builder.Services.AddSingleton(_ => new DaemonRoomInventory());
+
         // #1025: room retention sweep (journal compaction)
         builder.Services.AddHostedService<RoomRetentionSweep>();
 
@@ -128,7 +133,8 @@ public static class DaemonHost
         builder.Services.AddHostedService<MemoryProjectionSweep>();
         // #1557: writes BatonPaths.FleetProjectionFile every ~30s -- spec/baton.md §7's fourth kept
         // daemon responsibility, outbound-only (no listener added).
-        builder.Services.AddHostedService<FleetProjectionWriter>();
+        builder.Services.AddHostedService(
+            services => new FleetProjectionWriter(services.GetRequiredService<DaemonRoomInventory>()));
 
         // #2072: the dead-pump liveness probe -- the only kept surface that appends a TERMINAL fact
         // into a room's own journal. Registered after FleetProjectionWriter so the projection it makes
@@ -137,18 +143,21 @@ public static class DaemonHost
 
         // #1391: per-vendor /usage harvester -- cadence-gated, outbound-only, persists to
         // BatonPaths.VendorUsageSnapshotFile for FleetProjectionWriter/FleetStatusTool to read back.
-        builder.Services.AddHostedService<VendorUsageHarvester>();
+        builder.Services.AddHostedService(
+            services => new VendorUsageHarvester(services.GetRequiredService<DaemonRoomInventory>()));
 
         // #734: gh-backed delivery poll (branch/PR -> checks -> merged), spec/baton.md §7's fifth
         // kept daemon responsibility, outbound-only (reads GitHub via gh, writes flow.jsonl, never
         // acts on what it observes).
-        builder.Services.AddHostedService<DeliveryPoller>();
+        builder.Services.AddHostedService(
+            services => new DeliveryPoller(services.GetRequiredService<DaemonRoomInventory>()));
 
         // #1934 slice 1: the conductor queue's scheduler -- the only thing that launches a queued item,
         // hosted here beside the usage harvester and the projection writer (Q1 answer (b)). Reads
         // settings.json's `Queue` block on every tick rather than the daemonSettings captured above, so
         // a policy change (a floor, the cap, the tier table) takes effect without a daemon restart.
-        builder.Services.AddHostedService<QueueSchedulerService>();
+        builder.Services.AddHostedService(
+            services => new QueueSchedulerService(services.GetRequiredService<DaemonRoomInventory>()));
 
         // #1946: GlassHttpService's own doc comment carries what it serves and under which ruling.
         // Registered AFTER FleetProjectionWriter above so the file it serves is being produced by

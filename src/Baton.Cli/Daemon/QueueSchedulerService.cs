@@ -54,12 +54,24 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
     private readonly QueueFleetEventOutbox _fleetOutbox;
     private readonly DaemonLoopDriver _loopDriver;
+    private readonly DaemonRoomInventory _roomInventory;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
 
     public QueueSchedulerService()
         : this(null, null, null, null, appendFleetEvent: AppendOperationalFleetEventAsync)
+    {
+    }
+
+    internal QueueSchedulerService(DaemonRoomInventory roomInventory)
+        : this(
+            null,
+            null,
+            null,
+            null,
+            appendFleetEvent: AppendOperationalFleetEventAsync,
+            roomInventory: roomInventory)
     {
     }
 
@@ -80,8 +92,10 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
         Func<string, CancellationToken, Task<string?>>? workspaceHead = null,
         Func<string, IReadOnlyList<string>>? workspaceLocks = null,
-        DaemonLoopDriver? loopDriver = null)
+        DaemonLoopDriver? loopDriver = null,
+        DaemonRoomInventory? roomInventory = null)
     {
+        _roomInventory = roomInventory ?? new DaemonRoomInventory();
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
         _liveWeight = liveWeight ?? CountLiveWeightAsync;
@@ -1621,29 +1635,30 @@ public sealed class QueueSchedulerService : BackgroundService
     }
 
     /// <summary>
-    /// The live tally, over the SAME room scan <c>fleet_status</c> and
-    /// <see cref="FleetProjectionWriter"/> already walk (a second scan on this service's own tick, so
-    /// the three background services stay decoupled — <see cref="VendorUsageHarvester"/>'s own remarks
-    /// state that trade). <see cref="QueueWeights.For"/> is the one weight function, called here over
-    /// running rooms and in <see cref="QueueScheduler"/> over the candidate.
+    /// The live tally comes from the daemon's shared <see cref="DaemonRoomInventory"/>, but requires a
+    /// current snapshot because stale admission evidence could exceed the configured fleet ceiling.
+    /// <see cref="QueueWeights.For"/> is the one weight function, called here over running rooms and in
+    /// <see cref="QueueScheduler"/> over the candidate.
     /// </summary>
-    private static async Task<double> CountLiveWeightAsync(CancellationToken cancellationToken)
+    private async Task<double> CountLiveWeightAsync(CancellationToken cancellationToken)
     {
         var total = 0.0;
-        IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered;
+        IReadOnlyList<DaemonRoomObservation> observations;
         using (DaemonLoopDriver.EnterPhase("room-discovery"))
         {
-            discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+            // Protected invariant: queue admission never uses a stale live-lane tally. If the shared
+            // inventory refresh fails, this tick fails closed instead of authorizing excess work.
+            observations = await _roomInventory
+                .ObserveAsync(
+                    DaemonRoomInventory.InventoryScope.Active,
+                    DaemonRoomInventory.InventoryFreshness.Current,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
-        foreach (var room in discovered)
+        foreach (var observation in observations)
         {
-            FleetRoomStatusView? view;
-            using (DaemonLoopDriver.EnterPhase("room-scan"))
-            {
-                view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: false, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            if (view is null || view.State != "Running")
+            var view = observation.View;
+            if (view.State != "Running")
             {
                 continue;
             }
