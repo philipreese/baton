@@ -2591,6 +2591,223 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Explicit_merged_pr_retirement_retires_a_roomless_failed_lifecycle_and_releases_wip()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-2381";
+            const int pullRequest = 2380;
+            var item = ExplicitRetirementItem(home, tag);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+            Assert.True(QueueScheduler.IsActiveLifecycle(item));
+
+            var gh = new ExplicitRetirementGh(MergedPullRequestJson(pullRequest));
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "superseded by merged PR", MergedPullRequest: pullRequest),
+                output,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(repository),
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+
+            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            var retired = Assert.Single(snapshot.Items);
+            Assert.Equal(QueueItemState.Failed, retired.State);
+            Assert.Null(retired.RoomDirectory);
+            Assert.Equal(pullRequest, retired.PullRequest);
+            Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
+            Assert.Equal("superseded by merged PR", retired.Retirement?.Reason);
+            Assert.False(QueueScheduler.IsActiveLifecycle(retired));
+            var observation = Assert.Single(snapshot.PullRequestObservations!);
+            Assert.Equal("github.com/example/repo", observation.Repository);
+            Assert.Equal(pullRequest, observation.PullRequest);
+            Assert.Equal(PullRequestObservationStates.Merged, observation.State);
+            Assert.Equal("head-sha", observation.HeadSha);
+            Assert.Equal("merged: PR #2380", Assert.Single(retired.DispositionOutbox).Reason);
+            Assert.Contains("merged PR #2380", output.ToString(), StringComparison.Ordinal);
+            Assert.Single(gh.Calls);
+            Assert.Equal("github.com/example/repo", gh.Calls[0][^1]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("open")]
+    [InlineData("closed-unmerged")]
+    [InlineData("wrong-branch")]
+    [InlineData("foreign-repository")]
+    [InlineData("wrong-repository")]
+    [InlineData("lookup-failure")]
+    [InlineData("missing-identity")]
+    [InlineData("missing-repository")]
+    [InlineData("missing-branch")]
+    public async Task Explicit_merged_pr_retirement_refuses_untrusted_evidence_without_mutation(string caseName)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-refusal";
+            const int pullRequest = 2380;
+            var item = ExplicitRetirementItem(home, tag) with
+            {
+                Repository = caseName == "missing-repository" ? null : "github.com/example/repo",
+                Branch = caseName == "missing-branch" ? null : "ghost-lane",
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+
+            var state = caseName switch
+            {
+                "open" => "OPEN",
+                "closed-unmerged" => "CLOSED",
+                _ => "MERGED",
+            };
+            var headBranch = caseName == "wrong-branch" ? "other-lane" : "ghost-lane";
+            var crossRepository = caseName == "foreign-repository";
+            var gh = new ExplicitRetirementGh(
+                caseName == "lookup-failure"
+                    ? string.Empty
+                    : MergedPullRequestJson(pullRequest, state, headBranch, crossRepository),
+                exitCode: caseName == "lookup-failure" ? 1 : 0);
+            var repository = RepositoryIdentity.From(
+                caseName == "wrong-repository"
+                    ? "https://github.com/other/repo"
+                    : "https://github.com/example/repo",
+                null)!;
+            Func<string, CancellationToken, Task<RepositoryIdentity?>> resolver = caseName == "missing-identity"
+                ? (_, _) => Task.FromResult<RepositoryIdentity?>(null)
+                : (_, _) => Task.FromResult<RepositoryIdentity?>(repository);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "untrusted", MergedPullRequest: pullRequest),
+                TextWriter.Null,
+                Ct,
+                home,
+                resolver,
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+
+            Assert.Contains("not changed", refusal.Message, StringComparison.Ordinal);
+            var unchanged = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Null(unchanged.Retirement);
+            Assert.Null(unchanged.PullRequest);
+            Assert.Empty((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations ?? []);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Explicit_merged_pr_retirement_refuses_attempt_drift_at_the_queue_CAS()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-drift";
+            const int pullRequest = 2380;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [ExplicitRetirementItem(home, tag)],
+            }, Ct);
+            var gh = new ExplicitRetirementGh(
+                MergedPullRequestJson(pullRequest),
+                beforeReturn: () => QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+                {
+                    Items = state.Items.Select(item => item.Tag == tag
+                        ? item with { AttemptId = new FleetAttemptId("drifted-attempt") }
+                        : item).ToList(),
+                }, Ct));
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "drifted", MergedPullRequest: pullRequest),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(repository),
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+
+            Assert.Contains("changed while", refusal.Message, StringComparison.Ordinal);
+            var unchanged = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("drifted-attempt", unchanged.AttemptId?.Value);
+            Assert.Null(unchanged.Retirement);
+            Assert.Null(unchanged.PullRequest);
+            Assert.Empty((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations ?? []);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Explicit_merged_pr_retirement_replays_its_outbox_after_a_ledger_append_failure()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-replay";
+            const int pullRequest = 2380;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [ExplicitRetirementItem(home, tag)],
+            }, Ct);
+            var gh = new ExplicitRetirementGh(MergedPullRequestJson(pullRequest));
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            QueueDecisionLedgerStore.DispositionAppendFault = (_, operation) =>
+                operation.Decision == QueueDecisionEntry.Retired
+                    ? new IOException("planned merged retirement append failure")
+                    : null;
+
+            var failure = await Record.ExceptionAsync(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "replay this", MergedPullRequest: pullRequest),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(repository),
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+            Assert.IsType<IOException>(failure);
+            var committed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueRetirement.Merged, committed.Retirement?.Kind);
+            Assert.Single(committed.DispositionOutbox);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+
+            QueueDecisionLedgerStore.DispositionAppendFault = null;
+            var retryGh = new ExplicitRetirementGh(MergedPullRequestJson(pullRequest));
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "replay this", MergedPullRequest: pullRequest),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(repository),
+                NeverIssueProvisionAsync,
+                ghRunner: retryGh));
+            Assert.Empty(retryGh.Calls);
+            Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally
+        {
+            QueueDecisionLedgerStore.DispositionAppendFault = null;
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Restore_replays_the_retire_fact_before_committing_its_successor()
     {
         var home = CreateTempHome();
@@ -2712,6 +2929,61 @@ public sealed class QueueCommandTests
         finally
         {
             DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    private static QueueItem ExplicitRetirementItem(string home, string tag) => new()
+    {
+        Tag = tag,
+        Role = "implement",
+        Workspace = home,
+        SpecFile = BatonPaths.QueueSpecFile(tag),
+        Stage = WorkStage.Continue,
+        State = QueueItemState.Failed,
+        Repository = "github.com/example/repo",
+        Branch = "ghost-lane",
+        AttemptId = new FleetAttemptId("ghost-attempt"),
+        LaunchedAt = new DateTimeOffset(2026, 9, 17, 11, 0, 0, TimeSpan.Zero),
+        AttemptStartedFactDurable = true,
+        Error = "roomless launch evidence is incomplete",
+    };
+
+    private static string MergedPullRequestJson(
+        int number,
+        string state = "MERGED",
+        string headBranch = "ghost-lane",
+        bool crossRepository = false) =>
+        $$"""{"number":{{number}},"state":"{{state}}","isDraft":false,"headRefOid":"head-sha","headRefName":"{{headBranch}}","baseRefName":"main","isCrossRepository":{{crossRepository.ToString().ToLowerInvariant()}},"mergeCommit":null}""";
+
+    private static Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> NeverIssueProvisionAsync(
+        int issue,
+        string sourceRepository,
+        string? worktreeRoot,
+        string repository,
+        bool lifecycle,
+        TextWriter output,
+        CancellationToken cancellationToken) =>
+        Task.FromException<IssueWorktreeProvisioner.ProvisionedIssueWorktree>(
+            new InvalidOperationException("the issue provisioner should not run for retirement"));
+
+    private sealed class ExplicitRetirementGh(
+        string stdout,
+        int exitCode = 0,
+        bool started = true,
+        Func<Task>? beforeReturn = null) : IGhCliRunner
+    {
+        public List<string[]> Calls { get; } = [];
+
+        public async Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            Calls.Add(args.ToArray());
+            if (beforeReturn is not null)
+            {
+                await beforeReturn().ConfigureAwait(false);
+            }
+
+            return new GhCliResult(started, exitCode, stdout, exitCode == 0 ? string.Empty : "lookup failed");
         }
     }
 

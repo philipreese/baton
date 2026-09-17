@@ -20,7 +20,7 @@ public static class QueueOptionsParser
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
-        "baton queue list [--active] | baton queue worktrees [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire|restore <tag> --reason <text> | baton queue import <file>. " +
+        "baton queue list [--active] | baton queue worktrees [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -118,7 +118,7 @@ public static class QueueOptionsParser
 
     private static QueueOptions ParseRetirement(QueueVerb verb, IReadOnlyList<string> args)
     {
-        if (args.Count != 4 || args[2] != "--reason" || string.IsNullOrWhiteSpace(args[3]))
+        if (args.Count < 4)
         {
             throw new CliArgumentException($"'baton queue {args[0]}' takes a tag and nonblank '--reason <text>'. {Usage}");
         }
@@ -126,7 +126,43 @@ public static class QueueOptionsParser
         {
             throw new CliArgumentException($"'{args[1]}' is not a usable queue tag ({QueueTag.Rule}).");
         }
-        return new QueueOptions(verb, Tag: args[1], Reason: args[3].Trim());
+
+        string? reason = null;
+        int? mergedPullRequest = null;
+        var i = 2;
+        while (i < args.Count)
+        {
+            switch (args[i])
+            {
+                case "--reason":
+                    reason = TakeValue(args, ref i, "--reason");
+                    break;
+                case "--merged-pr":
+                    if (verb != QueueVerb.Retire)
+                    {
+                        throw new CliArgumentException("'--merged-pr' applies only to 'baton queue retire'. " + Usage);
+                    }
+
+                    mergedPullRequest = TakeInt(args, ref i, "--merged-pr");
+                    break;
+                default:
+                    throw new CliArgumentException(
+                        $"Unexpected queue {args[0]} argument '{args[i]}'. {Usage}");
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new CliArgumentException($"'baton queue {args[0]}' takes a tag and nonblank '--reason <text>'. {Usage}");
+        }
+
+        if (mergedPullRequest is <= 0)
+        {
+            throw new CliArgumentException("'--merged-pr' must be a positive pull-request number. " + Usage);
+        }
+
+        return new QueueOptions(
+            verb, Tag: args[1], Reason: reason.Trim(), MergedPullRequest: mergedPullRequest);
     }
 
     private static QueueOptions ParseAdd(IReadOnlyList<string> args)

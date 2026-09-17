@@ -51,6 +51,7 @@ public enum QueueWorktreesOutputFormat
 /// <param name="TokenBudget">Forwarded as <c>baton dispatch --token-budget</c>.</param>
 /// <param name="OverrideRunwayReason">Forwarded as <c>baton dispatch --override-runway</c>; the reason is mandatory when the flag is used.</param>
 /// <param name="Reason">Why the item's axes differ from its tier. Mandatory when any of adapter/model/effort is set alongside a scope class.</param>
+/// <param name="MergedPullRequest">The explicitly supplied merged PR used as retirement evidence, for <c>queue retire</c>.</param>
 /// <param name="Skills">Normalized explicit skill package names forwarded as repeatable <c>baton dispatch --skill</c> arguments.</param>
 /// <param name="ImportFilePath">The scratchpad <c>queue.json</c> to import, for <see cref="QueueVerb.Import"/>.</param>
 /// <param name="Lifecycle">
@@ -94,4 +95,5 @@ public sealed record QueueOptions(
     IReadOnlyList<string>? Requirements = null,
     bool Active = false,
     TaskSizeDeclaration? DeclaredTaskSize = null,
-    QueueWorktreesOutputFormat Format = QueueWorktreesOutputFormat.Text);
+    QueueWorktreesOutputFormat Format = QueueWorktreesOutputFormat.Text,
+    int? MergedPullRequest = null);
