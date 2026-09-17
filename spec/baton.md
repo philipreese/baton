@@ -7206,6 +7206,18 @@ snapshot rebind cannot interleave between proof and disposition. Any missing, ma
 ordinary terminal without a dead-pump marker, or nonterminal account refuses retirement. The command
 writes no sentinel or room evidence; it only records the queue disposition after bounded reproof.
 
+An operator may explicitly retire a lifecycle whose attempt has no trusted terminal proof with
+`queue retire <tag> --reason <text> --merged-pr <n>`. This is an evidence-bearing exception, not PR
+discovery: the command must find the row's recorded canonical repository and branch, read the supplied
+PR from that repository, and require a positive merged state with no lookup error, an exact head branch,
+and same-repository evidence. The row must still be a lifecycle item that is neither retired nor
+launched and has no readiness mutation claim; its attempt identity and the recorded repository,
+branch, workspace, and PR fields are compared again under the queue mutation lock. Missing identity,
+foreign repository, branch mismatch, open or closed-unmerged PR, lookup failure, or mutation-time drift
+refuses without changing the row. On success the supplied PR number and repository-qualified merged
+observation are retained on the queue row, and the disposition uses the existing `merged` kind and
+`merged: PR #<n>` outbox/ledger evidence while the operator's reason remains visible in Fleet Glass.
+
 ### Where it lives
 
 - **`~/.baton/queue/queue.json`** — the items, in operator order, and the `held` flag. Two writers
@@ -7230,8 +7242,9 @@ writes no sentinel or room evidence; it only records the queue disposition after
 
 `baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
 engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeout <minutes>] [--max-tool-steps]
-[--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`, and
-`import <file>`, and `worktrees [--format text|json]`.
+[--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`,
+`retire <tag> --reason <text> [--merged-pr <n>]`, `restore <tag> --reason <text>`, `import <file>`, and
+`worktrees [--format text|json]`.
 
 **Explicit retained issue worktree reuse (#2333).** `queue add --issue <n> --workspace <dir>
 --lifecycle` is the only retained-checkout form: `--issue` supplies the issue, rendered lifecycle

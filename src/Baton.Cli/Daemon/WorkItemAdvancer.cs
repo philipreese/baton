@@ -1143,6 +1143,50 @@ public sealed class WorkItemAdvancer
         return after with { RequiredChecks = required };
     }
 
+    /// <summary>
+    /// Reads one operator-supplied PR through the same repository-qualified forge seam as lifecycle
+    /// reconciliation. No queue or fleet state is changed here; the caller owns the retirement CAS.
+    /// </summary>
+    internal async Task<(QueuePullRequestObservation? Observation, string? Error)>
+        ReadMergedPullRequestObservationAsync(
+            QueueItem item,
+            int pullRequest,
+            DateTimeOffset observedAt,
+            CancellationToken cancellationToken)
+    {
+        if (item.Branch is not { Length: > 0 })
+        {
+            return (null, "the lifecycle item has no recorded branch");
+        }
+
+        if (item.Repository is not { Length: > 0 })
+        {
+            return (null, "the lifecycle item has no trusted repository identity");
+        }
+
+        if (!Directory.Exists(item.Workspace))
+        {
+            return (null, $"workspace '{item.Workspace}' is unavailable");
+        }
+
+        var reading = await ReadPullRequestSnapshotAsync(
+            item with { PullRequest = pullRequest }, cancellationToken).ConfigureAwait(false);
+        if (!reading.Succeeded)
+        {
+            return (null, reading.Error ?? $"GitHub PR lookup for #{pullRequest} failed");
+        }
+
+        if (reading.Number != pullRequest
+            || !string.Equals(reading.State, "MERGED", StringComparison.Ordinal))
+        {
+            return (null, $"PR #{pullRequest} did not report a positive merged state");
+        }
+
+        return (new QueuePullRequestObservation(
+            item.Repository, pullRequest, PullRequestObservationStates.Merged,
+            reading.HeadSha, observedAt, observedAt, Error: null), null);
+    }
+
     private async Task<PullRequestObservation> ReadPullRequestSnapshotAsync(
         QueueItem item, CancellationToken cancellationToken)
     {
@@ -1260,8 +1304,8 @@ public sealed class WorkItemAdvancer
             return false;
         }
 
-        var state = Text(root, "state");
-        var isOpen = state?.ToUpperInvariant() switch
+        var state = Text(root, "state")?.ToUpperInvariant();
+        var isOpen = state switch
         {
             "OPEN" => true,
             "CLOSED" or "MERGED" => false,
@@ -1301,7 +1345,7 @@ public sealed class WorkItemAdvancer
         var checks = PullRequestChecks.Summarize(statusCheckRollup);
         var checkRuns = PullRequestChecks.ObserveRuns(statusCheckRollup);
         observation = new PullRequestObservation(
-            true, number, headSha, mergeSha, isOpen, isDraft, checks, checkRuns, null, null);
+            true, number, headSha, mergeSha, state, isOpen, isDraft, checks, checkRuns, null, null);
         return true;
     }
 
@@ -1451,6 +1495,7 @@ public sealed class WorkItemAdvancer
         int? Number,
         string? HeadSha,
         string? MergeSha,
+        string? State,
         bool? IsOpen,
         bool? IsDraft,
         string? Checks,
@@ -1459,11 +1504,11 @@ public sealed class WorkItemAdvancer
         string? Error)
     {
         internal static PullRequestObservation NoPullRequest { get; } =
-            new(true, null, null, null, false, null, null, [], null, null);
+            new(true, null, null, null, null, false, null, null, [], null, null);
 
         internal static PullRequestObservation Failed(
             string error, PullRequestObservation? last = null) =>
-            new(false, last?.Number, last?.HeadSha, last?.MergeSha, last?.IsOpen, last?.IsDraft,
+            new(false, last?.Number, last?.HeadSha, last?.MergeSha, last?.State, last?.IsOpen, last?.IsDraft,
                 last?.Checks, last?.CheckRuns ?? [], null, error);
     }
 

@@ -355,6 +355,20 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
+    public void Retire_accepts_an_explicit_merged_pr_but_restore_does_not()
+    {
+        var options = QueueOptionsParser.Parse([
+            "retire", "2381-lane", "--reason", "superseded by merged PR", "--merged-pr", "2380"]);
+
+        Assert.Equal(2380, options.MergedPullRequest);
+        Assert.Contains("--merged-pr <n>", QueueOptionsParser.Usage, StringComparison.Ordinal);
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "restore", "2381-lane", "--reason", "resume", "--merged-pr", "2380"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "retire", "2381-lane", "--reason", "superseded", "--merged-pr", "0"]));
+    }
+
+    [Fact]
     public void Import_takes_exactly_one_path()
     {
         Assert.Equal("q.json", QueueOptionsParser.Parse(["import", "q.json"]).ImportFilePath);

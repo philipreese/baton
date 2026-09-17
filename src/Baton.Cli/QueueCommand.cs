@@ -57,7 +57,8 @@ public static class QueueCommand
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
-        Action<string, string>? writeSpecFile = null)
+        Action<string, string>? writeSpecFile = null,
+        IGhCliRunner? ghRunner = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -73,7 +74,9 @@ public static class QueueCommand
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
             QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
-            QueueVerb.Retire => RetireAsync(options.Tag!, options.Reason!, output, cancellationToken),
+            QueueVerb.Retire => RetireAsync(
+                options.Tag!, options.Reason!, options.MergedPullRequest, output, cancellationToken,
+                repositoryResolver, ghRunner ?? new GhCliRunner()),
             QueueVerb.Restore => RestoreAsync(options.Tag!, options.Reason!, output, cancellationToken),
             QueueVerb.Import => ImportAsync(options, output, cancellationToken),
             _ => throw new ArgumentOutOfRangeException(nameof(options)),
@@ -710,7 +713,21 @@ public static class QueueCommand
         }
     }
 
-    private static async Task<int> RetireAsync(string tag, string reason, TextWriter output, CancellationToken cancellationToken)
+    private static Task<int> RetireAsync(
+        string tag,
+        string reason,
+        int? mergedPullRequest,
+        TextWriter output,
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
+        IGhCliRunner ghRunner) =>
+        mergedPullRequest is { } pullRequest
+            ? RetireFromMergedPullRequestAsync(
+                tag, reason, pullRequest, output, cancellationToken, repositoryResolver, ghRunner)
+            : RetireOperatorAsync(tag, reason, output, cancellationToken);
+
+    private static async Task<int> RetireOperatorAsync(
+        string tag, string reason, TextWriter output, CancellationToken cancellationToken)
     {
         var before = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var observed = before.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
@@ -828,6 +845,160 @@ public static class QueueCommand
         output.WriteLine($"Retired lifecycle item '{tag}' as operator-handled. Its evidence was retained.");
         return 0;
     }
+
+    private static async Task<int> RetireFromMergedPullRequestAsync(
+        string tag,
+        string reason,
+        int pullRequest,
+        TextWriter output,
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
+        IGhCliRunner ghRunner)
+    {
+        var before = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var observed = before.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+        if (observed is null)
+        {
+            throw new CliArgumentException($"Queue item '{tag}' does not exist.");
+        }
+
+        const string mergedDispositionPrefix = "merged: PR #";
+        if (observed.Retirement is not null)
+        {
+            // A queue CAS may have committed the merged disposition immediately before its ledger
+            // append failed. Replay the retained operation before deciding whether this invocation is
+            // the same request, so a retry is idempotent and cannot create a second disposition.
+            await ReconcileDispositionOutboxAsync(observed, cancellationToken).ConfigureAwait(false);
+            if (observed.Retirement.Kind == QueueRetirement.Merged
+                && observed.PullRequest == pullRequest
+                && string.Equals(observed.Retirement.Reason, reason, StringComparison.Ordinal)
+                && observed.DispositionOutbox.LastOrDefault() is
+                {
+                    Decision: QueueDecisionEntry.Retired,
+                    Reason: var committedReason,
+                }
+                && string.Equals(committedReason, $"{mergedDispositionPrefix}{pullRequest}", StringComparison.Ordinal))
+            {
+                await QueueDecisionLedgerStore.AppendDispositionAsync(
+                    tag,
+                    observed.DispositionOutbox.Last(),
+                    BatonPaths.QueueDecisionLedgerFile,
+                    cancellationToken).ConfigureAwait(false);
+                output.WriteLine($"Retired lifecycle item '{tag}' as merged PR #{pullRequest}; its evidence was retained.");
+                return 0;
+            }
+
+            throw new CliArgumentException($"Queue item '{tag}' is already retired as '{observed.Retirement.Kind}'.");
+        }
+
+        if (observed.Stage is null)
+        {
+            throw new CliArgumentException($"Queue item '{tag}' is ordinary queued work; use 'baton queue cancel {tag}'.");
+        }
+
+        if (observed.ReadinessMutationClaim is not null || observed.State == QueueItemState.Launched)
+        {
+            throw new CliArgumentException($"Queue item '{tag}' is live or has an in-flight readiness mutation and cannot be retired with explicit merged-PR evidence.");
+        }
+
+        if (observed.Repository is not { Length: > 0 } || observed.Branch is not { Length: > 0 })
+        {
+            throw new CliArgumentException(
+                $"Queue item '{tag}' has no recorded repository and branch identity for explicit merged-PR retirement; the queue row was not changed.");
+        }
+
+        var currentRepository = await repositoryResolver(observed.Workspace, cancellationToken).ConfigureAwait(false);
+        if (currentRepository?.RemoteValue is not { Length: > 0 } resolvedRepository)
+        {
+            throw new CliArgumentException(
+                $"Queue item '{tag}' has no resolvable repository identity for explicit merged-PR retirement; the queue row was not changed.");
+        }
+
+        if (!string.Equals(resolvedRepository, observed.Repository, StringComparison.Ordinal))
+        {
+            throw new CliArgumentException(
+                $"Queue item '{tag}' repository identity '{resolvedRepository}' does not match recorded '{observed.Repository}'; the queue row was not changed.");
+        }
+
+        var observedAt = DateTimeOffset.UtcNow;
+        var reader = new WorkItemAdvancer(ghRunner, null, repositoryResolver);
+        var lookup = await reader.ReadMergedPullRequestObservationAsync(
+            observed, pullRequest, observedAt, cancellationToken).ConfigureAwait(false);
+        if (lookup.Observation is not { } trustedObservation)
+        {
+            throw new CliArgumentException(
+                $"Queue item '{tag}' could not verify merged PR #{pullRequest}: {lookup.Error ?? "the lookup returned no trusted evidence"}. The queue row was not changed.");
+        }
+
+        // A prior disposition must be acknowledged before this successor can be committed, just as
+        // ordinary retirement fences the ordered outbox before its own CAS.
+        await ReconcileDispositionOutboxAsync(observed, cancellationToken).ConfigureAwait(false);
+        var at = DateTimeOffset.UtcNow;
+        var operation = new QueueDispositionOperation(
+            Guid.NewGuid().ToString("N"), at, QueueDecisionEntry.Retired, $"{mergedDispositionPrefix}{pullRequest}");
+        var eligible = false;
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+            if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
+                || current.State == QueueItemState.Launched
+                || !SameMergedRetirementAttempt(observed, current))
+            {
+                return snapshot;
+            }
+
+            eligible = true;
+            var observations = (snapshot.PullRequestObservations ?? [])
+                .Where(observation =>
+                    !string.Equals(observation.Repository, trustedObservation.Repository, StringComparison.Ordinal)
+                    || observation.PullRequest != trustedObservation.PullRequest)
+                .Append(trustedObservation)
+                .OrderBy(observation => observation.Repository, StringComparer.Ordinal)
+                .ThenBy(observation => observation.PullRequest)
+                .ToList();
+            return snapshot with
+            {
+                Items = snapshot.Items.Select(item => string.Equals(item.Tag, tag, StringComparison.Ordinal)
+                    ? item with
+                    {
+                        PullRequest = pullRequest,
+                        Retirement = new QueueRetirement(QueueRetirement.Merged, at, reason),
+                        DispositionOperations = AppendDisposition(item, operation),
+                    }
+                    : item).ToList(),
+                PullRequestObservations = observations,
+            };
+        }, cancellationToken).ConfigureAwait(false);
+
+        if (!eligible)
+        {
+            throw new CliArgumentException(
+                $"Queue item '{tag}' changed while merged PR #{pullRequest} was being verified; retry after checking its current state.");
+        }
+
+        await QueueDecisionLedgerStore.AppendDispositionAsync(
+            tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+        output.WriteLine($"Retired lifecycle item '{tag}' as merged PR #{pullRequest}; its evidence was retained.");
+        return 0;
+    }
+
+    private static bool SameMergedRetirementAttempt(QueueItem observed, QueueItem current) =>
+        SameRetirementAttempt(observed, current)
+        && string.Equals(current.Workspace, observed.Workspace, StringComparison.Ordinal)
+        && string.Equals(current.Repository, observed.Repository, StringComparison.Ordinal)
+        && string.Equals(current.Branch, observed.Branch, StringComparison.Ordinal)
+        && current.PullRequest == observed.PullRequest
+        && current.AttemptBaseRevision == observed.AttemptBaseRevision
+        && Equals(current.AttemptEnvelope, observed.AttemptEnvelope)
+        && current.LaunchMayHaveBegunAt == observed.LaunchMayHaveBegunAt
+        && current.AttemptAdmissionFactDurable == observed.AttemptAdmissionFactDurable
+        && current.AttemptStartedFactDurable == observed.AttemptStartedFactDurable
+        && current.AttemptRefusedFactDurable == observed.AttemptRefusedFactDurable
+        && current.AttemptSettledFactDurable == observed.AttemptSettledFactDurable
+        && current.LaunchRecoveryKind == observed.LaunchRecoveryKind
+        && current.Halted == observed.Halted
+        && current.ReconciliationKind == observed.ReconciliationKind;
 
     /// <summary>
     /// Protected invariant: a historical roomless next stage may leave WIP only when its exact
