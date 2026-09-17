@@ -9,6 +9,27 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.51.3](https://github.com/philipreese/baton/compare/v0.51.2...v0.51.3) (2026-09-17)
+
+
+### Bug Fixes
+
+* **flow:** Do not pass delivery when a changed branch lane leaves HEAD unchanged ([#2371](https://github.com/philipreese/baton/issues/2371)) ([a5f039d](https://github.com/philipreese/baton/commit/a5f039d743e6a7d7631c9bdac8ea01954960cabd))
+* **queue:** Make attempt facts crash-safe before DAG replay ([#2375](https://github.com/philipreese/baton/issues/2375)) ([b76befc](https://github.com/philipreese/baton/commit/b76befcc53046e8d97962c70898f6121971459d0))
+* **queue:** Reject contradictory attempt base revisions ([#2377](https://github.com/philipreese/baton/issues/2377)) ([4cc26a5](https://github.com/philipreese/baton/commit/4cc26a564dfabd759fbf2c9f36cbe9bf30b96ead))
+* **vendors:** Match PR-create instruction to broker ([#2372](https://github.com/philipreese/baton/issues/2372)) ([31a3e25](https://github.com/philipreese/baton/commit/31a3e252178aba82a2c2eb5fd9d1b438aefd25b0))
+
+
+### Performance Improvements
+
+* **daemon:** attribute late loop phases ([#2374](https://github.com/philipreese/baton/issues/2374)) ([c743799](https://github.com/philipreese/baton/commit/c74379991219f16e731a3adecb24badd50727895))
+* **daemon:** share room inventory across loops ([#2378](https://github.com/philipreese/baton/issues/2378)) ([8d1c149](https://github.com/philipreese/baton/commit/8d1c14983eaefddf58d2ff894b6bd941ca0a58c9))
+
+
+### Documentation
+
+* **agents:** Add conductor operating contract ([#2380](https://github.com/philipreese/baton/issues/2380)) ([fa6aab1](https://github.com/philipreese/baton/commit/fa6aab1e9667171c206c66288dc67015d992fc96))
+
 ## [0.51.2](https://github.com/philipreese/baton/compare/v0.51.1...v0.51.2) (2026-09-17)
 
 
