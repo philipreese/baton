@@ -1,15 +1,22 @@
 namespace Baton.Memory;
 
 /// <summary>
-/// One place a projection is written: a vendor memory root that already exists, plus the single file
-/// inside it that Baton owns (#1852 phase C).
+/// One place a projection is written: a vendor memory root that already exists, plus the legacy cache,
+/// vendor index, and Baton-owned detail files inside it (#1852/#2139).
 /// </summary>
 /// <param name="Vendor">Which vendor's root this is (<c>claude</c>, <c>codex</c>) — the same vocabulary <see cref="MemoryEntry.SourceVendor"/> uses.</param>
 /// <param name="Scope">Whether the root is the vendor's own or Baton-managed, as phase A2 classifies it.</param>
 /// <param name="RootDirectoryPath">The memory root the file goes in. Discovered, never constructed; see the target types' remarks.</param>
-/// <param name="FilePath">The one file this target's projection is written to.</param>
+/// <param name="FilePath">The compatibility cache file this target's projection is written to.</param>
 public sealed record ProjectionTarget(
-    string Vendor, VendorMemoryScope Scope, string RootDirectoryPath, string FilePath);
+    string Vendor, VendorMemoryScope Scope, string RootDirectoryPath, string FilePath)
+{
+    /// <summary>The vendor index file whose Baton section is updated.</summary>
+    public string IndexFilePath => Path.Combine(RootDirectoryPath, ClaudeProjectionTarget.IndexFileName);
+
+    /// <summary>The directory alongside the index where each Baton detail is written.</summary>
+    public string DetailDirectoryPath => RootDirectoryPath;
+}
 
 /// <summary>
 /// The Claude memory roots a projection is written into — <c>{claude-home}/projects/&lt;encoded-path&gt;/memory/</c>,
@@ -27,17 +34,19 @@ public sealed record ProjectionTarget(
 /// constructing one — is spec/baton.md §12's ruling.
 /// </para>
 /// <para>
-/// <b>One file, owned outright, and not the vendor's index.</b> Baton writes exactly
-/// <see cref="ProjectionFileName"/> and overwrites it in full; it does not touch <c>MEMORY.md</c> or
-/// any other file in the root. What follows from that, said outright rather than left to be worked
-/// out: Claude Code surfaces memories it has indexed, so a projection Baton did not add to the
-/// vendor's own index may not be read by the vendor until something points at it. Editing the
-/// vendor's index would make the projection reachable and would also make this verb destructive to a
-/// file the operator owns, which is the trade #1852 settles in the other direction throughout.
+/// <b>The legacy cache remains compatibility-owned, while the actual index is marker-bounded.</b>
+/// Baton continues to write exactly <see cref="ProjectionFileName"/> for callers that already consume
+/// that cache. #2139 additionally updates <see cref="IndexFileName"/> only between
+/// <see cref="MemoryProjection.IndexStartMarker"/> and <see cref="MemoryProjection.IndexEndMarker"/>
+/// and writes explicitly Baton-named details beside it. Bytes outside those markers remain vendor
+/// owned and untouched; an existing index without a valid marker pair is refused.
 /// </para>
 /// </remarks>
 public static class ClaudeProjectionTarget
 {
+    /// <summary>The vendor-equivalent memory index whose Baton section is vendor-loaded.</summary>
+    public const string IndexFileName = "MEMORY.md";
+
     /// <summary>
     /// The one file Baton writes in a Claude memory root. Prefixed <c>baton-</c> so it cannot collide
     /// with a memory the vendor or the operator wrote, and suffixed <c>.md</c> because the root's other
@@ -81,6 +90,9 @@ public static class ClaudeProjectionTarget
 /// </remarks>
 public static class CodexProjectionTarget
 {
+    /// <summary>The markdown memory index whose Baton section is vendor-loaded.</summary>
+    public const string IndexFileName = ClaudeProjectionTarget.IndexFileName;
+
     /// <summary>The one file Baton writes in a Codex markdown root, for the reason <see cref="ClaudeProjectionTarget.ProjectionFileName"/> gives.</summary>
     public const string ProjectionFileName = ClaudeProjectionTarget.ProjectionFileName;
 

@@ -38,6 +38,21 @@ public enum MemoryFactOrigin
 public sealed record MemoryProjectionCandidate(MemoryEntry Entry, MemoryFactOrigin Origin);
 
 /// <summary>
+/// One Baton-owned detail document emitted beside the vendor's memory index.
+/// </summary>
+/// <param name="EntryId">The resolved entry represented by the detail.</param>
+/// <param name="RelativePath">The file name the index links to, relative to the vendor root.</param>
+/// <param name="Title">The stable, one-line title shown in the index.</param>
+/// <param name="Description">The stable, one-line description shown in the index.</param>
+/// <param name="Bytes">The complete UTF-8 detail document.</param>
+public sealed record MemoryProjectionDetail(
+    string EntryId,
+    string RelativePath,
+    string Title,
+    string Description,
+    byte[] Bytes);
+
+/// <summary>
 /// One entry that is accounted for in the report and <b>not</b> in the projected bytes, and why.
 /// </summary>
 /// <remarks>
@@ -85,7 +100,14 @@ public sealed record MemoryProjectionResult(
     IReadOnlyList<string> ProjectedEntryIds,
     IReadOnlyList<ProjectionOmission> Superseded,
     IReadOnlyList<ProjectionOmission> Overridden,
-    IReadOnlyList<ProjectionOmission> Dropped);
+    IReadOnlyList<ProjectionOmission> Dropped)
+{
+    /// <summary>The complete Baton-owned section to splice into a vendor index.</summary>
+    public byte[] IndexBytes { get; init; } = [];
+
+    /// <summary>Every detail file linked by <see cref="IndexBytes"/>, in index order.</summary>
+    public IReadOnlyList<MemoryProjectionDetail> DetailFiles { get; init; } = [];
+}
 
 /// <summary>
 /// Renders one repository's canonical memory into the bytes a vendor's memory root receives (#1852
@@ -166,6 +188,21 @@ public static class MemoryProjection
     /// <summary>Format marker on the first line of every projected file, so a reader (or a later Baton) can tell what it is holding.</summary>
     public const string FormatMarker = "<!-- baton:projection v1 -->";
 
+    /// <summary>The exact opening marker for the section Baton owns in a vendor index.</summary>
+    public const string IndexStartMarker = "<!-- baton:memory-index:start -->";
+
+    /// <summary>The exact closing marker for the section Baton owns in a vendor index.</summary>
+    public const string IndexEndMarker = "<!-- baton:memory-index:end -->";
+
+    /// <summary>The first-line marker on every per-entry detail document.</summary>
+    public const string DetailFormatMarker = "<!-- baton:memory-detail v1 -->";
+
+    /// <summary>The reserved prefix for Baton-owned per-entry detail file names.</summary>
+    public const string DetailFilePrefix = "baton-memory-detail-";
+
+    /// <summary>The suffix for Baton-owned per-entry detail file names.</summary>
+    public const string DetailFileSuffix = ".md";
+
     /// <summary>
     /// Whether <paramref name="text"/> is a file this projector wrote — the first line is
     /// <see cref="FormatMarker"/>.
@@ -190,7 +227,95 @@ public static class MemoryProjection
     /// </para>
     /// </remarks>
     public static bool IsProjectedFile(string? text) =>
+        text is not null &&
+        (text.StartsWith(FormatMarker, StringComparison.Ordinal)
+         || text.StartsWith(DetailFormatMarker, StringComparison.Ordinal)
+         || text.Contains(IndexStartMarker, StringComparison.Ordinal)
+         || text.Contains(IndexEndMarker, StringComparison.Ordinal));
+
+    /// <summary>
+    /// Whether <paramref name="text"/> is the legacy full-file cache written before the vendor index
+    /// migration. It remains separate from <see cref="IsProjectedFile"/> so import compatibility can
+    /// account for a migrated projection set without reporting every member as a new cache.
+    /// </summary>
+    public static bool IsLegacyProjectedFile(string? text) =>
         text is not null && text.StartsWith(FormatMarker, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Returns the deterministic, collision-resistant detail file name for an entry id.
+    /// </summary>
+    public static string DetailFileNameFor(string entryId)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(entryId);
+
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(entryId))).ToLowerInvariant();
+        return DetailFilePrefix + digest + DetailFileSuffix;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="fileName"/> is one of the explicitly Baton-owned detail names.
+    /// </summary>
+    public static bool IsOwnedDetailFileName(string fileName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(fileName);
+
+        if (!fileName.StartsWith(DetailFilePrefix, StringComparison.OrdinalIgnoreCase)
+            || !fileName.EndsWith(DetailFileSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (fileName.Length < DetailFilePrefix.Length + DetailFileSuffix.Length)
+        {
+            return false;
+        }
+
+        var digest = fileName[DetailFilePrefix.Length..^DetailFileSuffix.Length];
+        return digest.Length == 64 && digest.All(Uri.IsHexDigit);
+    }
+
+    /// <summary>
+    /// Replaces exactly one valid Baton-owned index section, preserving every byte outside its two
+    /// marker lines. A missing index file is represented by <see langword="null"/> and receives a new
+    /// section; an existing file without a valid pair fails closed.
+    /// </summary>
+    public static byte[] MergeIndex(byte[]? existingBytes, byte[] ownedSectionBytes)
+    {
+        ArgumentNullException.ThrowIfNull(ownedSectionBytes);
+        ValidateOwnedSection(ownedSectionBytes);
+
+        if (existingBytes is null)
+        {
+            return ownedSectionBytes.ToArray();
+        }
+
+        var markers = FindIndexMarkers(existingBytes);
+        if (markers.Start is null || markers.End is null)
+        {
+            throw new InvalidDataException(
+                "The vendor memory index has missing Baton ownership markers; refusing to rewrite it.");
+        }
+
+        if (markers.Start.Value.Start >= markers.End.Value.End)
+        {
+            throw new InvalidDataException(
+                "The vendor memory index has reordered Baton ownership markers; refusing to rewrite it.");
+        }
+
+        var merged = new byte[
+            markers.Start.Value.Start
+            + ownedSectionBytes.Length
+            + existingBytes.Length - markers.End.Value.End];
+        Buffer.BlockCopy(existingBytes, 0, merged, 0, markers.Start.Value.Start);
+        Buffer.BlockCopy(ownedSectionBytes, 0, merged, markers.Start.Value.Start, ownedSectionBytes.Length);
+        Buffer.BlockCopy(
+            existingBytes,
+            markers.End.Value.End,
+            merged,
+            markers.Start.Value.Start + ownedSectionBytes.Length,
+            existingBytes.Length - markers.End.Value.End);
+        return merged;
+    }
 
     /// <summary>
     /// <paramref name="candidates"/> rendered for <paramref name="repository"/>, bounded by
@@ -264,7 +389,7 @@ public static class MemoryProjection
         var overridden = new List<ProjectionOmission>();
         var selected = SelectRepositoryTruth(live, overridden);
 
-        var sections = new List<(string EntryId, string Text)>();
+        var sections = new List<(MemoryProjectionCandidate Candidate, string Text)>();
         var dropped = new List<ProjectionOmission>();
         var bodyBytes = 0;
         var stopped = false;
@@ -286,7 +411,7 @@ public static class MemoryProjection
             }
 
             bodyBytes += size;
-            sections.Add((candidate.Entry.Id, section));
+            sections.Add((candidate, section));
         }
 
         var body = string.Concat(sections.Select(s => s.Text));
@@ -296,15 +421,33 @@ public static class MemoryProjection
             repository, canonicalStorePath, fleetStorePath, bodySha256, budget,
             sections.Count, superseded.Count, overridden.Count, dropped.Count);
 
+        var details = sections
+            .Select(section =>
+            {
+                var title = IndexTitle(section.Candidate.Entry);
+                var description = IndexDescription(section.Candidate.Entry);
+                return new MemoryProjectionDetail(
+                    section.Candidate.Entry.Id,
+                    DetailFileNameFor(section.Candidate.Entry.Id),
+                    title,
+                    description,
+                    Encoding.UTF8.GetBytes(RenderDetail(section.Candidate, section.Text)));
+            })
+            .ToList();
+
         return new MemoryProjectionResult(
             repository,
             canonicalStorePath,
             Encoding.UTF8.GetBytes(header + body),
             bodySha256,
-            sections.Select(s => s.EntryId).ToList(),
+            sections.Select(s => s.Candidate.Entry.Id).ToList(),
             superseded,
             overridden,
-            dropped);
+            dropped)
+        {
+            IndexBytes = RenderIndex(details),
+            DetailFiles = details,
+        };
     }
 
     /// <summary>
@@ -368,6 +511,235 @@ public static class MemoryProjection
     private static string ConflictKey(MemoryProjectionCandidate candidate) =>
         candidate.Entry.Repository.ToLowerInvariant() + "\n" +
         Path.GetFileName(candidate.Entry.SourcePath).ToLowerInvariant();
+
+    private static byte[] RenderIndex(IReadOnlyList<MemoryProjectionDetail> details)
+    {
+        var builder = new StringBuilder();
+        builder.Append(IndexStartMarker).Append('\n');
+        foreach (var detail in details)
+        {
+            builder.Append("- [")
+                .Append(EscapeIndexText(detail.Title))
+                .Append("](")
+                .Append(detail.RelativePath)
+                .Append(") — ")
+                .Append(EscapeIndexText(detail.Description))
+                .Append(" <!-- baton:entry id=")
+                .Append(detail.EntryId)
+                .Append(" -->\n");
+        }
+
+        builder.Append(IndexEndMarker).Append('\n');
+        return Encoding.UTF8.GetBytes(builder.ToString());
+    }
+
+    private static string RenderDetail(MemoryProjectionCandidate candidate, string section) =>
+        DetailFormatMarker + "\n" + section;
+
+    private static string IndexTitle(MemoryEntry entry)
+    {
+        var heading = FirstMarkdownHeading(entry.Text);
+        if (heading is { Length: > 0 })
+        {
+            return heading;
+        }
+
+        if (AuthoredMemory.IsAuthored(entry))
+        {
+            return "authored memory " + entry.Id;
+        }
+
+        var fileName = Path.GetFileName(entry.SourcePath);
+        return fileName.Length > 0 ? fileName : entry.Id;
+    }
+
+    private static string IndexDescription(MemoryEntry entry)
+    {
+        var lines = Normalize(entry.Text).Split('\n');
+        var sawHeading = false;
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0 || trimmed == "---")
+            {
+                continue;
+            }
+
+            if (IsMarkdownHeading(trimmed))
+            {
+                sawHeading = true;
+                continue;
+            }
+
+            if (sawHeading || trimmed.Length > 0)
+            {
+                return OneLine(trimmed);
+            }
+        }
+
+        return "No description provided.";
+    }
+
+    private static string? FirstMarkdownHeading(string text)
+    {
+        foreach (var line in Normalize(text).Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (IsMarkdownHeading(trimmed))
+            {
+                var heading = trimmed.TrimStart('#').Trim();
+                while (heading.EndsWith('#'))
+                {
+                    heading = heading[..^1].TrimEnd();
+                }
+
+                return OneLine(heading);
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsMarkdownHeading(string line)
+    {
+        var hashes = 0;
+        while (hashes < line.Length && line[hashes] == '#')
+        {
+            hashes++;
+        }
+
+        return hashes is >= 1 and <= 6 && hashes < line.Length && line[hashes] == ' ';
+    }
+
+    private static string OneLine(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        var pendingSpace = false;
+        foreach (var character in value)
+        {
+            if (char.IsWhiteSpace(character))
+            {
+                pendingSpace = builder.Length > 0;
+                continue;
+            }
+
+            if (pendingSpace)
+            {
+                builder.Append(' ');
+                pendingSpace = false;
+            }
+
+            builder.Append(character);
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    private static string EscapeIndexText(string value) =>
+        value.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("[", "\\[", StringComparison.Ordinal)
+            .Replace("]", "\\]", StringComparison.Ordinal)
+            .Replace("(", "\\(", StringComparison.Ordinal)
+            .Replace(")", "\\)", StringComparison.Ordinal);
+
+    private static void ValidateOwnedSection(byte[] bytes)
+    {
+        var markers = FindIndexMarkers(bytes);
+        if (markers.Start is null || markers.End is null
+            || markers.Start.Value.Start >= markers.End.Value.End)
+        {
+            throw new InvalidDataException("The generated Baton memory index section has invalid ownership markers.");
+        }
+    }
+
+    private static IndexMarkers FindIndexMarkers(byte[] bytes)
+    {
+        var start = (IndexMarkerLine?)null;
+        var end = (IndexMarkerLine?)null;
+        var startCount = 0;
+        var endCount = 0;
+        var malformed = false;
+        var lineStart = 0;
+        while (lineStart < bytes.Length)
+        {
+            var lineFeed = Array.IndexOf(bytes, (byte)'\n', lineStart);
+            var lineEnd = lineFeed < 0 ? bytes.Length : lineFeed + 1;
+            var contentEnd = lineFeed < 0 ? bytes.Length : lineFeed;
+            if (contentEnd > lineStart && bytes[contentEnd - 1] == '\r')
+            {
+                contentEnd--;
+            }
+
+            var isStart = BytesEqual(bytes, lineStart, contentEnd, IndexStartMarker);
+            var isEnd = BytesEqual(bytes, lineStart, contentEnd, IndexEndMarker);
+            if (isStart)
+            {
+                startCount++;
+                start ??= new IndexMarkerLine(lineStart, lineEnd);
+            }
+            else if (isEnd)
+            {
+                endCount++;
+                end ??= new IndexMarkerLine(lineStart, lineEnd);
+            }
+            else if (ContainsMarkerFamily(bytes, lineStart, contentEnd))
+            {
+                malformed = true;
+            }
+
+            lineStart = lineEnd;
+        }
+
+        if (startCount != 1 || endCount != 1 || malformed)
+        {
+            throw new InvalidDataException(
+                "The vendor memory index has duplicated, nested, reordered, or malformed Baton ownership markers; " +
+                "refusing to rewrite it.");
+        }
+
+        return new IndexMarkers(start, end);
+    }
+
+    private static bool BytesEqual(byte[] bytes, int start, int end, string value)
+    {
+        if (end - start != value.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (bytes[start + index] != value[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool ContainsMarkerFamily(byte[] bytes, int start, int end)
+    {
+        const string markerFamily = "baton:memory-index";
+        if (end - start < markerFamily.Length)
+        {
+            return false;
+        }
+
+        for (var index = start; index <= end - markerFamily.Length; index++)
+        {
+            if (BytesEqual(bytes, index, index + markerFamily.Length, markerFamily))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private sealed record IndexMarkers(IndexMarkerLine? Start, IndexMarkerLine? End);
+
+    private sealed record IndexMarkerLine(int Start, int End);
 
     private static ProjectionOmission Omission(MemoryEntry entry, string reason) =>
         new(entry.Id, Path.GetFileName(entry.SourcePath), entry.SourcePath, reason);
