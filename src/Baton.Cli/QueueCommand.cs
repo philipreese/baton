@@ -30,7 +30,8 @@ public static class QueueCommand
     /// </summary>
     internal sealed record WorktreeApplyTestHooks(
         Func<QueueWorktreeCleanupClaim, CancellationToken, Task>? AfterClaim = null,
-        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? RunProbeAsync = null);
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? RunProbeAsync = null,
+        QueueWorktreeLivenessProbe? LivenessProbe = null);
 
     public static Task<int> ExecuteAsync(
         QueueOptions options,
@@ -488,7 +489,8 @@ public static class QueueCommand
         var sourceRepository = Path.GetFullPath(repositoryDirectory ?? Directory.GetCurrentDirectory());
         var worktreeRoot = settings.Queue.WorktreeRoot ?? Path.GetDirectoryName(sourceRepository);
         var report = await QueueWorktreeReport.CreateAsync(
-            snapshot.Items, worktreeRoot, cancellationToken).ConfigureAwait(false);
+            snapshot.Items, worktreeRoot, cancellationToken,
+            livenessProbe: worktreeApplyTestHooks?.LivenessProbe).ConfigureAwait(false);
         if (!apply)
         {
             output.WriteLine(format == QueueWorktreesOutputFormat.Json ? report.ToJson() : report.ToText());
@@ -578,7 +580,9 @@ public static class QueueCommand
 
         // A workspace is removed only while Baton holds a durable claim for that exact resolved path and a final recheck still proves every condition that made the same report classify it as a static candidate. Missing, stale, conflicting, or unavailable evidence removes nothing.
         var current = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        var recheck = await QueueWorktreeReport.CreateAsync(current.Items, worktreeRoot, cancellationToken).ConfigureAwait(false);
+        var recheck = await QueueWorktreeReport.CreateAsync(
+            current.Items, worktreeRoot, cancellationToken,
+            livenessProbe: worktreeApplyTestHooks?.LivenessProbe).ConfigureAwait(false);
         var entry = recheck.Workspaces.SingleOrDefault(workspace => QueueWorktreeReport.PathComparer.Equals(workspace.Path, claim.Path));
         if (entry is not { Classification: "candidate" }
             || !string.Equals(entry.Git.ExpectedRepository, claim.Repository, StringComparison.Ordinal)

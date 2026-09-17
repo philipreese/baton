@@ -208,6 +208,13 @@ public sealed class QueueWorktreeApplyTests
         QueueCommand.WorktreeApplyTestHooks? hooks = null)
     {
         var output = new StringWriter();
+        hooks = (hooks ?? new QueueCommand.WorktreeApplyTestHooks()) with
+        {
+            LivenessProbe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = Path.Combine(fixture.Home, "build.lock"),
+            },
+        };
         var exit = await QueueCommand.ExecuteAsync(
             new QueueOptions(QueueVerb.Worktrees, Format: QueueWorktreesOutputFormat.Json, Apply: apply),
             output, Ct, fixture.Source,
