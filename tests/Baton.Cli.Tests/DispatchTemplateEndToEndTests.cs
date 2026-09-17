@@ -16,7 +16,8 @@ namespace Baton.Cli.Tests;
 /// binding → capture HEAD → adapter receives it) is proven without a live LLM and without git having to
 /// produce a real diff. The one namespace rule (0047 §5) and the role-vs-template spec split are here too.
 /// </summary>
-// #1524: kept enrolled solely for Console.Out; see SerializedEnvironmentCollection's remarks.
+// #1524: kept enrolled for Console.Out and the hermetic-gh PATH/environment mutation below; see
+// SerializedEnvironmentCollection's remarks.
 [Collection(SerializedEnvironmentCollection.Name)]
 public sealed class DispatchTemplateEndToEndTests : IDisposable
 {
