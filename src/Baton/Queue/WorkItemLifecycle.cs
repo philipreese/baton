@@ -104,6 +104,14 @@ public static class WorkItemLifecycle
                 + "round for reconciliation");
         }
 
+        // A branch-delivery no-op is an incomplete mutating lane even when an old PR already points
+        // at the unchanged workspace head. Route it through the same continuation arm as unpushed
+        // work; reviewing a pre-existing head would certify work this attempt did not create.
+        if (IsRevisionNotCreatedDelivery(observation))
+        {
+            return DecideAfterIncompleteLane(observation);
+        }
+
         // The SUCCEEDED-shaped SET, never one word: #1945's FinishedDuringTeardown is a room that
         // finished and pushed, and reading it as a failure here re-reviewed a PR whose verdict was
         // already on disk. WorkflowOutcome owns the membership test (spec/baton.md §3).
@@ -326,6 +334,14 @@ public static class WorkItemLifecycle
                 QueueReconciliationKind.AwaitingVerifiedPullRequest);
         }
 
+        if (IsRevisionNotCreatedDelivery(observation))
+        {
+            return EnsureDraft(observation, Dispatch(
+                observation, WorkStage.Continue,
+                $"the {WorkStages.Token(observation.Stage)} lane did not create a new revision "
+                + "(revision-not-created) — finish and push the attempt's work"));
+        }
+
         if (IsPushed(observation))
         {
             return EnsureDraft(observation, Dispatch(
@@ -471,6 +487,11 @@ public static class WorkItemLifecycle
             : $"PR #{observation.PullRequest} head {Short(observation.PullRequestHeadSha)} ≠ workspace head "
                 + Short(observation.WorkspaceHeadSha);
 
+    private static bool IsRevisionNotCreatedDelivery(WorkItemObservation observation) =>
+        observation.Stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue
+        && observation.DeliveryFailingMembers?.Any(member =>
+            string.Equals(member, "revision-not-created", StringComparison.Ordinal)) == true;
+
     /// <summary>A sha as a person reads one. "unknown" rather than an empty gap, so a reason that names
     /// no sha says so out loud.</summary>
     private static string Short(string? sha) =>
@@ -513,6 +534,11 @@ public static class WorkItemLifecycle
 /// to <paramref name="WorkspaceHeadSha"/> before they can consume a re-review round; null is not
 /// revision evidence.
 /// </param>
+/// <param name="DeliveryFailingMembers">
+/// The engine-owned delivery observation's typed failure members for this settled execution, when
+/// available. In particular, <c>revision-not-created</c> keeps a no-op delivery on the incomplete
+/// continuation path even when an older PR already matches the workspace head.
+/// </param>
 public sealed record WorkItemObservation(
     WorkStage Stage,
     int Round,
@@ -530,7 +556,8 @@ public sealed record WorkItemObservation(
     bool? WorkspaceChanged = null,
     IndeterminateProducer? IndeterminateProducer = null,
     bool? WorkerStepsRecorded = null,
-    string? AttemptBaseRevision = null);
+    string? AttemptBaseRevision = null,
+    IReadOnlyList<string>? DeliveryFailingMembers = null);
 
 /// <summary>What the queue does with a work item next.</summary>
 /// <param name="Kind">Which of the three shapes below.</param>

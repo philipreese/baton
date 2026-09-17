@@ -1688,7 +1688,11 @@ origin/<branch>`), and (2) when a PR is expected (`--expect-pr`, defaulting to
 effective bool there rather than leaving it null, so a plain-`bool` default trap on
 `WorkerBindingConfigEntry.ExpectPr` can never silently disable the check for a role the catalog does
 mark), an open PR exists for that branch with a readable exact number/head
-(`gh pr list --head <branch> --json number,headRefOid`). A positive-but-unnameable PR reading
+(`gh pr list --head <branch> --json number,headRefOid`). The attempt-start `HEAD` is journalled before
+the worker starts; a branch-delivering attempt must advance that revision before its branch can count
+as delivered. An unchanged `HEAD` fails as `revision-not-created` whether the workspace is clean or
+still carries tracked/untracked changes, so an existing pushed branch cannot certify a no-op attempt.
+A positive-but-unnameable PR reading
 cannot certify the later exact head and makes this delivery assertion `NotRun`, without changing the
 general PR reader's truthful "some PR is open" answer. Two lanes shipped
 `implement: Succeeded` reports describing a push and a PR while their branch sat only local — the
@@ -1731,7 +1735,9 @@ For a passing exit-0 assertion, the ancestry check names the exact local and fet
 instead of movable symbolic refs. The later stamp observation must report those same IDs; a readable
 different head is recorded as a failed delivery fact, and missing/incomplete provenance remains unknown.
 Neither case may inherit the earlier pass or advance the lane.
-When a PR is expected, the check retains its positive open reading and exact PR number/head. If
+When a PR is expected, the check retains its positive open reading and exact PR number/head, and the
+PR head must name the resulting local revision; an open PR left at the attempt-start or another stale
+revision is a delivery failure. If
 either identity or object ID is unreadable in the first answer, delivery is `NotRun` rather than a
 pass that cannot be compared with the later forge state.
 The final stamp re-reads the PR: a positive absence or a different readable number/head fails
@@ -1743,7 +1749,8 @@ optional head member makes that event incomplete on replay rather than silently 
 as branch-only. Failed and `NotRun` observations may still lack PR facts without fabricating them.
 
 A failure appends `FlowEvent.VerifyFailed` with `VerifyFailedKind.DeliveryFailed` and `FailingMembers`
-naming exactly which of the two is missing — `branch-not-pushed`, `pr-not-open`, or both — settling
+naming the missing or stale delivery member — `revision-not-created`, `branch-not-pushed`,
+`pr-not-open`, or the applicable combination — settling
 `Indeterminate` via the same `IndeterminateProducer.VerifyFailed` path an ordinary gate failure uses, so
 `baton resolve`'s admission rules and `verifyTail` (the `Tail` field, carrying a short human-readable
 line per failing member) apply unchanged. `--heads` scopes the `ls-remote` query to branch refs only —

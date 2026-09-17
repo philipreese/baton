@@ -38,6 +38,97 @@ public sealed class DeliveryVerifierTests
     }
 
     [Fact]
+    public async Task A_remote_advanced_since_attempt_start_but_the_PR_head_is_stale_fails_delivery()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-stale");
+        try
+        {
+            var attemptStart = GitRevParseHead(workspace);
+            TempGitRepository.CommitAll(workspace, "delivered revision");
+            TempGitRepository.Push(workspace, "origin", "feature-pr-stale");
+            var deliveredHead = GitRevParseHead(workspace);
+            var gh = WriteFakeGh(workspace, $$"""[{"number":2362,"headRefOid":"{{attemptStart}}"}]""");
+
+            var outcome = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: true, TestContext.Current.CancellationToken,
+                ghProgram: gh, workspaceHeadShaAtStart: attemptStart);
+
+            Assert.Equal(DeliveryCheckStatus.Failed, outcome.Status);
+            Assert.Equal(["pr-not-open"], outcome.FailingMembers);
+            Assert.Contains(deliveredHead[..12], outcome.Tail, StringComparison.Ordinal);
+            Assert.Contains("PR", outcome.Tail, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_unchanged_attempt_HEAD_fails_delivery_with_workspace_state(bool leaveWorkspaceDirty)
+    {
+        var (workspace, origin) = CreatePushedWorkspace(leaveWorkspaceDirty ? "feature-dirty-unchanged" : "feature-clean-unchanged");
+        try
+        {
+            var attemptStart = GitRevParseHead(workspace);
+            if (leaveWorkspaceDirty)
+            {
+                File.AppendAllText(Path.Combine(workspace, "README.md"), "changed\n");
+                File.WriteAllText(Path.Combine(workspace, "untracked.txt"), "stray\n");
+            }
+
+            var outcome = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: false, TestContext.Current.CancellationToken,
+                workspaceHeadShaAtStart: attemptStart);
+
+            Assert.Equal(DeliveryCheckStatus.Failed, outcome.Status);
+            Assert.Equal(["revision-not-created"], outcome.FailingMembers);
+            Assert.Contains(leaveWorkspaceDirty ? "tracked" : "clean", outcome.Tail,
+                StringComparison.OrdinalIgnoreCase);
+            if (leaveWorkspaceDirty)
+            {
+                Assert.Contains("untracked", outcome.Tail, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
+    [Fact]
+    public async Task A_never_pushed_dirty_unchanged_HEAD_reports_revision_not_created_before_remote_lookup()
+    {
+        var origin = TempGitRepository.InitBareRepository(TempPath("origin"));
+        var workspace = TempPath("workspace");
+        try
+        {
+            Directory.CreateDirectory(workspace);
+            TempGitRepository.InitWithEverythingCommitted(workspace);
+            TempGitRepository.AddRemote(workspace, "origin", origin);
+            TempGitRepository.CreateAndCheckoutBranch(workspace, "never-pushed-unchanged");
+            var attemptStart = GitRevParseHead(workspace);
+            File.AppendAllText(Path.Combine(workspace, "README.md"), "changed\n");
+            File.WriteAllText(Path.Combine(workspace, "untracked.txt"), "stray\n");
+
+            var outcome = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: false, TestContext.Current.CancellationToken,
+                workspaceHeadShaAtStart: attemptStart);
+
+            Assert.Equal(DeliveryCheckStatus.Failed, outcome.Status);
+            Assert.Equal(["revision-not-created"], outcome.FailingMembers);
+            Assert.Contains("tracked", outcome.Tail, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("untracked", outcome.Tail, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
+    [Fact]
     public async Task ExpectPr_false_skips_the_PR_check_even_with_no_gh_available()
     {
         var (workspace, origin) = CreatePushedWorkspace("feature-b");
