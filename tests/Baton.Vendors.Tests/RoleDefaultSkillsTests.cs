@@ -8,9 +8,10 @@ namespace Baton.Vendors.Tests;
 /// <summary>
 /// #2110: the four arms spec/baton.md §2 ("Role default skills") states — attached first, added to by
 /// <c>--skill</c>, removed by the opt-out, and the unresolvable-default refusal that names the role.
-/// The shipped three packages are pinned here too — loadable, lint-clean, bounded in size, and
-/// carrying nothing task-specific — because a default that fails to load turns every dispatch of that
-/// role into a refusal.
+/// The shipped three role-default packages are pinned here too — loadable, lint-clean, bounded in
+/// size, and carrying nothing task-specific — because a default that fails to load turns every
+/// dispatch of that role into a refusal. The model-invoked conductor package is pinned separately:
+/// it is shipped through the same tree but is not inlined into worker prompts or registered to a role.
 /// </summary>
 /// <remarks>
 /// Reads the shipped catalog off <c>BatonEnvironmentSnapshot.Current</c> the way <see cref="RoleDispatchTests"/>
@@ -111,6 +112,20 @@ public sealed class RoleDefaultSkillsTests : IDisposable
             Assert.Empty(role.DefaultSkills);
             Assert.Null(RoleDispatch.ToBinding(role, "Do the work.").Skills);
         }
+    }
+
+    [Fact]
+    public void The_conductor_package_is_shipped_but_is_never_a_worker_role_default()
+    {
+        var package = SkillPackageReader.LoadPackage(Path.Combine(ShippedSkillsDirectory, "baton-conductor"));
+
+        Assert.Equal("baton-conductor", package.Name);
+        Assert.Null(SkillPackageLint.Check(package));
+        Assert.False(string.IsNullOrWhiteSpace(package.Description));
+        Assert.InRange(package.Content.Split('\n').Length, 1, 120);
+        Assert.DoesNotMatch(new Regex(@"#\d{3,}"), package.Content);
+        Assert.DoesNotMatch(new Regex(@"\bPR #|\bissue #", RegexOptions.IgnoreCase), package.Content);
+        Assert.All(WorkerRoleCatalog.All, role => Assert.DoesNotContain("baton-conductor", role.DefaultSkills));
     }
 
     [Fact]
@@ -277,6 +292,26 @@ public sealed class RoleDefaultSkillsTests : IDisposable
     }
 
     [Fact]
+    public void The_conductor_package_owns_readiness_flow_and_the_root_entry_point_routes_to_it()
+    {
+        var content = SkillPackageReader.LoadPackage(
+            Path.Combine(ShippedSkillsDirectory, "baton-conductor")).Content;
+        var normalized = Regex.Replace(content, @"\s+", " ");
+
+        Assert.Contains("No build-ready work is available", content, StringComparison.Ordinal);
+        Assert.Contains("never a stopping condition", normalized, StringComparison.Ordinal);
+        Assert.Contains("queue, workers, pull requests, reviews, CI, merge authority, installed behavior, and backlog", normalized, StringComparison.Ordinal);
+        Assert.Contains("one compact question", normalized, StringComparison.Ordinal);
+        Assert.Contains("an issue body is source material, not an execution brief", normalized, StringComparison.Ordinal);
+        Assert.Contains("Calibrate instructions to the selected worker and effort", content, StringComparison.Ordinal);
+
+        var repositoryRoot = FindRepositoryRoot();
+        var agents = File.ReadAllText(Path.Combine(repositoryRoot, "AGENTS.md"));
+        Assert.Contains("src/Baton.Vendors/Skills/baton-conductor/SKILL.md", agents, StringComparison.Ordinal);
+        Assert.Contains("docs/agents/invoking-baton.md", agents, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_implement_package_requires_draft_creation_and_same_context_result_validation()
     {
         var content = SkillPackageReader.LoadPackage(
@@ -319,6 +354,17 @@ public sealed class RoleDefaultSkillsTests : IDisposable
         var path = Path.Combine(_root, name);
         File.WriteAllText(path, content);
         return path;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Baton.slnx")))
+        {
+            directory = directory.Parent;
+        }
+
+        return Assert.IsType<DirectoryInfo>(directory).FullName;
     }
 
     /// <summary>

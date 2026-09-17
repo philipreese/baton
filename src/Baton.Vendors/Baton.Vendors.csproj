@@ -23,9 +23,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- #2110: the shipped role-default skill packages (Skills/<name>/), copied next to the engine as
-         skills/<name>/ so they sit on SkillPackageResolver's next-to-the-assembly rung and a role's
-         default_skills resolve against ANY workspace, not only a checkout of this repository. Copied,
+    <!-- #2110: the shipped skill packages (Skills/<name>/), copied next to the engine as
+         skills/<name>/ so they sit on SkillPackageResolver's next-to-the-assembly rung. Role-default
+         packages therefore resolve against ANY workspace, not only a checkout of this repository. Copied,
          not embedded, for the same reason the catalog files above are: an operator's same-named
          package in the account library (the rung above) still wins, with no rebuild. The source
          tree sits under this project, NOT at the repository root: <repo>/skills/ is the resolver's

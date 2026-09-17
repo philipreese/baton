@@ -60,6 +60,7 @@ docs/vendor-coverage.md
 docs/vendor-doc-audit.md
 spec/baton.md
 src/Baton.Vendors/Skills/baton-advise/SKILL.md
+src/Baton.Vendors/Skills/baton-conductor/SKILL.md
 src/Baton.Vendors/Skills/baton-implement/SKILL.md
 src/Baton.Vendors/Skills/baton-review/SKILL.md
 tools/fleet-glass/README.md
