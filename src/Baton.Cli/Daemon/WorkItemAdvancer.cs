@@ -46,6 +46,7 @@ public sealed class WorkItemAdvancer
     private readonly Func<string, CancellationToken, Task<RepositoryIdentity?>>? _repositoryIdentity;
     private readonly TimeSpan _boardObservationTimeout;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
+    private readonly QueueFleetEventOutbox _fleetOutbox;
 
     public WorkItemAdvancer()
         : this(
@@ -70,6 +71,7 @@ public sealed class WorkItemAdvancer
         _repositoryIdentity = repositoryIdentity;
         _boardObservationTimeout = boardObservationTimeout ?? WorkspaceDeliveryProbe.SpawnTimeout;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
+        _fleetOutbox = new QueueFleetEventOutbox(_appendFleetEvent);
     }
 
     /// <summary>
@@ -80,6 +82,7 @@ public sealed class WorkItemAdvancer
     public async Task<IReadOnlyList<QueueDecisionEntry>> AdvanceAsync(
         DateTimeOffset now, CancellationToken cancellationToken)
     {
+        await _fleetOutbox.PumpAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
 
         // A disposition CAS is the linearization point; ledger availability must never manufacture
@@ -104,6 +107,7 @@ public sealed class WorkItemAdvancer
         // see QueueItem.Halted for what that cost.
         var candidates = snapshot.Items
             .Where(i => i.Stage is { } stage && i.Retirement is null
+                && CanAdvanceCurrentAttempt(i, snapshot)
                 && (i.RequiredCheckEvidenceWait is not { } waiting
                     || now - waiting.LatestObservationAt >= RequiredCheckEvidenceBackoff)
                 && (stage == WorkStage.Ready
@@ -132,6 +136,26 @@ public sealed class WorkItemAdvancer
         }
 
         return facts;
+    }
+
+    private static bool CanAdvanceCurrentAttempt(QueueItem item, QueueSnapshot snapshot)
+    {
+        if (item.AttemptEnvelope is not { } envelope)
+        {
+            return true;
+        }
+
+        if (QueueFleetEventOutbox.HasPendingFor(snapshot, envelope.AttemptId)
+            || !item.AttemptAdmissionFactDurable)
+        {
+            return false;
+        }
+
+        // A room-bearing terminal result must wait for attemptSettled. A roomless admission refusal
+        // has no settle fact by design; its durable admission decision is the refusal proof.
+        return item.RoomDirectory is null
+            && item.LastAdmission?.Result == TaskRequirementAdmission.Refused
+            || item.AttemptSettledFactDurable;
     }
 
     private static bool IsAdmissionRefusedRoomlessFailure(QueueItem item) =>
@@ -547,6 +571,13 @@ public sealed class WorkItemAdvancer
             ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
             AttemptId = null,
             AttemptBaseRevision = null,
+            AttemptEnvelope = null,
+            LaunchMayHaveBegunAt = null,
+            AttemptAdmissionFactDurable = false,
+            AttemptStartedFactDurable = false,
+            AttemptRefusedFactDurable = false,
+            AttemptSettledFactDurable = false,
+            LaunchRecoveryKind = null,
             Error = null,
             Halted = false,
             ReconciliationKind = null,
@@ -581,6 +612,15 @@ public sealed class WorkItemAdvancer
             State = QueueItemState.Queued,
             RoomDirectory = null,
             LaunchedAt = null,
+            AttemptId = null,
+            AttemptBaseRevision = null,
+            AttemptEnvelope = null,
+            LaunchMayHaveBegunAt = null,
+            AttemptAdmissionFactDurable = false,
+            AttemptStartedFactDurable = false,
+            AttemptRefusedFactDurable = false,
+            AttemptSettledFactDurable = false,
+            LaunchRecoveryKind = null,
             Error = null,
             ReconciliationKind = null,
             ReadinessMutationClaim = null,
@@ -698,7 +738,9 @@ public sealed class WorkItemAdvancer
                     || !string.Equals(
                         JsonSerializer.Serialize(current),
                         expectedJson,
-                        StringComparison.Ordinal))
+                        StringComparison.Ordinal)
+                    || current.AttemptEnvelope is { } currentEnvelope
+                        && QueueFleetEventOutbox.HasPendingFor(snapshot, currentEnvelope.AttemptId))
                 {
                     return snapshot;
                 }
@@ -838,11 +880,25 @@ public sealed class WorkItemAdvancer
                             Guid.NewGuid().ToString("N"), now, QueueDecisionEntry.Retired,
                             $"merged: PR #{pair.Key.PullRequest}");
                         mergedRetirements.Add((item.Tag, operation));
-                        return item with
+                        var retired = item with
                         {
                             Retirement = retirement,
                             DispositionOperations = [.. item.DispositionOutbox, operation],
                         };
+                        return item.AttemptEnvelope is not null
+                            && item.State == QueueItemState.Queued
+                            && item.LaunchMayHaveBegunAt is null
+                            && !QueueFleetEventOutbox.HasPendingFor(current, item.AttemptEnvelope.AttemptId)
+                            ? retired with
+                            {
+                                AttemptEnvelope = null,
+                                AttemptAdmissionFactDurable = false,
+                                AttemptStartedFactDurable = false,
+                                AttemptRefusedFactDurable = false,
+                                AttemptSettledFactDurable = false,
+                                LaunchRecoveryKind = null,
+                            }
+                            : retired;
                     }).ToList();
                 }
 

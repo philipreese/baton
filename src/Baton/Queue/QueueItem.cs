@@ -285,6 +285,31 @@ public sealed record QueueItem
     /// </summary>
     public string? AttemptBaseRevision { get; init; }
 
+    /// <summary>
+    /// The immutable launch envelope for the current attempt. It is the source of truth for replayed
+    /// fleet facts; current tier settings and mutable stage fields are never substituted for it.
+    /// Historical rows without this field keep the pre-envelope compatibility path.
+    /// </summary>
+    public QueueAttemptEnvelope? AttemptEnvelope { get; init; }
+
+    /// <summary>When the queue persisted that the external launch call may have begun.</summary>
+    public DateTimeOffset? LaunchMayHaveBegunAt { get; init; }
+
+    /// <summary>True after the current attempt's admission fact has been confirmed in fleet history.</summary>
+    public bool AttemptAdmissionFactDurable { get; init; }
+
+    /// <summary>True after the current attempt's start fact has been confirmed in fleet history.</summary>
+    public bool AttemptStartedFactDurable { get; init; }
+
+    /// <summary>True after the current attempt's refusal fact has been confirmed in fleet history.</summary>
+    public bool AttemptRefusedFactDurable { get; init; }
+
+    /// <summary>True after the current attempt's settlement fact has been confirmed in fleet history.</summary>
+    public bool AttemptSettledFactDurable { get; init; }
+
+    /// <summary>The typed operator halt retained when launch evidence is contradictory or ambiguous.</summary>
+    public QueueLaunchRecoveryKind? LaunchRecoveryKind { get; init; }
+
     /// <summary>The immediately preceding lifecycle attempt, when this row was queued from one.</summary>
     public FleetAttemptId? ParentAttemptId { get; init; }
 
@@ -335,12 +360,55 @@ public sealed record QueueItem
     public bool PinModel { get; init; }
 }
 
+/// <summary>
+/// The exact values selected for one queue launch attempt. Once written, this record is immutable for
+/// that attempt, including when the queue advances to a later stage or the configured tiers change.
+/// </summary>
+public sealed record QueueAttemptEnvelope(
+    [property: JsonPropertyName("attemptId")] FleetAttemptId AttemptId,
+    [property: JsonPropertyName("parentAttemptId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetAttemptId? ParentAttemptId,
+    [property: JsonPropertyName("workId")] string WorkId,
+    [property: JsonPropertyName("issue")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Issue,
+    [property: JsonPropertyName("pullRequest")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? PullRequest,
+    [property: JsonPropertyName("stage")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WorkStage? Stage,
+    [property: JsonPropertyName("declaredRole")] string DeclaredRole,
+    [property: JsonPropertyName("adapter")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Adapter,
+    [property: JsonPropertyName("model")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Model,
+    [property: JsonPropertyName("effort")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Effort,
+    [property: JsonPropertyName("effectiveGrant")] IReadOnlyList<string> EffectiveGrant,
+    [property: JsonPropertyName("requestedRequirements")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? RequestedRequirements,
+    [property: JsonPropertyName("missingCapabilities")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? MissingCapabilities,
+    [property: JsonPropertyName("admissionDecision")] string AdmissionDecision,
+    [property: JsonPropertyName("roomDirectory")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RoomDirectory,
+    [property: JsonPropertyName("roomId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RoomId,
+    [property: JsonPropertyName("attemptBaseRevision")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AttemptBaseRevision,
+    [property: JsonPropertyName("factTimestamp")] DateTimeOffset FactTimestamp);
+
 /// <summary>The closed set of automatic reconciliations permitted after an operator halt.</summary>
 [JsonConverter(typeof(JsonStringEnumConverter<QueueReconciliationKind>))]
 public enum QueueReconciliationKind
 {
     /// <summary>A settled incomplete lane lacked an exact open PR; a later verified PR may resume it.</summary>
     AwaitingVerifiedPullRequest,
+}
+
+/// <summary>Why a launch attempt was halted rather than classified as started or refused.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<QueueLaunchRecoveryKind>))]
+public enum QueueLaunchRecoveryKind
+{
+    AmbiguousEvidence,
 }
 
 /// <summary>Why a lifecycle row is retained as history rather than active attention.</summary>

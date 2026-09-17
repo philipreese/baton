@@ -760,6 +760,26 @@ public sealed class QueueSchedulerServiceTests
         SpecFile = Path.Combine(Path.GetTempPath(), "never-read.md"),
     };
 
+    private static QueueAttemptEnvelope AttemptEnvelope(FleetAttemptId attemptId, string room) => new(
+        attemptId,
+        ParentAttemptId: null,
+        WorkId: "recovered-room",
+        Issue: 2363,
+        PullRequest: null,
+        Stage: WorkStage.Implement,
+        DeclaredRole: "implement",
+        Adapter: "codex",
+        Model: "gpt-5.6-terra",
+        Effort: "high",
+        EffectiveGrant: ["repository-read", "artifact:changes.md"],
+        RequestedRequirements: ["repository-read"],
+        MissingCapabilities: [],
+        AdmissionDecision: TaskRequirementAdmission.Admitted,
+        RoomDirectory: room,
+        RoomId: BatonPaths.RecordKey(room),
+        AttemptBaseRevision: "base-revision",
+        FactTimestamp: DateTimeOffset.Parse("2026-09-17T12:00:00Z"));
+
     [Fact]
     public async Task A_git_lock_observed_at_the_final_production_prelaunch_check_refuses_without_starting_a_lane()
     {
@@ -1412,6 +1432,114 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task Restart_across_launch_with_room_evidence_replays_the_exact_started_binding_once()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-recovered-room");
+            Directory.CreateDirectory(room);
+            var attemptId = new FleetAttemptId("recovered-attempt");
+            var envelope = AttemptEnvelope(attemptId, room);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [Item("recovered-room") with
+                {
+                    Stage = WorkStage.Implement,
+                    State = QueueItemState.Launched,
+                    RoomDirectory = room,
+                    AttemptId = attemptId,
+                    AttemptBaseRevision = envelope.AttemptBaseRevision,
+                    AttemptEnvelope = envelope,
+                    AttemptAdmissionFactDurable = true,
+                    LaunchMayHaveBegunAt = envelope.FactTimestamp,
+                }],
+            }, Ct);
+            var facts = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (_, _) => throw new InvalidOperationException("restart recovery must not launch again"),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => envelope.FactTimestamp,
+                appendFleetEvent: (draft, _) =>
+                {
+                    facts.Add(draft);
+                    return Task.FromResult<FleetEvent?>(FleetEvent.From(facts.Count, draft));
+                });
+
+            await service.ResolveFinishedItemsAsync(Ct);
+            await service.ResolveFinishedItemsAsync(Ct);
+
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Launched, retained.State);
+            Assert.Null(retained.LaunchMayHaveBegunAt);
+            Assert.True(retained.AttemptStartedFactDurable);
+            var started = Assert.Single(facts);
+            Assert.Equal(FleetEventKind.AttemptStarted, started.Kind);
+            Assert.Equal("codex", started.Vendor);
+            Assert.Equal("gpt-5.6-terra", started.Model);
+            Assert.Equal("high", started.Effort);
+            Assert.Equal(["repository-read", "artifact:changes.md"], started.EffectiveGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Restart_across_launch_without_room_evidence_halts_instead_of_guessing_refusal()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-missing-room");
+            var attemptId = new FleetAttemptId("ambiguous-attempt");
+            var envelope = AttemptEnvelope(attemptId, room);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [Item("missing-room") with
+                {
+                    Stage = WorkStage.Implement,
+                    State = QueueItemState.Launched,
+                    RoomDirectory = room,
+                    AttemptId = attemptId,
+                    AttemptBaseRevision = envelope.AttemptBaseRevision,
+                    AttemptEnvelope = envelope,
+                    AttemptAdmissionFactDurable = true,
+                    LaunchMayHaveBegunAt = envelope.FactTimestamp,
+                }],
+            }, Ct);
+            var facts = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (_, _) => throw new InvalidOperationException("restart recovery must not launch again"),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => envelope.FactTimestamp,
+                appendFleetEvent: (draft, _) =>
+                {
+                    facts.Add(draft);
+                    return Task.FromResult<FleetEvent?>(FleetEvent.From(facts.Count, draft));
+                });
+
+            await service.ResolveFinishedItemsAsync(Ct);
+
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, retained.State);
+            Assert.True(retained.Halted);
+            Assert.Equal(QueueLaunchRecoveryKind.AmbiguousEvidence, retained.LaunchRecoveryKind);
+            Assert.Contains("may have begun", retained.Error, StringComparison.Ordinal);
+            Assert.Empty(facts);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task First_lifecycle_launch_records_post_claim_wip_without_changing_selection_context()
     {
         var home = CreateTempHome();
@@ -1475,6 +1603,47 @@ public sealed class QueueSchedulerServiceTests
                 events[0].AttemptId,
                 Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).AttemptId);
             Assert.Null(events[1].ExecutionId);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Refused_admission_atomically_publishes_admission_and_refusal_for_one_attempt()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [Item(role: "advise") with { Requirements = ["file-write"] }],
+            }, Ct);
+            var events = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (_, _) => throw new InvalidOperationException("refused admission must not launch"),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.Parse("2026-09-17T12:00:00Z"),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(FleetEvent.From(events.Count, draft));
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Collection(
+                events,
+                admission => Assert.Equal(FleetEventKind.AdmissionDecided, admission.Kind),
+                refusal => Assert.Equal(FleetEventKind.AttemptRefused, refusal.Kind));
+            Assert.Equal(events[0].AttemptId, events[1].AttemptId);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, retained.State);
+            Assert.True(retained.AttemptAdmissionFactDurable);
+            Assert.True(retained.AttemptRefusedFactDurable);
         }
         finally
         {
@@ -1861,6 +2030,59 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_runway_hold_finishes_its_attempt_and_retries_without_self_halting()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [Item()] }, Ct);
+            var now = DateTimeOffset.Parse("2026-09-17T12:00:00Z");
+            var launches = 0;
+            var events = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launches++;
+                    return Task.FromResult(new QueueLaunchOutcome(null, RunwayHeld: true));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => now,
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(FleetEvent.From(events.Count, draft));
+                });
+
+            await service.TickOnceAsync(Ct);
+            now = now.AddMinutes(10);
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(2, launches);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Queued, retained.State);
+            Assert.False(retained.Halted);
+            Assert.Null(retained.AttemptEnvelope);
+            Assert.Null(retained.LaunchMayHaveBegunAt);
+            Assert.Collection(
+                events,
+                firstAdmission => Assert.Equal(FleetEventKind.AdmissionDecided, firstAdmission.Kind),
+                firstRefusal => Assert.Equal(FleetEventKind.AttemptRefused, firstRefusal.Kind),
+                secondAdmission => Assert.Equal(FleetEventKind.AdmissionDecided, secondAdmission.Kind),
+                secondRefusal => Assert.Equal(FleetEventKind.AttemptRefused, secondRefusal.Kind));
+            Assert.Equal(events[0].AttemptId, events[1].AttemptId);
+            Assert.Equal(events[2].AttemptId, events[3].AttemptId);
+            Assert.NotEqual(events[0].AttemptId, events[2].AttemptId);
+            Assert.Equal(events[0].AttemptId, events[2].ParentAttemptId);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_hold_and_a_launch_are_told_apart_by_the_outcome_not_by_an_exception()
     {
         var home = CreateTempHome();
@@ -2143,6 +2365,78 @@ public sealed class QueueSchedulerServiceTests
             Assert.Equal(
                 QueueItemState.Done,
                 Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).State);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Envelope_settlement_keeps_exact_binding_and_fresh_terminal_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-envelope-settle");
+            Directory.CreateDirectory(room);
+            await File.WriteAllTextAsync(
+                Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                """{"state":"Succeeded","steps":[{"id":"implement","state":"Succeeded","execution":"execution-envelope","usage":{"wallClockMs":4321,"tokensIn":23,"tokensOut":7,"toolSteps":5}}],"outputs":["changes.md"],"error":"observed detail"}""",
+                Ct);
+            var attemptId = new FleetAttemptId("envelope-settle-attempt");
+            var envelope = AttemptEnvelope(attemptId, room);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [Item("recovered-room") with
+                {
+                    Stage = WorkStage.Implement,
+                    State = QueueItemState.Launched,
+                    RoomDirectory = room,
+                    AttemptId = attemptId,
+                    AttemptBaseRevision = envelope.AttemptBaseRevision,
+                    AttemptEnvelope = envelope,
+                    AttemptAdmissionFactDurable = true,
+                    AttemptStartedFactDurable = true,
+                    LastAdmission = new TaskRequirementAdmission(
+                        ["repository-read"],
+                        ["repository-read", "artifact:changes.md"],
+                        TaskRequirementAdmission.Admitted,
+                        []),
+                }],
+            }, Ct);
+            var observedAt = DateTimeOffset.Parse("2026-09-17T13:00:00Z");
+            var events = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (_, _) => throw new InvalidOperationException("settlement must not relaunch"),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => observedAt,
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(FleetEvent.From(events.Count, draft));
+                });
+
+            await service.ResolveFinishedItemsAsync(Ct);
+
+            var settled = Assert.Single(events);
+            Assert.Equal(FleetEventKind.AttemptSettled, settled.Kind);
+            Assert.Equal(observedAt, settled.OccurredAt);
+            Assert.Equal("codex", settled.Vendor);
+            Assert.Equal("gpt-5.6-terra", settled.Model);
+            Assert.Equal("high", settled.Effort);
+            Assert.Equal(new ExecutionId("execution-envelope"), settled.ExecutionId);
+            Assert.Equal("observed detail", settled.OutcomeDetail);
+            Assert.Equal(4321, settled.ElapsedMilliseconds);
+            Assert.Equal(23, settled.Usage!.InputTokens);
+            Assert.Equal(7, settled.Usage.OutputTokens);
+            Assert.Equal(5, settled.Usage.ToolSteps);
+            Assert.Equal(["changes.md"], settled.ArtifactReferences);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Done, retained.State);
+            Assert.True(retained.AttemptSettledFactDurable);
         }
         finally
         {

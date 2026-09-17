@@ -950,7 +950,14 @@ public static class QueueLauncher
     {
         ArgumentNullException.ThrowIfNull(request);
         var item = request.Item;
-        var tier = ApplyFrozenAssignment(item, request.Tier);
+        var tier = item.AttemptEnvelope is { } envelope
+            ? request.Tier with
+            {
+                Adapter = envelope.Adapter,
+                Model = envelope.Model,
+                Effort = envelope.Effort,
+            }
+            : ApplyFrozenAssignment(item, request.Tier);
         var followOn = item.Stage is WorkStage.Continue or WorkStage.Fix;
         if (followOn && (item.Repository is not { Length: > 0 } || item.PullRequest is null
             || item.Branch is not { Length: > 0 }))
@@ -994,9 +1001,11 @@ public static class QueueLauncher
 
     /// <summary>The queue-add decision is the launch authority; later tier-file changes retain only policy metadata.</summary>
     internal static QueueTierResolution ApplyFrozenAssignment(QueueItem item, QueueTierResolution current) =>
-        item.WorkerAssignment is { } frozen
-            ? current with { Adapter = frozen.Adapter, Model = frozen.Model, Effort = frozen.Effort }
-            : current;
+        item.AttemptEnvelope is { } envelope
+            ? current with { Adapter = envelope.Adapter, Model = envelope.Model, Effort = envelope.Effort }
+            : item.WorkerAssignment is { } frozen
+                ? current with { Adapter = frozen.Adapter, Model = frozen.Model, Effort = frozen.Effort }
+                : current;
 
     /// <summary>
     /// Applies the queue's lifecycle policy and dispatch's own skill normalization to a persisted
