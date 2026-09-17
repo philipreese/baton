@@ -1886,11 +1886,11 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     /// <summary>
-    /// The #2190 production shape end to end through a hermetic fake: a preselected executable
-    /// outside the workspace receives exact argv, including a quoted Windows title as one value.
-    /// Its attributed, successful, repository-matching output opens exactly one repository-qualified
-    /// read. The interpreter prefix is an explicit internal test seam; production accepts only a
-    /// native file named gh/gh.exe and supplies no prefix.
+    /// #2368 regression for #2363 / PR #2367: the Codex implement fixture follows the shipped
+    /// standalone draft/body-file form end to end through a hermetic fake. A preselected executable
+    /// outside the workspace receives exact argv; its attributed, successful, repository-matching
+    /// output opens a selectorless read of exactly that PR. The interpreter prefix is an explicit
+    /// internal test seam; production accepts only a native file named gh/gh.exe and supplies no prefix.
     /// </summary>
     [Fact]
     public async Task The_broker_learns_ownership_only_from_direct_verified_gh_create()
@@ -1906,16 +1906,16 @@ public sealed class CodexDynamicToolPolicyTests
             CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
         var create = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool,
-            new { command = "gh pr create --draft --title \"fix(codex): Example [proof]\" --body-file body.md" });
+            new { command = "gh pr create --draft --body-file body.md" });
         var after = await fixture.ExecuteAsync(
-            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view" });
 
         Assert.False(before.Success);
         Assert.Contains("has not opened a pull request yet", before.Text, StringComparison.Ordinal);
         Assert.True(create.Success, create.Text);
         Assert.Equal(
-            ["pr", "create", "--draft", "--title", "fix(codex): Example [proof]", "--body-file",
-             "body.md", "--repo", "aer-works/baton", "--head", "2190-verified-pr-ownership"],
+            ["pr", "create", "--draft", "--body-file", "body.md", "--repo", "aer-works/baton",
+             "--head", "2190-verified-pr-ownership"],
             File.ReadAllLines(fixture.DirectGhArguments));
         Assert.True(after.Success, after.Text);
         Assert.DoesNotContain(OwnPullRequestOnlyRule.Rule, after.Text, StringComparison.Ordinal);

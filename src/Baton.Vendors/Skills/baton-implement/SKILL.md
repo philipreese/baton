@@ -46,6 +46,8 @@ Report red checks; name any that cannot run and why.
   Use the brief's subject verbatim when given.
 - Push to `origin <branch>`; open a draft with `gh pr create --draft`. End the body with
   `Closes #<n>` (or brief-specified `Part of #<n>`) alone on the last line.
+- Use real-newline body file; run standalone `gh pr create --draft --body-file <file>`;
+  push separately; never use `cd`, chaining, substitution, redirection, or unquoted parentheses.
 - No AI attribution. Read back the stored body (`gh pr view --json body`) and fix appended text.
 - `gh pr view` without a selector reaches your PR; another PR number is refused.
 

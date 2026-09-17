@@ -5169,6 +5169,9 @@ worker Git metadata. Capture is required when either the primary binding or its 
 the Codex broker. The readers are the binding resolver, worker invocation, Codex adapter and broker;
 they use it only to compile the supported standalone `gh pr create` spelling into direct argv with
 trusted `--repo` and `--head`. A legacy binding with no field remains null and direct create refuses.
+The #2363 / PR #2367 Codex-implement fixture failed because its shipped instruction did not name that
+standalone body-file spelling; its regression is the real-newline body file and separate push/create
+contract now pinned by `DirectGhPullRequestCreateTests` and `RoleDefaultSkillsTests`.
 A harness-authored binding may populate the field only when the harness is acting as the conductor
 and has independently verified the same repository/head inputs; worker-authored data and shell output
 have no authority to populate it. General shell output never mints PR ownership evidence.
