@@ -44,6 +44,38 @@ public class TerminalSentinelEndToEndTests
     }
 
     [Fact]
+    public async Task A_one_shot_operational_file_failure_exits_cleanly_without_a_stack_trace()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-operational-failure-{Guid.NewGuid():N}");
+        var batonHome = Path.Combine(testRoot, "baton-home");
+        try
+        {
+            Directory.CreateDirectory(testRoot);
+            // A file where BATON_HOME must be a directory makes the real one-shot queue mutation
+            // hit an ordinary IOException without relying on machine ACL configuration.
+            await File.WriteAllTextAsync(batonHome, "not a directory", TestContext.Current.CancellationToken);
+
+            using var process = StartBatonProcessInHome(batonHome, "queue", "hold");
+            var (_, stderr) = await BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.NotEqual(0, process.ExitCode);
+            Assert.DoesNotContain("Unhandled exception", stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("   at ", stderr, StringComparison.Ordinal);
+
+            var stderrLines = stderr.Split(
+                Environment.NewLine,
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            Assert.Single(stderrLines);
+            Assert.StartsWith("Baton command failed: ", stderrLines[0], StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task A_room_that_fails_before_a_ledger_exists_is_left_queryable_as_Failed()
     {
         // The task's own suggested fixture -- a bindings entry naming a model the vendor would
@@ -701,6 +733,16 @@ public class TerminalSentinelEndToEndTests
 
     private static Process StartBatonProcess(params string[] args)
     {
+        return StartBatonProcessCore(null, args);
+    }
+
+    private static Process StartBatonProcessInHome(string batonHome, params string[] args)
+    {
+        return StartBatonProcessCore(batonHome, args);
+    }
+
+    private static Process StartBatonProcessCore(string? batonHome, params string[] args)
+    {
         var startInfo = new ProcessStartInfo("dotnet")
         {
             UseShellExecute = false,
@@ -708,6 +750,10 @@ public class TerminalSentinelEndToEndTests
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
+        if (batonHome is not null)
+        {
+            startInfo.Environment["BATON_HOME"] = batonHome;
+        }
         startInfo.ArgumentList.Add("exec");
         startInfo.ArgumentList.Add(typeof(RunCommand).Assembly.Location);
         foreach (var arg in args)

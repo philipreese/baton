@@ -693,6 +693,11 @@ catch (BatonFlowException ex)
 
     return 1;
 }
+catch (Exception ex) when (CliOperationalFailureClassifier.IsOperational(ex))
+{
+    Console.Error.WriteLine($"Baton command failed: {ex.Message}");
+    return 1;
+}
 
 // #2030 review (record-once): the sole definition of "a verb that runs a lane" in this file. It had
 // been written out as a literal tuple in four places -- the #2030 handle-inheritance clear and the
