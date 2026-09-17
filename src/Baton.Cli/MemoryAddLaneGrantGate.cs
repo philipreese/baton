@@ -13,7 +13,8 @@ public static class MemoryAddLaneGrantGate
 {
     public sealed record Authorization(string Repository, string DispatchId, int Issue, string AssertedBy);
 
-    public static async Task<Authorization?> TryAuthorizeAsync(string? artifactsRoot, CancellationToken cancellationToken)
+    public static async Task<Authorization?> TryAuthorizeAsync(
+        string? artifactsRoot, CancellationToken cancellationToken, string? brokerOutputDirectory = null)
     {
         if (string.IsNullOrEmpty(artifactsRoot))
         {
@@ -31,6 +32,15 @@ public static class MemoryAddLaneGrantGate
 
             var room = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(artifactsRoot)));
             if (room is null || !File.Exists(BatonPaths.RoomBindingsFile(room)))
+            {
+                return null;
+            }
+
+            // The artifacts root identifies a room but is inherited environment and therefore never
+            // establishes which dispatch is executing. Only the Codex broker can call this path with
+            // its live output directory; it must name one concrete execution under this exact room.
+            if (brokerOutputDirectory is null
+                || !IsCurrentBrokerExecution(brokerOutputDirectory, artifactsRoot))
             {
                 return null;
             }
@@ -77,5 +87,23 @@ public static class MemoryAddLaneGrantGate
         {
             return null;
         }
+    }
+
+    private static bool IsCurrentBrokerExecution(string outputDirectory, string artifactsRoot)
+    {
+        if (!Path.IsPathFullyQualified(outputDirectory))
+        {
+            return false;
+        }
+
+        var expectedRoot = Path.GetFullPath(artifactsRoot);
+        var output = Path.GetFullPath(outputDirectory);
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(output));
+        var leaf = Path.GetFileName(Path.TrimEndingDirectorySeparator(output));
+        return parent is not null
+            && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(parent), BatonPaths.RecordKey(expectedRoot))
+            && leaf.StartsWith("execution_", StringComparison.Ordinal)
+            && leaf.Length > "execution_".Length
+            && Directory.Exists(output);
     }
 }

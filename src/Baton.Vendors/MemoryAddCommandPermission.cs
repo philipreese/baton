@@ -25,12 +25,40 @@ public static class MemoryAddCommandPermission
     }
 
     internal static bool Allows(string commandLine, IReadOnlyList<string>? exceptions) =>
-        exceptions is { Count: > 0 }
-        && exceptions.Any(marker => marker.StartsWith(Prefix, StringComparison.Ordinal)
-            && TryParse(commandLine, marker[Prefix.Length..]));
+        TryParseAllowed(commandLine, exceptions, out _);
 
-    private static bool TryParse(string commandLine, string repository)
+    /// <summary>
+    /// Parses the one admitted shell shape while proving it is covered by this dispatch's exact
+    /// repository marker. The broker uses the parsed form to keep the write inside its own process;
+    /// a worker never receives an ambient credential it could replay in a direct process.
+    /// </summary>
+    internal static bool TryParseAllowed(
+        string commandLine, IReadOnlyList<string>? exceptions, out MemoryAddCommandInvocation? invocation)
     {
+        invocation = null;
+        if (exceptions is null)
+        {
+            return false;
+        }
+
+        foreach (var marker in exceptions)
+        {
+            if (!marker.StartsWith(Prefix, StringComparison.Ordinal)
+                || !TryParse(commandLine, marker[Prefix.Length..], out var parsed))
+            {
+                continue;
+            }
+
+            invocation = parsed;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParse(string commandLine, string repository, out MemoryAddCommandInvocation? invocation)
+    {
+        invocation = null;
         if (!TryTokenize(commandLine, out var args)
             || args.Count != 9
             || !string.Equals(args[0], "baton", StringComparison.Ordinal)
@@ -46,6 +74,7 @@ public static class MemoryAddCommandPermission
             return false;
         }
 
+        invocation = new MemoryAddCommandInvocation(args[4], args[6], repository);
         return true;
     }
 
@@ -102,3 +131,9 @@ public static class MemoryAddCommandPermission
         return true;
     }
 }
+
+/// <summary>The exact, already-admitted memory-add argv handed from the broker to its host.</summary>
+public sealed record MemoryAddCommandInvocation(string Text, string Kind, string Repository);
+
+/// <summary>Result of a broker-hosted memory-add execution.</summary>
+public sealed record MemoryAddCommandExecution(bool Success, string Output);

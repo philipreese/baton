@@ -20,7 +20,21 @@ internal static class CodexBrokerCommand
             var configuration = JsonSerializer.Deserialize<CodexBrokerConfiguration>(json)
                 ?? throw new JsonException("Codex broker configuration was null.");
             return await CodexAppServerBroker.RunAsync(
-                configuration, args[2], Console.Out, Console.Error, cancellationToken).ConfigureAwait(false);
+                configuration, args[2], Console.Out, Console.Error, cancellationToken,
+                async (invocation, token) =>
+                {
+                    var writer = new StringWriter();
+                    var exitCode = await MemoryAddCommand.ExecuteAsync(
+                        MemoryAddOptionsParser.Parse([
+                            "--text", invocation.Text,
+                            "--kind", invocation.Kind,
+                            "--repository", invocation.Repository]),
+                        writer,
+                        cancellationToken: token,
+                        brokerOutputDirectory: Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR"))
+                        .ConfigureAwait(false);
+                    return new MemoryAddCommandExecution(exitCode == 0, writer.ToString());
+                }).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {

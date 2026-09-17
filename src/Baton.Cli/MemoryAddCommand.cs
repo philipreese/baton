@@ -57,7 +57,8 @@ public static class MemoryAddCommand
         CancellationToken cancellationToken = default,
         string? claudeHomeOverride = null,
         string? userHomeOverride = null,
-        Action<string, byte[]>? projectionWriterOverride = null)
+        Action<string, byte[]>? projectionWriterOverride = null,
+        string? brokerOutputDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -83,7 +84,7 @@ public static class MemoryAddCommand
 
         var laneAuthorization = assertedByOverride is null
             ? await MemoryAddLaneGrantGate.TryAuthorizeAsync(
-                Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable), cancellationToken).ConfigureAwait(false)
+                Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable), cancellationToken, brokerOutputDirectory).ConfigureAwait(false)
             : null;
         if (Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable) is { Length: > 0 }
             && assertedByOverride is null && laneAuthorization is null)

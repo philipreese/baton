@@ -7312,8 +7312,14 @@ a shell string. A lifecycle item refuses any explicit `--skill` for now: choosin
 whole-lifecycle attachment is policy, and the queue does not silently choose one.
 
 `--require <capability>` is repeatable task metadata, not a grant request. The initial vocabulary is
-`repository-read`, `file-write`, `shell`, `network`, `github-read`, `github-write`, and
-`artifact:<declared-output-name>`. Before claiming a room, provisioning a worktree, or starting a
+`repository-read`, `file-write`, `shell`, `network`, `github-read`, `github-write`, `memory-add`, and
+`artifact:<declared-output-name>`. `memory-add` is off by default and repository-scoped: admission
+records one immutable per-dispatch grant on the queue row and materializes that same fact in the room
+binding. It never follows from an implement role or shell access, cannot widen on reseed or a later
+round, and admits only the recorded repository's canonical store. The broker admits its exact command
+grammar, then the in-process command path rechecks the live broker execution against the room, binding,
+queue row, repository, issue, and grant; an environment-selected artifacts root is never dispatch
+identity. This paragraph is the capability contract; §12's memory-write path refers here. Before claiming a room, provisioning a worktree, or starting a
 vendor process, the scheduler reads the current role catalog and compares these requirements to the
 effective grant — including its scoped `gh` shell patterns and declared output contract. A mismatch
 fails that item with the missing capability and a remedy; it never widens a role or guesses from the

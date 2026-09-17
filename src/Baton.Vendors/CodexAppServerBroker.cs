@@ -58,7 +58,8 @@ public static class CodexAppServerBroker
         string prompt,
         TextWriter output,
         TextWriter error,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(prompt);
@@ -98,7 +99,8 @@ public static class CodexAppServerBroker
             configuration.ProducedOutputNames,
             artifactOnlyOutputNames: ReadArtifactOnlyOutputs(),
             pullRequestCreateProvenance: configuration.PullRequestCreateProvenance,
-            originatingPullRequestOwnership: configuration.OriginatingPullRequestOwnership);
+            originatingPullRequestOwnership: configuration.OriginatingPullRequestOwnership,
+            memoryAddExecutor: memoryAddExecutor);
 
         using var process = StartAppServer(configuration, isolatedHome);
         if (process is null)
