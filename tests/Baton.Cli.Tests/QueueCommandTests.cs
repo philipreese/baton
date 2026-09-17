@@ -2601,6 +2601,11 @@ public sealed class QueueCommandTests
             const int pullRequest = 2380;
             var item = ExplicitRetirementItem(home, tag);
             await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with { Items = [item] }, Ct);
+            var persistedEnvelope = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).AttemptEnvelope;
+            Assert.NotNull(persistedEnvelope);
+            Assert.NotSame(item.AttemptEnvelope!.EffectiveGrant, persistedEnvelope!.EffectiveGrant);
+            Assert.NotSame(item.AttemptEnvelope.RequestedRequirements, persistedEnvelope.RequestedRequirements);
+            Assert.NotSame(item.AttemptEnvelope.MissingCapabilities, persistedEnvelope.MissingCapabilities);
             Assert.True(QueueScheduler.IsActiveLifecycle(item));
 
             var gh = new ExplicitRetirementGh(MergedPullRequestJson(pullRequest));
@@ -2746,6 +2751,56 @@ public sealed class QueueCommandTests
             Assert.Null(unchanged.Retirement);
             Assert.Null(unchanged.PullRequest);
             Assert.Empty((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations ?? []);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("field")]
+    [InlineData("list")]
+    public async Task Explicit_merged_pr_retirement_refuses_envelope_drift_at_the_queue_CAS(string driftKind)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string tag = "ghost-envelope-drift";
+            const int pullRequest = 2380;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [ExplicitRetirementItem(home, tag)],
+            }, Ct);
+            var gh = new ExplicitRetirementGh(
+                MergedPullRequestJson(pullRequest),
+                beforeReturn: () => QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+                {
+                    Items = state.Items.Select(item => item.Tag == tag
+                        ? item with
+                        {
+                            AttemptEnvelope = driftKind == "field"
+                                ? item.AttemptEnvelope! with { Model = "changed-model" }
+                                : item.AttemptEnvelope! with { EffectiveGrant = ["repository-read", "changed-grant"] },
+                        }
+                        : item).ToList(),
+                }, Ct));
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: tag, Reason: "envelope drift", MergedPullRequest: pullRequest),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(repository),
+                NeverIssueProvisionAsync,
+                ghRunner: gh));
+
+            Assert.Contains("changed while", refusal.Message, StringComparison.Ordinal);
+            var unchanged = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Null(unchanged.Retirement);
+            Assert.Null(unchanged.PullRequest);
         }
         finally
         {
@@ -2942,11 +2997,35 @@ public sealed class QueueCommandTests
         State = QueueItemState.Failed,
         Repository = "github.com/example/repo",
         Branch = "ghost-lane",
+        Issue = 2379,
         AttemptId = new FleetAttemptId("ghost-attempt"),
+        ParentAttemptId = new FleetAttemptId("ghost-parent"),
         LaunchedAt = new DateTimeOffset(2026, 9, 17, 11, 0, 0, TimeSpan.Zero),
+        AttemptBaseRevision = "base-revision",
         AttemptStartedFactDurable = true,
+        AttemptEnvelope = ExplicitRetirementAttemptEnvelope(tag),
         Error = "roomless launch evidence is incomplete",
     };
+
+    private static QueueAttemptEnvelope ExplicitRetirementAttemptEnvelope(string tag) => new(
+        new FleetAttemptId("ghost-attempt"),
+        new FleetAttemptId("ghost-parent"),
+        tag,
+        2379,
+        null,
+        WorkStage.Continue,
+        "implement",
+        "shell",
+        "test-model",
+        "high",
+        ["repository-read", "artifact:changes.md"],
+        ["repository-read"],
+        [],
+        TaskRequirementAdmission.Admitted,
+        null,
+        null,
+        "base-revision",
+        new DateTimeOffset(2026, 9, 17, 11, 0, 0, TimeSpan.Zero));
 
     private static string MergedPullRequestJson(
         int number,
