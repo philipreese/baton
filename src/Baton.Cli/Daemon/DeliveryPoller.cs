@@ -38,6 +38,7 @@ public sealed class DeliveryPoller : BackgroundService
     private readonly IGhCliRunner _gh;
     private readonly WorkItemAdvancer _boardObservationAdvancer;
     private readonly DaemonLoopDriver _loopDriver;
+    private readonly DaemonRoomInventory _roomInventory;
     private bool _ghMissingWarned;
     private readonly HashSet<string> _missingProjectRootWarnedRooms = new(StringComparer.Ordinal);
 
@@ -51,14 +52,29 @@ public sealed class DeliveryPoller : BackgroundService
     {
     }
 
+    internal DeliveryPoller(DaemonRoomInventory roomInventory)
+        : this(new GhCliRunner(), roomInventory)
+    {
+    }
+
+    private DeliveryPoller(IGhCliRunner gh, DaemonRoomInventory roomInventory)
+        : this(
+            gh,
+            new WorkItemAdvancer(gh, null, RepositoryIdentityResolver.TryResolveAsync),
+            roomInventory: roomInventory)
+    {
+    }
+
     internal DeliveryPoller(
         IGhCliRunner gh,
         WorkItemAdvancer boardObservationAdvancer,
-        DaemonLoopDriver? loopDriver = null)
+        DaemonLoopDriver? loopDriver = null,
+        DaemonRoomInventory? roomInventory = null)
     {
         _gh = gh;
         _boardObservationAdvancer = boardObservationAdvancer;
         _loopDriver = loopDriver ?? new DaemonLoopDriver();
+        _roomInventory = roomInventory ?? new DaemonRoomInventory();
     }
 
     public static TimeSpan GetInterval()
@@ -113,16 +129,21 @@ public sealed class DeliveryPoller : BackgroundService
             Console.Error.WriteLine($"DeliveryPoller: queue-board refresh failed: {ex.Message}");
         }
 
-        IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered;
+        IReadOnlyList<DaemonRoomObservation> observations;
         using (DaemonLoopDriver.EnterPhase("room-discovery"))
         {
-            discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+            observations = await _roomInventory
+                .ObserveAsync(
+                    DaemonRoomInventory.InventoryScope.All,
+                    DaemonRoomInventory.InventoryFreshness.LastComplete,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
-        foreach (var room in discovered)
+        foreach (var observation in observations)
         {
             try
             {
-                await PollRoomAsync(room, cancellationToken).ConfigureAwait(false);
+                await PollRoomAsync(observation.Room, observation.View, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -130,7 +151,7 @@ public sealed class DeliveryPoller : BackgroundService
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"DeliveryPoller: room '{room.RoomDir}' failed: {ex.Message}");
+                Console.Error.WriteLine($"DeliveryPoller: room '{observation.Room.RoomDir}' failed: {ex.Message}");
             }
         }
     }
@@ -155,6 +176,16 @@ public sealed class DeliveryPoller : BackgroundService
         {
             return;
         }
+
+        await PollRoomAsync(room, view, cancellationToken, warningSink).ConfigureAwait(false);
+    }
+
+    private async Task PollRoomAsync(
+        FleetStatusTool.DiscoveredRoom room,
+        FleetRoomStatusView view,
+        CancellationToken cancellationToken,
+        TextWriter? warningSink = null)
+    {
 
         var reference = DeliveryReferenceResolver.Resolve(view.Outputs);
         if (reference?.PullRequestNumber is not { } pullRequestNumber || reference.PullRequestReference is not { } prArgument)

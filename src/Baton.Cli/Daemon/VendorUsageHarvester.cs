@@ -22,11 +22,9 @@ namespace Baton.Cli.Daemon;
 /// </para>
 /// </summary>
 /// <remarks>
-/// Live-lane counts are read from the SAME room scan <see cref="FleetStatusTool.DiscoverRoomsAsync"/>/
-/// <see cref="FleetStatusTool.ProcessRoomAsync"/> already do for <c>fleet_status</c> and
-/// <see cref="FleetProjectionWriter"/> — a second, independent scan on this service's own tick rather
-/// than threaded through from <see cref="FleetProjectionWriter"/>'s tick, so the two background
-/// services stay decoupled (one's failure or interval change cannot affect the other's cadence).
+/// Live-lane counts come from the daemon's shared <see cref="DaemonRoomInventory"/>. The inventory
+/// coalesces room discovery and unchanged terminal observations, while this service keeps its own
+/// cadence and harvest failure boundary instead of being driven by <see cref="FleetProjectionWriter"/>.
 /// </remarks>
 public sealed class VendorUsageHarvester : BackgroundService
 {
@@ -47,9 +45,15 @@ public sealed class VendorUsageHarvester : BackgroundService
     private readonly IReadOnlyList<IVendorUsageSource> _sources;
     private readonly VendorUsageHarvestScheduler _scheduler;
     private readonly Func<CancellationToken, Task<Dictionary<string, int>>> _countLiveLanes;
+    private readonly DaemonRoomInventory _roomInventory;
 
     public VendorUsageHarvester()
         : this(VendorUsageSources.Default)
+    {
+    }
+
+    internal VendorUsageHarvester(DaemonRoomInventory roomInventory)
+        : this(VendorUsageSources.Default, roomInventory: roomInventory)
     {
     }
 
@@ -68,9 +72,11 @@ public sealed class VendorUsageHarvester : BackgroundService
     internal VendorUsageHarvester(
         IReadOnlyList<IVendorUsageSource> sources,
         VendorUsageHarvestScheduler? scheduler = null,
-        Func<CancellationToken, Task<Dictionary<string, int>>>? countLiveLanes = null)
+        Func<CancellationToken, Task<Dictionary<string, int>>>? countLiveLanes = null,
+        DaemonRoomInventory? roomInventory = null)
     {
         _sources = sources;
+        _roomInventory = roomInventory ?? new DaemonRoomInventory();
         _scheduler = scheduler
             ?? new VendorUsageHarvestScheduler(PeriodicInterval, Jitter, PostExitDelay, CoalesceWindow, IdleInterval);
         _countLiveLanes = countLiveLanes ?? CountLiveLanesByVendorAsync;
@@ -176,15 +182,19 @@ public sealed class VendorUsageHarvester : BackgroundService
                 snapshot.HarvestedAt)
             : ([], null);
 
-    private static async Task<Dictionary<string, int>> CountLiveLanesByVendorAsync(CancellationToken cancellationToken)
+    private async Task<Dictionary<string, int>> CountLiveLanesByVendorAsync(CancellationToken cancellationToken)
     {
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
-        var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
-        foreach (var room in discovered)
+        var observations = await _roomInventory
+            .ObserveAsync(
+                DaemonRoomInventory.InventoryScope.Active,
+                DaemonRoomInventory.InventoryFreshness.LastComplete,
+                cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var observation in observations)
         {
-            var view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: false, cancellationToken)
-                .ConfigureAwait(false);
-            if (view is null || view.State != "Running" || view.Adapter is not { } adapter)
+            var view = observation.View;
+            if (view.State != "Running" || view.Adapter is not { } adapter)
             {
                 continue;
             }

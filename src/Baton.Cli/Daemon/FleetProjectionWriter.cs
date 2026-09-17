@@ -27,11 +27,11 @@ namespace Baton.Cli.Daemon;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Reuses <see cref="FleetStatusTool.DiscoverRoomsAsync"/>/<see cref="FleetStatusTool.ProcessRoomAsync"/>
-/// in-process (same assembly) rather than going through the MCP tool's JSON-in/JSON-out wrapper — the
-/// exact room list and per-room projection <c>fleet_status</c> itself would return, serialized with the
-/// SAME <see cref="FleetStatusTool.SerializerOptions"/>. This daemon path is the sole Fleet Glass
-/// delivery; no second delivery is maintained.
+/// Reads the daemon's shared <see cref="DaemonRoomInventory"/>, which produces the same room list and
+/// per-room projection <c>fleet_status</c> itself would return while reusing unchanged terminal-room
+/// observations across independent hosted loops. Serialization still uses the SAME
+/// <see cref="FleetStatusTool.SerializerOptions"/>. This daemon path is the sole Fleet Glass delivery;
+/// no second delivery is maintained.
 /// </para>
 /// <para>
 /// <b>PR-A2 (#1557)</b> added <c>rooms[].live.stdoutTail</c> — <see cref="StdoutTailRenderer"/>'s own
@@ -55,9 +55,15 @@ public sealed class FleetProjectionWriter : BackgroundService
 {
     private readonly Func<double?> _freeGb;
     private readonly DaemonLoopDriver _loopDriver;
+    private readonly DaemonRoomInventory _roomInventory;
 
     public FleetProjectionWriter()
-        : this(null, null)
+        : this(null, null, null)
+    {
+    }
+
+    internal FleetProjectionWriter(DaemonRoomInventory roomInventory)
+        : this(null, null, roomInventory)
     {
     }
 
@@ -67,10 +73,14 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// <c>queue</c> section that no fixture on disk can fix, so a test drives it as a delegate rather
     /// than asserting around whatever this machine happens to have free.
     /// </summary>
-    internal FleetProjectionWriter(Func<double?>? freeGb, DaemonLoopDriver? loopDriver = null)
+    internal FleetProjectionWriter(
+        Func<double?>? freeGb,
+        DaemonLoopDriver? loopDriver = null,
+        DaemonRoomInventory? roomInventory = null)
     {
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _loopDriver = loopDriver ?? new DaemonLoopDriver();
+        _roomInventory = roomInventory ?? new DaemonRoomInventory();
     }
 
     public const string IntervalSecondsEnvironmentVariable = "BATON_FLEET_PROJECTION_INTERVAL_SECONDS";
@@ -216,10 +226,15 @@ public sealed class FleetProjectionWriter : BackgroundService
     internal async Task<string> BuildProjectionJsonAsync(CancellationToken cancellationToken, TextWriter? diagnostics = null)
     {
         diagnostics ??= Console.Error;
-        IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered;
+        IReadOnlyList<DaemonRoomObservation> observations;
         using (DaemonLoopDriver.EnterPhase("room-discovery"))
         {
-            discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
+            observations = await _roomInventory
+                .ObserveAsync(
+                    DaemonRoomInventory.InventoryScope.All,
+                    DaemonRoomInventory.InventoryFreshness.LastComplete,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
         var roomsArray = new JsonArray();
         var timelines = new JsonObject();
@@ -240,23 +255,10 @@ public sealed class FleetProjectionWriter : BackgroundService
                 $"FleetProjectionWriter: secret-gate denylist not found at {BatonPaths.SecretPatternsFile} -- WITHHOLDING EVERY stdoutTail line (fail closed)");
         }
 
-        foreach (var room in discovered)
+        foreach (var observation in observations)
         {
-            FleetRoomStatusView? view;
-            using (DaemonLoopDriver.EnterPhase("room-scan"))
-            {
-                view = await FleetStatusTool.ProcessRoomAsync(room.RoomDir, includeTerminal: true, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            if (view is null)
-            {
-                continue;
-            }
-
-            if (room.Project is not null)
-            {
-                view = view with { Project = room.Project };
-            }
+            var room = observation.Room;
+            var view = observation.View;
 
             var node = JsonSerializer.SerializeToNode(view, FleetStatusTool.SerializerOptions)!.AsObject();
 
@@ -311,6 +313,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         }
 
         PruneLiveCache(liveKeysThisTick);
+        var discovered = observations.Select(observation => observation.Room).ToList();
         PrunePrunedCache(discovered);
         PruneTerminalTimelineCache(discovered);
 

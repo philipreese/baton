@@ -184,6 +184,50 @@ public class DaemonHostTests
         }
     }
 
+    [Fact]
+    public async Task RunDaemonAsync_FourRoomReadersShareOneInventorySingleton()
+    {
+        var tempHome = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
+        try
+        {
+            DaemonRoomInventory? registeredInventory = null;
+            List<IHostedService>? hostedServices = null;
+
+            await DaemonHost.RunDaemonAsync(
+                ["--no-mutex"],
+                host =>
+                {
+                    registeredInventory = host.Services.GetRequiredService<DaemonRoomInventory>();
+                    hostedServices = [.. host.Services.GetServices<IHostedService>()];
+                    StopAsSoonAsStarted(host);
+                }).WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+
+            var readers = hostedServices!
+                .Where(service => service is FleetProjectionWriter
+                    or DeliveryPoller
+                    or VendorUsageHarvester
+                    or QueueSchedulerService)
+                .ToList();
+            Assert.Equal(4, readers.Count);
+            foreach (var reader in readers)
+            {
+                var field = reader.GetType().GetField(
+                    "_roomInventory",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.NotNull(field);
+                Assert.Same(registeredInventory, field.GetValue(reader));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(tempHome))
+            {
+                Directory.Delete(tempHome, true);
+            }
+        }
+    }
+
     /// <summary>#1488: <see cref="WatchSweep"/> registered the same way as
     /// <see cref="RoomRetentionSweep"/> above — on the same daemon host, not a second process.</summary>
     [Fact]
