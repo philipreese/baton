@@ -2,7 +2,9 @@
 
 Read the route that matches the task before acting; do not load every linked document by default.
 
-- **Using or conducting Baton:** read [`docs/agents/invoking-baton.md`](docs/agents/invoking-baton.md)
+- **Conducting Baton:** read the [`baton-conductor`](src/Baton.Vendors/Skills/baton-conductor/SKILL.md)
+  package before operating the backlog or supervising queue, worker, and PR flow.
+- **Invoking Baton:** read [`docs/agents/invoking-baton.md`](docs/agents/invoking-baton.md)
   before starting a lane, queueing work, or collecting a worker output. Read [`README.md`](README.md)
   when you need the product overview or verb index. For repository-changing work, select the
   [`baton-implement`](src/Baton.Vendors/Skills/baton-implement/SKILL.md),
