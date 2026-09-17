@@ -493,6 +493,20 @@ public static class DeliveryVerifier
             return new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun, NotRunReason: string.Join("; ", notRunReasons));
         }
 
+        // A readable PR head proves only that a PR exists. Delivery is the stronger claim that the
+        // PR exposes this execution's exact pushed worktree head; recording two unrelated exact
+        // object IDs would otherwise let a stale or foreign branch PR certify the lane.
+        if (expectPr
+            && checkedPush?.CheckedLocalHead is { } deliveredHead
+            && checkedPr?.Head is { } pullRequestHead
+            && !string.Equals(pullRequestHead, deliveredHead, StringComparison.OrdinalIgnoreCase))
+        {
+            return new DeliveryCheckOutcome(
+                DeliveryCheckStatus.Failed,
+                ["pr-not-open"],
+                "pr-not-open: the open PR head does not match the delivered workspace HEAD.");
+        }
+
         return checkedPush is null
             ? new DeliveryCheckOutcome(DeliveryCheckStatus.NotRun,
                 NotRunReason: "delivery push check supplied no exact checked heads")
