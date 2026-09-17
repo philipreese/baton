@@ -7566,8 +7566,9 @@ written:
 
 | At stage | The lane settled | Then | Because |
 |---|---|---|---|
-| implement / continue | succeeded-shaped, PR open | **review** | there is something to review |
-| fix | succeeded-shaped, PR open | **re-review** | the prior verdict's findings are being checked |
+| implement | succeeded-shaped, PR open | **review** | there is something to review |
+| continue | succeeded-shaped, PR open, readable distinct attempt revision | **review** | the recovered work has a new authoritative revision to review |
+| fix | succeeded-shaped, PR open, readable distinct attempt revision | **re-review** | the prior verdict's findings are being checked against a new authoritative revision |
 | implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
 | review / re-review | succeeded-shaped, `decision: approve`, exact full `reviewedRef` = current PR head, required checks passing | **ready** | only current-head approval plus green required checks may clear draft |
 | review / re-review | succeeded-shaped, `decision: approve`, canonical full-SHA `reviewedRef` differs from current PR head | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
@@ -7577,6 +7578,7 @@ written:
 | review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: true` or absent | **operator** | a second fix or untrustworthy legacy history needs conductor judgment |
 | review / re-review | succeeded-shaped, verdict with no decision | **operator** | never guessed from the findings |
 | review / re-review | succeeded-shaped, no readable verdict | **operator** | silence is not an approval |
+| fix / continue | any settled outcome, missing, unreadable, or unchanged attempt base versus authoritative local revision | **operator** | no new revision means there is nothing new to review; preserve the terminal attempt and prior verdict rather than spend a reviewer on the same head |
 | implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: true` | **continue** | structured arrest-boundary evidence proves work to recover |
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: false` or absent | **operator** | no observed work, or no measurement, justifies an automatic continuation |
@@ -7584,7 +7586,7 @@ written:
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
 | review / re-review | anything else, readable verdict | **route by decision** | a later failed or indeterminate settlement does not discard a readable reviewer decision |
 | review / re-review | anything else, no readable verdict | **operator** | silence cannot spend another review round |
-| fix, `automaticFixUsed: true`, round at the ceiling | succeeded-shaped, PR open | **re-review** | the one automatic repair is not operator-ready before its paired exact-head review |
+| fix, `automaticFixUsed: true`, round at the ceiling | succeeded-shaped, PR open, readable distinct attempt revision | **re-review** | the one automatic repair is not operator-ready before its paired exact-head review |
 | any other stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
 
@@ -7614,6 +7616,13 @@ succeeded-shaped — `Succeeded` and `FinishedDuringTeardown` — take every row
 `WorkflowOutcome.IsSucceededShaped`, which is where that membership is spelled. This lifecycle is one of
 the consumers §3 obliges, and an ordinal `== "Succeeded"` here discarded a readable `verdict.json` and
 re-dispatched a full review lane against the same head.
+
+**A fix or continuation earns review only by producing a revision.** Its pre-launch workspace HEAD and
+the authoritative local HEAD at settlement are the same two values `revisionProduced` reads. Both must
+be readable and differ before a fix can re-review or a continuation can review; an equal pair, a missing
+baseline, or an unreadable delivered head is an operator halt for every terminal outcome. The terminal
+room, attempt identity, baseline, and last verdict stay on the item for recovery. A prose claim in
+`changes.md` is not revision evidence, and this guard runs before any review round is reserved.
 
 **Arrest continuation evidence (#2253).** The dispatcher captures the attempt-start SHA and the
 engine-placed-file list before the worker starts. After the existing grace turn, it records
@@ -7676,11 +7685,12 @@ that was a PowerShell loop reading the same file with `jq` last week. `ReviewVer
 a person, never an input to routing" (decision 0043) continues to hold where it was written: inside
 the engine's own routing.
 
-**Pushed-ness, not a timeout word, discriminates re-review from continue.** A lane that runs out of
-wall clock settles `Failed` — `WorkflowOutcome` has no distinct word for it — so keying on one would
-mean string-matching an error message. The PR's `headRefOid` equal to the worktree's `HEAD` is work
-someone can review; anything else, including an absent PR or an unreadable head, is work to finish.
-`gh` goes through the daemon's existing `IGhCliRunner` seam and the head through
+**Pushed-ness, not a timeout word, discriminates re-review from continue after the revision
+prerequisite.** A lane that runs out of wall clock settles `Failed` — `WorkflowOutcome` has no distinct
+word for it — so keying on one would mean string-matching an error message. Fix and continue first need
+their readable, distinct attempt revision; only then does the PR's `headRefOid` equal to the worktree's
+`HEAD` mean work someone can review. Anything else, including an absent PR or an unreadable head, is work
+to finish. `gh` goes through the daemon's existing `IGhCliRunner` seam and the head through
 `WorkspaceHead.CaptureAsync`: **the advance adds no process-spawn site.**
 
 **A `ready` item is parked in `queued`, not marked done**, because the conductor still has to merge it

@@ -26,12 +26,13 @@ namespace Baton.Queue;
 /// stays forbidden.
 /// </para>
 /// <para>
-/// <b>Pushed-ness, not the timeout word, is what discriminates re-review from continue</b> —
-/// spec/baton.md §13 has the argument. What it means for the code below: nothing reads
-/// <c>WorkflowOutcome</c> beyond <see cref="Status.WorkflowOutcome.IsSucceededShaped"/> — the membership
-/// test that owns both succeeded-shaped words — and <see cref="IsPushed"/> is the whole discriminator
-/// for work that reached a PR. Every incomplete PR-less lane stops before it could buy a continuation
-/// that admission is known to refuse; positive zero-step evidence is not a substitute for forge identity.
+/// <b>Pushed-ness, not the timeout word, is what discriminates re-review from continue after Fix or
+/// Continue has a distinct revision</b> — spec/baton.md §13 has the argument. What it means for the code below:
+/// nothing reads <c>WorkflowOutcome</c> beyond <see cref="Status.WorkflowOutcome.IsSucceededShaped"/> —
+/// the membership test that owns both succeeded-shaped words — and, after Fix or Continue has passed its
+/// readable-distinct-revision prerequisite, <see cref="IsPushed"/> is the whole discriminator for work
+/// that reached a PR. Every incomplete PR-less lane stops before it could buy a continuation that
+/// admission is known to refuse; positive zero-step evidence is not a substitute for forge identity.
 /// </para>
 /// <para>
 /// <b>Every dispatch is counted and bounded</b> (<see cref="WorkStages.MaxRounds"/>). Two of the arms
@@ -61,6 +62,22 @@ public static class WorkItemLifecycle
         if (string.IsNullOrWhiteSpace(observation.TerminalOutcome))
         {
             return WorkItemTransition.None("the room has not settled yet");
+        }
+
+        // A repair without a distinct revision is not a repair. In particular, a cancelled or
+        // arrested fix can leave the PR and workspace at the prior review's head; sending that head
+        // to re-review spends a reviewer to rediscover the same findings. Keep the terminal attempt
+        // and prior verdict for the operator instead. This deliberately uses the exact baseline and
+        // authoritative local head used by WorkItemAdvancer's revisionProduced event, so absent
+        // evidence fails closed rather than turning a narrative claim into revision evidence.
+        if (observation.Stage is WorkStage.Fix or WorkStage.Continue
+            && !HasDistinctAttemptRevision(observation))
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with no distinct "
+                + $"revision (attempt base {Short(observation.AttemptBaseRevision)}; authoritative workspace HEAD "
+                + $"{Short(observation.WorkspaceHeadSha)}) — retain the terminal attempt and prior verdict/findings for "
+                + $"operator recovery; {Recovery(observation.Stage)}");
         }
 
         // #2131 readiness policy: an unavailable forge answer is an obligation to retry, never
@@ -443,6 +460,11 @@ public static class WorkItemLifecycle
             && string.Equals(prHead, workspaceHead, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool HasDistinctAttemptRevision(WorkItemObservation observation) =>
+        observation.AttemptBaseRevision is { Length: > 0 } baseRevision
+        && observation.WorkspaceHeadSha is { Length: > 0 } deliveredRevision
+        && !string.Equals(baseRevision, deliveredRevision, StringComparison.OrdinalIgnoreCase);
+
     private static string DescribeUnpushed(WorkItemObservation observation) =>
         observation.PullRequest is null
             ? $"no pull request is open on '{observation.Branch}'"
@@ -486,6 +508,11 @@ public static class WorkItemLifecycle
 /// False only when a readable terminal sentinel positively lists zero steps; true when it lists any;
 /// null when terminal step evidence is absent or unreadable. Null never proves no worker work.
 /// </param>
+/// <param name="AttemptBaseRevision">
+/// The workspace HEAD captured before this attempt launched. Fix and continuation stages compare it
+/// to <paramref name="WorkspaceHeadSha"/> before they can consume a re-review round; null is not
+/// revision evidence.
+/// </param>
 public sealed record WorkItemObservation(
     WorkStage Stage,
     int Round,
@@ -502,7 +529,8 @@ public sealed record WorkItemObservation(
     string? RequiredChecks,
     bool? WorkspaceChanged = null,
     IndeterminateProducer? IndeterminateProducer = null,
-    bool? WorkerStepsRecorded = null);
+    bool? WorkerStepsRecorded = null,
+    string? AttemptBaseRevision = null);
 
 /// <summary>What the queue does with a work item next.</summary>
 /// <param name="Kind">Which of the three shapes below.</param>

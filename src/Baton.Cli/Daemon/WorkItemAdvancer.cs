@@ -268,7 +268,8 @@ public sealed class WorkItemAdvancer
             reading.Number, reading.HeadSha, head, reading.Succeeded, reading.IsOpen,
             reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
-            sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null);
+            sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null,
+            item.AttemptBaseRevision);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
