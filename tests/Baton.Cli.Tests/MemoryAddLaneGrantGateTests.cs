@@ -38,11 +38,14 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
             {
                 Tag = "2100-memory",
                 Role = "implement",
+                Adapter = "claude",
+                Model = "gpt-fixture",
                 Workspace = _root,
                 SpecFile = Path.Combine(_root, "brief.md"),
                 Issue = 2100,
                 Repository = Repository,
                 RoomDirectory = room,
+                Requirements = [TaskRequirements.MemoryAdd],
                 MemoryAddGrant = grant,
             }]), TestContext.Current.CancellationToken);
 
@@ -56,6 +59,24 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
         Assert.Contains("role=implement", authorization.AssertedBy, StringComparison.Ordinal);
         Assert.Contains("adapter=claude", authorization.AssertedBy, StringComparison.Ordinal);
         Assert.Contains("model=gpt-fixture", authorization.AssertedBy, StringComparison.Ordinal);
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = [snapshot.Items.Single() with { Requirements = [] }],
+        }, TestContext.Current.CancellationToken);
+        Assert.Null(await MemoryAddLaneGrantGate.TryAuthorizeAsync(
+            Path.Combine(room, "artifacts"), TestContext.Current.CancellationToken));
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = [snapshot.Items.Single() with
+            {
+                Requirements = [TaskRequirements.MemoryAdd],
+                Adapter = "agy",
+            }],
+        }, TestContext.Current.CancellationToken);
+        Assert.Null(await MemoryAddLaneGrantGate.TryAuthorizeAsync(
+            Path.Combine(room, "artifacts"), TestContext.Current.CancellationToken));
     }
 
     [Fact]

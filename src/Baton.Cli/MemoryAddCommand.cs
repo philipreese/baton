@@ -175,10 +175,27 @@ public static class MemoryAddCommand
         cancellationToken.ThrowIfCancellationRequested();
         manifest.Write(manifestPath);
         output.WriteLine($"RECOVERY {manifestPath} -- durable intent recorded; retry or undo is safe after interruption.");
-        manifest = await MemoryImportOperationStore
-            .ApplyAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            manifest = await MemoryImportOperationStore
+                .ApplyAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (MemoryAddDispatchConflictException)
+        {
+            output.WriteLine("REFUSED  this durable memory-add grant was already used for a different normalized payload.");
+            return 1;
+        }
         if (!manifest.Appended.Any())
         {
+            if (laneAuthorization is not null
+                && (await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false))
+                    .FirstOrDefault(existing => string.Equals(existing.SourcePath, entry.SourcePath, StringComparison.OrdinalIgnoreCase))
+                    is { } committed
+                && string.Equals(committed.Id, entry.Id, StringComparison.Ordinal))
+            {
+                output.WriteLine($"ADDED    {committed.Id} already committed; retry returned the canonical entry.");
+                return 0;
+            }
             output.WriteLine(
                 $"REFUSED  this memory became entry {entry.Id}, but a concurrent writer appended it first.");
             output.WriteLine("         Nothing was appended by this call, so its durable intent owns no canonical row.");

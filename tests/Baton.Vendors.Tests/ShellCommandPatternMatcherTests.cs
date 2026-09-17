@@ -1,10 +1,32 @@
 using Baton.Vendors;
+using Baton.Queue;
 using Xunit;
 
 namespace Baton.Vendors.Tests;
 
 public class ShellCommandPatternMatcherTests
 {
+    [Fact]
+    public void Memory_add_exception_admits_only_the_granted_repository_and_exact_argv()
+    {
+        var grant = MemoryAddCommandPermission.Add(
+            new PermissionGrant(RunShellCommands: true, DeniedShellCommandPatterns: ["baton *"]),
+            new MemoryAddDispatchGrant("a" + new string('1', 31), "github.com/owner/repo"));
+
+        Assert.True(ShellCommandPatternMatcher.EvaluateChainedCommand(
+            "baton memory add --text 'fixture fact' --kind durable-fact --repository github.com/owner/repo",
+            grant.ShellCommandPatterns, grant.DeniedShellCommandPatterns, grant.DeniedShellCommandExceptions).IsAllowed);
+        Assert.False(ShellCommandPatternMatcher.EvaluateChainedCommand(
+            "baton memory add --text fixture --kind durable-fact --repository github.com/other/repo",
+            grant.ShellCommandPatterns, grant.DeniedShellCommandPatterns, grant.DeniedShellCommandExceptions).IsAllowed);
+        Assert.False(ShellCommandPatternMatcher.EvaluateChainedCommand(
+            "baton memory add --text fixture --kind durable-fact",
+            grant.ShellCommandPatterns, grant.DeniedShellCommandPatterns, grant.DeniedShellCommandExceptions).IsAllowed);
+        Assert.False(ShellCommandPatternMatcher.EvaluateChainedCommand(
+            "baton queue add x --role implement",
+            grant.ShellCommandPatterns, grant.DeniedShellCommandPatterns, grant.DeniedShellCommandExceptions).IsAllowed);
+    }
+
     [Theory]
     [InlineData("git status")]
     [InlineData("git commit -m \"msg\"")]

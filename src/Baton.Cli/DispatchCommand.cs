@@ -1407,7 +1407,11 @@ public static class DispatchCommand
             materialized.Definition,
             materialized.Bindings.ToDictionary(
                 pair => pair.Key,
-                pair => pair.Value with { MemoryAddGrant = memoryAddGrant },
+                pair => pair.Value with
+                {
+                    MemoryAddGrant = memoryAddGrant,
+                    PermissionGrant = MemoryAddCommandPermission.Add(pair.Value.PermissionGrant!, memoryAddGrant),
+                },
                 StringComparer.Ordinal));
     }
 

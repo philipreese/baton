@@ -45,21 +45,33 @@ public static class MemoryAddLaneGrantGate
             var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
             var item = queue.Items.SingleOrDefault(candidate =>
                 candidate.MemoryAddGrant == grant
+                && candidate.Requirements?.Contains(TaskRequirements.MemoryAdd, StringComparer.Ordinal) == true
                 && candidate.Issue is > 0
                 && candidate.RoomDirectory is { Length: > 0 } recordedRoom
                 && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(recordedRoom), BatonPaths.RecordKey(room)));
+            var model = resolved.Entry.ModelResolved ?? resolved.Entry.Model;
+            var assignment = item?.AttemptEnvelope;
+            var recordedAdapter = assignment?.Adapter ?? item?.Adapter;
+            var recordedModel = assignment?.Model ?? item?.Model;
             if (item is null || item.Issue is not int issue
+                || string.IsNullOrWhiteSpace(recordedAdapter)
                 || !string.Equals(item.Repository, grant.Repository, StringComparison.Ordinal))
             {
                 return null;
             }
 
-            var model = resolved.Entry.ModelResolved ?? resolved.Entry.Model ?? "unresolved-model";
+            if (!string.Equals(resolved.Role, item.Role, StringComparison.Ordinal)
+                || !string.Equals(resolved.Entry.Adapter, recordedAdapter, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(model, recordedModel, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
             return new Authorization(
                 grant.Repository,
                 grant.DispatchId,
                 issue,
-                $"room={Path.GetFileName(room)};role={resolved.Role};adapter={resolved.Entry.Adapter};model={model};issue={issue};dispatch={grant.DispatchId}");
+                $"room={Path.GetFileName(room)};role={resolved.Role};adapter={resolved.Entry.Adapter};model={model ?? "unresolved-model"};issue={issue};dispatch={grant.DispatchId}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WorkerBindingConfigException or QueueStoreException)
         {

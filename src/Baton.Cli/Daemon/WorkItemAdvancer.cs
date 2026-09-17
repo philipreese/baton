@@ -549,6 +549,7 @@ public sealed class WorkItemAdvancer
             // stage has its own role and stage plan; carrying the old tuple forward would silently
             // run review/fix/re-review on the implementation worker.
             WorkerAssignment = null,
+            MemoryAddGrant = null,
             Round = transition.Round,
             PullRequest = pr.Number ?? existing.PullRequest,
             // Coalesced, never assigned: a `gh` that did not run (missing, unauthenticated, no PR on
