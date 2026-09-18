@@ -248,13 +248,17 @@ public sealed class MemoryImportTests : IDisposable
     {
         var indexPath = Path.Combine(root, ClaudeProjectionTarget.IndexFileName);
         Assert.True(File.Exists(indexPath), $"Missing projected vendor index: {indexPath}");
-        var index = File.ReadAllText(indexPath);
+        var indexBytes = File.ReadAllBytes(indexPath);
+        var index = Encoding.UTF8.GetString(indexBytes);
         Assert.True(MemoryVendorIndexProjection.TryStripOwnedSection(index, out _));
+        var ownedDetailNames = MemoryVendorIndexProjection.OwnedDetailFileNames(indexBytes);
 
         var details = Directory.EnumerateFiles(root)
-            .Select(Path.GetFileName)
-            .Where(name => name is not null && MemoryVendorIndexProjection.IsOwnedDetailFile(name))
-            .Cast<string>()
+            .Select(path => (Name: Path.GetFileName(path), Bytes: File.ReadAllBytes(path)))
+            .Where(file => file.Name is { } name
+                && ownedDetailNames.Contains(name)
+                && MemoryVendorIndexProjection.IsOwnedDetailFile(name, file.Bytes))
+            .Select(file => file.Name!)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in entries)
         {
@@ -558,6 +562,11 @@ public sealed class MemoryImportTests : IDisposable
         await BuildStandardFixtureAsync();
         var firstRoot = Path.Combine(ClaudeHome, "projects", "C--baton", "memory");
         var secondRoot = Path.Combine(ClaudeHome, "projects", "C--baton-worktree", "memory");
+        const string unownedDetailName = "baton-memory-0123456789abcdef0123456789abcdef.md";
+        const string unownedDetailContent = "vendor-owned source content";
+        var unownedDetailPath = Path.Combine(secondRoot, unownedDetailName);
+        File.WriteAllText(unownedDetailPath, unownedDetailContent);
+        var unownedDetailBefore = File.ReadAllBytes(unownedDetailPath);
 
         await RunAsync("--root", firstRoot);
         var afterFirstEntries = await StoreAsync("github.com/philipreese/baton");
@@ -566,6 +575,7 @@ public sealed class MemoryImportTests : IDisposable
         await RunAsync("--root", secondRoot);
         var afterSecond = await StoreAsync("github.com/philipreese/baton");
         Assert.True(afterSecond.Count > afterFirst.Count);
+        Assert.Equal(unownedDetailBefore, File.ReadAllBytes(unownedDetailPath));
 
         var manifests = Directory
             .GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName))
@@ -580,6 +590,11 @@ public sealed class MemoryImportTests : IDisposable
         Assert.Contains("No source memory file was touched", undone, StringComparison.Ordinal);
         AssertOnlyOwnedProjectionChanges(ClaudeHome, claudeBefore, claudeBeforeBytes);
         Assert.Equal(afterFirst, (await StoreAsync("github.com/philipreese/baton")).Select(e => e.Id));
+        Assert.Equal(unownedDetailBefore, File.ReadAllBytes(unownedDetailPath));
+        Assert.DoesNotContain(
+            unownedDetailName,
+            File.ReadAllText(Path.Combine(secondRoot, ClaudeProjectionTarget.IndexFileName)),
+            StringComparison.Ordinal);
 
         AssertProjectionMatchesStore(
             Path.Combine(ClaudeHome, "projects", "C--baton", "memory"),
