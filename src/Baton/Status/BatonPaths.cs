@@ -433,6 +433,16 @@ public static class BatonPaths
     public const string FleetEventsRolloverFileName = "events.1.jsonl";
 
     /// <summary>
+    /// <c>{Root}/fleet/conductor-obligations.json</c> — the materialized recovery projection for
+    /// conductor obligations. Facts remain in <see cref="FleetEventsFile"/>; this file is only the
+    /// latest projection so an old open obligation survives bounded event-log rotation.
+    /// </summary>
+    public static string ConductorObligationsFile =>
+        Path.Combine(Root, FleetDirectoryName, ConductorObligationsFileName);
+
+    public const string ConductorObligationsFileName = "conductor-obligations.json";
+
+    /// <summary>
     /// <c>{Root}/fleet/watchdog.txt</c> — the one line <c>DaemonWatchdog</c> writes when it declares
     /// the daemon hung, and the reason it is a file of its own rather than another field in
     /// <see cref="FleetHeartbeatFile"/> beside it: the heartbeat is rewritten by the next healthy
