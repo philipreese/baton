@@ -218,6 +218,31 @@ public sealed class QueueWorktreeReportTests
     }
 
     [Fact]
+    public async Task Remote_HEAD_ref_is_not_publication_evidence()
+    {
+        var sandbox = Temp("remote-head");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var repo = await RepoAsync(root, "remote-head-only");
+            await GitAsync(repo.Path, "update-ref", "refs/remotes/origin/HEAD", "HEAD");
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "remote-head-only")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "remote-head-only");
+
+            Assert.Contains("upstream-publication-evidence-unavailable", entry.ReasonCodes);
+            Assert.Equal("unknown", entry.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
     public async Task Configured_but_unresolvable_upstream_is_unknown()
     {
         var sandbox = Temp("unresolvable-upstream");

@@ -317,20 +317,35 @@ internal sealed record QueueWorktreeEntry(
 
             var containment = await RunGitAsync(
                 path,
-                ["for-each-ref", "--contains", "HEAD", "--format=%(refname)", "refs/heads", "refs/remotes"],
+                ["for-each-ref", "--contains", "HEAD", "--format=%(refname)%09%(symref)", "refs/heads", "refs/remotes"],
                 cancellationToken).ConfigureAwait(false);
             if (!containment.Success || containment.Truncated) return UpstreamPublicationEvidenceUnavailableReason;
 
-            var containingReferences = containment.Stdout
-                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
-            if (containingReferences.Any(reference =>
-                (reference.StartsWith("refs/heads/", StringComparison.Ordinal)
-                    && reference.Length == "refs/heads/".Length)
-                || (reference.StartsWith("refs/remotes/", StringComparison.Ordinal)
-                    && reference.Length == "refs/remotes/".Length)
-                || (!reference.StartsWith("refs/heads/", StringComparison.Ordinal)
-                    && !reference.StartsWith("refs/remotes/", StringComparison.Ordinal))))
-                return UpstreamPublicationEvidenceUnavailableReason;
+            var containingReferences = new List<string>();
+            foreach (var line in containment.Stdout
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                var fields = line.Split('\t');
+                if (fields.Length != 2) return UpstreamPublicationEvidenceUnavailableReason;
+
+                var reference = fields[0];
+                var symbolicTarget = fields[1];
+                if (reference.StartsWith("refs/remotes/", StringComparison.Ordinal)
+                    && reference.EndsWith("/HEAD", StringComparison.Ordinal))
+                    continue;
+
+                var localBranch = reference.StartsWith("refs/heads/", StringComparison.Ordinal)
+                    && reference.Length > "refs/heads/".Length;
+                var remoteNameAndBranch = reference.StartsWith("refs/remotes/", StringComparison.Ordinal)
+                    ? reference["refs/remotes/".Length..]
+                    : string.Empty;
+                var remoteSeparator = remoteNameAndBranch.IndexOf('/');
+                var remoteBranch = remoteSeparator > 0 && remoteSeparator < remoteNameAndBranch.Length - 1;
+                if (!string.IsNullOrEmpty(symbolicTarget) || (!localBranch && !remoteBranch))
+                    return UpstreamPublicationEvidenceUnavailableReason;
+
+                containingReferences.Add(reference);
+            }
 
             return containingReferences.Any(reference =>
                 !string.Equals(reference, attachedBranch, StringComparison.Ordinal))
