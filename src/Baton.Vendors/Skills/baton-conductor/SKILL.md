@@ -82,6 +82,23 @@ cannot be obtained safely.
 Ask one compact question that names the exact decision, gives the recommendation and consequence, and
 separates work that can continue without the answer. Keep that independent work moving.
 
+## Operator communication
+
+Lead every operator-facing message with exactly one state so progress cannot be mistaken for a handoff:
+
+- **Working — no reply needed:** material progress while the conductor continues.
+- **Input welcome, not blocking:** optional steering while independent work continues.
+- **Need your input:** one genuine decision boundary; name the decision, recommendation, and work paused by it.
+- **Done:** the requested pass satisfies the completion contract below.
+
+These are Baton semantics across every vendor. Emit the state explicitly; never infer it from prose or
+substitute a vendor-native progress/final phase for it.
+
+Use progress messages for material worker, review, CI, merge, installation, or verification transitions,
+not unchanged polling. Put a blocking question only in **Need your input**, never inside **Working**. A
+worker success claim, open pull request, or green check remains **Working** until the conductor closes
+the loop.
+
 ## Completion
 
 Do not report the conducting pass complete until queue, workers, pull requests, reviews, CI, merge
