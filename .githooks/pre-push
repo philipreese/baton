@@ -52,6 +52,33 @@ now_ms() {
     printf '%s' "$ms"
 }
 
+# The phase timeline is diagnostic only and is enabled for this hook invocation when Baton gave
+# it a usable execution artifact directory. Its schema and retention meaning live in
+# spec/baton.md §7; this recorder must never affect the hook result.
+phase_timeline_path=""
+if [ -n "$BATON_OUTPUT_DIR" ] && [ -d "$BATON_OUTPUT_DIR" ]; then
+    phase_timeline_path="$BATON_OUTPUT_DIR/pre-push-phase-timeline.jsonl"
+    BATON_PRE_PUSH_PHASE_TIMELINE="$phase_timeline_path"
+    export BATON_PRE_PUSH_PHASE_TIMELINE
+fi
+
+record_phase() {
+    phase=$1
+    event=$2
+    member=${3-}
+    [ -n "$phase_timeline_path" ] || return 0
+    python -c 'import json, sys, time
+path, phase, event, member = sys.argv[1:]
+row = {"schemaVersion": 1, "phase": phase, "event": event,
+       "monotonicMs": time.monotonic_ns() // 1_000_000}
+if member:
+    row["member"] = member
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(row, separators=(",", ":")) + "\n")' \
+        "$phase_timeline_path" "$phase" "$event" "$member" 2>/dev/null || return 0
+    return 0
+}
+
 gate_start_ms=$(now_ms)
 wait_log=$(mktemp 2>/dev/null) || wait_log=""
 if [ -n "$wait_log" ]; then
@@ -68,20 +95,28 @@ record_push_timing() {
     else
         wait_ms=0
     fi
+    record_phase aggregate-append start
     if [ -n "$gate_start_ms" ] && [ -n "$BATON_OUTPUT_DIR" ] && [ -d "$BATON_OUTPUT_DIR" ]; then
         gate_end_ms=$(now_ms)
-        [ -n "$gate_end_ms" ] || return 0
-        printf '{"pushWaitMs":%s,"prePushGateMs":%s}\n' \
-            "${wait_ms:-0}" "$((gate_end_ms - gate_start_ms))" \
-            >> "$BATON_OUTPUT_DIR/push-timing.jsonl" 2>/dev/null || return 0
+        if [ -n "$gate_end_ms" ]; then
+            printf '{"pushWaitMs":%s,"prePushGateMs":%s}\n' \
+                "${wait_ms:-0}" "$((gate_end_ms - gate_start_ms))" \
+                >> "$BATON_OUTPUT_DIR/push-timing.jsonl" 2>/dev/null || true
+        fi
     fi
+    record_phase aggregate-append end
     return 0
 }
 
+record_phase receipt-check start
 if pixi run gates-check-receipt; then
+    record_phase receipt-check end
+    record_phase hook-completion start
     record_push_timing
+    record_phase hook-completion end
     exit 0
 fi
+record_phase receipt-check end
 
 # Baton.Artifacts.ArtifactManager.BuildEnvironment sets BATON_LANE on every dispatched worker,
 # unconditionally, and it survives into that worker's own `git push`; a human at a keyboard never
@@ -99,7 +134,11 @@ fi
 # with -- tools/gates/gates.py's selftest runs this hook against a stub that exits 7 on the human
 # (gates-fast) branch and a distinct 8 on the lane (gates-lane-fast) branch, proving the lane path
 # actually ran rather than falling back to the human one.
+record_phase fallback-gate start "$fallback_task"
 pixi run "$fallback_task"
 status=$?
+record_phase fallback-gate end "$fallback_task"
+record_phase hook-completion start
 record_push_timing
+record_phase hook-completion end
 exit $status

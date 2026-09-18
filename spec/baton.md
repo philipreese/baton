@@ -6110,6 +6110,35 @@ inventing a fourth number a ruling never sized would be exactly the drift `recor
 enforcement remains scoped to the one path that holds the stopwatch (`baton_run_command`, above) — a
 claude or agy lane's own CLI shell is unaffected because Baton is not the process bounding it.
 
+### Pre-push phase timeline (#2325 diagnostic slice)
+
+The pre-push hook may retain a diagnostic timeline at
+`<BATON_OUTPUT_DIR>/pre-push-phase-timeline.jsonl`. It is enabled only by that hook, and only when
+`BATON_OUTPUT_DIR` already names a usable directory. The file is append-only JSONL and is retained
+with the current execution artifact under the ordinary artifact-retention policy; it is not copied
+into the repository cost ledger or any room-level projection. A missing file means that the hook
+was not instrumented, had no usable output directory, or recorded nothing; it does not mean that a
+push was instant or successful.
+
+Each line has this canonical schema:
+
+| Field | Meaning |
+|---|---|
+| `schemaVersion` | Integer `1`. A reader must reject an unknown version rather than reinterpret it. |
+| `phase` | One of `receipt-check`, `fallback-gate`, `member-execution`, `runner-cleanup`, `hook-completion`, or `aggregate-append`. |
+| `event` | `start` or `end`; a `start` without its matching `end` proves only that completion was not retained. The process may have been killed or failed before completion, or the failure-tolerant recorder may have failed to append the `end`. |
+| `monotonicMs` | The local monotonic-clock reading at append time; it is not wall-clock time and is never used for cost or timeout policy. |
+| `member` | Present only for `fallback-gate` and `member-execution`: the selected fallback task or canonical gate-member name. |
+
+The hook records receipt checking, the selected fallback, hook completion, and the existing aggregate
+timing append. `gates.py` records each member independently, including overlapped members, and its
+runner cleanup. Lines are ordered by append, so overlapping members may interleave. This is passive
+evidence for diagnosing a killed push: consumers must use the explicit milestones, never buffered
+stdout, to decide whether work completed. It is not a second source for `pushWaitMs` or
+`prePushGateMs`, does not grant progress credit, and does not change the shipping ceiling, gate
+membership, receipt coverage, exit status, or settlement behavior. Every write is failure-tolerant;
+an inability to append a diagnostic line must not change the hook's result.
+
 ### Canonical skill packages (#1151)
 
 A **canonical skill package** is a directory whose name is its identity, holding an optional typed
