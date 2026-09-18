@@ -37,6 +37,22 @@ public static class QueueCommand
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? RunProbeAsync = null,
         QueueWorktreeLivenessProbe? LivenessProbe = null);
 
+    internal static Task<int> ExecuteJanitorNowAsync(
+        TextWriter output,
+        CancellationToken cancellationToken = default,
+        string? repositoryDirectory = null,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null,
+        WorktreeApplyTestHooks? worktreeApplyTestHooks = null)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        return JanitorNowAsync(
+            output,
+            cancellationToken,
+            repositoryDirectory,
+            repositoryResolver ?? RepositoryIdentityResolver.TryResolveAsync,
+            worktreeApplyTestHooks);
+    }
+
     public static Task<int> ExecuteAsync(
         QueueOptions options,
         TextWriter output,
@@ -521,6 +537,66 @@ public static class QueueCommand
             return 0;
         }
 
+        return await ApplyWorktreeReportAsync(
+            report, sourceRepository, worktreeRoot, snapshot.Items, output, format, cancellationToken,
+            worktreeApplyTestHooks, _ => true, printSummary: false).ConfigureAwait(false);
+    }
+
+    private static async Task<int> JanitorNowAsync(
+        TextWriter output,
+        CancellationToken cancellationToken,
+        string? repositoryDirectory,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
+        WorktreeApplyTestHooks? worktreeApplyTestHooks)
+    {
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
+        var sourceRepository = Path.GetFullPath(repositoryDirectory ?? Directory.GetCurrentDirectory());
+        var worktreeRoot = settings.Queue.WorktreeRoot ?? Path.GetDirectoryName(sourceRepository);
+        var currentRepository = await repositoryResolver(sourceRepository, cancellationToken).ConfigureAwait(false);
+        var scopedItems = currentRepository is null
+            ? []
+            : snapshot.Items
+                .Where(item => string.Equals(item.Repository, currentRepository.Value, StringComparison.Ordinal))
+                .ToList();
+        var report = await QueueWorktreeReport.CreateAsync(
+            scopedItems,
+            worktreeRoot,
+            cancellationToken,
+            repositoryResolver,
+            worktreeApplyTestHooks?.LivenessProbe).ConfigureAwait(false);
+
+        if (currentRepository is null)
+        {
+            output.WriteLine("Janitor now: current repository identity unavailable; no worktrees selected.");
+        }
+
+        return await ApplyWorktreeReportAsync(
+            report,
+            sourceRepository,
+            worktreeRoot,
+            scopedItems,
+            output,
+            QueueWorktreesOutputFormat.Text,
+            cancellationToken,
+            worktreeApplyTestHooks,
+            claim => currentRepository is not null
+                && string.Equals(claim.Repository, currentRepository.Value, StringComparison.Ordinal),
+            printSummary: true).ConfigureAwait(false);
+    }
+
+    private static async Task<int> ApplyWorktreeReportAsync(
+        QueueWorktreeReport report,
+        string sourceRepository,
+        string? worktreeRoot,
+        IReadOnlyList<QueueItem> observedItems,
+        TextWriter output,
+        QueueWorktreesOutputFormat format,
+        CancellationToken cancellationToken,
+        WorktreeApplyTestHooks? worktreeApplyTestHooks,
+        Func<QueueWorktreeCleanupClaim, bool> claimIsInScope,
+        bool printSummary)
+    {
         var dispositions = new Dictionary<string, string>(QueueWorktreeReport.PathComparer);
         // An unreceipted claim can only be left by a process that did not finish its apply operation.
         // Settle it before considering a fresh claim: the replacement claim below fences the full
@@ -528,6 +604,7 @@ public static class QueueCommand
         foreach (var active in await QueueStore.GetActiveWorktreeCleanupClaimsAsync(
                      BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
         {
+            if (!claimIsInScope(active)) continue;
             using var recoveryLease = await QueueStore.TryAcquireWorktreeCleanupOperationAsync(
                 BatonPaths.QueueFile, active.Path, cancellationToken).ConfigureAwait(false);
             if (recoveryLease is null) continue;
@@ -554,14 +631,14 @@ public static class QueueCommand
                 BatonPaths.QueueFile, adopted, "race-lost", "abandoned-claim-recovered",
                 cancellationToken: cancellationToken, observedBytes: candidate.SizeBytes, ownerId: recoveryLease.OwnerId).ConfigureAwait(false);
             dispositions[candidate.Path] = await ApplyWorktreeCandidateAsync(
-                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken, worktreeApplyTestHooks, recoveryLease).ConfigureAwait(false);
+                candidate, sourceRepository, worktreeRoot, observedItems, cancellationToken, worktreeApplyTestHooks, recoveryLease).ConfigureAwait(false);
         }
 
         foreach (var candidate in report.Workspaces.Where(entry =>
                      entry.Classification == "candidate" && !dispositions.ContainsKey(entry.Path)))
         {
             dispositions[candidate.Path] = await ApplyWorktreeCandidateAsync(
-                candidate, sourceRepository, worktreeRoot, snapshot.Items, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
+                candidate, sourceRepository, worktreeRoot, observedItems, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
         }
 
         var applied = report with
@@ -571,6 +648,21 @@ public static class QueueCommand
                 : entry).ToList(),
         };
         output.WriteLine(format == QueueWorktreesOutputFormat.Json ? applied.ToJson() : applied.ToText());
+        if (printSummary)
+        {
+            var removed = dispositions.Values.Count(disposition => disposition == "removed");
+            var retained = applied.Workspaces.Count(entry => entry.Classification == "retain")
+                + dispositions.Values.Count(disposition => disposition == "retained");
+            var refused = dispositions.Values.Count(disposition => disposition == "refused");
+            var raceLost = dispositions.Values.Count(disposition => disposition == "race-lost");
+            var unknown = applied.Workspaces.Count(entry => entry.Classification == "unknown");
+            output.WriteLine(
+                $"Janitor now: removed {removed}; retained {retained}; refused {refused}; "
+                + $"race-lost {raceLost}; unknown {unknown}; changed {removed}.");
+            if (removed == 0) output.WriteLine("Janitor now changed nothing.");
+            return 0;
+        }
+
         return dispositions.Values.Any(disposition => disposition is "retained" or "refused") ? 1 : 0;
     }
 

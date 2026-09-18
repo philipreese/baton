@@ -114,6 +114,8 @@ internal sealed record QueueWorktreeEntry(
     IReadOnlyList<QueueWorktreeRow> Rows,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CleanupDisposition = null)
 {
+    private const string UpstreamAheadProbeUnavailableReason = "upstream-ahead-probe-unavailable";
+    private const string UpstreamPublicationEvidenceUnavailableReason = "upstream-publication-evidence-unavailable";
     private const int MaxFilesMeasured = 10_000;
     private const int MaxDirectoriesMeasured = 10_000;
     private const long MaxBytesMeasured = 1L << 30;
@@ -167,6 +169,8 @@ internal sealed record QueueWorktreeEntry(
         if (size is null) reasons.Add("size-observation-unavailable");
 
         var candidate = reasons.Count == 0;
+        var publicationEvidenceUnavailable = git.ReasonCodes.Contains(
+            UpstreamPublicationEvidenceUnavailableReason, StringComparer.Ordinal);
         var unavailable = !exists
             || origins.Contains(WorkspaceOrigins.Unknown, StringComparer.Ordinal)
             || !referenceObservation.Complete
@@ -174,8 +178,13 @@ internal sealed record QueueWorktreeEntry(
             || git.SubstantiveCleanliness == "unknown"
             || git.ReasonCodes.Contains("repository-probe-unavailable", StringComparer.Ordinal)
             || git.ReasonCodes.Contains("expected-branch-probe-unavailable", StringComparer.Ordinal)
+            || git.ReasonCodes.Contains(UpstreamAheadProbeUnavailableReason, StringComparer.Ordinal)
             || size is null;
-        var classification = candidate ? "candidate" : unavailable ? "unknown" : "retain";
+        var publicationEvidenceIsOnlyBlocker = publicationEvidenceUnavailable
+            && reasons.All(reason => reason == UpstreamPublicationEvidenceUnavailableReason);
+        var classification = candidate
+            ? "candidate"
+            : unavailable || publicationEvidenceIsOnlyBlocker ? "unknown" : "retain";
         return new QueueWorktreeEntry(
             path,
             string.Join(",", origins),
@@ -265,6 +274,10 @@ internal sealed record QueueWorktreeEntry(
         var cleanliness = status.Success ? string.IsNullOrWhiteSpace(status.Stdout) ? "clean" : "dirty" : "unknown";
         if (!status.Success) reasons.Add("git-status-unavailable");
 
+        var unpublishedReason = await ObserveUnpublishedReasonAsync(path, attachedBranch, cancellationToken)
+            .ConfigureAwait(false);
+        if (unpublishedReason is not null) reasons.Add(unpublishedReason);
+
         var exact = registered && repositoryMatches && branchMatches && refHead.Success
             && string.Equals(refHead.Stdout.Trim(), head, StringComparison.Ordinal);
 
@@ -278,6 +291,82 @@ internal sealed record QueueWorktreeEntry(
             cleanliness,
             identity?.Value,
             reasons);
+    }
+
+    private static async Task<string?> ObserveUnpublishedReasonAsync(
+        string path,
+        string? attachedBranch,
+        CancellationToken cancellationToken)
+    {
+        var upstream = await RunGitAsync(
+            path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cancellationToken)
+            .ConfigureAwait(false);
+        if (!upstream.Success)
+        {
+            const string BranchPrefix = "refs/heads/";
+            if (attachedBranch is null || !attachedBranch.StartsWith(BranchPrefix, StringComparison.Ordinal))
+                return null;
+
+            var branch = attachedBranch[BranchPrefix.Length..];
+            var configuration = await RunGitAsync(
+                path,
+                ["config", "--get-regexp",
+                    "^branch\\." + System.Text.RegularExpressions.Regex.Escape(branch) + "\\.(remote|merge)$"],
+                cancellationToken).ConfigureAwait(false);
+            if (configuration.Success) return UpstreamAheadProbeUnavailableReason;
+
+            var containment = await RunGitAsync(
+                path,
+                ["for-each-ref", "--contains", "HEAD", "--format=%(refname)%09%(symref)", "refs/heads", "refs/remotes"],
+                cancellationToken).ConfigureAwait(false);
+            if (!containment.Success || containment.Truncated) return UpstreamPublicationEvidenceUnavailableReason;
+
+            var containingReferences = new List<string>();
+            foreach (var line in containment.Stdout
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                var fields = line.Split('\t');
+                if (fields.Length != 2) return UpstreamPublicationEvidenceUnavailableReason;
+
+                var reference = fields[0];
+                var symbolicTarget = fields[1];
+                if (reference.StartsWith("refs/remotes/", StringComparison.Ordinal)
+                    && reference.EndsWith("/HEAD", StringComparison.Ordinal))
+                    continue;
+
+                var localBranch = reference.StartsWith("refs/heads/", StringComparison.Ordinal)
+                    && reference.Length > "refs/heads/".Length;
+                var remoteNameAndBranch = reference.StartsWith("refs/remotes/", StringComparison.Ordinal)
+                    ? reference["refs/remotes/".Length..]
+                    : string.Empty;
+                var remoteSeparator = remoteNameAndBranch.IndexOf('/');
+                var remoteBranch = remoteSeparator > 0 && remoteSeparator < remoteNameAndBranch.Length - 1;
+                if (!string.IsNullOrEmpty(symbolicTarget) || (!localBranch && !remoteBranch))
+                    return UpstreamPublicationEvidenceUnavailableReason;
+
+                containingReferences.Add(reference);
+            }
+
+            return containingReferences.Any(reference =>
+                !string.Equals(reference, attachedBranch, StringComparison.Ordinal))
+                ? null
+                : UpstreamPublicationEvidenceUnavailableReason;
+        }
+
+        var divergence = await RunGitAsync(
+            path, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cancellationToken)
+            .ConfigureAwait(false);
+        if (!divergence.Success) return UpstreamAheadProbeUnavailableReason;
+
+        var counts = divergence.Stdout.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (counts.Length != 2
+            || !long.TryParse(counts[0], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var ahead)
+            || !long.TryParse(counts[1], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out _))
+            return UpstreamAheadProbeUnavailableReason;
+
+        return ahead > 0 ? "unpushed-commits" : null;
     }
 
     private static bool ParseRegistration(string porcelain, string expectedPath, out string? head, out string? branch)

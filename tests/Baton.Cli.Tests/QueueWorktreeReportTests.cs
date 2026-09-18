@@ -33,6 +33,7 @@ public sealed class QueueWorktreeReportTests
             await File.WriteAllTextAsync(Path.Combine(candidate.Path, "local.txt"), "local only", Ct);
             await GitAsync(candidate.Path, "add", "local.txt");
             await CommitAsync(candidate.Path, "local-only commit");
+            await GitAsync(candidate.Path, "branch", "retained-candidate-head");
 
             var cancelled = await RepoAsync(root, "cancelled-before-launch");
             var operatorRepo = await RepoAsync(root, "operator");
@@ -86,7 +87,8 @@ public sealed class QueueWorktreeReportTests
             var candidateEntry = Find(report, "candidate");
             Assert.True(candidateEntry.Classification == "candidate",
                 $"candidate was {candidateEntry.Classification}: {string.Join(", ", candidateEntry.ReasonCodes)}");
-            Assert.Equal("candidate", Find(report, "cancelled-before-launch").Classification);
+            AssertReason(report, "cancelled-before-launch",
+                "upstream-publication-evidence-unavailable", "unknown");
             AssertReason(report, "operator", "origin-not-owned", "retain");
             AssertReason(report, "imported", "origin-not-owned", "retain");
             AssertReason(report, "historical", "origin-not-owned", "unknown");
@@ -149,6 +151,123 @@ public sealed class QueueWorktreeReportTests
                 IsolatedProbe(sandbox));
 
             AssertReason(report, "repository-probe-unavailable", "repository-probe-unavailable", "unknown");
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Clean_branch_ahead_of_upstream_is_retained_as_unpushed()
+    {
+        var sandbox = Temp("unpushed");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var bareRemote = Path.Combine(sandbox, "published.git");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await GitAsync(sandbox, "init", "-q", "--bare", bareRemote);
+            var repo = await RepoAsync(root, "unpushed");
+            await GitAsync(repo.Path, "remote", "add", "published", bareRemote);
+            await GitAsync(repo.Path, "push", "-q", "-u", "published", repo.Branch);
+            await File.WriteAllTextAsync(Path.Combine(repo.Path, "local.txt"), "unpublished", Ct);
+            await GitAsync(repo.Path, "add", "local.txt");
+            await CommitAsync(repo.Path, "unpublished commit");
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "unpushed")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "unpushed");
+
+            Assert.Contains("unpushed-commits", entry.ReasonCodes);
+            Assert.Equal("retain", entry.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Clean_locally_committed_branch_without_upstream_stays_unknown()
+    {
+        var sandbox = Temp("no-upstream");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var repo = await RepoAsync(root, "no-upstream");
+            await GitAsync(repo.Path, "branch", "retained-base");
+            await File.WriteAllTextAsync(Path.Combine(repo.Path, "unique.txt"), "unique local commit", Ct);
+            await GitAsync(repo.Path, "add", "unique.txt");
+            await CommitAsync(repo.Path, "unique local commit");
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "no-upstream")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "no-upstream");
+
+            Assert.Contains("upstream-publication-evidence-unavailable", entry.ReasonCodes);
+            Assert.Equal("unknown", entry.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Remote_HEAD_ref_is_not_publication_evidence()
+    {
+        var sandbox = Temp("remote-head");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var repo = await RepoAsync(root, "remote-head-only");
+            await GitAsync(repo.Path, "update-ref", "refs/remotes/origin/HEAD", "HEAD");
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "remote-head-only")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "remote-head-only");
+
+            Assert.Contains("upstream-publication-evidence-unavailable", entry.ReasonCodes);
+            Assert.Equal("unknown", entry.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Configured_but_unresolvable_upstream_is_unknown()
+    {
+        var sandbox = Temp("unresolvable-upstream");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var bareRemote = Path.Combine(sandbox, "published.git");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await GitAsync(sandbox, "init", "-q", "--bare", bareRemote);
+            var repo = await RepoAsync(root, "unresolvable-upstream");
+            await GitAsync(repo.Path, "remote", "add", "published", bareRemote);
+            await GitAsync(repo.Path, "push", "-q", "-u", "published", repo.Branch);
+            await GitAsync(repo.Path, "update-ref", "-d", $"refs/remotes/published/{repo.Branch}");
+
+            Assert.Equal("published", (await GitOutputAsync(repo.Path, "config", "--get", $"branch.{repo.Branch}.remote")).Trim());
+            Assert.Equal($"refs/heads/{repo.Branch}", (await GitOutputAsync(repo.Path, "config", "--get", $"branch.{repo.Branch}.merge")).Trim());
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "unresolvable-upstream")], root, Ct, livenessProbe: IsolatedProbe(sandbox)),
+                "unresolvable-upstream");
+
+            Assert.Contains("upstream-ahead-probe-unavailable", entry.ReasonCodes);
+            Assert.Equal("unknown", entry.Classification);
         }
         finally
         {
@@ -238,6 +357,7 @@ public sealed class QueueWorktreeReportTests
         try
         {
             var repo = await RepoAsync(root, "referenced");
+            await GitAsync(repo.Path, "branch", "retained-referenced-head");
             var room = Path.Combine(BatonPaths.Rooms, "continuation-room");
             Directory.CreateDirectory(room);
             await WorkerBindingConfigWriter.SaveToFileAsync(

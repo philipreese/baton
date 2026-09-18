@@ -155,6 +155,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine(
         "              (adding an item queues it; the running daemon is what launches it, and 'baton queue hold' " +
         "pauses launches without stopping the daemon)");
+    Console.Error.WriteLine($"       {JanitorOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {ConductorOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
@@ -397,6 +398,13 @@ try
         var queueOptions = QueueOptionsParser.Parse(args[1..]);
         return await QueueCommand
             .ExecuteAsync(queueOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
+    }
+
+    if (args[0] == "janitor")
+    {
+        var janitorOptions = JanitorOptionsParser.Parse(args[1..]);
+        return await JanitorCommand
+            .ExecuteAsync(janitorOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
     }
 
     // #2296: durable repository claims for external conductors. Produces no CommandResult,
