@@ -264,7 +264,7 @@ public sealed class QueueWorktreeApplyTests
     {
         await using var fixture = ApplyFixture.Create();
         await fixture.InitializeAsync();
-        await GitAsync(fixture.Source, Ct, "commit", "--allow-empty", "-q", "-m", "competing target");
+        await GitAsync(fixture.Source, Ct, "-c", "user.name=Baton Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-q", "-m", "competing target");
         var competingHead = (await GitOutputAsync(fixture.Source, "rev-parse", "HEAD")).Trim();
         (string Output, string Error, int ExitCode) competingUpdate = (string.Empty, string.Empty, 0);
         var hooks = new QueueCommand.WorktreeApplyTestHooks(AfterReferenceFence: async (_, token) =>
@@ -294,7 +294,7 @@ public sealed class QueueWorktreeApplyTests
         await using var fixture = ApplyFixture.Create();
         await fixture.InitializeAsync();
         var calls = new List<string[]>();
-        await GitAsync(fixture.Source, Ct, "commit", "--allow-empty", "-q", "-m", "competing target");
+        await GitAsync(fixture.Source, Ct, "-c", "user.name=Baton Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-q", "-m", "competing target");
         var competingHead = (await GitOutputAsync(fixture.Source, "rev-parse", "HEAD")).Trim();
         var hooks = new QueueCommand.WorktreeApplyTestHooks(
             BeforeProtectedRemoval: failure == "expected-head-mismatch" ? async (_, token) =>
