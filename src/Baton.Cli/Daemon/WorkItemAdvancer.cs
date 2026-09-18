@@ -259,6 +259,7 @@ public sealed class WorkItemAdvancer
                     ? i with
                     {
                         Retirement = retirement,
+                        ExpectedOriginatingPullRequestHead = null,
                         DispositionOperations = [.. i.DispositionOutbox, operation],
                     } : i).ToList()
                 };
@@ -572,6 +573,12 @@ public sealed class WorkItemAdvancer
             ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
             AttemptId = null,
             AttemptBaseRevision = null,
+            ExpectedOriginatingPullRequestHead = from is WorkStage.Fix or WorkStage.Continue
+                && next == WorkStage.Continue
+                && pr.Succeeded
+                && pr.IsOpen == true
+                ? pr.HeadSha
+                : null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -615,6 +622,7 @@ public sealed class WorkItemAdvancer
             LaunchedAt = null,
             AttemptId = null,
             AttemptBaseRevision = null,
+            ExpectedOriginatingPullRequestHead = null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -673,6 +681,7 @@ public sealed class WorkItemAdvancer
             ReconciliationKind = transition.ReconciliationKind,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
+            ExpectedOriginatingPullRequestHead = null,
             Halted = true,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
@@ -711,6 +720,7 @@ public sealed class WorkItemAdvancer
             Error = reason,
             Halted = true,
             ReconciliationKind = null,
+            ExpectedOriginatingPullRequestHead = null,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 

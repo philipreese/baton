@@ -11,14 +11,26 @@ internal static class OriginatingPullRequestVerifier
     private static readonly TimeSpan GhVerificationTimeout = TimeSpan.FromSeconds(20);
 
     public static async Task<OriginatingPullRequestOwnership> VerifyAsync(
-        string reference, string workspace, CancellationToken cancellationToken, string? expectedBranch = null)
+        string reference, string workspace, CancellationToken cancellationToken, string? expectedBranch = null,
+        string? expectedHead = null)
     {
         var (repository, number) = ParseReference(reference);
+        if (expectedHead is not null && !IsCanonicalSha(expectedHead))
+        {
+            throw new CliArgumentException(
+                "The preserved continuation PR head is missing or malformed; originating PR ownership was refused before launch.");
+        }
+
         var identity = GhPullRequestCreateProvenanceResolver.TryCaptureIdentity(workspace);
         var launchHead = await WorkspaceHead.TryCaptureAsync(workspace, cancellationToken).ConfigureAwait(false);
         if (identity is null || launchHead is null || identity.Repository != repository)
             throw new CliArgumentException("The workspace repository and launch HEAD must be readable before originating PR ownership can be granted.");
         ValidateExpectedBranch(identity, expectedBranch);
+        if (expectedHead is not null)
+        {
+            await ValidatePreservedContinuationAsync(
+                workspace, expectedHead, launchHead, cancellationToken).ConfigureAwait(false);
+        }
 
         var gh = ResolveExecutable(workspace, Environment.GetEnvironmentVariable("PATH"), OperatingSystem.IsWindows());
         var start = ChildProcessStartInfo.Create(gh, info =>
@@ -62,7 +74,7 @@ internal static class OriginatingPullRequestVerifier
         }
         var output = await stdoutTask.ConfigureAwait(false);
         _ = await stderrTask.ConfigureAwait(false);
-        return ValidateResponse(repository, number, identity, launchHead, process.ExitCode, output);
+        return ValidateResponse(repository, number, identity, launchHead, process.ExitCode, output, expectedHead);
     }
 
     internal static string ResolveExecutable(string workspace, string? searchPath, bool isWindows) =>
@@ -110,8 +122,15 @@ internal static class OriginatingPullRequestVerifier
         GhPullRequestCreateIdentity identity,
         string launchHead,
         int exitCode,
-        string output)
+        string output,
+        string? expectedHead = null)
     {
+        if (expectedHead is not null && !IsCanonicalSha(expectedHead))
+        {
+            throw new CliArgumentException(
+                "The preserved continuation PR head is missing or malformed; originating PR ownership was refused before launch.");
+        }
+
         if (exitCode != 0)
         {
             throw new CliArgumentException("The originating pull request could not be read.");
@@ -145,15 +164,113 @@ internal static class OriginatingPullRequestVerifier
             var state = stateValue.GetString();
             var branch = branchValue.GetString();
             var head = headValue.GetString();
+            var requiredHead = expectedHead ?? launchHead;
             if (!string.Equals(state, "OPEN", StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(branch, identity.HeadBranch, StringComparison.Ordinal)
-                || !string.Equals(head, launchHead, StringComparison.OrdinalIgnoreCase))
+                || !string.Equals(head, requiredHead, StringComparison.OrdinalIgnoreCase))
             {
                 throw new CliArgumentException(
-                    "The originating pull request must be open and match the workspace repository, branch, and pre-dispatch HEAD.");
+                    expectedHead is null
+                        ? "The originating pull request must be open and match the workspace repository, branch, and pre-dispatch HEAD."
+                        : "The originating pull request must be open at the retained continuation head and match the workspace repository and branch.");
             }
 
             return new OriginatingPullRequestOwnership(repository, number, branch!, launchHead);
+        }
+    }
+
+    private static async Task ValidatePreservedContinuationAsync(
+        string workspace, string expectedHead, string launchHead, CancellationToken cancellationToken)
+    {
+        if (!IsCanonicalSha(launchHead))
+        {
+            throw new CliArgumentException(
+                "The current workspace HEAD is missing or malformed; preserved continuation ownership was refused before launch.");
+        }
+
+        var git = OutsideWorkspaceExecutableResolver.TryResolve(
+            Environment.GetEnvironmentVariable("PATH"), workspace, "git", OperatingSystem.IsWindows())
+            ?? throw new CliArgumentException(
+                "Could not resolve an absolute, link-free git executable outside the worker workspace; preserved continuation ownership was refused before launch.");
+
+        var status = await RunGitAsync(
+            git, workspace, ["status", "--porcelain=v1", "--untracked-files=all"], cancellationToken)
+            .ConfigureAwait(false);
+        if (!status.Started || status.ExitCode != 0 || status.Stdout.Trim().Length > 0)
+        {
+            throw new CliArgumentException(
+                "The preserved continuation workspace must be clean and readable; ownership was refused before launch.");
+        }
+
+        var ancestry = await RunGitAsync(
+            git, workspace, ["merge-base", "--is-ancestor", expectedHead, launchHead], cancellationToken)
+            .ConfigureAwait(false);
+        if (!ancestry.Started || ancestry.ExitCode != 0)
+        {
+            throw new CliArgumentException(
+                "The current workspace HEAD is not a readable descendant of the retained continuation head; ownership was refused before launch.");
+        }
+    }
+
+    private static bool IsCanonicalSha(string value) =>
+        value.Length == 40 && value.All(char.IsAsciiHexDigit);
+
+    private static async Task<(bool Started, int ExitCode, string Stdout, string Stderr)> RunGitAsync(
+        string executable, string workspace, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+    {
+        var start = ChildProcessStartInfo.Create(executable, info =>
+        {
+            info.WorkingDirectory = workspace;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            info.StandardOutputEncoding = Encoding.UTF8;
+            info.StandardErrorEncoding = Encoding.UTF8;
+        });
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+
+        Process? process;
+        try
+        {
+            process = Process.Start(start);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return (false, -1, string.Empty, ex.Message);
+        }
+
+        if (process is null)
+        {
+            return (false, -1, string.Empty, "git did not start.");
+        }
+
+        using (process)
+        using (var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            bound.CancelAfter(GhVerificationTimeout);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            try
+            {
+                await process.WaitForExitAsync(bound.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (bound.IsCancellationRequested)
+            {
+                try
+                {
+                    if (!process.HasExited) process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException) { }
+
+                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+                return (false, -1, string.Empty, "git verification timed out or was cancelled.");
+            }
+
+            return (
+                true,
+                process.ExitCode,
+                await stdoutTask.ConfigureAwait(false),
+                await stderrTask.ConfigureAwait(false));
         }
     }
 

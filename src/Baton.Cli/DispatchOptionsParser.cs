@@ -82,6 +82,7 @@ public static class DispatchOptionsParser
         string? overrideRunwayReason = null;
         string? originatingPullRequest = null;
         string? originatingPullRequestBranch = null;
+        string? originatingPullRequestExpectedHead = null;
         string? memoryAddDispatch = null;
         string? memoryAddRepository = null;
         var attachments = new List<string>();
@@ -209,6 +210,11 @@ public static class DispatchOptionsParser
                 case "--originating-pr-branch":
                     originatingPullRequestBranch = RequireValue(args, ref i, arg);
                     break;
+                // Internal queue transport: this is the retained PR head for the one recovery proof
+                // shape. It is intentionally absent from Usage; direct dispatch has no way to mint it.
+                case "--originating-pr-expected-head":
+                    originatingPullRequestExpectedHead = RequireValue(args, ref i, arg);
+                    break;
                 // Conductor-only transport. The command gate independently requires the matching
                 // durable queue row, so typing these flags cannot manufacture authority.
                 case "--memory-add-dispatch":
@@ -298,6 +304,12 @@ public static class DispatchOptionsParser
             throw new CliArgumentException("The queue memory-add transport requires both its dispatch identity and repository.");
         }
 
+        if (originatingPullRequestExpectedHead is not null && originatingPullRequest is null)
+        {
+            throw new CliArgumentException(
+                "The preserved continuation PR head is an internal queue value and requires --originating-pr.");
+        }
+
         var memoryAddGrant = memoryAddDispatch is null
             ? null
             : new MemoryAddDispatchGrant(memoryAddDispatch, memoryAddRepository!);
@@ -332,6 +344,7 @@ public static class DispatchOptionsParser
             ParseTaskSizeDeclaration(declaredSize, sizeRationale),
             originatingPullRequest,
             originatingPullRequestBranch,
+            originatingPullRequestExpectedHead,
             memoryAddGrant);
     }
 

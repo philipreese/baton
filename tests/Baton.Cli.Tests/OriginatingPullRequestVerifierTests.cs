@@ -8,6 +8,7 @@ namespace Baton.Cli.Tests;
 public sealed class OriginatingPullRequestVerifierTests
 {
     private const string Head = "0123456789abcdef0123456789abcdef01234567";
+    private const string PreservedHead = "fedcba9876543210fedcba9876543210fedcba98";
     private static readonly GhPullRequestCreateIdentity Identity = new("aer-works/baton", "2178-lane");
 
     [Theory]
@@ -49,6 +50,26 @@ public sealed class OriginatingPullRequestVerifierTests
             $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head.ToUpperInvariant()}}"}""");
 
         Assert.Equal(new OriginatingPullRequestOwnership("aer-works/baton", 2304, "2178-lane", Head), ownership);
+    }
+
+    [Fact]
+    public void A_recovery_PR_may_remain_at_the_retained_head_when_workspace_HEAD_is_a_descendant()
+    {
+        var ownership = OriginatingPullRequestVerifier.ValidateResponse(
+            "aer-works/baton", 2304, Identity, Head, 0,
+            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{PreservedHead}}"}""",
+            PreservedHead);
+
+        Assert.Equal(new OriginatingPullRequestOwnership("aer-works/baton", 2304, "2178-lane", Head), ownership);
+    }
+
+    [Fact]
+    public void A_malformed_retained_head_is_refused()
+    {
+        Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
+            "aer-works/baton", 2304, Identity, Head, 0,
+            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{PreservedHead}}"}""",
+            "not-a-sha"));
     }
 
     [Theory]

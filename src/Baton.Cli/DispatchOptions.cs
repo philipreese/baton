@@ -198,4 +198,5 @@ public sealed record DispatchOptions(
     TaskSizeDeclaration? DeclaredTaskSize = null,
     string? OriginatingPullRequest = null,
     string? OriginatingPullRequestBranch = null,
+    string? OriginatingPullRequestExpectedHead = null,
     MemoryAddDispatchGrant? MemoryAddGrant = null);

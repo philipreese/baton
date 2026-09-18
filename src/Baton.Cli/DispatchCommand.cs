@@ -219,7 +219,8 @@ public static class DispatchCommand
                 throw new CliArgumentException("'--originating-pr' applies to one direct role dispatch, not a workflow template.");
             var ownership = await OriginatingPullRequestVerifier.VerifyAsync(
                 options.OriginatingPullRequest, workspace, cancellationToken,
-                options.OriginatingPullRequestBranch).ConfigureAwait(false);
+                options.OriginatingPullRequestBranch,
+                options.OriginatingPullRequestExpectedHead).ConfigureAwait(false);
             bindings = bindings.ToDictionary(pair => pair.Key, pair => pair.Value with { OriginatingPullRequestOwnership = ownership }, StringComparer.Ordinal);
         }
 

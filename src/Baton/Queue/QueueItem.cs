@@ -142,6 +142,14 @@ public sealed record QueueItem
     public int? PullRequest { get; init; }
 
     /// <summary>
+    /// The conductor-retained open PR head used only when a failed fix/continue attempt is recovered
+    /// by another continuation. It is observed from the lifecycle's PR read, never from worker input
+    /// or the next mutable workspace probe, and is cleared whenever the next stage is not recovery
+    /// continuation.
+    /// </summary>
+    public string? ExpectedOriginatingPullRequestHead { get; init; }
+
+    /// <summary>
     /// Opaque ownership token for a readiness reconciliation that has crossed its local linearization
     /// point. While present, cancellation and same-tag replacement must not supersede the row: the
     /// already-authorized GitHub mutation is allowed to finish and commit its observation first.

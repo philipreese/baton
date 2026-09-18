@@ -600,6 +600,7 @@ public static class QueueLauncher
         Add("--override-runway", options.OverrideRunwayReason);
         Add("--originating-pr", options.OriginatingPullRequest);
         Add("--originating-pr-branch", options.OriginatingPullRequestBranch);
+        Add("--originating-pr-expected-head", options.OriginatingPullRequestExpectedHead);
         if (options.MemoryAddGrant is { } memoryAddGrant)
         {
             Add("--memory-add-dispatch", memoryAddGrant.DispatchId);
@@ -1010,6 +1011,9 @@ public static class QueueLauncher
                 ? OriginatingPullRequestVerifier.CanonicalReference(repository, pullRequest)
                 : null,
             OriginatingPullRequestBranch: followOn ? item.Branch : null,
+            OriginatingPullRequestExpectedHead: item.Stage == WorkStage.Continue
+                ? item.ExpectedOriginatingPullRequestHead
+                : null,
             MemoryAddGrant: item.MemoryAddGrant);
     }
 

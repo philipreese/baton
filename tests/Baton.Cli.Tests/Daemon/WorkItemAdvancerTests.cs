@@ -596,6 +596,45 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_failed_fix_with_one_clean_commit_ahead_retains_the_observed_PR_head_for_continue()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Fix, room, round: 2, automaticFixUsed: true);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { AttemptBaseRevision = FullPushedSha }] },
+                Ct);
+
+            var facts = await new WorkItemAdvancer(
+                    new FakeGh(PrJson(77, FullPushedSha)),
+                    (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Equal(FullPushedSha, item.ExpectedOriginatingPullRequestHead);
+
+            var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+                item,
+                new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
+                Path.Combine(home, "continue-room")));
+            Assert.Equal(FullPushedSha, options.OriginatingPullRequestExpectedHead);
+
+            var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
+            Assert.Equal(FullPushedSha, parsed.OriginatingPullRequestExpectedHead);
+            Assert.Contains(facts, fact => fact.Reason!.Contains("fix → continue", StringComparison.Ordinal));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_legacy_lifecycle_item_without_repository_identity_retains_actionable_uncertainty()
     {
         var home = CreateTempHome();

@@ -772,6 +772,39 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.Equal(options.OriginatingPullRequestBranch, parsed.OriginatingPullRequestBranch);
     }
 
+    [Fact]
+    public void Only_a_retained_continue_item_forwards_the_internal_expected_head()
+    {
+        var expectedHead = "0123456789abcdef0123456789abcdef01234567";
+        var item = new QueueItem
+        {
+            Tag = "2178-lane",
+            Role = "implement",
+            Workspace = @"C:\repos\w2178",
+            SpecFile = @"C:\Users\x\.baton\queue\specs\2178-lane.md",
+            Stage = WorkStage.Continue,
+            Repository = "github.com/aer-works/baton",
+            PullRequest = 2304,
+            Branch = "2178-lane",
+            ExpectedOriginatingPullRequestHead = expectedHead,
+        };
+
+        var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+            item,
+            new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
+            @"C:\rooms\next"));
+        var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
+
+        Assert.Equal(expectedHead, options.OriginatingPullRequestExpectedHead);
+        Assert.Equal(expectedHead, parsed.OriginatingPullRequestExpectedHead);
+
+        var fixOptions = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+            item with { Stage = WorkStage.Fix },
+            new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
+            @"C:\rooms\next"));
+        Assert.Null(fixOptions.OriginatingPullRequestExpectedHead);
+    }
+
     [Theory]
     [InlineData(WorkStage.Continue, null, 2304, "2178-lane")]
     [InlineData(WorkStage.Continue, "github.com/aer-works/baton", null, "2178-lane")]
