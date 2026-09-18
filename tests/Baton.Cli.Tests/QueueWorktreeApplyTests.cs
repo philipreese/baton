@@ -52,6 +52,86 @@ public sealed class QueueWorktreeApplyTests
     }
 
     [Fact]
+    public async Task Janitor_now_removes_one_safe_candidate_and_is_idempotent()
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+
+        var first = await ExecuteJanitorAsync(fixture);
+        var second = await ExecuteJanitorAsync(fixture);
+
+        Assert.Equal(0, first.ExitCode);
+        Assert.Contains("Janitor now: removed 1", first.Output, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(fixture.Worktree));
+        Assert.Equal(0, second.ExitCode);
+        Assert.Contains("Janitor now changed nothing.", second.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("CleanupDisposition", second.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Janitor_now_filters_worktrees_to_the_current_repository()
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+        var foreignSource = Path.Combine(fixture.Home, "foreign-source");
+        var foreignWorktree = Path.Combine(fixture.Home, "foreign-worktree");
+        Directory.CreateDirectory(foreignSource);
+        await GitAsync(foreignSource, Ct, "init", "-q", "--initial-branch", "main");
+        await GitAsync(foreignSource, Ct, "remote", "add", "origin", "https://github.com/example/foreign.git");
+        await File.WriteAllTextAsync(Path.Combine(foreignSource, "README.md"), "foreign", Ct);
+        await GitAsync(foreignSource, Ct, "add", "README.md");
+        await GitAsync(foreignSource, Ct, "-c", "user.name=Baton Test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "base");
+        await GitAsync(foreignSource, Ct, "worktree", "add", "-q", "-b", "foreign-lane", foreignWorktree);
+        var foreignItem = fixture.Item with
+        {
+            Tag = "foreign-lane",
+            Workspace = foreignWorktree,
+            Repository = "github.com/example/foreign",
+            Branch = "foreign-lane",
+        };
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = [.. snapshot.Items, foreignItem],
+        }, Ct);
+
+        var result = await ExecuteJanitorAsync(fixture);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.False(Directory.Exists(fixture.Worktree));
+        Assert.True(Directory.Exists(foreignWorktree));
+        Assert.DoesNotContain(foreignWorktree, result.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Janitor_now_reports_dirty_evidence_without_deleting()
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+        await File.WriteAllTextAsync(Path.Combine(fixture.Worktree, "dirty.txt"), "dirty", Ct);
+
+        var result = await ExecuteJanitorAsync(fixture);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(Directory.Exists(fixture.Worktree));
+        Assert.Contains("substantive-uncommitted-content", result.Output, StringComparison.Ordinal);
+        Assert.Contains("Janitor now changed nothing.", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Janitor_now_reports_unknown_evidence_without_deleting()
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+        DirectoryCleanup.DeleteRecursively(fixture.Worktree);
+
+        var result = await ExecuteJanitorAsync(fixture);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("missing-directory", result.Output, StringComparison.Ordinal);
+        Assert.Contains("unknown 1", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Apply_is_idempotent_and_does_not_receipt_a_successful_removal_twice()
     {
         await using var fixture = ApplyFixture.Create();
@@ -365,6 +445,25 @@ public sealed class QueueWorktreeApplyTests
             RepositoryIdentityResolver.TryResolveAsync,
             NeverProvisionAsync,
             worktreeApplyTestHooks: hooks);
+        return (exit, output.ToString());
+    }
+
+    private static async Task<(int ExitCode, string Output)> ExecuteJanitorAsync(ApplyFixture fixture)
+    {
+        var output = new StringWriter();
+        var hooks = new QueueCommand.WorktreeApplyTestHooks
+        {
+            LivenessProbe = QueueWorktreeLivenessProbe.Default with
+            {
+                BuildLockPath = Path.Combine(fixture.Home, "build.lock"),
+            },
+        };
+        var exit = await QueueCommand.ExecuteJanitorNowAsync(
+            output,
+            Ct,
+            fixture.Source,
+            RepositoryIdentityResolver.TryResolveAsync,
+            hooks);
         return (exit, output.ToString());
     }
 
