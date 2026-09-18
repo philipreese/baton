@@ -391,10 +391,14 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
-    public void Worktrees_parses_its_two_output_formats_and_refuses_other_arguments()
+    public void Worktrees_parses_apply_and_its_two_output_formats_and_refuses_other_arguments()
     {
         Assert.Equal(QueueVerb.Worktrees, QueueOptionsParser.Parse(["worktrees"]).Verb);
         Assert.Equal(QueueWorktreesOutputFormat.Json, QueueOptionsParser.Parse(["worktrees", "--format", "json"]).Format);
+        var apply = QueueOptionsParser.Parse(["worktrees", "--apply", "--format", "json"]);
+        Assert.True(apply.Apply);
+        Assert.Equal(QueueWorktreesOutputFormat.Json, apply.Format);
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["worktrees", "--format", "xml"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["worktrees", "--apply", "--apply"]));
     }
 }

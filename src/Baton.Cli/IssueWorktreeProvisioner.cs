@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Baton.Accounting;
 using Baton.Queue;
+using Baton.Status;
 using Baton.Vendors;
 
 namespace Baton.Cli;
@@ -191,7 +192,10 @@ public static class IssueWorktreeProvisioner
         var firstWorkspace = Path.Combine(root, $"w{issue}");
         var firstBranch = BranchNameFor(issue);
 
-        if (Directory.Exists(firstWorkspace))
+        var canonicalFirst = Path.GetFullPath(firstWorkspace);
+        if (Directory.Exists(firstWorkspace)
+            && !await QueueStore.HasActiveWorktreeCleanupClaimAsync(
+                BatonPaths.QueueFile, canonicalFirst, cancellationToken).ConfigureAwait(false))
         {
             // A directory named w<n> is not evidence that it is the live lane. Only an exact Git
             // registration on the first-lane branch permits reuse. A positively different attached
@@ -209,6 +213,13 @@ public static class IssueWorktreeProvisioner
         {
             var branch = suffix == 1 ? firstBranch : $"{firstBranch}-{suffix}";
             var workspace = suffix == 1 ? firstWorkspace : Path.Combine(root, $"w{issue}-{suffix}");
+            var canonicalWorkspace = Path.GetFullPath(workspace);
+            if (await QueueStore.HasActiveWorktreeCleanupClaimAsync(
+                    BatonPaths.QueueFile, canonicalWorkspace, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
             if (Directory.Exists(workspace))
             {
                 continue;

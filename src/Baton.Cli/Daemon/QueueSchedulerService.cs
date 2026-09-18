@@ -611,17 +611,18 @@ public sealed class QueueSchedulerService : BackgroundService
                 return interval;
             }
 
-            if (outcome.RunwayHeld)
+            if (outcome.RunwayHeld || outcome.Deferred)
             {
-                // A runway hold is a modeled no-launch result for this admitted attempt. Publish its
-                // refusal before clearing the envelope; the next retry receives a fresh attempt id.
-                await MarkRunwayHeldAsync(item.Tag, attemptId, now).ConfigureAwait(false);
+                // A runway hold or active cleanup claim is a modeled no-launch result for this admitted attempt.
+                // Publish its refusal before clearing the envelope; the next retry receives a fresh attempt id.
+                var waitReason = outcome.Deferred ? QueueWaitReason.CleanupClaim : QueueWaitReason.RunwayHeld;
+                await MarkAttemptRefusedAsync(item.Tag, attemptId, waitReason, now).ConfigureAwait(false);
                 await PumpFleetEventsAsync(cancellationToken).ConfigureAwait(false);
                 await ResetRetryableRefusedAttemptAsync(item.Tag, attemptId).ConfigureAwait(false);
                 await RecordAsync(
                     new QueueDecisionEntry(
                         now, item.Tag, QueueDecisionEntry.Waited,
-                        QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
+                        QueueWaitReasons.Token(waitReason),
                         decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                         tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
                         SelectionSource: tier.SelectionSource, Admission: admission,
@@ -1376,7 +1377,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 : current),
         }, CancellationToken.None);
 
-    private static Task MarkRunwayHeldAsync(string tag, FleetAttemptId attemptId, DateTimeOffset occurredAt) =>
+    private static Task MarkAttemptRefusedAsync(string tag, FleetAttemptId attemptId, QueueWaitReason waitReason, DateTimeOffset occurredAt) =>
         QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
@@ -1401,7 +1402,7 @@ public sealed class QueueSchedulerService : BackgroundService
                     FleetEventKind.AttemptRefused,
                     envelope,
                     occurredAt,
-                    QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
+                    QueueWaitReasons.Token(waitReason),
                     room: null,
                     usage: null,
                     artifacts: null));

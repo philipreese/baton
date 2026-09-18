@@ -35,7 +35,8 @@ public sealed record QueueLaunchRequest(QueueItem Item, QueueTierResolution Tier
 /// because the two have opposite consequences for the item's state — spec/baton.md §13 names them.
 /// </param>
 /// <param name="Error">Why the launch failed, or null when it started.</param>
-public sealed record QueueLaunchOutcome(string? RoomDirectory, bool RunwayHeld = false, string? Error = null);
+/// <param name="Deferred">Whether the launch was deferred without failure (e.g. by an active worktree cleanup claim).</param>
+public sealed record QueueLaunchOutcome(string? RoomDirectory, bool RunwayHeld = false, string? Error = null, bool Deferred = false);
 
 /// <summary>
 /// What re-adopting one <see cref="QueueItemState.Launched"/> row on daemon start found (#2082):
@@ -102,6 +103,13 @@ public static class QueueLauncher
         ArgumentNullException.ThrowIfNull(request);
 
         var item = request.Item;
+        var canonicalWorkspace = Path.GetFullPath(item.Workspace);
+        if (await QueueStore.HasActiveWorktreeCleanupClaimAsync(
+                BatonPaths.QueueFile, canonicalWorkspace, cancellationToken).ConfigureAwait(false))
+        {
+            return new QueueLaunchOutcome(null, Deferred: true);
+        }
+
         if (!File.Exists(item.SpecFile))
         {
             return new QueueLaunchOutcome(null, Error: $"spec file '{item.SpecFile}' is gone");

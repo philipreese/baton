@@ -61,6 +61,111 @@ public sealed class QueueStoreTests
     }
 
     [Fact]
+    public async Task Worktree_cleanup_claim_is_exact_path_exclusive_and_receipted()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            var claim = await QueueStore.TryClaimWorktreeCleanupAsync(
+                path, @"C:\repos\worktrees\retired", "github.com/example/repo", "2151-lane", "abc123", Ct);
+            var duplicate = await QueueStore.TryClaimWorktreeCleanupAsync(
+                path, @"C:\repos\worktrees\retired", "github.com/example/repo", "2151-lane", "abc123", Ct);
+
+            var acquired = Assert.IsType<QueueWorktreeCleanupClaim>(claim);
+            Assert.Null(duplicate);
+            Assert.True(await QueueStore.HasActiveWorktreeCleanupClaimAsync(path, acquired.Path, Ct));
+
+            await QueueStore.CompleteWorktreeCleanupAsync(path, acquired, "refused", "final-recheck-not-candidate", Ct);
+            var read = await QueueStore.LoadAsync(path, Ct);
+
+            Assert.False(await QueueStore.HasActiveWorktreeCleanupClaimAsync(path, acquired.Path, Ct));
+            Assert.Single(read.WorktreeCleanupClaims!);
+            Assert.Single(read.WorktreeCleanupReceipts!);
+            Assert.Equal("final-recheck-not-candidate", read.WorktreeCleanupReceipts![0].ReasonCode);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
+    public async Task Worktree_cleanup_operation_lease_is_exclusive_and_crash_recoverable()
+    {
+        var path = TempQueuePath();
+        const string workspace = @"C:\repos\worktrees\retired";
+        try
+        {
+            using var first = await QueueStore.TryAcquireWorktreeCleanupOperationAsync(path, workspace, Ct);
+            Assert.NotNull(first);
+            Assert.Null(await QueueStore.TryAcquireWorktreeCleanupOperationAsync(path, workspace, Ct));
+
+            first.Dispose();
+            using var recovered = await QueueStore.TryAcquireWorktreeCleanupOperationAsync(path, workspace, Ct);
+            Assert.NotNull(recovered);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
+    public async Task Legacy_cleanup_claims_and_receipts_reload_with_explicit_observation_defaults()
+    {
+        var path = TempQueuePath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            await File.WriteAllTextAsync(path, """
+                {"items":[],"worktreeCleanupClaims":[{"Id":"claim-1","Path":"C:\\repos\\w1","Repository":"github.com/example/repo","Branch":"2151-lane","Head":"abc","ClaimedAt":"2026-09-17T12:00:00+00:00"}],"worktreeCleanupReceipts":[{"ClaimId":"claim-0","Path":"C:\\repos\\w0","Disposition":"retained","ReasonCode":"git-worktree-remove-failed","CompletedAt":"2026-09-17T11:00:00+00:00"}]}
+                """, Ct);
+
+            var snapshot = await QueueStore.LoadAsync(path, Ct);
+            var claim = Assert.Single(snapshot.WorktreeCleanupClaims!);
+            Assert.Equal(string.Empty, claim.QueueRevision);
+            Assert.Equal("candidate", claim.Classification);
+            var receipt = Assert.Single(snapshot.WorktreeCleanupReceipts!);
+            Assert.Equal(string.Empty, receipt.Repository);
+            Assert.Equal(receipt.CompletedAt, receipt.StartedAt);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
+    public async Task A_non_success_receipt_does_not_permanently_fence_a_path()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            var first = Assert.IsType<QueueWorktreeCleanupClaim>(await QueueStore.TryClaimWorktreeCleanupAsync(
+                path, @"C:\repos\worktrees\retired", "github.com/example/repo", "2151-lane", "abc123", Ct));
+            await QueueStore.CompleteWorktreeCleanupAsync(path, first, "retained", "git-worktree-remove-failed", Ct);
+            var next = await QueueStore.TryClaimWorktreeCleanupAsync(
+                path, @"C:\repos\worktrees\retired", "github.com/example/repo", "2151-lane", "abc123", Ct);
+
+            Assert.NotNull(next);
+            Assert.NotEqual(first.Id, next.Id);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
+    public void Cleanup_revision_observes_full_queue_row_provenance()
+    {
+        var original = Item("owned") with { WorkspaceOrigin = WorkspaceOrigins.IssueProvisioned };
+        var changed = original with { Repository = "github.com/example/repo", Branch = "2151-lane" };
+
+        Assert.NotEqual(QueueStore.ComputeRevision([original]), QueueStore.ComputeRevision([changed]));
+    }
+
+    [Fact]
     public async Task Lifecycle_selection_intent_and_the_legacy_compatibility_shape_survive_a_restart()
     {
         var path = TempQueuePath();

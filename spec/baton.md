@@ -7285,7 +7285,7 @@ record, that exact ceiling is copied even when a sibling is narrower. If the rep
 never trusted, the historical unrestricted bootstrap is recorded with the exact invocation checkout
 as provenance; concurrent provisions may copy only that deterministic bootstrap lineage.
 
-**Read-only retained-worktree inventory (#2318).** `queue worktrees` projects every distinct
+**Retained-worktree inventory and controlled cleanup (#2318, #2386).** `queue worktrees` projects every distinct
 resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for
 compatibility: only the exact creation fact `issue-provisioned` confers Baton ownership;
 `operator-supplied`, `imported-unknown`, and historical null are respectively non-owned or
@@ -7294,14 +7294,32 @@ the same identity, rows, origin, root containment, expected repository/branch, r
 status, substantive cleanliness, bounded byte observation, known active references, and stable
 reason codes.
 
-The command writes no state and never authorizes deletion. A **static candidate** is only a
-read-only observation: every referring row is durably retired or cancelled before launch, no known
-active Baton reference remains, the path is strictly under `Queue.WorktreeRoot`, Git registers
-that exact path to the recorded repository, the attached expected local branch names checkout
-HEAD, and no substantive uncommitted content exists. Failed, missing, conflicting, dirty,
+Without `--apply`, the command writes no state and never authorizes deletion. A **static candidate**
+is only a read-only observation: every referring row is durably retired or cancelled before launch,
+no known active Baton reference remains, the path is strictly under `Queue.WorktreeRoot`, Git
+registers that exact path to the recorded repository, the attached expected local branch names
+checkout HEAD, and no substantive uncommitted content exists. Failed, missing, conflicting, dirty,
 outside-root, historical, imported, operator-supplied, active, failed/halted, or unavailable
 observations stay retain/unknown. The local Git probes and size walk are bounded; probe failure is
-visible as unknown rather than a candidate.
+visible as unknown rather than a candidate. Text and JSON dry runs remain the same read-only
+classifier and expose the same candidate identities.
+
+`queue worktrees --apply` is the narrow deletion authority boundary. Before any Git mutation Baton
+persists a unique durable cleanup claim for the resolved path, repository, branch, HEAD, queue
+revision, and candidate classification, then holds an exact-path crash-released operation lease. The
+lease fences concurrent apply/recovery; its absence is the only abandonment evidence, and recovery
+atomically transfers claim ownership before it can recheck or settle the old claimant. Queue launch,
+continuation, and issue-worktree provisioning defer an active claim. While holding its exact active
+claim and lease, the remover performs a final protected recheck of path, registration, repository,
+branch/HEAD, substantive cleanliness, queue ownership, and complete active-reference observations,
+then acquires a prepared Git expected-old-value transaction for that exact local branch and HEAD before
+the last proof. The transaction holds the branch ref through the non-force `git worktree remove` and
+branch postcondition, so a concurrent Git update is refused until cleanup settles. Fence acquisition
+or liveness failure, drift, ownership loss, missing evidence, or a controlled Git/postcondition failure
+performs no removal and leaves a durable non-success receipt. Successful removal likewise records one
+receipt, proves the registration is absent, and proves the retained local branch still names the claimed HEAD. No receipt
+may report the same removal twice; branch deletion and force or recursive filesystem removal remain
+out of scope.
 
 `--skill <name>` is repeatable on an ordinary dispatch request. Its declaration uses dispatch's own
 normalization — surrounding whitespace is removed, first-seen order is retained, duplicates collapse,

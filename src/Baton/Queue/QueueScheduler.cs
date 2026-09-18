@@ -354,6 +354,11 @@ public enum QueueWaitReason
     /// stays <see cref="QueueItemState.Queued"/> for the next gap.
     /// </summary>
     RunwayHeld,
+
+    /// <summary>
+    /// The workspace has an active cleanup claim. Launch is deferred without failing the queued item.
+    /// </summary>
+    CleanupClaim,
 }
 
 /// <summary>The ledger tokens for <see cref="QueueWaitReason"/>. Stated once here; nothing else
@@ -371,6 +376,7 @@ public static class QueueWaitReasons
         QueueWaitReason.PrePullRequestCap => "pre-pr-cap",
         QueueWaitReason.ReviewCap => "review-cap",
         QueueWaitReason.RunwayHeld => "runway-held",
+        QueueWaitReason.CleanupClaim => "cleanup-claim",
         _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, "Unknown queue wait reason."),
     };
 }

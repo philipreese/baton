@@ -71,6 +71,7 @@ public enum QueueWorktreesOutputFormat
 /// no <c>--require</c> flag is supplied.</param>
 /// <param name="Active">Limits <c>list</c> to queued, launched, and lifecycle terminal work that still needs attention.</param>
 /// <param name="Format">The output format for <c>baton queue worktrees</c>.</param>
+/// <param name="Apply">Claims and removes static worktree candidates after a final recheck.</param>
 public sealed record QueueOptions(
     QueueVerb Verb,
     string? Tag = null,
@@ -96,4 +97,5 @@ public sealed record QueueOptions(
     bool Active = false,
     TaskSizeDeclaration? DeclaredTaskSize = null,
     QueueWorktreesOutputFormat Format = QueueWorktreesOutputFormat.Text,
-    int? MergedPullRequest = null);
+    int? MergedPullRequest = null,
+    bool Apply = false);
