@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Baton.Accounting;
@@ -31,6 +32,8 @@ public static class QueueCommand
     internal sealed record WorktreeApplyTestHooks(
         Func<QueueWorktreeCleanupClaim, CancellationToken, Task>? AfterClaim = null,
         Func<QueueWorktreeCleanupClaim, CancellationToken, Task>? BeforeProtectedRemoval = null,
+        Func<QueueWorktreeCleanupClaim, CancellationToken, Task>? AfterReferenceFence = null,
+        bool FailReferenceFence = false,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? RunProbeAsync = null,
         QueueWorktreeLivenessProbe? LivenessProbe = null);
 
@@ -614,16 +617,38 @@ public static class QueueCommand
             await beforeProtectedRemoval(claim, cancellationToken).ConfigureAwait(false);
         }
 
-        // The lease remains held for this last protected proof and the mutation. It excludes another
-        // Baton apply/recovery while the active claim excludes launch and provisioning; Git retains
-        // its non-force cleanliness and registration checks during the removal itself.
+        // Hold Git's prepared expected-old-value transaction through the last proof, non-force
+        // removal, and branch postcondition. The operation lease only excludes Baton; this lock makes
+        // a competing Git ref update fail while cleanup is in progress.
+        await using var referenceFence = worktreeApplyTestHooks?.FailReferenceFence == true
+            ? null
+            : await GitReferenceFence.TryAcquireAsync(owningCheckout, claim.Branch, claim.Head, cancellationToken).ConfigureAwait(false);
+        if (referenceFence is null)
+        {
+            await QueueStore.CompleteWorktreeCleanupAsync(
+                BatonPaths.QueueFile, claim, "refused", "git-reference-fence-unavailable",
+                cancellationToken: cancellationToken, observedBytes: entry.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
+            return "refused";
+        }
+
+        if (worktreeApplyTestHooks?.AfterReferenceFence is { } afterReferenceFence)
+        {
+            await afterReferenceFence(claim, cancellationToken).ConfigureAwait(false);
+        }
+
+        // The lease remains held for this last protected proof and the mutation. The active claim
+        // excludes launch and provisioning; the prepared Git transaction retains the exact branch
+        // value through removal and its postcondition.
         entry = await RecheckClaimAsync(claim, worktreeRoot, cancellationToken, worktreeApplyTestHooks).ConfigureAwait(false);
         var owned = await QueueStore.IsWorktreeCleanupClaimActiveAndOwnedAsync(
             BatonPaths.QueueFile, claim, lease.OwnerId, cancellationToken).ConfigureAwait(false);
-        if (entry is null || !owned)
+        if (entry is null || !owned || !referenceFence.IsHeld)
         {
+            var reason = !owned ? "cleanup-claim-ownership-lost"
+                : !referenceFence.IsHeld ? "git-reference-fence-lost"
+                : "final-protected-recheck-not-candidate";
             await QueueStore.CompleteWorktreeCleanupAsync(
-                BatonPaths.QueueFile, claim, "refused", owned ? "final-protected-recheck-not-candidate" : "cleanup-claim-ownership-lost",
+                BatonPaths.QueueFile, claim, "refused", reason,
                 cancellationToken: cancellationToken, observedBytes: entry?.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
             return "refused";
         }
@@ -661,6 +686,72 @@ public static class QueueCommand
             BatonPaths.QueueFile, claim, "removed", "removed",
             cancellationToken: cancellationToken, observedBytes: entry.SizeBytes, ownerId: lease.OwnerId).ConfigureAwait(false);
         return "removed";
+    }
+
+    /// <summary>Holds Git's lock for one expected branch value until cleanup releases the transaction.</summary>
+    private sealed class GitReferenceFence : IAsyncDisposable
+    {
+        private readonly Process _process;
+
+        private GitReferenceFence(Process process) => _process = process;
+
+        public bool IsHeld => !_process.HasExited;
+
+        public static async Task<GitReferenceFence?> TryAcquireAsync(
+            string checkout, string branch, string expectedHead, CancellationToken cancellationToken)
+        {
+            var startInfo = new ProcessStartInfo("git")
+            {
+                WorkingDirectory = checkout,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            startInfo.ArgumentList.Add("update-ref");
+            startInfo.ArgumentList.Add("--stdin");
+            var process = Process.Start(startInfo);
+            if (process is null) return null;
+
+            var fence = new GitReferenceFence(process);
+            await process.StandardInput.WriteAsync("start\n").ConfigureAwait(false);
+            await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await process.StandardInput.WriteAsync($"update refs/heads/{branch} {expectedHead} {expectedHead}\n").ConfigureAwait(false);
+            await process.StandardInput.WriteAsync("prepare\n").ConfigureAwait(false);
+            await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+            for (var attempt = 0; attempt < 25; attempt++)
+            {
+                if (process.HasExited) break;
+                if (IsReferenceLockHeld(checkout, branch))
+                {
+                    return fence;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
+            }
+
+            await fence.DisposeAsync().ConfigureAwait(false);
+            return null;
+        }
+
+        private static bool IsReferenceLockHeld(string checkout, string branch) => File.Exists(Path.Combine(
+            checkout, ".git", "refs", "heads", branch.Replace('/', Path.DirectorySeparatorChar) + ".lock"));
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                if (!_process.HasExited)
+                {
+                    await _process.StandardInput.WriteAsync("abort\n").ConfigureAwait(false);
+                    await _process.StandardInput.FlushAsync().ConfigureAwait(false);
+                    await _process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _process.Dispose();
+            }
+        }
     }
 
     private static async Task<QueueWorktreeEntry?> RecheckClaimAsync(

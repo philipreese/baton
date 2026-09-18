@@ -7303,10 +7303,12 @@ atomically transfers claim ownership before it can recheck or settle the old cla
 continuation, and issue-worktree provisioning defer an active claim. While holding its exact active
 claim and lease, the remover performs a final protected recheck of path, registration, repository,
 branch/HEAD, substantive cleanliness, queue ownership, and complete active-reference observations,
-then proves the same claim is still owned immediately before non-force `git worktree remove`. Drift,
-ownership loss, missing evidence, or a controlled Git/postcondition failure performs no removal and
-leaves a durable non-success receipt. Successful removal likewise records one receipt, proves the
-registration is absent, and proves the retained local branch still names the claimed HEAD. No receipt
+then acquires a prepared Git expected-old-value transaction for that exact local branch and HEAD before
+the last proof. The transaction holds the branch ref through the non-force `git worktree remove` and
+branch postcondition, so a concurrent Git update is refused until cleanup settles. Fence acquisition
+or liveness failure, drift, ownership loss, missing evidence, or a controlled Git/postcondition failure
+performs no removal and leaves a durable non-success receipt. Successful removal likewise records one
+receipt, proves the registration is absent, and proves the retained local branch still names the claimed HEAD. No receipt
 may report the same removal twice; branch deletion and force or recursive filesystem removal remain
 out of scope.
 
