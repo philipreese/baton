@@ -65,6 +65,7 @@ public static class MemoryAddLaneGrantGate
             var recordedModel = assignment?.Model ?? item?.Model;
             if (item is null || item.Issue is not int issue
                 || string.IsNullOrWhiteSpace(recordedAdapter)
+                || !WorkerAdapterRegistry.ProvidesHostMediatedExecution(recordedAdapter)
                 || !string.Equals(item.Repository, grant.Repository, StringComparison.Ordinal))
             {
                 return null;

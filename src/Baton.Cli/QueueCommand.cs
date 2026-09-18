@@ -140,6 +140,13 @@ public static class QueueCommand
         // `memory-add` is not a role capability. Its explicit queue declaration is conductor
         // approval, narrowed below to the issue repository and a new durable dispatch identity.
         var requestsMemoryAdd = requirements.Contains(TaskRequirements.MemoryAdd, StringComparer.Ordinal);
+        if (requestsMemoryAdd && !WorkerAdapterRegistry.ProvidesHostMediatedExecution(adapter))
+        {
+            throw new CliArgumentException(
+                $"Task requirement '{TaskRequirements.MemoryAdd}' cannot be admitted for adapter '{adapter}': "
+                + "this capability requires a host-mediated adapter.",
+                "select an adapter that provides host-mediated execution before queueing this capability.");
+        }
         var admission = TaskRequirementPreflight.Evaluate(
             admissionItem, role, settings.Queue.RequireDeclaredRequirements);
         if (admission.Result == TaskRequirementAdmission.Refused)

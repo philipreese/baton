@@ -1401,6 +1401,14 @@ public static class DispatchCommand
             return materialized;
         }
 
+        var boundAdapter = materialized.Bindings.Single().Value.Adapter;
+        if (!WorkerAdapterRegistry.ProvidesHostMediatedExecution(boundAdapter))
+        {
+            throw new CliArgumentException(
+                $"Memory-add grant admission refused for adapter '{boundAdapter}': this capability requires a host-mediated adapter.",
+                "select an adapter that provides host-mediated execution before launching this dispatch.");
+        }
+
         // This is the room-side half of the queue grant. The memory command still reads the queue
         // row itself, so a hand-authored binding or forged internal argv has no authority.
         return (

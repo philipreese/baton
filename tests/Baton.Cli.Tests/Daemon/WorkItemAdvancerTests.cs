@@ -553,6 +553,8 @@ public sealed class WorkItemAdvancerTests
                     [
                         seeded with
                         {
+                            MemoryAddGrant = new MemoryAddDispatchGrant(
+                                "a" + new string('1', 31), Repository),
                             WorkerAssignment = new FrozenWorkerAssignment(
                                 "implement-decision", "codex", "gpt-5.6-terra", "high", "pool-hash",
                                 "legacy-single-candidate", "Frozen for implementation.", Now),
@@ -572,6 +574,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(77, item.PullRequest);
             Assert.Null(item.RoomDirectory);
             Assert.Null(item.WorkerAssignment);
+            Assert.Null(item.MemoryAddGrant);
             Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
 
             var reviewTier = new QueueTierResolution(

@@ -3,6 +3,7 @@ using Baton.Status;
 using Baton.Tests.Shared;
 using Baton.Vendors;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Baton.Cli.Tests;
 
@@ -34,7 +35,7 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
         await File.WriteAllTextAsync(
             BatonPaths.RoomBindingsFile(room),
             $$"""
-            { "implement": { "Adapter": "claude", "Timeout": "00:25:00", "Contract": { "WorkerName": "implement", "RequiredInputs": [], "ProducedOutputs": [{ "Name": "report.md" }], "OptionalMetadata": [] }, "PromptTemplate": "do the thing", "Model": "gpt-fixture", "MemoryAddGrant": { "DispatchId": "{{grant.DispatchId}}", "Repository": "{{Repository}}" } } }
+            { "implement": { "Adapter": "codex", "Timeout": "00:25:00", "Contract": { "WorkerName": "implement", "RequiredInputs": [], "ProducedOutputs": [{ "Name": "report.md" }], "OptionalMetadata": [] }, "PromptTemplate": "do the thing", "Model": "gpt-fixture", "MemoryAddGrant": { "DispatchId": "{{grant.DispatchId}}", "Repository": "{{Repository}}" } } }
             """, TestContext.Current.CancellationToken);
         await QueueStore.MutateAsync(
             BatonPaths.QueueFile,
@@ -43,7 +44,7 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
             {
                 Tag = "2100-memory",
                 Role = "implement",
-                Adapter = "claude",
+                Adapter = "codex",
                 Model = "gpt-fixture",
                 Workspace = _root,
                 SpecFile = Path.Combine(_root, "brief.md"),
@@ -62,7 +63,7 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
         Assert.Equal(grant.DispatchId, authorization.DispatchId);
         Assert.Equal(2100, authorization.Issue);
         Assert.Contains("role=implement", authorization.AssertedBy, StringComparison.Ordinal);
-        Assert.Contains("adapter=claude", authorization.AssertedBy, StringComparison.Ordinal);
+        Assert.Contains("adapter=codex", authorization.AssertedBy, StringComparison.Ordinal);
         Assert.Contains("model=gpt-fixture", authorization.AssertedBy, StringComparison.Ordinal);
 
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
@@ -79,6 +80,13 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
                 Requirements = [TaskRequirements.MemoryAdd],
                 Adapter = "agy",
             }],
+        }, TestContext.Current.CancellationToken);
+        Assert.Null(await MemoryAddLaneGrantGate.TryAuthorizeAsync(
+            Path.Combine(room, "artifacts"), TestContext.Current.CancellationToken, output));
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = [snapshot.Items.Single() with { Adapter = "claude" }],
         }, TestContext.Current.CancellationToken);
         Assert.Null(await MemoryAddLaneGrantGate.TryAuthorizeAsync(
             Path.Combine(room, "artifacts"), TestContext.Current.CancellationToken, output));
@@ -121,30 +129,99 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
             }]), TestContext.Current.CancellationToken);
 
         var previousArtifacts = Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable);
+        var previousOutput = Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR");
         Environment.SetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable, artifacts);
+        Environment.SetEnvironmentVariable("BATON_OUTPUT_DIR", output);
         try
         {
             var permission = MemoryAddCommandPermission.Add(
                 new PermissionGrant(RunShellCommands: true, DeniedShellCommandPatterns: ["baton memory*"]), grant);
-            var policy = new CodexDynamicToolPolicy(
-                permission, _root, output, [], ["changes.md"],
-                memoryAddExecutor: async (invocation, token) =>
+            var configuration = new CodexBrokerConfiguration(
+                _root, "gpt-fixture", null, null, false, permission, ["changes.md"], false);
+            var transcript = string.Join('\n',
+            [
+                "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
+                "{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}",
+                "{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\",\"status\":\"inProgress\",\"items\":[]}}}",
+                JsonSerializer.Serialize(new
                 {
-                    var writer = new StringWriter();
-                    var code = await MemoryAddCommand.ExecuteAsync(
-                        MemoryAddOptionsParser.Parse([
-                            "--text", invocation.Text, "--kind", invocation.Kind, "--repository", invocation.Repository]),
-                        writer, cancellationToken: token, brokerOutputDirectory: output);
-                    return new MemoryAddCommandExecution(code == 0, writer.ToString());
-                });
-            using var arguments = JsonDocument.Parse(
-                $$"""{"command":"baton memory add --text brokered-fact --kind durable-fact --repository {{Repository}}"}""");
+                    id = 99,
+                    method = "item/tool/call",
+                    @params = new
+                    {
+                        tool = "baton_run_command",
+                        arguments = new { command = $"baton memory add --text brokered-fact --kind durable-fact --repository {Repository}" },
+                        callId = "call-1", threadId = "thread-1", turnId = "turn-1",
+                    },
+                }),
+                JsonSerializer.Serialize(new
+                {
+                    id = 100,
+                    method = "item/tool/call",
+                    @params = new
+                    {
+                        tool = "baton_run_command",
+                        arguments = new { command = $"baton memory add --text brokered-fact --kind durable-fact --repository {Repository}" },
+                        callId = "call-2", threadId = "thread-1", turnId = "turn-1",
+                    },
+                }),
+                JsonSerializer.Serialize(new
+                {
+                    id = 101,
+                    method = "item/tool/call",
+                    @params = new
+                    {
+                        tool = "baton_run_command",
+                        arguments = new { command = $"baton memory add --text conflicting-fact --kind durable-fact --repository {Repository}" },
+                        callId = "call-3", threadId = "thread-1", turnId = "turn-1",
+                    },
+                }),
+                JsonSerializer.Serialize(new
+                {
+                    id = 102,
+                    method = "item/tool/call",
+                    @params = new
+                    {
+                        tool = "baton_run_command",
+                        arguments = new { command = $"baton memory add --repository {Repository} --text malformed --kind durable-fact" },
+                        callId = "call-4", threadId = "thread-1", turnId = "turn-1",
+                    },
+                }),
+                "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\",\"items\":[]}}}",
+            ]) + "\n";
+            using var serverOutput = new StringReader(transcript);
+            using var serverInput = new StringWriter();
+            using var batonOutput = new StringWriter();
+            using var error = new StringWriter();
 
-            var allowed = await policy.ExecuteAsync(
-                "baton_run_command", arguments.RootElement, TestContext.Current.CancellationToken);
+            var exitCode = await CodexAppServerBroker.RunProtocolAsync(
+                configuration, "record the fact", output, [], null, CodexBrokerCommand.ExecuteMemoryAddAsync,
+                serverInput, serverOutput, batonOutput, error, TestContext.Current.CancellationToken);
 
-            Assert.True(allowed.Success);
-            Assert.Contains("ADDED", allowed.Text, StringComparison.Ordinal);
+            Assert.Equal(0, exitCode);
+            var responses = serverInput.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonNode.Parse(line)!).Where(node => node["id"] is not null).ToDictionary(
+                    node => node!["id"]!.GetValue<int>(), node => node!["result"]!);
+            Assert.True(responses[99]["success"]!.GetValue<bool>());
+            Assert.True(responses[100]["success"]!.GetValue<bool>());
+            Assert.False(responses[101]["success"]!.GetValue<bool>());
+            Assert.False(responses[102]["success"]!.GetValue<bool>());
+            Assert.Contains("ADDED", responses[100].ToJsonString(), StringComparison.Ordinal);
+            Assert.Contains("different normalized payload", responses[101].ToJsonString(), StringComparison.Ordinal);
+            Assert.Contains("grant-refused", responses[102].ToJsonString(), StringComparison.Ordinal);
+
+            var retry = await CodexBrokerCommand.ExecuteMemoryAddAsync(
+                new MemoryAddCommandInvocation("brokered-fact", "durable-fact", Repository),
+                TestContext.Current.CancellationToken);
+            Assert.True(retry.Success);
+            Assert.Contains("retry returned the canonical entry", retry.Output, StringComparison.Ordinal);
+
+            var conflictingRetry = await CodexBrokerCommand.ExecuteMemoryAddAsync(
+                new MemoryAddCommandInvocation("conflicting-fact", "durable-fact", Repository),
+                TestContext.Current.CancellationToken);
+            Assert.False(conflictingRetry.Success);
+            Assert.Contains("different normalized payload", conflictingRetry.Output, StringComparison.Ordinal);
+            Assert.Equal(string.Empty, error.ToString());
 
             var direct = new StringWriter();
             var directCode = await MemoryAddCommand.ExecuteAsync(
@@ -154,16 +231,11 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
             Assert.Equal(1, directCode);
             Assert.Contains("REFUSED", direct.ToString(), StringComparison.Ordinal);
 
-            using var malformed = JsonDocument.Parse(
-                $$"""{"command":"baton memory add --repository {{Repository}} --text x --kind durable-fact"}""");
-            var refused = await policy.ExecuteAsync(
-                "baton_run_command", malformed.RootElement, TestContext.Current.CancellationToken);
-            Assert.False(refused.Success);
-            Assert.Contains("grant-refused", refused.Text, StringComparison.Ordinal);
         }
         finally
         {
             Environment.SetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable, previousArtifacts);
+            Environment.SetEnvironmentVariable("BATON_OUTPUT_DIR", previousOutput);
         }
     }
 }

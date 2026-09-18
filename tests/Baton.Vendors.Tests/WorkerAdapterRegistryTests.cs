@@ -140,6 +140,15 @@ public class WorkerAdapterRegistryTests
         Assert.IsType<CaptureWorkerAdapter>(adapter);
     }
 
+    [Fact]
+    public void Only_the_brokered_adapter_advertises_host_mediated_execution()
+    {
+        Assert.True(WorkerAdapterRegistry.ProvidesHostMediatedExecution("codex"));
+        Assert.False(WorkerAdapterRegistry.ProvidesHostMediatedExecution("claude"));
+        Assert.False(WorkerAdapterRegistry.ProvidesHostMediatedExecution("agy"));
+        Assert.False(WorkerAdapterRegistry.ProvidesHostMediatedExecution("unknown"));
+    }
+
     /// <summary>
     /// #1745 review: <see cref="TokenBudgetSpec.Resolve"/> sends an adapter outside
     /// <see cref="WorkerRoleCatalog.KnownTokenBudgetAdapters"/> to the no-budget arm instead of refusing.

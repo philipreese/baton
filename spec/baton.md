@@ -7313,7 +7313,8 @@ whole-lifecycle attachment is policy, and the queue does not silently choose one
 
 `--require <capability>` is repeatable task metadata, not a grant request. The initial vocabulary is
 `repository-read`, `file-write`, `shell`, `network`, `github-read`, `github-write`, `memory-add`, and
-`artifact:<declared-output-name>`. `memory-add` is off by default and repository-scoped: admission
+`artifact:<declared-output-name>`. `memory-add` is off by default and repository-scoped: it is admitted
+only when the selected adapter provides host-mediated execution; unsupported adapters fail before launch. Admission
 records one immutable per-dispatch grant on the queue row and materializes that same fact in the room
 binding. It never follows from an implement role or shell access, cannot widen on reseed or a later
 round, and admits only the recorded repository's canonical store. The broker admits its exact command

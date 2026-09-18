@@ -91,16 +91,8 @@ public static class CodexAppServerBroker
             .Select(key => Environment.GetEnvironmentVariable(key!)!)
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .ToArray();
-        var policy = new CodexDynamicToolPolicy(
-            configuration.PermissionGrant,
-            configuration.WorkingDirectory,
-            outputDirectory,
-            inputPaths,
-            configuration.ProducedOutputNames,
-            artifactOnlyOutputNames: ReadArtifactOnlyOutputs(),
-            pullRequestCreateProvenance: configuration.PullRequestCreateProvenance,
-            originatingPullRequestOwnership: configuration.OriginatingPullRequestOwnership,
-            memoryAddExecutor: memoryAddExecutor);
+        var policy = CreateDynamicToolPolicy(
+            configuration, outputDirectory, inputPaths, ReadArtifactOnlyOutputs(), memoryAddExecutor);
 
         using var process = StartAppServer(configuration, isolatedHome);
         if (process is null)
@@ -153,6 +145,28 @@ public static class CodexAppServerBroker
         var raw = Environment.GetEnvironmentVariable("BATON_ARTIFACT_ONLY_OUTPUTS");
         return string.IsNullOrWhiteSpace(raw) ? null : raw.Split(';', StringSplitOptions.RemoveEmptyEntries);
     }
+
+    /// <summary>
+    /// Builds the dynamic-tool policy at the production broker boundary. The protocol overload below
+    /// uses this same construction so its isolated transcript tests cannot substitute a policy with
+    /// different grant wiring.
+    /// </summary>
+    internal static CodexDynamicToolPolicy CreateDynamicToolPolicy(
+        CodexBrokerConfiguration configuration,
+        string outputDirectory,
+        IEnumerable<string> inputPaths,
+        IEnumerable<string>? artifactOnlyOutputNames,
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null) =>
+        new(
+            configuration.PermissionGrant,
+            configuration.WorkingDirectory,
+            outputDirectory,
+            inputPaths,
+            configuration.ProducedOutputNames,
+            artifactOnlyOutputNames: artifactOnlyOutputNames,
+            pullRequestCreateProvenance: configuration.PullRequestCreateProvenance,
+            originatingPullRequestOwnership: configuration.OriginatingPullRequestOwnership,
+            memoryAddExecutor: memoryAddExecutor);
 
     /// <summary>
     /// Reads authenticated account limits through the broker's isolated home and app-server
@@ -444,6 +458,29 @@ public static class CodexAppServerBroker
             // process-tree cleanup. It must never become a second unobserved task.
         }
     }
+
+    internal static Task<int> RunProtocolAsync(
+        CodexBrokerConfiguration configuration,
+        string prompt,
+        string outputDirectory,
+        IEnumerable<string> inputPaths,
+        IEnumerable<string>? artifactOnlyOutputNames,
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor,
+        TextWriter serverInput,
+        TextReader serverOutput,
+        TextWriter batonOutput,
+        TextWriter error,
+        CancellationToken cancellationToken) =>
+        RunProtocolAsync(
+            configuration,
+            prompt,
+            CreateDynamicToolPolicy(
+                configuration, outputDirectory, inputPaths, artifactOnlyOutputNames, memoryAddExecutor),
+            serverInput,
+            serverOutput,
+            batonOutput,
+            error,
+            cancellationToken);
 
     internal static async Task<int> RunProtocolAsync(
         CodexBrokerConfiguration configuration,
