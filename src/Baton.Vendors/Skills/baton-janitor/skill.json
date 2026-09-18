@@ -1,0 +1,10 @@
+{
+  "name": "baton-janitor",
+  "version": 1,
+  "description": "The standing rules for a baton janitor lane: bounded mechanical hygiene, explicit refusal, and accurate artifacts.",
+  "requires": {
+    "read_files": true,
+    "write_files": true,
+    "run_shell_commands": true
+  }
+}

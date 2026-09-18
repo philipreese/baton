@@ -416,7 +416,7 @@ declared name(s) — `baton resolve` is the one permitted writer here (spec/bato
 | `consolidate` | frontier | `consolidation.md` | Reading one issue's thread and merged PRs against the code and writing the current-state block a person rewrites the body from (#2043). Read-only over `gh` and the tree — a strict narrowing of `review`'s grant — and it opens no PR. |
 | `patch` | frontier | `patch.diff` | Proposing code changes as an applyable diff without mutating the workspace. |
 | `fact-check` | minimal | `findings.md` | Confirming an exhaustive, supplied list of facts against the repo — not for noticing what the list omits. |
-| `janitor` | cheap | `janitor.md`, `branch.diff` | Running named mechanical checkers to green after an implementer, without changing behaviour. |
+| `janitor` | janitor | `janitor.md`, `branch.diff` | Running named mechanical checkers to green after an implementer, without changing behaviour. |
 | `orchestrate` | orchestrator | `turn-actions.json` | A resident room turn that reads room state and emits turn actions. |
 
 Queue measurement-only work through the supported conductor path by selecting the role before launch:

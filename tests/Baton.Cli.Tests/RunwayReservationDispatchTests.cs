@@ -248,8 +248,8 @@ public sealed class RunwayReservationDispatchTests : IDisposable
     }
 
     /// <summary>
-    /// A composed template binds two vendors (<c>implement-review</c> runs its janitor on the cheap tier,
-    /// which is <c>agy</c>, and the rest on <c>claude</c>) and the refusal is all-or-nothing. When one of
+    /// A composed template binds two vendors (<c>implement-review</c> runs its janitor on the dedicated
+    /// Codex Luna/high tier and the rest on <c>claude</c>) and the refusal is all-or-nothing. When one of
     /// them holds, the other's row must not read as spend that happened: the dispatch it belongs to never
     /// ran, so it reserves nothing against the <b>next</b> dispatch on that vendor. Both halves are
     /// asserted, and the second is what the control arm below discriminates against.
@@ -271,7 +271,7 @@ public sealed class RunwayReservationDispatchTests : IDisposable
                 composed,
                 MixedVendorAdapters,
                 TestContext.Current.CancellationToken,
-                evaluateRunway: vendor => vendor == "agy"
+                evaluateRunway: vendor => vendor == "codex"
                     ? new RunwayDecision(vendor, RunwayDisposition.Hold, "'week (all models)' is at 91% (holds at 85%)", At84Percent)
                     : AdmitAt84(vendor, harvestedAt),
                 reservationPolicy: policy));
@@ -341,6 +341,7 @@ public sealed class RunwayReservationDispatchTests : IDisposable
         {
             ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
             ["agy"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            ["codex"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
         };
 
     private static RunwayDecision AdmitAt84(string vendor, DateTimeOffset harvestedAt) =>

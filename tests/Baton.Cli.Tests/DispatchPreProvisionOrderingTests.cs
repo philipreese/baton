@@ -296,7 +296,9 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-codex-default-{Guid.NewGuid():N}");
         try
         {
-            var options = (await BuildDispatchAsync(testRoot)) with { Name = "janitor", Adapter = "codex" };
+            // Review's frontier tier is on another vendor, so a Codex adapter override deliberately
+            // drops that tier's vendor-specific model and reaches Codex's unpinned default.
+            var options = (await BuildDispatchAsync(testRoot)) with { Name = "review", Adapter = "codex" };
 
             var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
                 options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit));

@@ -2,6 +2,7 @@
   "frontier": { "adapter": "claude", "model": "opus", "effort": "high" },
   "standard": { "adapter": "codex", "model": "gpt-5.6-sol", "effort": "medium" },
   "cheap":    { "adapter": "agy", "model": "gemini-3.8-flash-medium", "effort": null },
+  "janitor":  { "adapter": "codex", "model": "gpt-5.6-luna", "effort": "high" },
   "minimal":  { "adapter": "claude", "model": "haiku", "effort": "low" },
   "orchestrator": { "adapter": "claude", "model": "opus", "effort": "high" }
 }

@@ -268,19 +268,30 @@ public class RoleDispatchTests
 
     private static WorkerRole Advise => WorkerRoleCatalog.For("advise");
     // #1861 moved advise's tier onto claude, so the vendor-swap tests below use janitor -- the role
-    // whose tier (cheap) still pins an agy model -- to keep swapping agy -> claude, the measured #1082
+    // whose dedicated tier pins a codex model -- to keep swapping codex -> claude, the measured #1082
     // direction. Janitor's grant is Enforced on claude, so a swap keeps WorkingDirectory in place
     // rather than moving it into a worktree spec the way an audited (withheld-write) role would.
     private static WorkerRole Janitor => WorkerRoleCatalog.For("janitor");
 
     [Fact]
+    public void An_ordinary_janitor_dispatch_is_pinned_to_codex_luna_at_high_effort()
+    {
+        var binding = RoleDispatch.ToBinding(Janitor, "Run the named checks.");
+
+        Assert.Equal("janitor", Janitor.Tier);
+        Assert.Equal("codex", binding.Adapter);
+        Assert.Equal("gpt-5.6-luna", binding.Model);
+        Assert.Equal("high", binding.Effort);
+    }
+
+    [Fact]
     public void An_adapter_override_to_a_different_vendor_drops_the_tiers_vendor_specific_model()
     {
-        // janitor is an agy-tier role whose tier pins a (gemini) model; running it on claude must NOT
+        // janitor is a codex-tier role whose tier pins a Luna model; running it on claude must NOT
         // carry that vendor-specific string to claude's CLI — the measured #1082 failure. With no
         // explicit --model, the swapped vendor falls back to its own default (null model).
         Assert.False(string.IsNullOrEmpty(Janitor.Model)); // the tier really does pin a model to drop
-        Assert.Equal("agy", Janitor.Adapter);              // so "claude" below really is a swap
+        Assert.Equal("codex", Janitor.Adapter);            // so "claude" below really is a swap
 
         var onClaude = RoleDispatch.ToBinding(Janitor, "spec", "claude");
         Assert.Equal("claude", onClaude.Adapter);
@@ -294,12 +305,12 @@ public class RoleDispatchTests
     public void An_explicit_model_override_wins_over_both_the_tier_and_the_vendor_swap()
     {
         // The model is its own axis (0017/0033): an explicit --model is used verbatim, whether or not
-        // the vendor is also swapped. Janitor (agy tier) keeps the first arm a REAL swap now that
-        // advise's tier is claude (#1861) -- the tier's own model is a gemini string, so "opus" here
+        // the vendor is also swapped. Janitor (dedicated codex tier) keeps the first arm a REAL swap now that
+        // advise's tier is claude (#1861) -- the tier's own model is a codex string, so "opus" here
         // can only have come from the override.
-        Assert.Equal("agy", Janitor.Adapter);
+        Assert.Equal("codex", Janitor.Adapter);
         Assert.Equal("opus", RoleDispatch.ToBinding(Janitor, "spec", "claude", modelOverride: "opus").Model);
-        Assert.Equal("gemini-x", RoleDispatch.ToBinding(Janitor, "spec", modelOverride: "gemini-x").Model);
+        Assert.Equal("codex-x", RoleDispatch.ToBinding(Janitor, "spec", modelOverride: "codex-x").Model);
     }
 
     [Fact]
