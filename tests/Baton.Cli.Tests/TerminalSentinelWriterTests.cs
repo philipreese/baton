@@ -8,6 +8,21 @@ namespace Baton.Cli.Tests;
 /// </summary>
 public class TerminalSentinelWriterTests
 {
+    [Theory]
+    [InlineData("io")]
+    [InlineData("unauthorized")]
+    public void Optional_persistence_failure_classifies_both_ordinary_filesystem_access_shapes(string kind)
+    {
+        Exception failure = kind switch
+        {
+            "io" => new IOException("fixture"),
+            "unauthorized" => new UnauthorizedAccessException("fixture"),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        Assert.True(TerminalSentinelWriter.IsOptionalPersistenceFailure(failure));
+    }
+
     [Fact]
     public async Task TryWriteValidationRefused_returns_false_when_the_room_path_is_a_file()
     {
