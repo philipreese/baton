@@ -683,7 +683,10 @@ catch (BatonFlowException ex)
     {
         if (!RoomLedgerProbe.HasLedger(roomDirectoryPathForFailureSentinel))
         {
-            await TerminalSentinelWriter.WriteValidationRefusedAsync(
+            // The diagnostic above is already the authoritative validation refusal. A denied room
+            // path must not replace it with a native crash merely because the best-effort
+            // queryability sentinel cannot be written (#2387).
+            await TerminalSentinelWriter.TryWriteValidationRefusedAsync(
                 roomDirectoryPathForFailureSentinel, ex.Message, CancellationToken.None, ex.TryInvocation).ConfigureAwait(false);
         }
 
