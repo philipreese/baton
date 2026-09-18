@@ -266,10 +266,10 @@ public sealed class QueueWorktreeApplyTests
         await fixture.InitializeAsync();
         await GitAsync(fixture.Source, Ct, "commit", "--allow-empty", "-q", "-m", "competing target");
         var competingHead = (await GitOutputAsync(fixture.Source, "rev-parse", "HEAD")).Trim();
-        var competingUpdateBlocked = false;
+        (string Output, string Error, int ExitCode) competingUpdate = (string.Empty, string.Empty, 0);
         var hooks = new QueueCommand.WorktreeApplyTestHooks(AfterReferenceFence: async (_, token) =>
         {
-            competingUpdateBlocked = await GitUpdateIsBlockedAsync(
+            competingUpdate = await RunGitAsync(
                 fixture.Source, token, ["update-ref", "refs/heads/" + Branch, competingHead, fixture.Head]);
         });
 
@@ -277,8 +277,13 @@ public sealed class QueueWorktreeApplyTests
 
         Assert.Equal(0, exit);
         Assert.Equal("removed", CleanupDisposition(output, fixture.Worktree));
-        Assert.True(competingUpdateBlocked);
-        Assert.Equal(fixture.Head, (await GitOutputAsync(fixture.Source, "rev-parse", "refs/heads/" + Branch)).Trim());
+        Assert.NotEqual(0, competingUpdate.ExitCode);
+        Assert.Contains("lock ref", competingUpdate.Error, StringComparison.OrdinalIgnoreCase);
+
+        var afterDisposal = await RunGitAsync(
+            fixture.Source, Ct, ["update-ref", "refs/heads/" + Branch, competingHead, fixture.Head]);
+        Assert.True(afterDisposal.ExitCode == 0, afterDisposal.Error);
+        Assert.Equal(competingHead, (await GitOutputAsync(fixture.Source, "rev-parse", "refs/heads/" + Branch)).Trim());
     }
 
     [Theory]
@@ -408,25 +413,6 @@ public sealed class QueueWorktreeApplyTests
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start git.");
         await process.WaitForExitAsync(cancellationToken);
         return (await process.StandardOutput.ReadToEndAsync(cancellationToken), await process.StandardError.ReadToEndAsync(cancellationToken), process.ExitCode);
-    }
-
-    private static async Task<bool> GitUpdateIsBlockedAsync(string directory, CancellationToken cancellationToken, IReadOnlyList<string> arguments)
-    {
-        var start = new ProcessStartInfo("git")
-        {
-            WorkingDirectory = directory,
-        };
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start git.");
-        var completion = process.WaitForExitAsync(cancellationToken);
-        if (await Task.WhenAny(completion, Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken)) == completion)
-        {
-            return process.ExitCode != 0;
-        }
-
-        process.Kill();
-        await process.WaitForExitAsync(cancellationToken);
-        return true;
     }
 
     private sealed class ApplyFixture : IAsyncDisposable

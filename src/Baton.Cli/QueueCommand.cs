@@ -692,49 +692,89 @@ public static class QueueCommand
     private sealed class GitReferenceFence : IAsyncDisposable
     {
         private readonly Process _process;
+        private readonly Task<string> _standardErrorTask;
+        private Task<string?>? _pendingStandardOutputRead;
+        private bool _prepared;
 
-        private GitReferenceFence(Process process) => _process = process;
+        private GitReferenceFence(Process process, Task<string> standardErrorTask)
+        {
+            _process = process;
+            _standardErrorTask = standardErrorTask;
+        }
 
-        public bool IsHeld => !_process.HasExited;
+        public bool IsHeld => _prepared && !_process.HasExited;
 
         public static async Task<GitReferenceFence?> TryAcquireAsync(
             string checkout, string branch, string expectedHead, CancellationToken cancellationToken)
         {
-            var startInfo = new ProcessStartInfo("git")
+            var startInfo = ChildProcessStartInfo.Create("git", info =>
             {
-                WorkingDirectory = checkout,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
+                info.WorkingDirectory = checkout;
+                info.RedirectStandardInput = true;
+                info.RedirectStandardOutput = true;
+                info.RedirectStandardError = true;
+                info.StandardOutputEncoding = Encoding.UTF8;
+                info.StandardErrorEncoding = Encoding.UTF8;
+            });
             startInfo.ArgumentList.Add("update-ref");
             startInfo.ArgumentList.Add("--stdin");
-            var process = Process.Start(startInfo);
-            if (process is null) return null;
 
-            var fence = new GitReferenceFence(process);
-            await process.StandardInput.WriteAsync("start\n").ConfigureAwait(false);
-            await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
-            await process.StandardInput.WriteAsync($"update refs/heads/{branch} {expectedHead} {expectedHead}\n").ConfigureAwait(false);
-            await process.StandardInput.WriteAsync("prepare\n").ConfigureAwait(false);
-            await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
-            for (var attempt = 0; attempt < 25; attempt++)
+            Process? process = null;
+            GitReferenceFence? fence = null;
+            try
             {
-                if (process.HasExited) break;
-                if (IsReferenceLockHeld(checkout, branch))
+                process = Process.Start(startInfo);
+                if (process is null) return null;
+
+                fence = new GitReferenceFence(process, process.StandardError.ReadToEndAsync());
+                await process.StandardInput.WriteAsync("start\n").ConfigureAwait(false);
+                await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+                if (!await fence.ReadAcknowledgementAsync("start: ok", cancellationToken).ConfigureAwait(false))
                 {
-                    return fence;
+                    await fence.DisposeAsync().ConfigureAwait(false);
+                    return null;
                 }
 
-                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
-            }
+                await process.StandardInput.WriteAsync(
+                    $"update refs/heads/{branch} {expectedHead} {expectedHead}\nprepare\n").ConfigureAwait(false);
+                await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+                if (!await fence.ReadAcknowledgementAsync("prepare: ok", cancellationToken).ConfigureAwait(false))
+                {
+                    await fence.DisposeAsync().ConfigureAwait(false);
+                    return null;
+                }
 
-            await fence.DisposeAsync().ConfigureAwait(false);
-            return null;
+                fence._prepared = true;
+                return fence;
+            }
+            catch (OperationCanceledException)
+            {
+                if (fence is not null) await fence.DisposeAsync().ConfigureAwait(false);
+                else process?.Dispose();
+                throw;
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
+            {
+                if (fence is not null) await fence.DisposeAsync().ConfigureAwait(false);
+                else process?.Dispose();
+                return null;
+            }
         }
 
-        private static bool IsReferenceLockHeld(string checkout, string branch) => File.Exists(Path.Combine(
-            checkout, ".git", "refs", "heads", branch.Replace('/', Path.DirectorySeparatorChar) + ".lock"));
+        private async Task<bool> ReadAcknowledgementAsync(string expected, CancellationToken cancellationToken)
+        {
+            var read = _process.StandardOutput.ReadLineAsync();
+            _pendingStandardOutputRead = read;
+            try
+            {
+                var line = await read.WaitAsync(cancellationToken).ConfigureAwait(false);
+                return string.Equals(line, expected, StringComparison.Ordinal);
+            }
+            finally
+            {
+                if (read.IsCompleted) _pendingStandardOutputRead = null;
+            }
+        }
 
         public async ValueTask DisposeAsync()
         {
@@ -742,13 +782,27 @@ public static class QueueCommand
             {
                 if (!_process.HasExited)
                 {
-                    await _process.StandardInput.WriteAsync("abort\n").ConfigureAwait(false);
-                    await _process.StandardInput.FlushAsync().ConfigureAwait(false);
+                    try
+                    {
+                        await _process.StandardInput.WriteAsync("abort\n").ConfigureAwait(false);
+                        await _process.StandardInput.FlushAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or IOException or ObjectDisposedException)
+                    {
+                    }
+
+                    _process.StandardInput.Close();
                     await _process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
                 }
             }
             finally
             {
+                if (_pendingStandardOutputRead is { } standardOutputRead)
+                {
+                    await standardOutputRead.ConfigureAwait(false);
+                }
+
+                await _standardErrorTask.ConfigureAwait(false);
                 _process.Dispose();
             }
         }
