@@ -6074,6 +6074,12 @@ adapter — onto the production path itself (`RoleDispatch.ToBinding` /
 `WorkerBindingResolver`, `tests/Baton.Vendors.Tests/TemplateDispatchabilityTests.cs`), so there is now
 exactly one implementation of this rule rather than two kept in step by hand.
 
+**#2002 bounded terminal recovery.** When the AGY stream records terminal `SUCCESS` while a tool
+step remains `ACTIVE` without a matching `DONE` or `ERROR`, Baton records the structured
+`outstanding-tool-at-terminal-success` cause and retries once in the same workspace with a generated
+continuation brief; a repeat settles as a visible failure for conductor rerouting. This recovery does
+not measure or set AGY's asynchronous wait parameter.
+
 **The run-command ceiling is per command CLASS, not flat (#1998, operator ruling 2026-09-06).** A
 granted shell command Baton itself runs — the codex broker's `baton_run_command`, the only path where
 Baton holds the stopwatch, since claude and agy run their shell inside the vendor CLI — is bounded by

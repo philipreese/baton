@@ -1,0 +1,5 @@
+{"event":"init","conversation_id":"captured-recovery","init":{"cwd":"C:\\workspace"}}
+{"event":"step_update","step_update":{"conversation_id":"captured-recovery","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"dotnet build -warnaserror","WaitMsBeforeAsync":5000}}}}
+{"event":"step_update","step_update":{"conversation_id":"captured-recovery","step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"manage_task","tool_info":{"parameters":{"Action":"status"}}}}
+{"event":"step_update","step_update":{"conversation_id":"captured-recovery","step_index":3,"state":"ERROR","step_type":"tool","tool_name":"manage_task","tool_info":{"error":{"message":"tool denied"}}}}
+{"event":"result","result":{"conversation_id":"captured-recovery","status":"SUCCESS","response":"I will wait for the build notification."}}

@@ -97,7 +97,10 @@ public sealed record CoreDispatchTarget(
     string? CaptureDirectory = null,
     Func<string, string?>? TryGetSessionId = null,
     Func<string, string, IReadOnlyList<string>>? ResumeArgs = null,
-    Func<string, string, CoreDispatchTarget>? ResumeTarget = null)
+    Func<string, string, CoreDispatchTarget>? ResumeTarget = null,
+    // #2002: the adapter may interpret the captured stream and return the one typed fact the
+    // outcome classifier needs. Core never parses vendor envelopes.
+    Func<string, OutstandingToolAtTerminalSuccess?>? DetectsOutstandingToolAtTerminalSuccess = null)
 {
     /// <summary>Returns a target whose broker is restricted to the named declared-output tools.</summary>
     public CoreDispatchTarget WithArtifactOnlyOutputs(IReadOnlyList<string> outputNames)
@@ -315,7 +318,15 @@ public sealed record CoreDispatchResult(
     // from the journaled FlowEvent.EngineFilesPlaced through the projection (#1933) — unlike
     // StderrTail/StdoutTail above, it does survive a crash. Null only when no such fact was recorded,
     // which counts the paths.
-    IReadOnlyList<EnginePlacedFile>? EnginePlacedFiles = null);
+    IReadOnlyList<EnginePlacedFile>? EnginePlacedFiles = null,
+    // #2002: vendor-derived structured evidence; null on vendors/paths without this capability.
+    OutstandingToolAtTerminalSuccess? OutstandingToolAtTerminalSuccess = null);
+
+/// <summary>
+/// A vendor-neutral fact that a terminal success arrived while one named tool step had no observed
+/// completion event. The adapter owns how this was derived; outcome classification owns what it means.
+/// </summary>
+public sealed record OutstandingToolAtTerminalSuccess(string ToolName, string? CommandLine = null);
 
 
 /// <summary>
@@ -1291,6 +1302,12 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
             capturedStdoutTail = stdoutTail.ToTailOrNull();
         }
 
+        var outstandingToolAtTerminalSuccess = terminalSuccessLatched
+            && target.DetectsOutstandingToolAtTerminalSuccess is { } detectOutstanding
+            && capturedStdoutTail is { } stdout
+            ? detectOutstanding(stdout)
+            : null;
+
         string? capturedStderr;
         lock (stderrLock)
         {
@@ -1299,7 +1316,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
 
         return new CoreDispatchResult(
             exitCode, reason, capturedStderr, terminalSuccessLatched, capturedStdoutTail, terminalResultLatched,
-            enginePlacedFiles);
+            enginePlacedFiles, outstandingToolAtTerminalSuccess);
 
     }
 

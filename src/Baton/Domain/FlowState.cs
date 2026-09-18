@@ -290,7 +290,10 @@ public sealed record StepState(
     // #1945: the latest succeeded execution for this step was killed by the dispatch timeout with a
     // clean, already-pushed workspace -- see FlowEvent.ExecutionSucceeded.FinishedDuringTeardown.
     // Read only by Status.WorkflowOutcome, to pick the room-level word.
-    bool FinishedDuringTeardown = false);
+    bool FinishedDuringTeardown = false,
+    // #2002: the latest structured recovery fact and its consecutive occurrence count.
+    RecoveryCause? LatestRecoveryCause = null,
+    int RecoveryOccurrence = 0);
 
 /// <summary>
 /// A step-less supplementary execution still awaiting completion: minted outside the

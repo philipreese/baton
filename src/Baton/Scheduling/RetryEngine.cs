@@ -79,6 +79,14 @@ public static class RetryEngine
             return false;
         }
 
+        // #2002: one automatic continuation is the whole recovery budget for this structured cause.
+        // A repeated mismatch remains Failed for conductor rerouting instead of looping.
+        if (stepState.LatestRecoveryCause?.Kind == RecoveryCauseKind.OutstandingToolAtTerminalSuccess
+            && stepState.RecoveryOccurrence >= 2)
+        {
+            return false;
+        }
+
         return stepState.Status == StepStatus.Failed
             && stepState.LatestFailureClassification != FailureClassification.Permanent
             && stepState.LatestFailureClassification != FailureClassification.ToolDenied

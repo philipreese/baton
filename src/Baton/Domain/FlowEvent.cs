@@ -144,7 +144,9 @@ public abstract record FlowEvent
         DateTimeOffset? RetryNotBefore = null,
         string? CapturedResponseFile = null,
         IReadOnlyList<string>? UnsatisfiedOutputNames = null,
-        long? PeakBilledInWindow = null) : FlowEvent;
+        long? PeakBilledInWindow = null,
+        // #2002: typed recovery evidence; null on all older and ordinary failure events.
+        RecoveryCause? RecoveryCause = null) : FlowEvent;
 
     /// <summary>Flow has classified a completed execution as cancelled.</summary>
     public sealed record ExecutionCancelled(ExecutionId ExecutionId) : FlowEvent;

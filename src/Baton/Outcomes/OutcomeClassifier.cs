@@ -92,7 +92,9 @@ public sealed record OutcomeClassification(
     // branch. A FLAG, not a Reason prefix: the succeeded path nulls LatestFailureReason by
     // construction (StateProjector), so a sentence could not survive the hop, and
     // WorkflowOutcome.IsTimeoutFailure's own remarks are already an apology for having to sniff one.
-    bool FinishedDuringTeardown = false);
+    bool FinishedDuringTeardown = false,
+    // #2002: structured recovery evidence, carried through the terminal event and projection.
+    RecoveryCause? RecoveryCause = null);
 
 /// <summary>
 /// Maps a <see cref="CoreDispatchResult"/> plus a step's <see cref="WorkerContract"/> into one of
@@ -233,7 +235,9 @@ public static class OutcomeClassifier
         string? workspaceHeadShaAtStart = null,
         Func<string?, string?, Workspaces.WorkspaceMutationReading?>? workspaceMutationProbe = null,
         int? openPullRequest = null,
-        bool verifiesWorkspace = true)
+        bool verifiesWorkspace = true,
+        RecoveryCause? priorRecoveryCause = null,
+        int priorRecoveryOccurrence = 0)
     {
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(contract);
@@ -243,6 +247,27 @@ public static class OutcomeClassifier
         {
             // A cancellation is never classified as a failure, and is never retried.
             return new OutcomeClassification(OutcomeVerdict.Cancelled);
+        }
+
+        if (result.OutstandingToolAtTerminalSuccess is { } outstanding)
+        {
+            var recoveryCause = new RecoveryCause(
+                RecoveryCauseKind.OutstandingToolAtTerminalSuccess,
+                outstanding.ToolName,
+                outstanding.CommandLine);
+            var repeated = priorRecoveryCause?.Kind == recoveryCause.Kind && priorRecoveryOccurrence > 0;
+            var command = outstanding.CommandLine is { Length: > 0 }
+                ? $"command '{outstanding.CommandLine}'"
+                : "the command carried by that tool";
+            var reason = repeated
+                ? $"The vendor again reported terminal success while the '{outstanding.ToolName}' tool step was still active after the one automatic recovery; conductor rerouting is required."
+                : $"The vendor reported terminal success while the '{outstanding.ToolName}' tool step was still active; no completion was observed for {command}.";
+
+            return new OutcomeClassification(
+                OutcomeVerdict.Failed,
+                repeated ? FailureClassification.Permanent : FailureClassification.Retryable,
+                reason,
+                RecoveryCause: recoveryCause);
         }
 
         if (result.Reason == CoreExitReason.TimedOut)

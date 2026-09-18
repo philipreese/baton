@@ -85,7 +85,9 @@ public sealed record ProjectionCheckpointState(
     HashSet<StepId>? ConductorRejectedStepIds = null,
     Dictionary<ExecutionId, string>? WorkspaceHeadShaAtStartByExecutionId = null,
     Dictionary<ExecutionId, List<EnginePlacedFile>>? EnginePlacedFilesByExecutionId = null,
-    HashSet<StepId>? FinishedDuringTeardownStepIds = null)
+    HashSet<StepId>? FinishedDuringTeardownStepIds = null,
+    Dictionary<StepId, RecoveryCause?>? LatestRecoveryCauseByStepId = null,
+    Dictionary<StepId, int>? RecoveryOccurrenceByStepId = null)
 {
     public Dictionary<StepId, int> ExecutionCountByStepId { get; init; } = ExecutionCountByStepId ?? new();
 
@@ -240,6 +242,12 @@ public sealed record ProjectionCheckpointState(
     /// </summary>
     public HashSet<StepId> FinishedDuringTeardownStepIds { get; init; } = FinishedDuringTeardownStepIds ?? new();
 
+    /// <summary>#2002: the latest structured automatic-recovery cause, absent on older checkpoints.</summary>
+    public Dictionary<StepId, RecoveryCause?> LatestRecoveryCauseByStepId { get; init; } = LatestRecoveryCauseByStepId ?? new();
+
+    /// <summary>#2002: how many consecutive times the latest recovery cause has occurred.</summary>
+    public Dictionary<StepId, int> RecoveryOccurrenceByStepId { get; init; } = RecoveryOccurrenceByStepId ?? new();
+
     public static ProjectionCheckpointState CreateEmpty() => new(
         new Dictionary<StepId, ExecutionId>(),
         new Dictionary<StepId, Dictionary<StepId, ExecutionId>>(),
@@ -311,5 +319,7 @@ public sealed record ProjectionCheckpointState(
         new HashSet<StepId>(ConductorRejectedStepIds),
         new Dictionary<ExecutionId, string>(WorkspaceHeadShaAtStartByExecutionId),
         EnginePlacedFilesByExecutionId.ToDictionary(kvp => kvp.Key, kvp => new List<EnginePlacedFile>(kvp.Value)),
-        new HashSet<StepId>(FinishedDuringTeardownStepIds));
+        new HashSet<StepId>(FinishedDuringTeardownStepIds),
+        LatestRecoveryCauseByStepId.ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
+        new Dictionary<StepId, int>(RecoveryOccurrenceByStepId));
 }
