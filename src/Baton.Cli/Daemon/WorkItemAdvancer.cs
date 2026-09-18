@@ -579,6 +579,7 @@ public sealed class WorkItemAdvancer
                 && pr.IsOpen == true
                 ? pr.HeadSha
                 : null,
+            OriginatingPullRequestRecoveryClaim = null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -623,6 +624,7 @@ public sealed class WorkItemAdvancer
             AttemptId = null,
             AttemptBaseRevision = null,
             ExpectedOriginatingPullRequestHead = null,
+            OriginatingPullRequestRecoveryClaim = null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -682,6 +684,7 @@ public sealed class WorkItemAdvancer
             LastVerdict = verdictPath ?? existing.LastVerdict,
             RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
             ExpectedOriginatingPullRequestHead = null,
+            OriginatingPullRequestRecoveryClaim = null,
             Halted = true,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
@@ -721,6 +724,7 @@ public sealed class WorkItemAdvancer
             Halted = true,
             ReconciliationKind = null,
             ExpectedOriginatingPullRequestHead = null,
+            OriginatingPullRequestRecoveryClaim = null,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 

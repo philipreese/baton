@@ -546,6 +546,7 @@ public sealed class QueueSchedulerService : BackgroundService
                             AttemptRefusedFactDurable = false,
                             AttemptSettledFactDurable = false,
                             LaunchRecoveryKind = null,
+                            OriginatingPullRequestRecoveryClaim = null,
                             LastAdmission = null,
                             RoomDirectory = null,
                         });
@@ -1417,6 +1418,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 RoomDirectory = null,
                 LaunchedAt = null,
                 LaunchMayHaveBegunAt = null,
+                OriginatingPullRequestRecoveryClaim = null,
             };
             var next = snapshot with { Items = Replace(snapshot.Items, tag, _ => updated) };
             return QueueFleetEventOutbox.Enqueue(
@@ -1450,6 +1452,7 @@ public sealed class QueueSchedulerService : BackgroundService
                         AttemptRefusedFactDurable = false,
                         AttemptSettledFactDurable = false,
                         LaunchRecoveryKind = null,
+                        OriginatingPullRequestRecoveryClaim = null,
                     }
                     : current),
         }, CancellationToken.None);

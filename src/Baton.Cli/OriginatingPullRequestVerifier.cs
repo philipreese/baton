@@ -135,10 +135,45 @@ internal static class OriginatingPullRequestVerifier
                 "The preserved continuation PR recovery identity requires both its queue tag and attempt id; ownership was refused before launch.");
         }
 
-        QueueSnapshot snapshot;
         try
         {
-            snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            string? claimedHead = null;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, current =>
+            {
+                var matches = current.Items
+                    .Where(item => string.Equals(item.Tag, tag, StringComparison.Ordinal))
+                    .ToArray();
+                if (matches.Length != 1)
+                {
+                    return current;
+                }
+
+                var item = matches[0];
+                if (!RecoveryEvidenceMatches(options, workspace, item)
+                    || item.OriginatingPullRequestRecoveryClaim is not null)
+                {
+                    return current;
+                }
+
+                claimedHead = item.ExpectedOriginatingPullRequestHead;
+                var claimed = item with
+                {
+                    OriginatingPullRequestRecoveryClaim = new FleetAttemptId(attemptId),
+                };
+                return current with
+                {
+                    Items = current.Items
+                        .Select(candidate => ReferenceEquals(candidate, item) ? claimed : candidate)
+                        .ToArray(),
+                };
+            }, cancellationToken).ConfigureAwait(false);
+            if (claimedHead is null)
+            {
+                throw new CliArgumentException(
+                    "No unused queue-owned recovery admission matches the launched continuation room; ownership was refused before launch.");
+            }
+
+            return claimedHead;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {
@@ -146,7 +181,6 @@ internal static class OriginatingPullRequestVerifier
                 $"The durable queue evidence for preserved continuation ownership could not be read: {ex.Message}");
         }
 
-        return ValidateRecoveryEvidence(options, workspace, snapshot);
     }
 
     internal static string ValidateRecoveryEvidence(
@@ -171,30 +205,43 @@ internal static class OriginatingPullRequestVerifier
         }
 
         var item = matches[0];
-        var expectedReference = ParseReference(options.OriginatingPullRequest);
-        var canonicalWorkspace = Path.GetFullPath(workspace);
-        var matchesRecovery = item.Stage == WorkStage.Continue
-            && item.State is QueueItemState.Queued or QueueItemState.Launched
-            && item.AttemptId is { } currentAttempt
-            && item.AttemptEnvelope is { } envelope
-            && string.Equals(currentAttempt.Value, attemptId, StringComparison.Ordinal)
-            && string.Equals(envelope.AttemptId.Value, attemptId, StringComparison.Ordinal)
-            && envelope.Stage == WorkStage.Continue
-            && SameWorkspace(item.Workspace, canonicalWorkspace)
-            && item.PullRequest is { } pullRequest
-            && pullRequest == expectedReference.Number
-            && envelope.PullRequest == pullRequest
-            && item.Repository is { Length: > 0 } repository
-            && string.Equals(CanonicalReference(repository, pullRequest), options.OriginatingPullRequest, StringComparison.Ordinal)
-            && string.Equals(item.Branch, options.OriginatingPullRequestBranch, StringComparison.Ordinal)
-            && IsCanonicalSha(item.ExpectedOriginatingPullRequestHead ?? string.Empty);
-        if (!matchesRecovery)
+        if (!RecoveryEvidenceMatches(options, workspace, item)
+            || item.OriginatingPullRequestRecoveryClaim is not null)
         {
             throw new CliArgumentException(
-                "The durable queue item does not match this preserved continuation PR recovery attempt; ownership was refused before launch.");
+                "The durable queue item does not match an unused launched continuation PR recovery attempt and room; ownership was refused before launch.");
         }
 
         return item.ExpectedOriginatingPullRequestHead!;
+    }
+
+    private static bool RecoveryEvidenceMatches(DispatchOptions options, string workspace, QueueItem item)
+    {
+        if (options.OriginatingPullRequest is null
+            || options.OriginatingPullRequestBranch is null
+            || options.OriginatingPullRequestRecoveryTag is null
+            || options.OriginatingPullRequestRecoveryAttemptId is not { } attemptId
+            || item.Stage != WorkStage.Continue
+            || item.State != QueueItemState.Launched
+            || item.AttemptId is not { } currentAttempt
+            || item.AttemptEnvelope is not { } envelope
+            || !string.Equals(currentAttempt.Value, attemptId, StringComparison.Ordinal)
+            || !string.Equals(envelope.AttemptId.Value, attemptId, StringComparison.Ordinal)
+            || envelope.Stage != WorkStage.Continue
+            || item.RoomDirectory is not { Length: > 0 } recordedRoom
+            || !SameWorkspace(recordedRoom, options.RoomDirectoryPath)
+            || item.ExpectedOriginatingPullRequestHead is not { } expectedHead
+            || !IsCanonicalSha(expectedHead)
+            || item.PullRequest is not { } pullRequest
+            || envelope.PullRequest != pullRequest
+            || item.Repository is not { Length: > 0 } repository
+            || !string.Equals(CanonicalReference(repository, pullRequest), options.OriginatingPullRequest, StringComparison.Ordinal)
+            || !string.Equals(item.Branch, options.OriginatingPullRequestBranch, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return SameWorkspace(item.Workspace, workspace);
     }
 
     internal static OriginatingPullRequestOwnership ValidateResponse(
@@ -296,17 +343,47 @@ internal static class OriginatingPullRequestVerifier
     private static bool IsCanonicalSha(string value) =>
         value.Length == 40 && value.All(char.IsAsciiHexDigit);
 
-    private static bool SameWorkspace(string recorded, string canonicalWorkspace)
+    internal static bool SameWorkspace(string recorded, string canonicalWorkspace)
     {
         try
         {
+            var recordedPath = Path.GetFullPath(recorded);
+            var requestedPath = Path.GetFullPath(canonicalWorkspace);
+            if (!IsExistingLinkFreeDirectory(recordedPath) || !IsExistingLinkFreeDirectory(requestedPath))
+            {
+                return false;
+            }
+
             return string.Equals(
-                Path.GetFullPath(recorded), canonicalWorkspace, StringComparison.OrdinalIgnoreCase);
+                recordedPath,
+                requestedPath,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException
+            or NotSupportedException or PathTooLongException or System.Security.SecurityException)
         {
             return false;
         }
+    }
+
+    private static bool IsExistingLinkFreeDirectory(string path)
+    {
+        var directory = new DirectoryInfo(path);
+        if (!directory.Exists)
+        {
+            return false;
+        }
+
+        for (DirectoryInfo? current = directory; current is not null; current = current.Parent)
+        {
+            if (current.LinkTarget is not null
+                || (current.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static async Task<(bool Started, int ExitCode, string Stdout, string Stderr)> RunGitAsync(
