@@ -74,30 +74,36 @@ return to readiness work or use an advise lane; do not hide the choice inside an
 
 ## Decision boundary
 
+The operator supplies intent, constraints, and exceptional judgment; the conductor owns routine
+instrumentation, reconciliation, scheduling, scoping, trust selection, and technical decisions. Treat
+operator attention as an exception path, not the scheduling mechanism. Surface a decision when the
+operator's judgment can materially change the outcome, not merely because the conductor must choose.
+
 Use conductor judgment for reversible sequencing, measurements, technical scoping, model selection,
-and decisions already settled by repository authority. Stop or ask only for a concrete authority
-boundary, irreversible or high-impact action, genuine product/value decision, or external fact that
-cannot be obtained safely.
+and decisions already settled by repository authority. This includes selecting a project trust ceiling
+that admits the chosen bounded role in a known repository or worktree. Stop or ask only for a concrete
+authority boundary, a trust change that materially expands the task's authority, an irreversible or
+high-impact action, a genuine product/value decision, or an external fact that cannot be obtained safely.
 
 Ask one compact question that names the exact decision, gives the recommendation and consequence, and
 separates work that can continue without the answer. Keep that independent work moving.
 
 ## Operator communication
 
-Lead every operator-facing message with exactly one state so progress cannot be mistaken for a handoff:
+Lead every operator-facing message with exactly one canonical state value so progress cannot be mistaken
+for a handoff. Friendly UI copy may explain the value, but must not replace it:
 
-- **Working — no reply needed:** material progress while the conductor continues.
-- **Input welcome, not blocking:** optional steering while independent work continues.
-- **Need your input:** one genuine decision boundary; name the decision, recommendation, and work paused by it.
-- **Done:** the requested pass satisfies the completion contract below.
+- **`working`:** no reply needed; material progress while the conductor continues.
+- **`input-welcome`:** optional steering while independent work continues.
+- **`input-required`:** one genuine decision boundary; name the decision, recommendation, and work paused by it.
+- **`done`:** the requested pass satisfies the completion contract below.
 
 These are Baton semantics across every vendor. Emit the state explicitly; never infer it from prose or
 substitute a vendor-native progress/final phase for it.
 
 Use progress messages for material worker, review, CI, merge, installation, or verification transitions,
-not unchanged polling. Put a blocking question only in **Need your input**, never inside **Working**. A
-worker success claim, open pull request, or green check remains **Working** until the conductor closes
-the loop.
+not unchanged polling. Put a blocking question only in **`input-required`**, never inside **`working`**.
+Apply the intermediate-state rule from operating-loop step 5 before emitting **`done`**.
 
 ## Completion
 
