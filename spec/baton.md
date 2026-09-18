@@ -7370,10 +7370,11 @@ and then `Janitor now: removed <n>; retained <n>; refused <n>; race-lost <n>; un
 <n>.`; `changed` is the removal count and zero removals add `Janitor now changed nothing.`. A
 successful report exits 0, including when evidence is retained or unknown; an unavailable current
 repository identity selects no worktrees and is reported in the text output. A clean attached branch
-with no configured upstream is `unknown` with
-`upstream-publication-evidence-unavailable`, and a configured upstream whose tracking ref cannot be
-resolved is `unknown` with `upstream-ahead-probe-unavailable`; both remain retained and can never
-become deletion candidates from missing publication evidence.
+with no configured upstream is a candidate only when one bounded containment probe over local and
+remote branch refs finds another branch ref containing HEAD; otherwise it is `unknown` with
+`upstream-publication-evidence-unavailable`. A configured upstream whose tracking ref cannot be
+resolved is `unknown` with `upstream-ahead-probe-unavailable`; both unavailable cases remain retained
+and can never become deletion candidates from missing publication evidence.
 
 This deterministic command is distinct from the model-backed `janitor` worker role: the role is a
 workflow participant that may perform its granted repository work, while `janitor now` is the

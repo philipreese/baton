@@ -33,6 +33,7 @@ public sealed class QueueWorktreeReportTests
             await File.WriteAllTextAsync(Path.Combine(candidate.Path, "local.txt"), "local only", Ct);
             await GitAsync(candidate.Path, "add", "local.txt");
             await CommitAsync(candidate.Path, "local-only commit");
+            await GitAsync(candidate.Path, "branch", "retained-candidate-head");
 
             var cancelled = await RepoAsync(root, "cancelled-before-launch");
             var operatorRepo = await RepoAsync(root, "operator");
@@ -198,6 +199,10 @@ public sealed class QueueWorktreeReportTests
         try
         {
             var repo = await RepoAsync(root, "no-upstream");
+            await GitAsync(repo.Path, "branch", "retained-base");
+            await File.WriteAllTextAsync(Path.Combine(repo.Path, "unique.txt"), "unique local commit", Ct);
+            await GitAsync(repo.Path, "add", "unique.txt");
+            await CommitAsync(repo.Path, "unique local commit");
 
             var entry = Find(await QueueWorktreeReport.CreateAsync(
                 [Item(repo, "no-upstream")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "no-upstream");

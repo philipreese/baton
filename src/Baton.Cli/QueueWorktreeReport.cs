@@ -308,8 +308,28 @@ internal sealed record QueueWorktreeEntry(
                 ["config", "--get-regexp",
                     "^branch\\." + System.Text.RegularExpressions.Regex.Escape(branch) + "\\.(remote|merge)$"],
                 cancellationToken).ConfigureAwait(false);
-            return configuration.Success
-                ? UpstreamAheadProbeUnavailableReason
+            if (configuration.Success) return UpstreamAheadProbeUnavailableReason;
+
+            var containment = await RunGitAsync(
+                path,
+                ["for-each-ref", "--contains", "HEAD", "--format=%(refname)", "refs/heads", "refs/remotes"],
+                cancellationToken).ConfigureAwait(false);
+            if (!containment.Success || containment.Truncated) return UpstreamPublicationEvidenceUnavailableReason;
+
+            var containingReferences = containment.Stdout
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            if (containingReferences.Any(reference =>
+                (reference.StartsWith("refs/heads/", StringComparison.Ordinal)
+                    && reference.Length == "refs/heads/".Length)
+                || (reference.StartsWith("refs/remotes/", StringComparison.Ordinal)
+                    && reference.Length == "refs/remotes/".Length)
+                || (!reference.StartsWith("refs/heads/", StringComparison.Ordinal)
+                    && !reference.StartsWith("refs/remotes/", StringComparison.Ordinal))))
+                return UpstreamPublicationEvidenceUnavailableReason;
+
+            return containingReferences.Any(reference =>
+                !string.Equals(reference, attachedBranch, StringComparison.Ordinal))
+                ? null
                 : UpstreamPublicationEvidenceUnavailableReason;
         }
 
