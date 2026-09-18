@@ -23,6 +23,9 @@ public sealed class DaemonRoomInventoryTests
             var discoveryCalls = 0;
             var versionCalls = 0;
             var observationCalls = 0;
+            TaskCompletionSource? refreshEntered = null;
+            TaskCompletionSource? releaseRefresh = null;
+            var gateNextRefresh = 0;
             var activeRooms = new HashSet<string>(StringComparer.Ordinal);
             IReadOnlySet<string>? changes = null;
             var rooms = Enumerable.Range(0, 1_001)
@@ -34,11 +37,16 @@ public sealed class DaemonRoomInventoryTests
                     Interlocked.Increment(ref discoveryCalls);
                     return Task.FromResult<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>(rooms);
                 },
-                (room, _, _) =>
+                async (room, _, _) =>
                 {
                     Interlocked.Increment(ref observationCalls);
-                    return Task.FromResult<FleetRoomStatusView?>(
-                        View(room, activeRooms.Contains(room) ? "Running" : "Succeeded"));
+                    if (Interlocked.Exchange(ref gateNextRefresh, 0) == 1)
+                    {
+                        refreshEntered!.TrySetResult();
+                        await releaseRefresh!.Task.WaitAsync(Ct);
+                    }
+
+                    return View(room, activeRooms.Contains(room) ? "Running" : "Succeeded");
                 },
                 () => Version(1),
                 room =>
@@ -62,12 +70,21 @@ public sealed class DaemonRoomInventoryTests
 
             async Task RunCadenceAsync()
             {
-                await Task.WhenAll(
-                    scheduler.TickOnceAsync(Ct),
+                refreshEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                releaseRefresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                Volatile.Write(ref gateNextRefresh, 1);
+
+                // The scheduler is the only Current reader. Hold its first room observation so the
+                // LastComplete consumers overlap this cadence instead of racing to become its refresh.
+                var schedulerTick = scheduler.TickOnceAsync(Ct);
+                await refreshEntered.Task.WaitAsync(Ct);
+                var otherConsumers = Task.WhenAll(
                     projection.BuildProjectionJsonAsync(Ct, TextWriter.Null),
                     delivery.PollOnceAsync(Ct),
                     usage.TickOnceAsync(now, Ct),
                     memory.SweepOnceAsync(cancellationToken: Ct));
+                releaseRefresh.TrySetResult();
+                await Task.WhenAll(schedulerTick, otherConsumers);
             }
 
             await RunCadenceAsync();
@@ -88,7 +105,7 @@ public sealed class DaemonRoomInventoryTests
 
             Assert.Equal(1, discoveryCalls);
             Assert.Equal(1_004, observationCalls);
-            Assert.True(versionCalls >= 2_005);
+            Assert.Equal(1_004, versionCalls);
         }
         finally
         {
