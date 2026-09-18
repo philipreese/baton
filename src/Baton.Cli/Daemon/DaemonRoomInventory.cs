@@ -447,12 +447,13 @@ internal sealed class DaemonRoomInventory : IDisposable
         long Revision,
         IReadOnlySet<string>? PollRooms = null);
 
-    internal sealed class RoomChangeTracker(string roomsRoot) : IDisposable
+    internal sealed class RoomChangeTracker : IDisposable
     {
         internal const int MaximumWatcherCount = 32;
 
         private readonly object _gate = new();
-        private readonly string _roomsRoot = BatonPaths.RecordKey(roomsRoot);
+        private readonly string _roomsRoot;
+        private readonly Func<string, FileSystemWatcher> _createWatcher;
         private readonly Dictionary<string, string> _roomKeysByPath = new(BatonPaths.RecordKeyComparer);
         private readonly Dictionary<string, FileSystemWatcher> _watchers = new(BatonPaths.RecordKeyComparer);
         private readonly HashSet<string> _changedRoomKeys = new(BatonPaths.RecordKeyComparer);
@@ -460,6 +461,14 @@ internal sealed class DaemonRoomInventory : IDisposable
         private bool _fullRefreshRequired = true;
         private bool _disposed;
         private long _revision;
+
+        internal RoomChangeTracker(
+            string roomsRoot,
+            Func<string, FileSystemWatcher>? createWatcher = null)
+        {
+            _roomsRoot = BatonPaths.RecordKey(roomsRoot);
+            _createWatcher = createWatcher ?? (root => new FileSystemWatcher(root));
+        }
 
         internal event Action? Changed;
 
@@ -611,14 +620,12 @@ internal sealed class DaemonRoomInventory : IDisposable
 
                 try
                 {
-                    var watcher = new FileSystemWatcher(root)
-                    {
-                        IncludeSubdirectories = true,
-                        NotifyFilter = NotifyFilters.FileName
-                            | NotifyFilters.DirectoryName
-                            | NotifyFilters.LastWrite
-                            | NotifyFilters.Size,
-                    };
+                    var watcher = _createWatcher(root);
+                    watcher.IncludeSubdirectories = true;
+                    watcher.NotifyFilter = NotifyFilters.FileName
+                        | NotifyFilters.DirectoryName
+                        | NotifyFilters.LastWrite
+                        | NotifyFilters.Size;
                     watcher.Changed += OnChanged;
                     watcher.Created += OnChanged;
                     watcher.Deleted += OnChanged;
