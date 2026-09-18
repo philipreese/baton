@@ -85,7 +85,7 @@ public sealed class OriginatingPullRequestVerifierTests
     }
 
     [Fact]
-    public void A_queued_recovery_attempt_supplies_its_retained_head_from_the_matching_durable_row()
+    public void A_queued_recovery_attempt_is_refused()
     {
         var workspace = Path.GetTempPath();
         var item = new QueueItem
@@ -107,7 +107,7 @@ public sealed class OriginatingPullRequestVerifierTests
                 DateTimeOffset.UnixEpoch),
         };
 
-        Assert.Equal(PreservedHead, OriginatingPullRequestVerifier.ValidateRecoveryEvidence(
+        Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateRecoveryEvidence(
             RecoveryOptions(), workspace, new QueueSnapshot([item])));
     }
 
