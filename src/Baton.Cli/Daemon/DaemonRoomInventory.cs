@@ -98,7 +98,7 @@ internal sealed class DaemonRoomInventory : IDisposable
     {
     }
 
-    private DaemonRoomInventory(
+    internal DaemonRoomInventory(
         Func<CancellationToken, Task<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>> discover,
         Func<string, bool, CancellationToken, Task<FleetRoomStatusView?>> observe,
         Func<DiscoveryVersion> discoveryVersion,
@@ -195,6 +195,7 @@ internal sealed class DaemonRoomInventory : IDisposable
                 // let the scheduler treat stale terminal evidence as a current tally.
                 if (changes.Rooms is { Count: > 0 }
                     && !changes.Rooms.Contains(key)
+                    && changes.PollRooms?.Contains(key) != true
                     && cached is not null
                     && string.Equals(cached.Project, room.Project, StringComparison.OrdinalIgnoreCase))
                 {
@@ -218,6 +219,18 @@ internal sealed class DaemonRoomInventory : IDisposable
                         rooms.Add(new DaemonRoomObservation(room, cached.View, version));
                         continue;
                     }
+                }
+                else if (cached is not null)
+                {
+                    // A rerun invalidates the old terminal fast-path entry permanently. Without
+                    // removing it, a later cadence carrying an unrelated change could project the
+                    // room as terminal again without reading its now-active version.
+                    lock (_gate)
+                    {
+                        _terminalCache.Remove(key);
+                    }
+
+                    cached = null;
                 }
 
                 var view = await _observe(room.RoomDir, true, _lifetimeToken)
@@ -429,18 +442,48 @@ internal sealed class DaemonRoomInventory : IDisposable
         string? Project,
         FleetRoomStatusView View);
 
-    private readonly record struct RoomChanges(IReadOnlySet<string>? Rooms, long Revision);
+    internal readonly record struct RoomChanges(
+        IReadOnlySet<string>? Rooms,
+        long Revision,
+        IReadOnlySet<string>? PollRooms = null);
 
-    private sealed class RoomChangeTracker(string roomsRoot) : IDisposable
+    internal sealed class RoomChangeTracker(string roomsRoot) : IDisposable
     {
+        internal const int MaximumWatcherCount = 32;
+
         private readonly object _gate = new();
         private readonly string _roomsRoot = BatonPaths.RecordKey(roomsRoot);
         private readonly Dictionary<string, string> _roomKeysByPath = new(BatonPaths.RecordKeyComparer);
         private readonly Dictionary<string, FileSystemWatcher> _watchers = new(BatonPaths.RecordKeyComparer);
         private readonly HashSet<string> _changedRoomKeys = new(BatonPaths.RecordKeyComparer);
+        private readonly HashSet<string> _polledRoomKeys = new(BatonPaths.RecordKeyComparer);
         private bool _fullRefreshRequired = true;
         private bool _disposed;
         private long _revision;
+
+        internal event Action? Changed;
+
+        internal int WatcherCount
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _watchers.Count;
+                }
+            }
+        }
+
+        internal int PolledRoomCount
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _polledRoomKeys.Count;
+                }
+            }
+        }
 
         internal RoomChanges SnapshotChanges(
             IReadOnlyList<FleetStatusTool.DiscoveredRoom> rooms)
@@ -459,24 +502,41 @@ internal sealed class DaemonRoomInventory : IDisposable
                     desiredWatchRoots.Add(_roomsRoot);
                 }
 
+                var externalRoomKeys = new List<string>();
                 foreach (var room in rooms)
                 {
                     var roomKey = BatonPaths.RecordKey(room.RoomDir);
                     _roomKeysByPath[roomKey] = roomKey;
                     if (!IsWithin(roomKey, _roomsRoot))
                     {
-                        desiredWatchRoots.Add(roomKey);
+                        externalRoomKeys.Add(roomKey);
                     }
                 }
 
+                var remainingCapacity = MaximumWatcherCount - desiredWatchRoots.Count;
+                foreach (var root in SelectExternalWatchRoots(externalRoomKeys, remainingCapacity))
+                {
+                    desiredWatchRoots.Add(root);
+                }
+
                 ReconcileWatchers(desiredWatchRoots);
+                _polledRoomKeys.Clear();
+                foreach (var roomKey in _roomKeysByPath.Keys)
+                {
+                    if (!_watchers.Keys.Any(root => IsWithin(roomKey, root)))
+                    {
+                        _polledRoomKeys.Add(roomKey);
+                    }
+                }
+
                 if (_fullRefreshRequired)
                 {
-                    return new RoomChanges(null, _revision);
+                    return new RoomChanges(null, _revision, new HashSet<string>(_polledRoomKeys, BatonPaths.RecordKeyComparer));
                 }
 
                 var changed = new HashSet<string>(_changedRoomKeys, BatonPaths.RecordKeyComparer);
-                return new RoomChanges(changed, _revision);
+                var polled = new HashSet<string>(_polledRoomKeys, BatonPaths.RecordKeyComparer);
+                return new RoomChanges(changed, _revision, polled);
             }
         }
 
@@ -492,6 +552,46 @@ internal sealed class DaemonRoomInventory : IDisposable
                 _fullRefreshRequired = false;
                 _changedRoomKeys.Clear();
             }
+        }
+
+        private static IReadOnlyList<string> SelectExternalWatchRoots(
+            IReadOnlyList<string> roomKeys,
+            int capacity)
+        {
+            if (capacity <= 0)
+            {
+                return [];
+            }
+
+            var parents = roomKeys
+                .Select(Path.GetDirectoryName)
+                .Where(parent => parent is not null && IsSafeWatchRoot(parent))
+                .Select(parent => BatonPaths.RecordKey(parent!))
+                .Distinct(BatonPaths.RecordKeyComparer)
+                .OrderBy(parent => parent.Length)
+                .ThenBy(parent => parent, BatonPaths.RecordKeyComparer)
+                .ToList();
+            var roots = new List<string>();
+            foreach (var parent in parents)
+            {
+                if (!roots.Any(root => IsWithin(parent, root)))
+                {
+                    roots.Add(parent);
+                }
+            }
+
+            return roots
+                .OrderByDescending(root => roomKeys.Count(room => IsWithin(room, root)))
+                .ThenBy(root => root, BatonPaths.RecordKeyComparer)
+                .Take(capacity)
+                .ToList();
+        }
+
+        private static bool IsSafeWatchRoot(string path)
+        {
+            var root = Path.GetPathRoot(path);
+            return !string.IsNullOrEmpty(root)
+                && !BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(path), BatonPaths.RecordKey(root));
         }
 
         private void ReconcileWatchers(IReadOnlySet<string> desiredRoots)
@@ -529,8 +629,9 @@ internal sealed class DaemonRoomInventory : IDisposable
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
                 {
-                    _fullRefreshRequired = true;
-                    _revision++;
+                    // Rooms below a root that cannot be watched stay in the explicit per-cadence
+                    // version-probe fallback. A failed handle must not turn into repeated full
+                    // observation scans.
                 }
             }
         }
@@ -545,6 +646,7 @@ internal sealed class DaemonRoomInventory : IDisposable
 
         private void MarkChanged(string path)
         {
+            var matched = false;
             lock (_gate)
             {
                 for (var candidate = BatonPaths.RecordKey(path);
@@ -555,9 +657,15 @@ internal sealed class DaemonRoomInventory : IDisposable
                     {
                         _changedRoomKeys.Add(roomKey);
                         _revision++;
-                        return;
+                        matched = true;
+                        break;
                     }
                 }
+            }
+
+            if (matched)
+            {
+                Changed?.Invoke();
             }
         }
 
@@ -565,9 +673,18 @@ internal sealed class DaemonRoomInventory : IDisposable
         {
             lock (_gate)
             {
+                var failed = _watchers.FirstOrDefault(pair => ReferenceEquals(pair.Value, sender));
+                if (failed.Value is not null)
+                {
+                    failed.Value.Dispose();
+                    _watchers.Remove(failed.Key);
+                }
+
                 _fullRefreshRequired = true;
                 _revision++;
             }
+
+            Changed?.Invoke();
         }
 
         private static bool IsWithin(string path, string root) =>

@@ -11,7 +11,7 @@ public sealed class DaemonRoomInventoryTests
     private static readonly CancellationToken Ct = TestContext.Current.CancellationToken;
 
     [Fact]
-    public async Task Real_consumers_do_not_reprobe_unchanged_terminal_rooms_on_the_next_cadence()
+    public async Task Real_consumers_invalidate_one_changed_room_and_keep_its_rerun_active_on_the_third_cadence()
     {
         var home = Path.Combine(Path.GetTempPath(), $"baton-inventory-consumers-{Guid.NewGuid():N}");
         Directory.CreateDirectory(home);
@@ -23,7 +23,8 @@ public sealed class DaemonRoomInventoryTests
             var discoveryCalls = 0;
             var versionCalls = 0;
             var observationCalls = 0;
-            var initialRefresh = true;
+            var activeRooms = new HashSet<string>(StringComparer.Ordinal);
+            IReadOnlySet<string>? changes = null;
             var rooms = Enumerable.Range(0, 1_001)
                 .Select(index => new FleetStatusTool.DiscoveredRoom($"room-{index}", null))
                 .ToList();
@@ -36,25 +37,22 @@ public sealed class DaemonRoomInventoryTests
                 (room, _, _) =>
                 {
                     Interlocked.Increment(ref observationCalls);
-                    return Task.FromResult<FleetRoomStatusView?>(View(room, "Succeeded"));
+                    return Task.FromResult<FleetRoomStatusView?>(
+                        View(room, activeRooms.Contains(room) ? "Running" : "Succeeded"));
                 },
                 () => Version(1),
-                _ =>
+                room =>
                 {
                     Interlocked.Increment(ref versionCalls);
-                    return TerminalVersion(1);
+                    return activeRooms.Contains(room) ? ActiveVersion(2) : TerminalVersion(1);
                 },
                 _ => true,
                 () => now,
                 _ =>
                 {
-                    if (initialRefresh)
-                    {
-                        initialRefresh = false;
-                        return null;
-                    }
-
-                    return new HashSet<string>(BatonPaths.RecordKeyComparer);
+                    var result = changes;
+                    changes = new HashSet<string>(BatonPaths.RecordKeyComparer);
+                    return result;
                 });
             var scheduler = new QueueSchedulerService(inventory);
             var projection = new FleetProjectionWriter(() => 8, roomInventory: inventory);
@@ -73,16 +71,124 @@ public sealed class DaemonRoomInventoryTests
             }
 
             await RunCadenceAsync();
+            activeRooms.Add("room-500");
+            changes = new HashSet<string>(BatonPaths.RecordKeyComparer)
+            {
+                BatonPaths.RecordKey("room-500"),
+            };
+            now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
+            await RunCadenceAsync();
+            activeRooms.Add("room-501");
+            changes = new HashSet<string>(BatonPaths.RecordKeyComparer)
+            {
+                BatonPaths.RecordKey("room-501"),
+            };
             now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
             await RunCadenceAsync();
 
             Assert.Equal(1, discoveryCalls);
-            Assert.Equal(1_001, observationCalls);
-            Assert.True(versionCalls >= 2_002);
+            Assert.Equal(1_004, observationCalls);
+            Assert.True(versionCalls >= 2_005);
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task External_sibling_rooms_share_one_real_watcher_and_detect_reruns_across_three_cadences()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-inventory-watchers-{Guid.NewGuid():N}");
+        var externalRoot = Path.Combine(root, "external");
+        Directory.CreateDirectory(externalRoot);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var observationCalls = 0;
+            var rooms = Enumerable.Range(0, 1_001)
+                .Select(index =>
+                {
+                    var room = Path.Combine(externalRoot, $"room-{index}");
+                    Directory.CreateDirectory(room);
+                    File.WriteAllText(
+                        Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                        "{}");
+                    return new FleetStatusTool.DiscoveredRoom(room, null);
+                })
+                .ToList();
+            using var tracker = new DaemonRoomInventory.RoomChangeTracker(Path.Combine(root, "local-rooms"));
+            var inventory = new DaemonRoomInventory(
+                _ => Task.FromResult<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>(rooms),
+                (room, _, _) =>
+                {
+                    observationCalls++;
+                    var isTerminal = File.Exists(
+                        Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName));
+                    return Task.FromResult<FleetRoomStatusView?>(
+                        View(room, isTerminal ? "Succeeded" : "Running"));
+                },
+                () => Version(1),
+                room => new DaemonRoomInventory.RoomVersion(
+                    DaemonRoomInventory.FileVersion.ReadFile(
+                        Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName)),
+                    default,
+                    default,
+                    default),
+                Directory.Exists,
+                () => now,
+                tracker.SnapshotChanges,
+                tracker.AcceptChanges,
+                Ct);
+
+            await inventory.ObserveAsync(
+                DaemonRoomInventory.InventoryScope.All,
+                DaemonRoomInventory.InventoryFreshness.Current,
+                Ct);
+
+            Assert.Equal(1, tracker.WatcherCount);
+            Assert.Equal(0, tracker.PolledRoomCount);
+
+            var firstChange = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnFirstChange() => firstChange.TrySetResult();
+            tracker.Changed += OnFirstChange;
+            File.Delete(Path.Combine(
+                rooms[500].RoomDir,
+                TerminalSentinelWriter.TerminalSentinelFileName));
+            await firstChange.Task.WaitAsync(Ct);
+            tracker.Changed -= OnFirstChange;
+
+            now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
+            var secondCadence = await inventory.ObserveAsync(
+                DaemonRoomInventory.InventoryScope.Active,
+                DaemonRoomInventory.InventoryFreshness.Current,
+                Ct);
+            Assert.Equal(rooms[500].RoomDir, Assert.Single(secondCadence).Room.RoomDir);
+
+            var secondChange = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnSecondChange() => secondChange.TrySetResult();
+            tracker.Changed += OnSecondChange;
+            File.Delete(Path.Combine(
+                rooms[501].RoomDir,
+                TerminalSentinelWriter.TerminalSentinelFileName));
+            await secondChange.Task.WaitAsync(Ct);
+            tracker.Changed -= OnSecondChange;
+
+            now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
+            var thirdCadence = await inventory.ObserveAsync(
+                DaemonRoomInventory.InventoryScope.Active,
+                DaemonRoomInventory.InventoryFreshness.Current,
+                Ct);
+
+            Assert.Equal(
+                [rooms[500].RoomDir, rooms[501].RoomDir],
+                thirdCadence.Select(room => room.Room.RoomDir));
+            Assert.Equal(1_004, observationCalls);
+            Assert.InRange(tracker.WatcherCount, 1, DaemonRoomInventory.RoomChangeTracker.MaximumWatcherCount);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
         }
     }
 
