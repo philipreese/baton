@@ -114,6 +114,8 @@ internal sealed record QueueWorktreeEntry(
     IReadOnlyList<QueueWorktreeRow> Rows,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CleanupDisposition = null)
 {
+    private const string UpstreamAheadProbeUnavailableReason = "upstream-ahead-probe-unavailable";
+    private const string UpstreamPublicationEvidenceUnavailableReason = "upstream-publication-evidence-unavailable";
     private const int MaxFilesMeasured = 10_000;
     private const int MaxDirectoriesMeasured = 10_000;
     private const long MaxBytesMeasured = 1L << 30;
@@ -174,6 +176,8 @@ internal sealed record QueueWorktreeEntry(
             || git.SubstantiveCleanliness == "unknown"
             || git.ReasonCodes.Contains("repository-probe-unavailable", StringComparer.Ordinal)
             || git.ReasonCodes.Contains("expected-branch-probe-unavailable", StringComparer.Ordinal)
+            || git.ReasonCodes.Contains(UpstreamAheadProbeUnavailableReason, StringComparer.Ordinal)
+            || git.ReasonCodes.Contains(UpstreamPublicationEvidenceUnavailableReason, StringComparer.Ordinal)
             || size is null;
         var classification = candidate ? "candidate" : unavailable ? "unknown" : "retain";
         return new QueueWorktreeEntry(
@@ -304,13 +308,15 @@ internal sealed record QueueWorktreeEntry(
                 ["config", "--get-regexp",
                     "^branch\\." + System.Text.RegularExpressions.Regex.Escape(branch) + "\\.(remote|merge)$"],
                 cancellationToken).ConfigureAwait(false);
-            return configuration.Success ? "upstream-ahead-probe-unavailable" : null;
+            return configuration.Success
+                ? UpstreamAheadProbeUnavailableReason
+                : UpstreamPublicationEvidenceUnavailableReason;
         }
 
         var divergence = await RunGitAsync(
             path, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cancellationToken)
             .ConfigureAwait(false);
-        if (!divergence.Success) return "upstream-ahead-probe-unavailable";
+        if (!divergence.Success) return UpstreamAheadProbeUnavailableReason;
 
         var counts = divergence.Stdout.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (counts.Length != 2
@@ -318,7 +324,7 @@ internal sealed record QueueWorktreeEntry(
                 System.Globalization.CultureInfo.InvariantCulture, out var ahead)
             || !long.TryParse(counts[1], System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out _))
-            return "upstream-ahead-probe-unavailable";
+            return UpstreamAheadProbeUnavailableReason;
 
         return ahead > 0 ? "unpushed-commits" : null;
     }

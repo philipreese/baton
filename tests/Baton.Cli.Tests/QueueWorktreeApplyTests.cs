@@ -132,6 +132,26 @@ public sealed class QueueWorktreeApplyTests
     }
 
     [Fact]
+    public async Task Janitor_now_counts_configured_unresolvable_upstream_as_unknown()
+    {
+        await using var fixture = ApplyFixture.Create();
+        await fixture.InitializeAsync();
+        var bareRemote = Path.Combine(fixture.Home, "published.git");
+        await GitAsync(fixture.Home, Ct, "init", "-q", "--bare", bareRemote);
+        await GitAsync(fixture.Worktree, Ct, "remote", "add", "published", bareRemote);
+        await GitAsync(fixture.Worktree, Ct, "push", "-q", "-u", "published", Branch);
+        await GitAsync(fixture.Worktree, Ct, "update-ref", "-d", "refs/remotes/published/" + Branch);
+
+        var result = await ExecuteJanitorAsync(fixture);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(Directory.Exists(fixture.Worktree));
+        Assert.Contains("upstream-ahead-probe-unavailable", result.Output, StringComparison.Ordinal);
+        Assert.Contains("unknown 1", result.Output, StringComparison.Ordinal);
+        Assert.Contains("Janitor now changed nothing.", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Apply_is_idempotent_and_does_not_receipt_a_successful_removal_twice()
     {
         await using var fixture = ApplyFixture.Create();

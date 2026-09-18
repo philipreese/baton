@@ -7360,6 +7360,26 @@ receipt, proves the registration is absent, and proves the retained local branch
 may report the same removal twice; branch deletion and force or recursive filesystem removal remain
 out of scope.
 
+`baton janitor now` is the deterministic operator entry point for this same fleet-hygiene domain. It
+scopes the inventory to Baton-owned `issue-provisioned` worktrees whose recorded repository matches
+the canonical identity of the repository from which the operator invokes it; it does not inspect or
+mutate other repositories. The command reuses the exact `queue worktrees --apply` report, durable
+claim, operation lease, final protected recheck, Git reference fence, non-force removal, and
+postcondition authority above rather than defining a second cleanup path. It writes the text report
+and then `Janitor now: removed <n>; retained <n>; refused <n>; race-lost <n>; unknown <n>; changed
+<n>.`; `changed` is the removal count and zero removals add `Janitor now changed nothing.`. A
+successful report exits 0, including when evidence is retained or unknown; an unavailable current
+repository identity selects no worktrees and is reported in the text output. A clean attached branch
+with no configured upstream is `unknown` with
+`upstream-publication-evidence-unavailable`, and a configured upstream whose tracking ref cannot be
+resolved is `unknown` with `upstream-ahead-probe-unavailable`; both remain retained and can never
+become deletion candidates from missing publication evidence.
+
+This deterministic command is distinct from the model-backed `janitor` worker role: the role is a
+workflow participant that may perform its granted repository work, while `janitor now` is the
+operator-approved, model-free cleanup command. Both serve the same fleet-hygiene domain; the
+operator command's name and contract remain unchanged.
+
 `--skill <name>` is repeatable on an ordinary dispatch request. Its declaration uses dispatch's own
 normalization — surrounding whitespace is removed, first-seen order is retained, duplicates collapse,
 and a blank alongside a named skill is refused — then persists on the queue item. An absent field on an

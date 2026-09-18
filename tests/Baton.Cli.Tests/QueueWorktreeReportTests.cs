@@ -188,7 +188,31 @@ public sealed class QueueWorktreeReportTests
     }
 
     [Fact]
-    public async Task Configured_but_unresolvable_upstream_is_retained()
+    public async Task Clean_locally_committed_branch_without_upstream_stays_unknown()
+    {
+        var sandbox = Temp("no-upstream");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var repo = await RepoAsync(root, "no-upstream");
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "no-upstream")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "no-upstream");
+
+            Assert.Contains("upstream-publication-evidence-unavailable", entry.ReasonCodes);
+            Assert.Equal("unknown", entry.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Configured_but_unresolvable_upstream_is_unknown()
     {
         var sandbox = Temp("unresolvable-upstream");
         var home = Path.Combine(sandbox, "home");
@@ -212,7 +236,7 @@ public sealed class QueueWorktreeReportTests
                 "unresolvable-upstream");
 
             Assert.Contains("upstream-ahead-probe-unavailable", entry.ReasonCodes);
-            Assert.Equal("retain", entry.Classification);
+            Assert.Equal("unknown", entry.Classification);
         }
         finally
         {
