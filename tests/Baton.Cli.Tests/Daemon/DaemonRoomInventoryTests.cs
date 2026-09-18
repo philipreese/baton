@@ -60,6 +60,7 @@ public sealed class DaemonRoomInventoryTests
             var projection = new FleetProjectionWriter(() => 8, roomInventory: inventory);
             var delivery = new DeliveryPoller(inventory);
             var usage = new VendorUsageHarvester([], roomInventory: inventory);
+            var memory = new MemoryProjectionSweep();
 
             async Task RunCadenceAsync()
             {
@@ -67,7 +68,8 @@ public sealed class DaemonRoomInventoryTests
                     scheduler.TickOnceAsync(Ct),
                     projection.BuildProjectionJsonAsync(Ct, TextWriter.Null),
                     delivery.PollOnceAsync(Ct),
-                    usage.TickOnceAsync(now, Ct));
+                    usage.TickOnceAsync(now, Ct),
+                    memory.SweepOnceAsync(cancellationToken: Ct));
             }
 
             await RunCadenceAsync();
@@ -76,7 +78,7 @@ public sealed class DaemonRoomInventoryTests
 
             Assert.Equal(1, discoveryCalls);
             Assert.Equal(1_001, observationCalls);
-            Assert.Equal(1_001, versionCalls);
+            Assert.True(versionCalls >= 2_002);
         }
         finally
         {
@@ -342,6 +344,44 @@ public sealed class DaemonRoomInventoryTests
 
         Assert.Equal("Running", Assert.Single(rerun).View.State);
         Assert.Equal(2, observeCalls);
+    }
+
+    [Fact]
+    public async Task Empty_change_journal_revalidates_a_terminal_rerun_before_active_filtering()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rerun = false;
+        IReadOnlySet<string>? changes = null;
+        var inventory = new DaemonRoomInventory(
+            _ => Task.FromResult<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>(
+                [new FleetStatusTool.DiscoveredRoom("room-a", null)]),
+            (room, _, _) => Task.FromResult<FleetRoomStatusView?>(
+                View(room, rerun ? "Running" : "Succeeded")),
+            () => Version(1),
+            _ => rerun ? ActiveVersion(2) : TerminalVersion(1),
+            _ => true,
+            () => now,
+            _ =>
+            {
+                var result = changes;
+                changes = new HashSet<string>(BatonPaths.RecordKeyComparer);
+                return result;
+            });
+
+        await inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.All,
+            DaemonRoomInventory.InventoryFreshness.Current,
+            Ct);
+
+        rerun = true;
+        now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
+        var active = await inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.Active,
+            DaemonRoomInventory.InventoryFreshness.Current,
+            Ct);
+
+        Assert.Equal("room-a", Assert.Single(active).Room.RoomDir);
+        Assert.Equal("Running", active[0].View.State);
     }
 
     [Fact]

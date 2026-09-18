@@ -190,7 +190,10 @@ internal sealed class DaemonRoomInventory : IDisposable
                     _terminalCache.TryGetValue(key, out cached);
                 }
 
-                if (changes.Rooms is not null
+                // An empty journal can mean that a filesystem callback is still queued. Revalidate
+                // cached terminals in that case: the active scope must not filter a rerun out and
+                // let the scheduler treat stale terminal evidence as a current tally.
+                if (changes.Rooms is { Count: > 0 }
                     && !changes.Rooms.Contains(key)
                     && cached is not null
                     && string.Equals(cached.Project, room.Project, StringComparison.OrdinalIgnoreCase))
