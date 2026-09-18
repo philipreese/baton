@@ -10,6 +10,10 @@ Queue state and triage labels are observations and routing aids, not permission 
 
 ## Authorities
 
+- Before selecting an external vendor or dispatching, read the repository-root
+  [`OPERATOR-PERMISSIONS.md`](../../../../OPERATOR-PERMISSIONS.md). It is the canonical record of
+  repository-specific external-processing permission; it does not widen project trust, lane tool
+  permissions, or conductor authority.
 - Read the [one-lane invocation guide](../../../../docs/agents/invoking-baton.md) before dispatching,
   queueing, or collecting work. It owns commands and room mechanics; do not reproduce them here.
 - Read the [triage label contract](../../../../docs/agents/triage-labels.md) before changing readiness.
