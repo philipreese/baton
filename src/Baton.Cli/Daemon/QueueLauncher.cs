@@ -600,7 +600,8 @@ public static class QueueLauncher
         Add("--override-runway", options.OverrideRunwayReason);
         Add("--originating-pr", options.OriginatingPullRequest);
         Add("--originating-pr-branch", options.OriginatingPullRequestBranch);
-        Add("--originating-pr-expected-head", options.OriginatingPullRequestExpectedHead);
+        Add("--originating-pr-recovery-tag", options.OriginatingPullRequestRecoveryTag);
+        Add("--originating-pr-recovery-attempt-id", options.OriginatingPullRequestRecoveryAttemptId);
         if (options.MemoryAddGrant is { } memoryAddGrant)
         {
             Add("--memory-add-dispatch", memoryAddGrant.DispatchId);
@@ -973,6 +974,10 @@ public static class QueueLauncher
             }
             : ApplyFrozenAssignment(item, request.Tier);
         var followOn = item.Stage is WorkStage.Continue or WorkStage.Fix;
+        var recovery = item.Stage == WorkStage.Continue
+            && item.ExpectedOriginatingPullRequestHead is { Length: > 0 }
+            && item.AttemptId is not null;
+        var recoveryAttemptId = recovery ? item.AttemptId!.Value.Value : null;
         if (followOn && (item.Repository is not { Length: > 0 } || item.PullRequest is null
             || item.Branch is not { Length: > 0 }))
         {
@@ -1011,9 +1016,8 @@ public static class QueueLauncher
                 ? OriginatingPullRequestVerifier.CanonicalReference(repository, pullRequest)
                 : null,
             OriginatingPullRequestBranch: followOn ? item.Branch : null,
-            OriginatingPullRequestExpectedHead: item.Stage == WorkStage.Continue
-                ? item.ExpectedOriginatingPullRequestHead
-                : null,
+            OriginatingPullRequestRecoveryTag: recovery ? item.Tag : null,
+            OriginatingPullRequestRecoveryAttemptId: recoveryAttemptId,
             MemoryAddGrant: item.MemoryAddGrant);
     }
 

@@ -1,5 +1,7 @@
 using Baton.Cli.Tests.TestSupport;
 using Baton.CrashTestHost;
+using Baton.Domain;
+using Baton.Queue;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
@@ -9,6 +11,7 @@ public sealed class OriginatingPullRequestVerifierTests
 {
     private const string Head = "0123456789abcdef0123456789abcdef01234567";
     private const string PreservedHead = "fedcba9876543210fedcba9876543210fedcba98";
+    private const string RecoveryAttemptId = "2178continuationattempt000000000000";
     private static readonly GhPullRequestCreateIdentity Identity = new("aer-works/baton", "2178-lane");
 
     [Theory]
@@ -70,6 +73,42 @@ public sealed class OriginatingPullRequestVerifierTests
             "aer-works/baton", 2304, Identity, Head, 0,
             $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{PreservedHead}}"}""",
             "not-a-sha"));
+    }
+
+    [Fact]
+    public void A_direct_caller_cannot_forge_recovery_identity_without_a_durable_queue_row()
+    {
+        var options = RecoveryOptions();
+
+        Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateRecoveryEvidence(
+            options, Path.GetTempPath(), new QueueSnapshot([])));
+    }
+
+    [Fact]
+    public void A_queued_recovery_attempt_supplies_its_retained_head_from_the_matching_durable_row()
+    {
+        var workspace = Path.GetTempPath();
+        var item = new QueueItem
+        {
+            Tag = "2178-lane",
+            Role = "implement",
+            Workspace = workspace,
+            SpecFile = "2178.md",
+            State = QueueItemState.Queued,
+            Stage = WorkStage.Continue,
+            Repository = "github.com/aer-works/baton",
+            PullRequest = 2304,
+            Branch = "2178-lane",
+            ExpectedOriginatingPullRequestHead = PreservedHead,
+            AttemptId = new FleetAttemptId(RecoveryAttemptId),
+            AttemptEnvelope = new QueueAttemptEnvelope(
+                new FleetAttemptId(RecoveryAttemptId), null, "2178", null, 2304, WorkStage.Continue,
+                "implement", null, null, null, [], null, null, "admitted", null, null, null,
+                DateTimeOffset.UnixEpoch),
+        };
+
+        Assert.Equal(PreservedHead, OriginatingPullRequestVerifier.ValidateRecoveryEvidence(
+            RecoveryOptions(), workspace, new QueueSnapshot([item])));
     }
 
     [Theory]
@@ -206,4 +245,11 @@ public sealed class OriginatingPullRequestVerifierTests
             File.SetUnixFileMode(path, File.GetUnixFileMode(path) | UnixFileMode.UserExecute);
         }
     }
+
+    private static DispatchOptions RecoveryOptions() => new(
+        "implement", "2178.md", "room",
+        OriginatingPullRequest: "aer-works/baton#2304",
+        OriginatingPullRequestBranch: "2178-lane",
+        OriginatingPullRequestRecoveryTag: "2178-lane",
+        OriginatingPullRequestRecoveryAttemptId: RecoveryAttemptId);
 }

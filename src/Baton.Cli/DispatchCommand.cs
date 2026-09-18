@@ -213,6 +213,8 @@ public static class DispatchCommand
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 
+        var recoveryExpectedHead = await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
+            options, workspace, cancellationToken).ConfigureAwait(false);
         if (options.OriginatingPullRequest is not null)
         {
             if (bindings.Count != 1)
@@ -220,7 +222,7 @@ public static class DispatchCommand
             var ownership = await OriginatingPullRequestVerifier.VerifyAsync(
                 options.OriginatingPullRequest, workspace, cancellationToken,
                 options.OriginatingPullRequestBranch,
-                options.OriginatingPullRequestExpectedHead).ConfigureAwait(false);
+                recoveryExpectedHead).ConfigureAwait(false);
             bindings = bindings.ToDictionary(pair => pair.Key, pair => pair.Value with { OriginatingPullRequestOwnership = ownership }, StringComparer.Ordinal);
         }
 

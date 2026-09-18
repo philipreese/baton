@@ -773,7 +773,7 @@ public sealed class QueueLauncherTests : IDisposable
     }
 
     [Fact]
-    public void Only_a_retained_continue_item_forwards_the_internal_expected_head()
+    public void Only_a_retained_continue_item_forwards_the_internal_recovery_identity()
     {
         var expectedHead = "0123456789abcdef0123456789abcdef01234567";
         var item = new QueueItem
@@ -787,6 +787,7 @@ public sealed class QueueLauncherTests : IDisposable
             PullRequest = 2304,
             Branch = "2178-lane",
             ExpectedOriginatingPullRequestHead = expectedHead,
+            AttemptId = new FleetAttemptId("2178continuationattempt000000000000"),
         };
 
         var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
@@ -795,14 +796,17 @@ public sealed class QueueLauncherTests : IDisposable
             @"C:\rooms\next"));
         var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
 
-        Assert.Equal(expectedHead, options.OriginatingPullRequestExpectedHead);
-        Assert.Equal(expectedHead, parsed.OriginatingPullRequestExpectedHead);
+        Assert.Equal("2178-lane", options.OriginatingPullRequestRecoveryTag);
+        Assert.Equal("2178continuationattempt000000000000", options.OriginatingPullRequestRecoveryAttemptId);
+        Assert.Equal(options.OriginatingPullRequestRecoveryTag, parsed.OriginatingPullRequestRecoveryTag);
+        Assert.Equal(options.OriginatingPullRequestRecoveryAttemptId, parsed.OriginatingPullRequestRecoveryAttemptId);
 
         var fixOptions = QueueLauncher.BuildOptions(new QueueLaunchRequest(
             item with { Stage = WorkStage.Fix },
             new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
             @"C:\rooms\next"));
-        Assert.Null(fixOptions.OriginatingPullRequestExpectedHead);
+        Assert.Null(fixOptions.OriginatingPullRequestRecoveryTag);
+        Assert.Null(fixOptions.OriginatingPullRequestRecoveryAttemptId);
     }
 
     [Theory]

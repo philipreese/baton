@@ -82,7 +82,8 @@ public static class DispatchOptionsParser
         string? overrideRunwayReason = null;
         string? originatingPullRequest = null;
         string? originatingPullRequestBranch = null;
-        string? originatingPullRequestExpectedHead = null;
+        string? originatingPullRequestRecoveryTag = null;
+        string? originatingPullRequestRecoveryAttemptId = null;
         string? memoryAddDispatch = null;
         string? memoryAddRepository = null;
         var attachments = new List<string>();
@@ -210,10 +211,13 @@ public static class DispatchOptionsParser
                 case "--originating-pr-branch":
                     originatingPullRequestBranch = RequireValue(args, ref i, arg);
                     break;
-                // Internal queue transport: this is the retained PR head for the one recovery proof
-                // shape. It is intentionally absent from Usage; direct dispatch has no way to mint it.
-                case "--originating-pr-expected-head":
-                    originatingPullRequestExpectedHead = RequireValue(args, ref i, arg);
+                // Internal queue transport. The command gate resolves the retained PR head from the
+                // matching durable queue attempt; neither a caller nor argv carries that authority.
+                case "--originating-pr-recovery-tag":
+                    originatingPullRequestRecoveryTag = RequireValue(args, ref i, arg);
+                    break;
+                case "--originating-pr-recovery-attempt-id":
+                    originatingPullRequestRecoveryAttemptId = RequireValue(args, ref i, arg);
                     break;
                 // Conductor-only transport. The command gate independently requires the matching
                 // durable queue row, so typing these flags cannot manufacture authority.
@@ -304,10 +308,17 @@ public static class DispatchOptionsParser
             throw new CliArgumentException("The queue memory-add transport requires both its dispatch identity and repository.");
         }
 
-        if (originatingPullRequestExpectedHead is not null && originatingPullRequest is null)
+        if ((originatingPullRequestRecoveryTag is null) != (originatingPullRequestRecoveryAttemptId is null))
         {
             throw new CliArgumentException(
-                "The preserved continuation PR head is an internal queue value and requires --originating-pr.");
+                "The preserved continuation PR recovery identity requires both its queue tag and attempt id.");
+        }
+
+        if (originatingPullRequestRecoveryTag is not null
+            && (originatingPullRequest is null || originatingPullRequestBranch is null))
+        {
+            throw new CliArgumentException(
+                "The preserved continuation PR recovery identity requires the originating PR and recorded branch.");
         }
 
         var memoryAddGrant = memoryAddDispatch is null
@@ -344,7 +355,8 @@ public static class DispatchOptionsParser
             ParseTaskSizeDeclaration(declaredSize, sizeRationale),
             originatingPullRequest,
             originatingPullRequestBranch,
-            originatingPullRequestExpectedHead,
+            originatingPullRequestRecoveryTag,
+            originatingPullRequestRecoveryAttemptId,
             memoryAddGrant);
     }
 

@@ -619,13 +619,15 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(FullPushedSha, item.ExpectedOriginatingPullRequestHead);
 
             var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
-                item,
+                item with { AttemptId = new FleetAttemptId("2178continuationattempt000000000000") },
                 new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
                 Path.Combine(home, "continue-room")));
-            Assert.Equal(FullPushedSha, options.OriginatingPullRequestExpectedHead);
+            Assert.Equal("1934-lane", options.OriginatingPullRequestRecoveryTag);
+            Assert.Equal("2178continuationattempt000000000000", options.OriginatingPullRequestRecoveryAttemptId);
 
             var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
-            Assert.Equal(FullPushedSha, parsed.OriginatingPullRequestExpectedHead);
+            Assert.Equal(options.OriginatingPullRequestRecoveryTag, parsed.OriginatingPullRequestRecoveryTag);
+            Assert.Equal(options.OriginatingPullRequestRecoveryAttemptId, parsed.OriginatingPullRequestRecoveryAttemptId);
             Assert.Contains(facts, fact => fact.Reason!.Contains("fix → continue", StringComparison.Ordinal));
         }
         finally
