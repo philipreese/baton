@@ -1,11 +1,76 @@
 using Baton.Cli.Daemon;
 using Baton.Cli.Mcp;
+using Baton.Status;
+using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests.Daemon;
 
 public sealed class DaemonRoomInventoryTests
 {
     private static readonly CancellationToken Ct = TestContext.Current.CancellationToken;
+
+    [Fact]
+    public async Task Real_consumers_do_not_reprobe_unchanged_terminal_rooms_on_the_next_cadence()
+    {
+        var home = Path.Combine(Path.GetTempPath(), $"baton-inventory-consumers-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(home);
+        using var environment = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var discoveryCalls = 0;
+            var versionCalls = 0;
+            var observationCalls = 0;
+            var rooms = Enumerable.Range(0, 1_001)
+                .Select(index => new FleetStatusTool.DiscoveredRoom($"room-{index}", null))
+                .ToList();
+            var inventory = new DaemonRoomInventory(
+                _ =>
+                {
+                    Interlocked.Increment(ref discoveryCalls);
+                    return Task.FromResult<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>(rooms);
+                },
+                (room, _, _) =>
+                {
+                    Interlocked.Increment(ref observationCalls);
+                    return Task.FromResult<FleetRoomStatusView?>(View(room, "Succeeded"));
+                },
+                () => Version(1),
+                _ =>
+                {
+                    Interlocked.Increment(ref versionCalls);
+                    return TerminalVersion(1);
+                },
+                _ => true,
+                () => now);
+            var scheduler = new QueueSchedulerService(inventory);
+            var projection = new FleetProjectionWriter(() => 8, roomInventory: inventory);
+            var delivery = new DeliveryPoller(inventory);
+            var usage = new VendorUsageHarvester([], roomInventory: inventory);
+
+            async Task RunCadenceAsync()
+            {
+                await Task.WhenAll(
+                    scheduler.TickOnceAsync(Ct),
+                    projection.BuildProjectionJsonAsync(Ct, TextWriter.Null),
+                    delivery.PollOnceAsync(Ct),
+                    usage.TickOnceAsync(now, Ct));
+            }
+
+            await RunCadenceAsync();
+            now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
+            await RunCadenceAsync();
+
+            Assert.Equal(1, discoveryCalls);
+            Assert.Equal(1_001, observationCalls);
+            Assert.Equal(1_001, versionCalls);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
 
     [Fact]
     public async Task Concurrent_consumers_share_one_cold_observation_pass()
