@@ -152,7 +152,7 @@ public sealed class DaemonRoomInventoryTests
             var firstChange = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             void OnFirstChange() => firstChange.TrySetResult();
             tracker.Changed += OnFirstChange;
-            File.Delete(Path.Combine(
+            FileCleanup.EnsureDeleted(Path.Combine(
                 rooms[500].RoomDir,
                 TerminalSentinelWriter.TerminalSentinelFileName));
             await firstChange.Task.WaitAsync(Ct);
@@ -168,7 +168,7 @@ public sealed class DaemonRoomInventoryTests
             var secondChange = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             void OnSecondChange() => secondChange.TrySetResult();
             tracker.Changed += OnSecondChange;
-            File.Delete(Path.Combine(
+            FileCleanup.EnsureDeleted(Path.Combine(
                 rooms[501].RoomDir,
                 TerminalSentinelWriter.TerminalSentinelFileName));
             await secondChange.Task.WaitAsync(Ct);
