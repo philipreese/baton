@@ -1,4 +1,5 @@
 using Baton.Queue;
+using Baton.Memory;
 
 namespace Baton.Vendors;
 
@@ -26,6 +27,9 @@ public static class MemoryAddCommandPermission
 
     internal static bool Allows(string commandLine, IReadOnlyList<string>? exceptions) =>
         TryParseAllowed(commandLine, exceptions, out _);
+
+    /// <summary>Worker grants may author repository facts and provisional evidence, never operator policy.</summary>
+    public static bool IsWorkerAuthorable(MemoryKind kind) => kind is not MemoryKind.OperatorPreference and not MemoryKind.Unknown;
 
     /// <summary>
     /// Parses the one admitted shell shape while proving it is covered by this dispatch's exact
@@ -133,7 +137,8 @@ public static class MemoryAddCommandPermission
 }
 
 /// <summary>The exact, already-admitted memory-add argv handed from the broker to its host.</summary>
-public sealed record MemoryAddCommandInvocation(string Text, string Kind, string Repository);
+public sealed record MemoryAddCommandInvocation(
+    string Text, string Kind, string Repository, CodexMemoryAddHostAuthority? HostAuthority = null);
 
 /// <summary>Result of a broker-hosted memory-add execution.</summary>
 public sealed record MemoryAddCommandExecution(bool Success, string Output);

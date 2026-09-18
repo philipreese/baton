@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 using Baton.Status;
 
 namespace Baton.Memory;
@@ -109,7 +110,7 @@ public static class MemoryStore
                         candidate.SourcePath, entry.SourcePath, StringComparison.OrdinalIgnoreCase));
                 if (existing is not null)
                 {
-                    return new DispatchAppendResult(existing, !string.Equals(existing.Id, entry.Id, StringComparison.Ordinal), []);
+                    return new DispatchAppendResult(existing, !SameDispatchPayload(existing, entry), []);
                 }
 
                 var appended = Ledger.AppendAndGetAppendedUnlocked([entry], entriesFilePath);
@@ -118,6 +119,19 @@ public static class MemoryStore
             cancellationToken,
             action => MemoryCanonicalGeneration.MutateLedger(entriesFilePath, action));
     }
+
+    private static bool SameDispatchPayload(MemoryEntry existing, MemoryEntry proposed) =>
+        string.Equals(existing.Repository, proposed.Repository, StringComparison.Ordinal)
+        && existing.Kind == proposed.Kind
+        && existing.KindSource == proposed.KindSource
+        && string.Equals(existing.Text.Normalize(NormalizationForm.FormC), proposed.Text.Normalize(NormalizationForm.FormC), StringComparison.Ordinal)
+        && string.Equals(existing.Sha256, proposed.Sha256, StringComparison.Ordinal)
+        && string.Equals(existing.SourcePath, proposed.SourcePath, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(existing.SourceVendor, proposed.SourceVendor, StringComparison.Ordinal)
+        && existing.SourceScope == proposed.SourceScope
+        && string.Equals(existing.AssertedBy, proposed.AssertedBy, StringComparison.Ordinal)
+        && string.Equals(existing.MemoryAddDispatchId, proposed.MemoryAddDispatchId, StringComparison.Ordinal)
+        && existing.Issue == proposed.Issue;
 
     /// <summary>
     /// This file's entries as they sit on disk, oldest first — <b>with no supersession resolved</b>.

@@ -1,4 +1,5 @@
 using Baton.Domain;
+using Baton.Queue;
 
 namespace Baton.Vendors;
 
@@ -17,4 +18,12 @@ public sealed record CodexBrokerConfiguration(
     IReadOnlyList<string> ProducedOutputNames,
     bool AllowsSubagents,
     GhPullRequestCreateProvenance? PullRequestCreateProvenance = null,
-    OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null);
+    OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null,
+    CodexMemoryAddHostAuthority? MemoryAddAuthority = null);
+
+/// <summary>Host-materialized identity for the one brokered worker memory write.</summary>
+public sealed record CodexMemoryAddHostAuthority(
+    string RoomDirectory,
+    string ArtifactsRoot,
+    string OutputDirectory,
+    MemoryAddDispatchGrant Grant);

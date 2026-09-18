@@ -110,6 +110,7 @@ public sealed class CodexDynamicToolPolicy
     /// </summary>
     private readonly OwnPullRequestOnlyRule? _ownPullRequestOnly;
     private readonly Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? _memoryAddExecutor;
+    private readonly CodexMemoryAddHostAuthority? _memoryAddAuthority;
 
     /// <param name="commandCeiling">
     /// How long one <c>baton_run_command</c> of a given class may run before Baton kills its process
@@ -135,7 +136,8 @@ public sealed class CodexDynamicToolPolicy
         GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
         OriginatingPullRequestOwnership? originatingPullRequestOwnership = null,
         IEnumerable<string>? artifactOnlyOutputNames = null,
-        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null)
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null,
+        CodexMemoryAddHostAuthority? memoryAddAuthority = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -165,6 +167,7 @@ public sealed class CodexDynamicToolPolicy
         _ownPullRequestOnly = OwnPullRequestOnlyRule.AppliesTo(grant) ? new OwnPullRequestOnlyRule() : null;
         _ownPullRequestOnly?.Observe(originatingPullRequestOwnership?.ToEvidence());
         _memoryAddExecutor = memoryAddExecutor;
+        _memoryAddAuthority = memoryAddAuthority;
     }
 
     /// <summary>
@@ -1186,7 +1189,21 @@ public sealed class CodexDynamicToolPolicy
             && MemoryAddCommandPermission.TryParseAllowed(
                 commandLine, _grant.DeniedShellCommandExceptions, out var memoryAdd))
         {
-            var execution = await _memoryAddExecutor(memoryAdd!, cancellationToken).ConfigureAwait(false);
+            var parsedMemoryAdd = memoryAdd!;
+            var kind = Enum.GetValues<Baton.Memory.MemoryKind>().FirstOrDefault(candidate =>
+                Baton.Memory.MemoryJsonNames.Of(candidate).Equals(parsedMemoryAdd.Kind, StringComparison.OrdinalIgnoreCase));
+            if (!MemoryAddCommandPermission.IsWorkerAuthorable(kind))
+            {
+                return CodexDynamicToolResult.Refused(
+                    "A worker memory-add grant cannot author operator policy or preferences.", GrantRules.ShellPattern);
+            }
+            if (_memoryAddAuthority is null)
+            {
+                return CodexDynamicToolResult.Refused(
+                    "This broker has no host-materialized memory-add authority.", GrantRules.ShellPattern);
+            }
+            var execution = await _memoryAddExecutor(
+                parsedMemoryAdd with { HostAuthority = _memoryAddAuthority }, cancellationToken).ConfigureAwait(false);
             RecordExecutedCommandOutcome(commandLine, execution.Output, execution.Success);
             return execution.Success
                 ? CodexDynamicToolResult.Allowed(execution.Output)

@@ -274,7 +274,8 @@ public static class WorkerBindingResolver
             OriginatingPullRequestOwnership: entry.OriginatingPullRequestOwnership is { } originating
                 && OriginatingPullRequestAuthorityStore.Read(bindingsFileDirectory) == originating
                     ? originating
-                    : null);
+                    : null,
+            MemoryAddGrant: entry.MemoryAddGrant);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)

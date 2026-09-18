@@ -368,9 +368,32 @@ public sealed class QueueSchedulerService : BackgroundService
 
                 // The role catalog is read on every admission, rather than trusting the grant that was
                 // current when queue add ran. This check remains before a room claim or vendor spawn.
+                var hasMemoryAdd = item.Requirements?.Contains(TaskRequirements.MemoryAdd, StringComparer.Ordinal) == true;
+                if (hasMemoryAdd
+                    && (item.MemoryAddGrant is not { IsWellFormed: true } memoryGrant
+                        || !string.Equals(memoryGrant.Repository, item.Repository, StringComparison.Ordinal)
+                        || !WorkerAdapterRegistry.ProvidesHostMediatedExecution(tier.Adapter)))
+                {
+                    var reason = $"task requirement '{TaskRequirements.MemoryAdd}' requires an exact durable grant and a host-mediated adapter; no lane was started.";
+                    var refusedAdmission = new TaskRequirementAdmission(
+                        item.Requirements, [], TaskRequirementAdmission.Refused, [TaskRequirements.MemoryAdd], VendorUsage: 0);
+                    envelope = CreateEnvelope(item, tier, FleetAttemptId.New(), refusedAdmission, now, room: null, baseRevision: null);
+                    await CommitAdmissionAsync(
+                        item, envelope, AdmissionEvent(envelope), refusedAdmission, QueueItemState.Failed, reason,
+                        AttemptFact(FleetEventKind.AttemptRefused, envelope, now, reason, room: null, usage: null, artifacts: null))
+                        .ConfigureAwait(false);
+                    return interval;
+                }
                 attemptId = FleetAttemptId.New();
+                var preflightItem = hasMemoryAdd
+                    ? item with
+                    {
+                        Requirements = item.Requirements!.Where(requirement =>
+                            !string.Equals(requirement, TaskRequirements.MemoryAdd, StringComparison.Ordinal)).ToArray(),
+                    }
+                    : item;
                 var projectPreflight = RecordedProjectCeilingAdmission.Evaluate(
-                    item, role, settings.RequireDeclaredRequirements);
+                    preflightItem, role, settings.RequireDeclaredRequirements);
                 admission = projectPreflight.Admission;
                 if (admission.Result == TaskRequirementAdmission.Refused)
                 {

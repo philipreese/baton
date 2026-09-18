@@ -2,6 +2,7 @@ using Baton.Queue;
 using Baton.Status;
 using Baton.Tests.Shared;
 using Baton.Vendors;
+using Baton.Memory;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -125,6 +126,7 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
                 Tag = "2100-memory", Role = "implement", Adapter = "codex", Model = "gpt-fixture",
                 Workspace = _root, SpecFile = Path.Combine(_root, "brief.md"), Issue = 2100,
                 Repository = Repository, RoomDirectory = room, Requirements = [TaskRequirements.MemoryAdd],
+                State = QueueItemState.Launched,
                 MemoryAddGrant = grant,
             }]), TestContext.Current.CancellationToken);
 
@@ -137,7 +139,8 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
             var permission = MemoryAddCommandPermission.Add(
                 new PermissionGrant(RunShellCommands: true, DeniedShellCommandPatterns: ["baton memory*"]), grant);
             var configuration = new CodexBrokerConfiguration(
-                _root, "gpt-fixture", null, null, false, permission, ["changes.md"], false);
+                _root, "gpt-fixture", null, null, false, permission, ["changes.md"], false,
+                MemoryAddAuthority: new CodexMemoryAddHostAuthority(room, artifacts, output, grant));
             var transcript = string.Join('\n',
             [
                 "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
@@ -211,16 +214,46 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
             Assert.Contains("grant-refused", responses[102].ToJsonString(), StringComparison.Ordinal);
 
             var retry = await CodexBrokerCommand.ExecuteMemoryAddAsync(
-                new MemoryAddCommandInvocation("brokered-fact", "durable-fact", Repository),
+                new MemoryAddCommandInvocation(
+                    "brokered-fact", "durable-fact", Repository,
+                    new CodexMemoryAddHostAuthority(room, artifacts, output, grant)),
                 TestContext.Current.CancellationToken);
             Assert.True(retry.Success);
             Assert.Contains("retry returned the canonical entry", retry.Output, StringComparison.Ordinal);
 
             var conflictingRetry = await CodexBrokerCommand.ExecuteMemoryAddAsync(
-                new MemoryAddCommandInvocation("conflicting-fact", "durable-fact", Repository),
+                new MemoryAddCommandInvocation(
+                    "conflicting-fact", "durable-fact", Repository,
+                    new CodexMemoryAddHostAuthority(room, artifacts, output, grant)),
                 TestContext.Current.CancellationToken);
             Assert.False(conflictingRetry.Success);
             Assert.Contains("different normalized payload", conflictingRetry.Output, StringComparison.Ordinal);
+
+            var kindOnlyConflict = await CodexBrokerCommand.ExecuteMemoryAddAsync(
+                new MemoryAddCommandInvocation(
+                    "brokered-fact", "hypothesis", Repository,
+                    new CodexMemoryAddHostAuthority(room, artifacts, output, grant)),
+                TestContext.Current.CancellationToken);
+            Assert.False(kindOnlyConflict.Success);
+            Assert.Contains("different normalized payload", kindOnlyConflict.Output, StringComparison.Ordinal);
+
+            var concurrentGrant = new MemoryAddDispatchGrant("c" + new string('3', 31), Repository);
+            await File.WriteAllTextAsync(BatonPaths.RoomBindingsFile(room),
+                $$"""
+                { "implement": { "Adapter": "codex", "Timeout": "00:25:00", "Contract": { "WorkerName": "implement", "RequiredInputs": [], "ProducedOutputs": [{ "Name": "changes.md" }], "OptionalMetadata": [] }, "PromptTemplate": "do the thing", "Model": "gpt-fixture", "MemoryAddGrant": { "DispatchId": "{{concurrentGrant.DispatchId}}", "Repository": "{{Repository}}" } } }
+                """, TestContext.Current.CancellationToken);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [snapshot.Items.Single() with { MemoryAddGrant = concurrentGrant }],
+            }, TestContext.Current.CancellationToken);
+            var concurrentAuthority = new CodexMemoryAddHostAuthority(room, artifacts, output, concurrentGrant);
+            var concurrentWrites = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ =>
+                CodexBrokerCommand.ExecuteMemoryAddAsync(
+                    new MemoryAddCommandInvocation("concurrent fact", "durable-fact", Repository, concurrentAuthority),
+                    TestContext.Current.CancellationToken)));
+            Assert.All(concurrentWrites, execution => Assert.True(execution.Success));
+            Assert.Single(await MemoryStore.ReadAllAsync(BatonPaths.MemoryEntriesFile(FleetMemory.SlugFor(Repository)),
+                TestContext.Current.CancellationToken), entry => entry.MemoryAddDispatchId == concurrentGrant.DispatchId);
             Assert.Equal(string.Empty, error.ToString());
 
             var direct = new StringWriter();
@@ -237,5 +270,24 @@ public sealed class MemoryAddLaneGrantGateTests : IDisposable
             Environment.SetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable, previousArtifacts);
             Environment.SetEnvironmentVariable("BATON_OUTPUT_DIR", previousOutput);
         }
+    }
+
+    [Fact]
+    public async Task An_invalid_host_authority_is_not_an_operator_bypass()
+    {
+        var output = new StringWriter();
+        var exitCode = await MemoryAddCommand.ExecuteAsync(
+            MemoryAddOptionsParser.Parse([
+                "--text", "forged host authority", "--kind", "durable-fact", "--repository", Repository]),
+            output,
+            brokerAuthority: new CodexMemoryAddHostAuthority(
+                Path.Combine(_root, "forged-room"),
+                Path.Combine(_root, "forged-room", "artifacts"),
+                Path.Combine(_root, "forged-room", "artifacts", "execution_forged"),
+                new MemoryAddDispatchGrant("f" + new string('3', 31), Repository)),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("REFUSED", output.ToString(), StringComparison.Ordinal);
     }
 }

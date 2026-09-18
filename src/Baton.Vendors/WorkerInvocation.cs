@@ -164,5 +164,6 @@ public sealed record WorkerInvocation(
     IReadOnlyList<SkillPackage>? Skills = null,
     // #2190: durable binding authority, not a live workspace claim.
     GhPullRequestCreateIdentity? PullRequestCreateIdentity = null,
-    OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null);
+    OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null,
+    Baton.Queue.MemoryAddDispatchGrant? MemoryAddGrant = null);
 

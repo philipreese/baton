@@ -753,7 +753,14 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
             contract.ProducedOutputs.Select(output => output.Name).ToArray(),
             invocation.AllowsSubagents,
             pullRequestCreateProvenance,
-            invocation.OriginatingPullRequestOwnership);
+            invocation.OriginatingPullRequestOwnership,
+            invocation.MemoryAddGrant is { IsWellFormed: true } memoryAddGrant
+                ? new CodexMemoryAddHostAuthority(
+                    "%BATON_ROOM_DIRECTORY%",
+                    "%BATON_ARTIFACTS_ROOT%",
+                    "%BATON_OUTPUT_DIR%",
+                    memoryAddGrant)
+                : null);
         CoreDispatchTarget BuildBrokerTarget(CodexBrokerConfiguration brokerConfiguration, string brokerPrompt) => new(
             "dotnet",
             [hostDllPath, "codex-broker", "--config", configPath, brokerPrompt],

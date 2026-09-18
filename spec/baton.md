@@ -7317,10 +7317,15 @@ whole-lifecycle attachment is policy, and the queue does not silently choose one
 only when the selected adapter provides host-mediated execution; unsupported adapters fail before launch. Admission
 records one immutable per-dispatch grant on the queue row and materializes that same fact in the room
 binding. It never follows from an implement role or shell access, cannot widen on reseed or a later
-round, and admits only the recorded repository's canonical store. The broker admits its exact command
-grammar, then the in-process command path rechecks the live broker execution against the room, binding,
-queue row, repository, issue, and grant; an environment-selected artifacts root is never dispatch
-identity. This paragraph is the capability contract; §12's memory-write path refers here. Before claiming a room, provisioning a worktree, or starting a
+round, and admits only the recorded repository's canonical store. Scheduler preflight treats this
+explicit capability as distinct from ordinary role-grant requirements while independently rechecking
+the selected adapter before any room or launch side effect. The broker admits its exact command
+grammar and passes the host-materialized room, execution, and immutable grant through to the command
+gate; neither a caller environment nor a sibling or stale path establishes dispatch identity. Worker
+writes are limited to repository-authorable memory kinds; operator policy and preferences remain on
+the ordinary operator surface. A grant's retry matches its complete canonical payload, including
+normalized text and kind, so any changed semantic payload is refused while concurrent exact retries
+append once. This paragraph is the capability contract; §12's memory-write path refers here. Before claiming a room, provisioning a worktree, or starting a
 vendor process, the scheduler reads the current role catalog and compares these requirements to the
 effective grant — including its scoped `gh` shell patterns and declared output contract. A mismatch
 fails that item with the missing capability and a remedy; it never widens a role or guesses from the

@@ -42,7 +42,7 @@ internal static class CodexBrokerCommand
                 "--repository", invocation.Repository]),
             writer,
             cancellationToken: cancellationToken,
-            brokerOutputDirectory: Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR"))
+            brokerAuthority: invocation.HostAuthority)
             .ConfigureAwait(false);
         return new MemoryAddCommandExecution(exitCode == 0, writer.ToString());
     }

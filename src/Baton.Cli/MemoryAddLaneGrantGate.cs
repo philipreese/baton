@@ -90,6 +90,72 @@ public static class MemoryAddLaneGrantGate
         }
     }
 
+    /// <summary>Host-materialized identity has no ambient-path fallback.</summary>
+    public static Task<Authorization?> TryAuthorizeAsync(
+        CodexMemoryAddHostAuthority? authority, CancellationToken cancellationToken)
+    {
+        if (authority is null || !authority.Grant.IsWellFormed)
+        {
+            return Task.FromResult<Authorization?>(null);
+        }
+        return TryAuthorizeHostAsync(authority, cancellationToken);
+    }
+
+    private static async Task<Authorization?> TryAuthorizeHostAsync(
+        CodexMemoryAddHostAuthority authority, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!Path.IsPathFullyQualified(authority.RoomDirectory)
+                || !Path.IsPathFullyQualified(authority.ArtifactsRoot)
+                || !Path.IsPathFullyQualified(authority.OutputDirectory)
+                || !BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(
+                    Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(authority.ArtifactsRoot)) ?? ""),
+                    BatonPaths.RecordKey(authority.RoomDirectory))
+                || !BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(
+                    Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(authority.OutputDirectory)) ?? ""),
+                    BatonPaths.RecordKey(authority.ArtifactsRoot))
+                || !Directory.Exists(authority.OutputDirectory)
+                || !File.Exists(BatonPaths.RoomBindingsFile(authority.RoomDirectory)))
+            {
+                return null;
+            }
+
+            var bindings = WorkerBindingConfigParser.Parse(File.ReadAllText(BatonPaths.RoomBindingsFile(authority.RoomDirectory)));
+            var binding = ConductorRoomDetector.TryResolveSoleBinding(bindings);
+            if (binding is not { } resolved || resolved.Entry.MemoryAddGrant != authority.Grant)
+            {
+                return null;
+            }
+            var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var item = queue.Items.SingleOrDefault(candidate =>
+                candidate.MemoryAddGrant == authority.Grant
+                && candidate.Requirements?.Contains(TaskRequirements.MemoryAdd, StringComparer.Ordinal) == true
+                && candidate.Issue is > 0
+                && candidate.State == QueueItemState.Launched
+                && candidate.RoomDirectory is { Length: > 0 } recordedRoom
+                && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(recordedRoom), BatonPaths.RecordKey(authority.RoomDirectory)));
+            var model = resolved.Entry.ModelResolved ?? resolved.Entry.Model;
+            var recordedAdapter = item?.AttemptEnvelope?.Adapter ?? item?.Adapter;
+            var recordedModel = item?.AttemptEnvelope?.Model ?? item?.Model;
+            if (item?.Issue is not int issue || string.IsNullOrWhiteSpace(recordedAdapter)
+                || !WorkerAdapterRegistry.ProvidesHostMediatedExecution(recordedAdapter)
+                || !string.Equals(item.Repository, authority.Grant.Repository, StringComparison.Ordinal)
+                || !string.Equals(resolved.Role, item.Role, StringComparison.Ordinal)
+                || !string.Equals(resolved.Entry.Adapter, recordedAdapter, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(model, recordedModel, StringComparison.Ordinal))
+            {
+                return null;
+            }
+            return new Authorization(authority.Grant.Repository, authority.Grant.DispatchId, issue,
+                $"room={Path.GetFileName(authority.RoomDirectory)};role={resolved.Role};adapter={resolved.Entry.Adapter};model={model ?? "unresolved-model"};issue={issue};dispatch={authority.Grant.DispatchId}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WorkerBindingConfigException or QueueStoreException)
+        {
+            return null;
+        }
+    }
+
     private static bool IsCurrentBrokerExecution(string outputDirectory, string artifactsRoot)
     {
         if (!Path.IsPathFullyQualified(outputDirectory))

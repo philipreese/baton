@@ -822,6 +822,14 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         var pathVariables = request.Environment
             .OfType<EnvironmentVariable.BatonComputed>()
             .ToDictionary(v => v.Name, v => v.Value);
+        if (pathVariables.TryGetValue("BATON_ARTIFACTS_ROOT", out var artifactsRoot))
+        {
+            var roomDirectory = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(artifactsRoot));
+            if (!string.IsNullOrWhiteSpace(roomDirectory))
+            {
+                pathVariables["BATON_ROOM_DIRECTORY"] = roomDirectory;
+            }
+        }
 
         // Perform expansion on target arguments
         var expandedArgs = target.Args.Select(arg => ExpandVariables(arg, pathVariables)).ToList();

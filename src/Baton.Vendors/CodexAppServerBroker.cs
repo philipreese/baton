@@ -66,7 +66,10 @@ public static class CodexAppServerBroker
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
 
-        var outputDirectory = Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR");
+        // A memory-authorized broker receives its exact execution path from the host-rendered
+        // configuration. Ordinary broker invocations retain the established output environment.
+        var outputDirectory = configuration.MemoryAddAuthority?.OutputDirectory
+            ?? Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR");
         if (string.IsNullOrWhiteSpace(outputDirectory))
         {
             await error.WriteLineAsync("Codex broker requires BATON_OUTPUT_DIR.").ConfigureAwait(false);
@@ -166,7 +169,8 @@ public static class CodexAppServerBroker
             artifactOnlyOutputNames: artifactOnlyOutputNames,
             pullRequestCreateProvenance: configuration.PullRequestCreateProvenance,
             originatingPullRequestOwnership: configuration.OriginatingPullRequestOwnership,
-            memoryAddExecutor: memoryAddExecutor);
+            memoryAddExecutor: memoryAddExecutor,
+            memoryAddAuthority: configuration.MemoryAddAuthority);
 
     /// <summary>
     /// Reads authenticated account limits through the broker's isolated home and app-server
