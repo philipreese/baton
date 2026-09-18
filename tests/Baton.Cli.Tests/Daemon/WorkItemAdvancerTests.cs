@@ -262,7 +262,16 @@ public sealed class WorkItemAdvancerTests
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
-            await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            var seeded = await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            var attemptId = new FleetAttemptId("retiring-recovery-attempt");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seeded with
+                {
+                    AttemptId = attemptId,
+                    OriginatingPullRequestRecoveryClaim = attemptId,
+                }],
+            }, Ct);
             var merged = $$$"""
                 [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
                   "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
@@ -277,6 +286,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
             Assert.Equal(Now, retired.Retirement?.At);
             Assert.Equal("trusted merged observation for PR #77", retired.Retirement?.Reason);
+            Assert.Null(retired.OriginatingPullRequestRecoveryClaim);
             var ledger = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
             Assert.Contains(ledger, entry => entry is { Decision: QueueDecisionEntry.Retired, Tag: "1934-lane" });
         }
@@ -588,6 +598,44 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
             Assert.Contains("implement → review", fact.Reason!, StringComparison.Ordinal);
             Assert.Equal(room, fact.Room);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_failed_fix_with_one_clean_commit_ahead_retains_the_observed_PR_head_for_continue()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Fix, room, round: 2, automaticFixUsed: true);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { AttemptBaseRevision = FullPushedSha }] },
+                Ct);
+
+            var facts = await new WorkItemAdvancer(
+                    new FakeGh(PrJson(77, FullPushedSha)),
+                    (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Equal(FullPushedSha, item.ExpectedOriginatingPullRequestHead);
+
+            var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+                item with { AttemptId = new FleetAttemptId("2178continuationattempt000000000000") },
+                new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
+                Path.Combine(home, "continue-room")));
+            var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
+            Assert.DoesNotContain("--originating-pr-recovery-tag", QueueLauncher.BuildArguments(options));
+            Assert.DoesNotContain("--originating-pr-recovery-attempt-id", QueueLauncher.BuildArguments(options));
+            Assert.Contains(facts, fact => fact.Reason!.Contains("fix → continue", StringComparison.Ordinal));
         }
         finally
         {

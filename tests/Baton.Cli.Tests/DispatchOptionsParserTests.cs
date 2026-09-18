@@ -8,6 +8,13 @@ namespace Baton.Cli.Tests;
 public class DispatchOptionsParserTests
 {
     [Fact]
+    public void A_direct_caller_cannot_supply_a_preserved_continuation_head()
+    {
+        Assert.Throws<CliArgumentException>(() => DispatchOptionsParser.Parse(
+            ["implement", "--originating-pr", "aer-works/baton#2304", "--originating-pr-expected-head", "0123456789abcdef0123456789abcdef01234567"]));
+    }
+
+    [Fact]
     public void Parses_the_name_spec_adapter_room_dir_and_workflow_id()
     {
         var options = DispatchOptionsParser.Parse(

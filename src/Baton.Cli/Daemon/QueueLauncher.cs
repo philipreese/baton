@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using Baton.Core;
 using Baton.Domain;
@@ -126,8 +127,18 @@ public static class QueueLauncher
             return new QueueLaunchOutcome(null, Error: ex.Message);
         }
 
-        var arguments = BuildArguments(options);
         var (fileName, leadingArguments) = ResolveLaneCommand();
+        string? recoveryProof = null;
+        if (RequiresRecoveryProof(item))
+        {
+            recoveryProof = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            if (!await RegisterRecoveryProofAsync(item, recoveryProof, cancellationToken).ConfigureAwait(false))
+            {
+                return new QueueLaunchOutcome(null, Error: "could not register the exact one-shot continuation recovery admission");
+            }
+        }
+
+        var arguments = BuildArguments(options);
 
         Process process;
         try
@@ -136,11 +147,30 @@ public static class QueueLauncher
             // (SpawnOutputRedirectionTests, RedirectedProcessEncodingTests) read redirects and decode
             // off whichever file sets them, and DetachedProcess only refuses what they would refuse.
             process = DetachedProcess.Start(
-                ChildProcessStartInfo.Create(fileName, startInfo => ConfigureLaneStartInfo(startInfo, leadingArguments, arguments)));
+                ChildProcessStartInfo.Create(fileName, startInfo =>
+                    ConfigureLaneStartInfo(startInfo, leadingArguments, arguments, recoveryProof is not null)));
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or IOException)
         {
+            await ReleaseRecoveryAdmissionAsync(item).ConfigureAwait(false);
             return new QueueLaunchOutcome(null, Error: $"could not start the lane process '{fileName}': {ex.Message}");
+        }
+
+        if (recoveryProof is not null)
+        {
+            try
+            {
+                await process.StandardInput.WriteLineAsync(recoveryProof).ConfigureAwait(false);
+                await process.StandardInput.FlushAsync().ConfigureAwait(false);
+                process.StandardInput.Close();
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException)
+            {
+                try { process.StandardInput.Close(); } catch (Exception closeEx) when (closeEx is IOException or ObjectDisposedException) { }
+                await ReleaseRecoveryAdmissionAsync(item).ConfigureAwait(false);
+                process.Dispose();
+                return new QueueLaunchOutcome(null, Error: $"could not deliver the one-shot continuation recovery admission: {ex.Message}");
+            }
         }
 
         var relay = new LaneOutputRelay(item.Tag, process);
@@ -548,7 +578,10 @@ public static class QueueLauncher
     /// </para>
     /// </remarks>
     internal static void ConfigureLaneStartInfo(
-        ProcessStartInfo startInfo, IReadOnlyList<string> leadingArguments, IReadOnlyList<string> arguments)
+        ProcessStartInfo startInfo,
+        IReadOnlyList<string> leadingArguments,
+        IReadOnlyList<string> arguments,
+        bool redirectStandardInput = false)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         ArgumentNullException.ThrowIfNull(leadingArguments);
@@ -566,6 +599,7 @@ public static class QueueLauncher
 
         startInfo.RedirectStandardOutput = true;
         startInfo.RedirectStandardError = true;
+        startInfo.RedirectStandardInput = redirectStandardInput;
         startInfo.StandardOutputEncoding = Encoding.UTF8;
         startInfo.StandardErrorEncoding = Encoding.UTF8;
     }
@@ -1012,6 +1046,61 @@ public static class QueueLauncher
             OriginatingPullRequestBranch: followOn ? item.Branch : null,
             MemoryAddGrant: item.MemoryAddGrant);
     }
+
+    private static bool RequiresRecoveryProof(QueueItem item) =>
+        item.Stage == WorkStage.Continue
+        && item.ExpectedOriginatingPullRequestHead is { Length: > 0 }
+        && item.AttemptId is not null
+        && item.AttemptEnvelope is { Stage: WorkStage.Continue };
+
+    private static async Task<bool> RegisterRecoveryProofAsync(QueueItem item, string proof, CancellationToken cancellationToken)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(proof)));
+        var registered = false;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var matches = snapshot.Items.Where(candidate =>
+                string.Equals(candidate.Tag, item.Tag, StringComparison.Ordinal)
+                && candidate.AttemptId == item.AttemptId
+                && candidate.AttemptEnvelope?.AttemptId == item.AttemptEnvelope?.AttemptId
+                && candidate.State == QueueItemState.Launched
+                && RequiresRecoveryProof(candidate)
+                && candidate.OriginatingPullRequestRecoveryClaim is null
+                && candidate.OriginatingPullRequestRecoveryProofDigest is null).ToArray();
+            if (matches.Length != 1)
+            {
+                return snapshot;
+            }
+
+            registered = true;
+            var match = matches[0];
+            return snapshot with
+            {
+                Items = snapshot.Items.Select(candidate => ReferenceEquals(candidate, match)
+                    ? candidate with { OriginatingPullRequestRecoveryProofDigest = digest }
+                    : candidate).ToArray(),
+            };
+        }, cancellationToken).ConfigureAwait(false);
+        return registered;
+    }
+
+    private static Task ReleaseRecoveryAdmissionAsync(QueueItem item) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = snapshot.Items.Select(candidate =>
+                string.Equals(candidate.Tag, item.Tag, StringComparison.Ordinal)
+                && candidate.AttemptId == item.AttemptId
+                && candidate.AttemptEnvelope?.AttemptId == item.AttemptEnvelope?.AttemptId
+                    ? candidate with
+                    {
+                        OriginatingPullRequestRecoveryProofDigest = null,
+                        OriginatingPullRequestRecoveryClaim =
+                            candidate.OriginatingPullRequestRecoveryClaim == item.AttemptId
+                                ? null
+                                : candidate.OriginatingPullRequestRecoveryClaim,
+                    }
+                    : candidate).ToArray(),
+        }, CancellationToken.None);
 
     /// <summary>The queue-add decision is the launch authority; later tier-file changes retain only policy metadata.</summary>
     internal static QueueTierResolution ApplyFrozenAssignment(QueueItem item, QueueTierResolution current) =>

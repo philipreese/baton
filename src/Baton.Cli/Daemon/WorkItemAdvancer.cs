@@ -259,6 +259,12 @@ public sealed class WorkItemAdvancer
                     ? i with
                     {
                         Retirement = retirement,
+                        ExpectedOriginatingPullRequestHead = null,
+                        OriginatingPullRequestRecoveryClaim =
+                            i.OriginatingPullRequestRecoveryClaim == i.AttemptId
+                                ? null
+                                : i.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = null,
                         DispositionOperations = [.. i.DispositionOutbox, operation],
                     } : i).ToList()
                 };
@@ -572,6 +578,14 @@ public sealed class WorkItemAdvancer
             ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
             AttemptId = null,
             AttemptBaseRevision = null,
+            ExpectedOriginatingPullRequestHead = from is WorkStage.Fix or WorkStage.Continue
+                && next == WorkStage.Continue
+                && pr.Succeeded
+                && pr.IsOpen == true
+                ? pr.HeadSha
+                : null,
+            OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -615,6 +629,9 @@ public sealed class WorkItemAdvancer
             LaunchedAt = null,
             AttemptId = null,
             AttemptBaseRevision = null,
+            ExpectedOriginatingPullRequestHead = null,
+            OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -673,6 +690,9 @@ public sealed class WorkItemAdvancer
             ReconciliationKind = transition.ReconciliationKind,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
+            ExpectedOriginatingPullRequestHead = null,
+            OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             Halted = true,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
@@ -711,6 +731,9 @@ public sealed class WorkItemAdvancer
             Error = reason,
             Halted = true,
             ReconciliationKind = null,
+            ExpectedOriginatingPullRequestHead = null,
+            OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 
@@ -884,6 +907,11 @@ public sealed class WorkItemAdvancer
                         var retired = item with
                         {
                             Retirement = retirement,
+                            OriginatingPullRequestRecoveryClaim =
+                                item.OriginatingPullRequestRecoveryClaim == item.AttemptId
+                                    ? null
+                                    : item.OriginatingPullRequestRecoveryClaim,
+                            OriginatingPullRequestRecoveryProofDigest = null,
                             DispositionOperations = [.. item.DispositionOutbox, operation],
                         };
                         return item.AttemptEnvelope is not null

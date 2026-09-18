@@ -1295,6 +1295,11 @@ public static class QueueCommand
                     ? item with
                     {
                         Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason),
+                        OriginatingPullRequestRecoveryClaim =
+                            item.OriginatingPullRequestRecoveryClaim == item.AttemptId
+                                ? null
+                                : item.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = null,
                         DispositionOperations = AppendDisposition(item, operation),
                     }
                     : item).ToList()
@@ -1448,6 +1453,11 @@ public static class QueueCommand
                     {
                         PullRequest = pullRequest,
                         Retirement = new QueueRetirement(QueueRetirement.Merged, at, reason),
+                        OriginatingPullRequestRecoveryClaim =
+                            item.OriginatingPullRequestRecoveryClaim == item.AttemptId
+                                ? null
+                                : item.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = null,
                         DispositionOperations = AppendDisposition(item, operation),
                     }
                     : item).ToList(),

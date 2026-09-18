@@ -142,6 +142,30 @@ public sealed record QueueItem
     public int? PullRequest { get; init; }
 
     /// <summary>
+    /// The conductor-retained open PR head used only when a failed fix/continue attempt is recovered
+    /// by another continuation. It is observed from the lifecycle's PR read, never from worker input
+    /// or the next mutable workspace probe, and is cleared whenever the next stage is not recovery
+    /// continuation.
+    /// </summary>
+    public string? ExpectedOriginatingPullRequestHead { get; init; }
+
+    /// <summary>
+    /// Durable single-use claim for the queue-owned continuation PR admission. It is written by the
+    /// dispatch gate while the exact launched attempt and room are still current; argv values alone
+    /// never prove this claim. The exact attempt's refusal, terminal transition, or retirement clears
+    /// it atomically with the state that makes that attempt ineligible for replay.
+    /// </summary>
+    public FleetAttemptId? OriginatingPullRequestRecoveryClaim { get; init; }
+
+    /// <summary>
+    /// SHA-256 digest of the launcher-minted, single-use recovery proof. The proof itself crosses only
+    /// the queue child's redirected standard input and is never persisted, logged, or transported as
+    /// an argument. Consumption clears this value while claiming <see
+    /// cref="OriginatingPullRequestRecoveryClaim"/> for the exact attempt.
+    /// </summary>
+    public string? OriginatingPullRequestRecoveryProofDigest { get; init; }
+
+    /// <summary>
     /// Opaque ownership token for a readiness reconciliation that has crossed its local linearization
     /// point. While present, cancellation and same-tag replacement must not supersede the row: the
     /// already-authorized GitHub mutation is allowed to finish and commit its observation first.

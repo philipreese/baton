@@ -772,6 +772,41 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.Equal(options.OriginatingPullRequestBranch, parsed.OriginatingPullRequestBranch);
     }
 
+    [Fact]
+    public void Only_a_retained_continue_item_forwards_the_internal_recovery_identity()
+    {
+        var expectedHead = "0123456789abcdef0123456789abcdef01234567";
+        var item = new QueueItem
+        {
+            Tag = "2178-lane",
+            Role = "implement",
+            Workspace = @"C:\repos\w2178",
+            SpecFile = @"C:\Users\x\.baton\queue\specs\2178-lane.md",
+            Stage = WorkStage.Continue,
+            Repository = "github.com/aer-works/baton",
+            PullRequest = 2304,
+            Branch = "2178-lane",
+            ExpectedOriginatingPullRequestHead = expectedHead,
+            AttemptId = new FleetAttemptId("2178continuationattempt000000000000"),
+        };
+
+        var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+            item,
+            new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
+            @"C:\rooms\next"));
+        var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
+
+        Assert.DoesNotContain("--originating-pr-recovery-tag", QueueLauncher.BuildArguments(options));
+        Assert.DoesNotContain("--originating-pr-recovery-attempt-id", QueueLauncher.BuildArguments(options));
+
+        var fixOptions = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+            item with { Stage = WorkStage.Fix },
+            new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
+            @"C:\rooms\next"));
+        Assert.DoesNotContain("--originating-pr-recovery-tag", QueueLauncher.BuildArguments(fixOptions));
+        Assert.DoesNotContain("--originating-pr-recovery-attempt-id", QueueLauncher.BuildArguments(fixOptions));
+    }
+
     [Theory]
     [InlineData(WorkStage.Continue, null, 2304, "2178-lane")]
     [InlineData(WorkStage.Continue, "github.com/aer-works/baton", null, "2178-lane")]
@@ -814,6 +849,7 @@ public sealed class QueueLauncherTests : IDisposable
 
         Assert.True(startInfo.RedirectStandardOutput);
         Assert.True(startInfo.RedirectStandardError);
+        Assert.False(startInfo.RedirectStandardInput);
         Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardOutputEncoding);
         Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardErrorEncoding);
         Assert.Equal(["Baton.Cli.dll", "dispatch", "implement", "--room-dir", @"C:\r"], startInfo.ArgumentList);
@@ -827,6 +863,15 @@ public sealed class QueueLauncherTests : IDisposable
 
         // And the shape is the one the detached seam accepts.
         Assert.Null(DetachedProcess.Refusal(startInfo));
+
+        var recoveryStartInfo = ChildProcessStartInfo.Create(
+            "baton.exe",
+            psi => QueueLauncher.ConfigureLaneStartInfo(
+                psi, ["Baton.Cli.dll"], ["dispatch", "implement", "--room-dir", @"C:\r"], redirectStandardInput: true));
+        Assert.True(recoveryStartInfo.RedirectStandardInput);
+        Assert.True(recoveryStartInfo.RedirectStandardOutput);
+        Assert.True(recoveryStartInfo.RedirectStandardError);
+        Assert.Null(DetachedProcess.Refusal(recoveryStartInfo));
     }
 
     /// <summary>

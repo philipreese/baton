@@ -546,6 +546,8 @@ public sealed class QueueSchedulerService : BackgroundService
                             AttemptRefusedFactDurable = false,
                             AttemptSettledFactDurable = false,
                             LaunchRecoveryKind = null,
+                            OriginatingPullRequestRecoveryClaim = null,
+                            OriginatingPullRequestRecoveryProofDigest = null,
                             LastAdmission = null,
                             RoomDirectory = null,
                         });
@@ -666,7 +668,9 @@ public sealed class QueueSchedulerService : BackgroundService
                 // outcome.RoomDirectory, not the path above: the launcher reports it only when the dispatch
                 // actually provisioned the room, and a refusal that never got that far must leave the item
                 // pointing at nothing rather than at a directory that does not exist.
-                await FailAsync(item, error, outcome.RoomDirectory, now, recordedDecision, tier, CancellationToken.None)
+                await FailAsync(
+                    item, error, outcome.RoomDirectory, now, recordedDecision, tier, CancellationToken.None,
+                    attemptId: attemptId)
                     .ConfigureAwait(false);
                 return interval;
             }
@@ -800,7 +804,10 @@ public sealed class QueueSchedulerService : BackgroundService
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-                if (current is null || current.Retirement is not null)
+                if (current is null || current.Retirement is not null
+                    || attemptId is { } exactAttempt
+                        && (current.AttemptId != exactAttempt
+                            || current.AttemptEnvelope?.AttemptId != exactAttempt))
                 {
                     return snapshot;
                 }
@@ -815,6 +822,14 @@ public sealed class QueueSchedulerService : BackgroundService
                     LastAdmission = admission ?? existing.LastAdmission,
                     AttemptId = attemptId ?? existing.AttemptId,
                     LaunchMayHaveBegunAt = null,
+                    OriginatingPullRequestRecoveryClaim = attemptId is { } failedAttempt
+                        && existing.OriginatingPullRequestRecoveryClaim == failedAttempt
+                            ? null
+                            : existing.OriginatingPullRequestRecoveryClaim,
+                    OriginatingPullRequestRecoveryProofDigest = attemptId is not null
+                        && existing.AttemptId == attemptId
+                            ? null
+                            : existing.OriginatingPullRequestRecoveryProofDigest,
                 };
                 var next = snapshot with { Items = Replace(snapshot.Items, item.Tag, _ => updated) };
                 return updated.AttemptEnvelope is { } envelope
@@ -964,7 +979,12 @@ public sealed class QueueSchedulerService : BackgroundService
             return;
         }
 
-        var resolved = new Dictionary<string, (QueueItemState State, string? Error, WorkflowStatusView? Terminal)>(StringComparer.Ordinal);
+        var resolved = new Dictionary<string, (
+            QueueItemState State,
+            string? Error,
+            WorkflowStatusView? Terminal,
+            FleetAttemptId? AttemptId,
+            string Room)>(StringComparer.Ordinal);
         foreach (var item in launched)
         {
             if (item.AttemptEnvelope is { } recoveringEnvelope
@@ -1007,7 +1027,7 @@ public sealed class QueueSchedulerService : BackgroundService
                         AttemptSettledEvent(item, legacySettlementAttemptId, terminal, _now()), cancellationToken)
                         .ConfigureAwait(false);
                 }
-                resolved[item.Tag] = (outcome.State, outcome.Error, terminal);
+                resolved[item.Tag] = (outcome.State, outcome.Error, terminal, item.AttemptId, item.RoomDirectory!);
                 continue;
             }
 
@@ -1015,7 +1035,8 @@ public sealed class QueueSchedulerService : BackgroundService
             {
                 resolved[item.Tag] = (QueueItemState.Failed,
                     $"room {item.RoomDirectory} was never created — the dispatch refused or faulted before it "
-                    + "provisioned the room, so nothing ran; re-add the item once you know why", null);
+                    + "provisioned the room, so nothing ran; re-add the item once you know why",
+                    null, item.AttemptId, item.RoomDirectory!);
             }
         }
 
@@ -1031,15 +1052,32 @@ public sealed class QueueSchedulerService : BackgroundService
                 var next = s with
                 {
                     Items = s.Items
-                        .Select(i => resolved.TryGetValue(i.Tag, out var outcome) && i.State == QueueItemState.Launched
-                            ? i with { State = outcome.State, Error = outcome.Error }
+                        .Select(i => resolved.TryGetValue(i.Tag, out var outcome)
+                            && i.State == QueueItemState.Launched
+                            && i.AttemptId == outcome.AttemptId
+                            && string.Equals(i.RoomDirectory, outcome.Room, StringComparison.Ordinal)
+                            ? i with
+                            {
+                                State = outcome.State,
+                                Error = outcome.Error,
+                                OriginatingPullRequestRecoveryClaim =
+                                    i.OriginatingPullRequestRecoveryClaim == outcome.AttemptId
+                                        ? null
+                                        : i.OriginatingPullRequestRecoveryClaim,
+                                OriginatingPullRequestRecoveryProofDigest = i.AttemptId == outcome.AttemptId
+                                    ? null
+                                    : i.OriginatingPullRequestRecoveryProofDigest,
+                            }
                             : i)
                         .ToList(),
                 };
                 foreach (var (tag, outcome) in resolved)
                 {
                     var updated = next.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
-                    if (updated?.AttemptEnvelope is { } currentEnvelope && outcome.Terminal is not null)
+                    if (updated?.AttemptEnvelope is { } currentEnvelope
+                        && updated.AttemptId == outcome.AttemptId
+                        && string.Equals(updated.RoomDirectory, outcome.Room, StringComparison.Ordinal)
+                        && outcome.Terminal is not null)
                     {
                         next = QueueFleetEventOutbox.Enqueue(
                             next,
@@ -1394,6 +1432,14 @@ public sealed class QueueSchedulerService : BackgroundService
                     State = QueueItemState.Failed,
                     Halted = true,
                     LaunchRecoveryKind = QueueLaunchRecoveryKind.AmbiguousEvidence,
+                    OriginatingPullRequestRecoveryClaim =
+                        current.OriginatingPullRequestRecoveryClaim == item.AttemptEnvelope!.AttemptId
+                            ? null
+                            : current.OriginatingPullRequestRecoveryClaim,
+                    OriginatingPullRequestRecoveryProofDigest =
+                        current.AttemptId == item.AttemptEnvelope!.AttemptId
+                            ? null
+                            : current.OriginatingPullRequestRecoveryProofDigest,
                     Error = detail
                         ?? $"attempt '{item.AttemptEnvelope!.AttemptId.Value}' may have begun but has no authoritative room evidence; recovery halted",
                 }
@@ -1417,6 +1463,13 @@ public sealed class QueueSchedulerService : BackgroundService
                 RoomDirectory = null,
                 LaunchedAt = null,
                 LaunchMayHaveBegunAt = null,
+                OriginatingPullRequestRecoveryClaim =
+                    current.OriginatingPullRequestRecoveryClaim == attemptId
+                        ? null
+                        : current.OriginatingPullRequestRecoveryClaim,
+                OriginatingPullRequestRecoveryProofDigest = current.AttemptId == attemptId
+                    ? null
+                    : current.OriginatingPullRequestRecoveryProofDigest,
             };
             var next = snapshot with { Items = Replace(snapshot.Items, tag, _ => updated) };
             return QueueFleetEventOutbox.Enqueue(
@@ -1450,6 +1503,13 @@ public sealed class QueueSchedulerService : BackgroundService
                         AttemptRefusedFactDurable = false,
                         AttemptSettledFactDurable = false,
                         LaunchRecoveryKind = null,
+                        OriginatingPullRequestRecoveryClaim =
+                            current.OriginatingPullRequestRecoveryClaim == attemptId
+                                ? null
+                                : current.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = current.AttemptId == attemptId
+                            ? null
+                            : current.OriginatingPullRequestRecoveryProofDigest,
                     }
                     : current),
         }, CancellationToken.None);
