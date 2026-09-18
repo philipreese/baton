@@ -70,4 +70,16 @@ public sealed class AgyTerminalRecoveryTests
         Assert.Equal("run_command", fact.ToolName);
         Assert.Null(fact.CommandLine);
     }
+
+    [Fact]
+    public void An_unmatched_completion_closes_the_sole_same_tool_candidate()
+    {
+        const string capturedStream = """
+            {"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"first"}}}}
+            {"event":"step_update","step_update":{"step_index":99,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{}}}
+            {"event":"result","result":{"status":"SUCCESS","response":"done"}}
+            """;
+
+        Assert.Null(AgyTerminalStreamRecoveryDetector.Detect(capturedStream));
+    }
 }

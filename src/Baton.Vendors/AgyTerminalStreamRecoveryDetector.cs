@@ -80,20 +80,19 @@ internal static class AgyTerminalStreamRecoveryDetector
                 }
                 else if (state is "DONE" or "ERROR")
                 {
-                    if (StepKey(step) is { } exactKey)
+                    var exactKey = StepKey(step);
+                    if (exactKey is not null && active.Remove(exactKey))
                     {
-                        active.Remove(exactKey);
+                        return null;
                     }
-                    else
+
+                    var candidates = active
+                        .Where(pair => string.Equals(pair.Value.ToolName, toolName, StringComparison.Ordinal))
+                        .Select(pair => pair.Key)
+                        .ToList();
+                    if (candidates.Count == 1)
                     {
-                        var candidates = active
-                            .Where(pair => string.Equals(pair.Value.ToolName, toolName, StringComparison.Ordinal))
-                            .Select(pair => pair.Key)
-                            .ToList();
-                        if (candidates.Count == 1)
-                        {
-                            active.Remove(candidates[0]);
-                        }
+                        active.Remove(candidates[0]);
                     }
                 }
 
