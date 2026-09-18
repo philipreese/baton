@@ -9,7 +9,11 @@ namespace Baton.Memory;
 /// <param name="RootDirectoryPath">The memory root the file goes in. Discovered, never constructed; see the target types' remarks.</param>
 /// <param name="FilePath">The one file this target's projection is written to.</param>
 public sealed record ProjectionTarget(
-    string Vendor, VendorMemoryScope Scope, string RootDirectoryPath, string FilePath);
+    string Vendor,
+    VendorMemoryScope Scope,
+    string RootDirectoryPath,
+    string FilePath,
+    string IndexFilePath);
 
 /// <summary>
 /// The Claude memory roots a projection is written into — <c>{claude-home}/projects/&lt;encoded-path&gt;/memory/</c>,
@@ -38,6 +42,8 @@ public sealed record ProjectionTarget(
 /// </remarks>
 public static class ClaudeProjectionTarget
 {
+    /// <summary>The vendor-loaded index Baton extends only inside its bounded section (#2139).</summary>
+    public const string IndexFileName = "MEMORY.md";
     /// <summary>
     /// The one file Baton writes in a Claude memory root. Prefixed <c>baton-</c> so it cannot collide
     /// with a memory the vendor or the operator wrote, and suffixed <c>.md</c> because the root's other
@@ -54,7 +60,8 @@ public static class ClaudeProjectionTarget
             MemoryRootInventory.ClaudeVendor,
             VendorMemoryScope.Vendor,
             rootDirectoryPath,
-            Path.Combine(rootDirectoryPath, ProjectionFileName));
+            Path.Combine(rootDirectoryPath, ProjectionFileName),
+            Path.Combine(rootDirectoryPath, IndexFileName));
     }
 }
 
@@ -93,6 +100,7 @@ public static class CodexProjectionTarget
             "codex",
             scope,
             rootDirectoryPath,
-            Path.Combine(rootDirectoryPath, ProjectionFileName));
+            Path.Combine(rootDirectoryPath, ProjectionFileName),
+            Path.Combine(rootDirectoryPath, ClaudeProjectionTarget.IndexFileName));
     }
 }

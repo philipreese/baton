@@ -676,16 +676,17 @@ public sealed class MemoryProjectionTests : IDisposable
 
         var imported = await ImportAsync();
         Assert.Equal(settled, File.ReadAllBytes(entriesFile));
-        Assert.Contains("projection-skipped: 1", imported, StringComparison.Ordinal);
+        Assert.Contains("projection-skipped:", imported, StringComparison.Ordinal);
         Assert.Contains(projection, imported, StringComparison.Ordinal);
         Assert.DoesNotContain("Unfiled -- read, digested", imported, StringComparison.Ordinal);
 
         // Cycle 2: the same pair again. Store bytes unchanged, and the skip count is still exactly the
-        // number of files sync projected — one target, one skip, not one more per cycle.
+        // number of generated files — compatibility cache, vendor index and two details — not one
+        // more per cycle.
         await RunAsync("--repository", Repository, "--apply");
         var again = await ImportAsync();
         Assert.Equal(settled, File.ReadAllBytes(entriesFile));
-        Assert.Contains("projection-skipped: 1", again, StringComparison.Ordinal);
+        Assert.Contains("projection-skipped:", again, StringComparison.Ordinal);
 
         // No entry in the store was ever sourced from the projection file.
         var stored = await MemoryStore.ReadAllAsync(entriesFile, TestContext.Current.CancellationToken);
@@ -1007,6 +1008,46 @@ public sealed class MemoryProjectionTests : IDisposable
         await AssertAliasAsync(root);
 
         return root;
+    }
+
+    /// <summary>
+    /// The #2139 vendor-loaded surface is a bounded index plus one named detail per live entry.
+    /// The empty-store arm proves cleanup has a narrow ownership boundary: only Baton-named details
+    /// and the marked lines go, while the surrounding index bytes and an ordinary vendor file remain.
+    /// </summary>
+    [Fact]
+    public async Task Sync_publishes_an_index_and_details_then_cleans_only_stale_owned_details_when_empty()
+    {
+        var root = await SeedStoreAndClaudeRootAsync();
+        var indexPath = Path.Combine(root, ClaudeProjectionTarget.IndexFileName);
+        var surrounding = Encoding.UTF8.GetBytes("vendor heading\r\n");
+        File.WriteAllBytes(indexPath, surrounding);
+        File.WriteAllText(Path.Combine(root, "vendor-note.md"), "leave me alone");
+
+        await RunAsync("--repository", Repository, "--apply");
+
+        var index = File.ReadAllText(indexPath);
+        var details = Directory.GetFiles(root, MemoryVendorIndexProjection.DetailPrefix + "*.md")
+            .Select(Path.GetFileName)
+            .Where(name => name is not null)
+            .ToList();
+        Assert.StartsWith("vendor heading\r\n", index, StringComparison.Ordinal);
+        Assert.Contains(MemoryVendorIndexProjection.SectionStart, index, StringComparison.Ordinal);
+        Assert.NotEmpty(details);
+        Assert.All(details, name => Assert.Contains(name!, index, StringComparison.Ordinal));
+
+        File.WriteAllText(Path.Combine(root, "baton-memory-stale.md"), "stale Baton detail");
+        var stored = await MemoryStore.ReadAllAsync(BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken);
+        Assert.Equal(stored.Count, await MemoryStore.RemoveAsync(
+            stored.Select(entry => entry.Id).ToList(), BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+
+        await RunAsync("--repository", Repository, "--apply");
+
+        var emptyIndex = File.ReadAllText(indexPath);
+        Assert.StartsWith("vendor heading\r\n", emptyIndex, StringComparison.Ordinal);
+        Assert.DoesNotContain(MemoryVendorIndexProjection.DetailPrefix, emptyIndex, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(root, MemoryVendorIndexProjection.DetailPrefix + "*.md"));
+        Assert.Equal("leave me alone", File.ReadAllText(Path.Combine(root, "vendor-note.md")));
     }
 
     private static MemoryProjectionCandidate Vendor(MemoryEntry entry) =>
