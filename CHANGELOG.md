@@ -9,6 +9,46 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.52.0](https://github.com/philipreese/baton/compare/v0.51.3...v0.52.0) (2026-09-18)
+
+
+### Features
+
+* **janitor:** Add deterministic on-demand cleanup ([#2395](https://github.com/philipreese/baton/issues/2395)) ([476e7fc](https://github.com/philipreese/baton/commit/476e7fc931625e607770b6eb1a9811c4780230ff))
+* **memory:** Project vendor-loaded index ([#2390](https://github.com/philipreese/baton/issues/2390)) ([41d0330](https://github.com/philipreese/baton/commit/41d033079ec9053c1953af3745787e7c106966cb))
+* **queue:** Apply classified worktree cleanup ([#2386](https://github.com/philipreese/baton/issues/2386)) ([f4bbcea](https://github.com/philipreese/baton/commit/f4bbceaf33803e35a0e0fbd4b31a157790064a66))
+* **roles:** Ship the janitor role package ([#2394](https://github.com/philipreese/baton/issues/2394)) ([3380872](https://github.com/philipreese/baton/commit/33808726067f33e49a9fc1ae7e37e1f986f57d31))
+* **tooling:** Retain pre-push phase timeline ([#2393](https://github.com/philipreese/baton/issues/2393)) ([f45e4b0](https://github.com/philipreese/baton/commit/f45e4b0a6f56e89fcd29a4968b02897739801e17))
+
+
+### Bug Fixes
+
+* **cli:** contain failure-sentinel writes ([#2399](https://github.com/philipreese/baton/issues/2399)) ([7347b7f](https://github.com/philipreese/baton/commit/7347b7f6f469cee5f493b9919a5af0a968d6ab13))
+* **cli:** Contain one-shot filesystem failures ([#2388](https://github.com/philipreese/baton/issues/2388)) ([df31cab](https://github.com/philipreese/baton/commit/df31cab20ff3f71f904951a60548753e4436ad29))
+* **dispatch:** Close forged recovery authority ([#2397](https://github.com/philipreese/baton/issues/2397)) ([f2dc58e](https://github.com/philipreese/baton/commit/f2dc58eb4b6f8e8646a7a0d178f946e4708389ba))
+* **outcomes:** Recover unfinished AGY command once ([#2405](https://github.com/philipreese/baton/issues/2405)) ([3bce8b4](https://github.com/philipreese/baton/commit/3bce8b49b765c02db8722cc687048afef5836a3a))
+* **queue:** Compare persisted attempt envelopes semantically ([#2384](https://github.com/philipreese/baton/issues/2384)) ([d829725](https://github.com/philipreese/baton/commit/d829725ca2a715269954d876359cda848d20a8bc))
+* **queue:** Retire a failed lifecycle superseded by its merged branch PR ([#2382](https://github.com/philipreese/baton/issues/2382)) ([4fdf520](https://github.com/philipreese/baton/commit/4fdf5201100e077b5704aadcabac68086da2acdf))
+* **queue:** Retire merged work after checkout removal ([#2385](https://github.com/philipreese/baton/issues/2385)) ([0cc83ea](https://github.com/philipreese/baton/commit/0cc83ea6a866e1f9d0edd52ecf83c69d040a96ff))
+
+
+### Performance Improvements
+
+* **daemon:** bound shared room inventory work ([#2398](https://github.com/philipreese/baton/issues/2398)) ([c848147](https://github.com/philipreese/baton/commit/c8481477aa016c0a6397191574dd5d9352aad141))
+* **daemon:** Independent background loops stall together for 7-9 minutes ([#2401](https://github.com/philipreese/baton/issues/2401)) ([739791f](https://github.com/philipreese/baton/commit/739791f8db574c9449faa652ef099d1e2eed299e))
+
+
+### Documentation
+
+* **conductor:** make operator message state explicit ([#2396](https://github.com/philipreese/baton/issues/2396)) ([40b1f77](https://github.com/philipreese/baton/commit/40b1f77cefbbba574bad55eef97b681da4503dc5))
+* **conductor:** persist vendor processing permission ([#2404](https://github.com/philipreese/baton/issues/2404)) ([e710270](https://github.com/philipreese/baton/commit/e7102707dec0d83ca7b5290be082685f12c06b0a))
+
+
+### Tests
+
+* **daemon:** Stabilise room inventory cadence ([#2400](https://github.com/philipreese/baton/issues/2400)) ([b3b1023](https://github.com/philipreese/baton/commit/b3b1023aa5c690d6c118d22e8c57de3e888781da))
+* **memory:** Require ownership evidence in reverse-agreement reader ([#2392](https://github.com/philipreese/baton/issues/2392)) ([fb6ff53](https://github.com/philipreese/baton/commit/fb6ff53c3fbcabb5343fd6d18aa391ae5bf2d58d))
+
 ## [0.51.3](https://github.com/philipreese/baton/compare/v0.51.2...v0.51.3) (2026-09-17)
 
 
