@@ -265,7 +265,8 @@ internal sealed record QueueWorktreeEntry(
         var cleanliness = status.Success ? string.IsNullOrWhiteSpace(status.Stdout) ? "clean" : "dirty" : "unknown";
         if (!status.Success) reasons.Add("git-status-unavailable");
 
-        var unpublishedReason = await ObserveUnpublishedReasonAsync(path, cancellationToken).ConfigureAwait(false);
+        var unpublishedReason = await ObserveUnpublishedReasonAsync(path, attachedBranch, cancellationToken)
+            .ConfigureAwait(false);
         if (unpublishedReason is not null) reasons.Add(unpublishedReason);
 
         var exact = registered && repositoryMatches && branchMatches && refHead.Success
@@ -285,12 +286,26 @@ internal sealed record QueueWorktreeEntry(
 
     private static async Task<string?> ObserveUnpublishedReasonAsync(
         string path,
+        string? attachedBranch,
         CancellationToken cancellationToken)
     {
         var upstream = await RunGitAsync(
             path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cancellationToken)
             .ConfigureAwait(false);
-        if (!upstream.Success) return null;
+        if (!upstream.Success)
+        {
+            const string BranchPrefix = "refs/heads/";
+            if (attachedBranch is null || !attachedBranch.StartsWith(BranchPrefix, StringComparison.Ordinal))
+                return null;
+
+            var branch = attachedBranch[BranchPrefix.Length..];
+            var configuration = await RunGitAsync(
+                path,
+                ["config", "--get-regexp",
+                    "^branch\\." + System.Text.RegularExpressions.Regex.Escape(branch) + "\\.(remote|merge)$"],
+                cancellationToken).ConfigureAwait(false);
+            return configuration.Success ? "upstream-ahead-probe-unavailable" : null;
+        }
 
         var divergence = await RunGitAsync(
             path, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cancellationToken)

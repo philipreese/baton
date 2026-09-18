@@ -188,6 +188,39 @@ public sealed class QueueWorktreeReportTests
     }
 
     [Fact]
+    public async Task Configured_but_unresolvable_upstream_is_retained()
+    {
+        var sandbox = Temp("unresolvable-upstream");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var bareRemote = Path.Combine(sandbox, "published.git");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await GitAsync(sandbox, "init", "-q", "--bare", bareRemote);
+            var repo = await RepoAsync(root, "unresolvable-upstream");
+            await GitAsync(repo.Path, "remote", "add", "published", bareRemote);
+            await GitAsync(repo.Path, "push", "-q", "-u", "published", repo.Branch);
+            await GitAsync(repo.Path, "update-ref", "-d", $"refs/remotes/published/{repo.Branch}");
+
+            Assert.Equal("published", (await GitOutputAsync(repo.Path, "config", "--get", $"branch.{repo.Branch}.remote")).Trim());
+            Assert.Equal($"refs/heads/{repo.Branch}", (await GitOutputAsync(repo.Path, "config", "--get", $"branch.{repo.Branch}.merge")).Trim());
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "unresolvable-upstream")], root, Ct, livenessProbe: IsolatedProbe(sandbox)),
+                "unresolvable-upstream");
+
+            Assert.Contains("upstream-ahead-probe-unavailable", entry.ReasonCodes);
+            Assert.Equal("retain", entry.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
     public async Task Raw_status_is_bounded_without_hiding_dirtiness()
     {
         var sandbox = Temp("bounded-status");
