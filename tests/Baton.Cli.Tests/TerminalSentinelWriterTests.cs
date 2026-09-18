@@ -8,6 +8,45 @@ namespace Baton.Cli.Tests;
 /// </summary>
 public class TerminalSentinelWriterTests
 {
+    [Theory]
+    [InlineData("io")]
+    [InlineData("unauthorized")]
+    public void Optional_persistence_failure_classifies_both_ordinary_filesystem_access_shapes(string kind)
+    {
+        Exception failure = kind switch
+        {
+            "io" => new IOException("fixture"),
+            "unauthorized" => new UnauthorizedAccessException("fixture"),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        Assert.True(TerminalSentinelWriter.IsOptionalPersistenceFailure(failure));
+    }
+
+    [Fact]
+    public async Task TryWriteValidationRefused_returns_false_when_the_room_path_is_a_file()
+    {
+        // #2387: deterministic no-ACL denial. Program has already reported the validation
+        // refusal by this point, so failure to create the optional terminal sentinel must be
+        // contained rather than escaping through baton.exe.
+        var root = Path.Combine(Path.GetTempPath(), $"terminal-sentinel-denied-{Guid.NewGuid():N}");
+        var roomPath = Path.Combine(root, "room-is-a-file");
+        try
+        {
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(roomPath, "not a directory", TestContext.Current.CancellationToken);
+
+            var written = await TerminalSentinelWriter.TryWriteValidationRefusedAsync(
+                roomPath, "validation refused", TestContext.Current.CancellationToken);
+
+            Assert.False(written);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     [Fact]
     public async Task WriteAsync_leaves_no_temp_file_behind_and_the_written_sentinel_round_trips()
     {

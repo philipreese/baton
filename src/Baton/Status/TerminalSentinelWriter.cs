@@ -65,6 +65,31 @@ public static class TerminalSentinelWriter
     }
 
     /// <summary>
+    /// Best-effort form for a caller that has already emitted the authoritative refusal. A denied
+    /// room must not turn that refusal into a process crash merely because its optional
+    /// queryability sentinel cannot be persisted (#2387).
+    /// </summary>
+    /// <returns><c>true</c> when the sentinel was written; <c>false</c> for ordinary filesystem access failures.</returns>
+    public static async Task<bool> TryWriteValidationRefusedAsync(
+        string roomDirectoryPath, string reason, CancellationToken cancellationToken, string? tryInvocation = null)
+    {
+        try
+        {
+            await WriteValidationRefusedAsync(roomDirectoryPath, reason, cancellationToken, tryInvocation).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (IsOptionalPersistenceFailure(ex))
+        {
+            return false;
+        }
+    }
+
+    // Test-visible because Windows can produce UnauthorizedAccessException for an ACL-denied room,
+    // while a portable deterministic fixture can only manufacture the sibling IOException path.
+    internal static bool IsOptionalPersistenceFailure(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException;
+
+    /// <summary>
     /// Deletes a stale sentinel from a prior pre-ledger failure, if any, before a fresh dispatch
     /// begins. Callers must only invoke this once they have confirmed the room is not already
     /// Terminal (#1374 F1) — see <c>RunCommand</c>'s own call site for why.
