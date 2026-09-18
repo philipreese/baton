@@ -789,6 +789,11 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             // F6 (#1593 review): same streaming gate as DetectsTerminalSuccess above, but fires on a
             // terminal `result` event of ANY status — see IsTerminalResultLine.
             DetectsTerminalResult: invocation.StreamJson ? IsTerminalResultLine : null,
+            // #2002: agy's adapter incrementally interprets complete stream-json lines; Core receives
+            // only the typed fact and never retains the vendor stream for this classification.
+            DetectsOutstandingToolAtTerminalSuccess: invocation.StreamJson
+                ? AgyTerminalStreamRecoveryDetector.CreateObserver()
+                : null,
             // #1732 review WIRING: the per-execution canary's read side, wired only when
             // requiresHookAsSoleNarrowing (computed above, same value the resolve-time probe already
             // gated on) held. Null otherwise -- see CoreDispatchTarget.CountHookVerdicts's own doc for

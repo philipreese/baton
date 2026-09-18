@@ -1235,6 +1235,12 @@ public static class MutationInterface
                         // The room already carries the event, so recovery never re-appends it.
                         var enginePlacedFiles =
                             latestCheckpoint.State.EnginePlacedFilesByExecutionId.GetValueOrDefault(executionId);
+                        var priorRecoveryCause = request.StepId is { } recoveryStepId
+                            ? latestCheckpoint.State.LatestRecoveryCauseByStepId.GetValueOrDefault(recoveryStepId)
+                            : null;
+                        var priorRecoveryOccurrence = request.StepId is { } recoveryStepIdForOccurrence
+                            ? latestCheckpoint.State.RecoveryOccurrenceByStepId.GetValueOrDefault(recoveryStepIdForOccurrence)
+                            : 0;
                         var classification = OutcomeClassifier.Classify(
                             new CoreDispatchResult(
                                 exit.ExitCode, exit.Reason, exit.StderrTail, EnginePlacedFiles: enginePlacedFiles),
@@ -1244,7 +1250,9 @@ public static class MutationInterface
                             changesTreeWorkingDirectory: changesTreeWorkingDirectory, toolCallCount: toolCallCount,
                             writeToolCallCount: writeToolCallCount, hookVerdictCount: hookVerdictCount,
                             workspaceHeadShaAtStart: workspaceHeadShaAtStart,
-                            verifiesWorkspace: verifiesWorkspace);
+                            verifiesWorkspace: verifiesWorkspace,
+                            priorRecoveryCause: priorRecoveryCause,
+                            priorRecoveryOccurrence: priorRecoveryOccurrence);
 
                         // A recorded exit is not a recorded delivery. The exact obligation was
                         // journalled before spawn; neither a worker file nor today's remote state
@@ -2027,14 +2035,16 @@ public static class MutationInterface
         // RetryEngine never auto-retries a resumed step anyway (StepState.LinkedFromExecutionId).
         var continuationBrief = processBindingForRequest is null
             ? null
-            : Scheduling.ContinuationBrief.ForRetryAfterTimeout(
+            : Scheduling.ContinuationBrief.ForRetry(
                 stateByStepId[step.StepId], step.RetryPolicy.MaxAttempts, processBindingForRequest.Timeout);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken)
             .ConfigureAwait(false);
 
-        return new PreparedExecution(request, outputDirectory, continuationBrief);
+        var priorRecoveryCause = stateByStepId[step.StepId].LatestRecoveryCause;
+        var priorRecoveryOccurrence = stateByStepId[step.StepId].RecoveryOccurrence;
+        return new PreparedExecution(request, outputDirectory, continuationBrief, priorRecoveryCause, priorRecoveryOccurrence);
     }
 
     // #1741: the one fact every Process-dispatch ExecutionRequest construction site must journal --
@@ -2390,7 +2400,9 @@ public static class MutationInterface
                 grantAuditMode, worktreePath, binding.ResponseParser, usageParser, binding.WorktreeBaseSha, binding.ChangesTree,
                 changesTreeWorkingDirectory, toolCallCount, writeToolCallCount, hookVerdictCount,
                 workspaceHeadShaAtStart, openPullRequest: openPullRequest,
-                verifiesWorkspace: binding.VerifiesWorkspace);
+                verifiesWorkspace: binding.VerifiesWorkspace,
+                priorRecoveryCause: prepared.PriorRecoveryCause,
+                priorRecoveryOccurrence: prepared.PriorRecoveryOccurrence);
 
             FlowEvent.DeliveryObservationRecorded? recordedDelivery = null;
             DeliveryCheckOutcome? deliveryOutcomeBeforeVerify = null;
@@ -3034,7 +3046,8 @@ public static class MutationInterface
                 peakBilledInWindow, classification.FinishedDuringTeardown),
             OutcomeVerdict.Failed => new FlowEvent.ExecutionFailed(
                 executionId, classification.FailureClassification, classification.Reason, classification.RetryNotBefore,
-                classification.CapturedResponseFile, classification.UnsatisfiedOutputNames, peakBilledInWindow),
+                classification.CapturedResponseFile, classification.UnsatisfiedOutputNames, peakBilledInWindow,
+                classification.RecoveryCause),
             OutcomeVerdict.Cancelled => new FlowEvent.ExecutionCancelled(executionId),
             OutcomeVerdict.Indeterminate => new FlowEvent.ExecutionIndeterminate(
                 executionId, classification.Reason, classification.CapturedResponseFile, classification.UnsatisfiedOutputNames),
@@ -3242,7 +3255,9 @@ public static class MutationInterface
     private sealed record PreparedExecution(
         ExecutionRequest Request,
         string OutputDirectory,
-        string? ContinuationBrief = null);
+        string? ContinuationBrief = null,
+        RecoveryCause? PriorRecoveryCause = null,
+        int PriorRecoveryOccurrence = 0);
 
     private sealed record RetryObligation(
         StepId StepId,

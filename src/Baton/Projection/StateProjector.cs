@@ -150,6 +150,10 @@ public static class StateProjector
                     // #1945: same clear, same reason -- a prior attempt having finished during its own
                     // teardown says nothing about this one.
                     state.FinishedDuringTeardownStepIds.Remove(acceptedStepId);
+
+                    // #2002: retain the predecessor's structured cause through acceptance so a
+                    // repeated mismatch can be recognized when this attempt settles. Success or an
+                    // ordinary failure clears it when that latest attempt speaks.
                 }
                 else
                 {
@@ -178,6 +182,8 @@ public static class StateProjector
                     state.LatestExecutionFailedRetryNotBeforeByStepId[succeededStepId] = null;
                     state.LatestCapturedResponseFileByStepId[succeededStepId] = null;
                     state.LatestUnsatisfiedOutputNamesByStepId[succeededStepId] = null;
+                    state.LatestRecoveryCauseByStepId.Remove(succeededStepId);
+                    state.RecoveryOccurrenceByStepId.Remove(succeededStepId);
                     // #1622/#1390: carried verbatim off the event -- see FlowEvent.ExecutionSucceeded's
                     // own remarks for the null-means-not-tree-changing-or-history-predates-the-field
                     // reading.
@@ -217,6 +223,20 @@ public static class StateProjector
                     state.LatestCapturedResponseFileByStepId[failedStepId] = failed.CapturedResponseFile;
                     state.LatestUnsatisfiedOutputNamesByStepId[failedStepId] =
                         failed.UnsatisfiedOutputNames is null ? null : new List<string>(failed.UnsatisfiedOutputNames);
+                    if (failed.RecoveryCause is { } recoveryCause)
+                    {
+                        var priorCause = state.LatestRecoveryCauseByStepId.GetValueOrDefault(failedStepId);
+                        var priorOccurrence = state.RecoveryOccurrenceByStepId.GetValueOrDefault(failedStepId);
+                        state.LatestRecoveryCauseByStepId[failedStepId] = recoveryCause;
+                        state.RecoveryOccurrenceByStepId[failedStepId] = priorCause?.Kind == recoveryCause.Kind
+                            ? priorOccurrence + 1
+                            : 1;
+                    }
+                    else
+                    {
+                        state.LatestRecoveryCauseByStepId.Remove(failedStepId);
+                        state.RecoveryOccurrenceByStepId.Remove(failedStepId);
+                    }
                 }
 
                 break;
@@ -287,6 +307,8 @@ public static class StateProjector
                         state.LatestExecutionFailedRetryNotBeforeByStepId[retryStepId] = null;
                         state.LatestCapturedResponseFileByStepId[retryStepId] = null;
                         state.LatestUnsatisfiedOutputNamesByStepId[retryStepId] = null;
+                        state.LatestRecoveryCauseByStepId.Remove(retryStepId);
+                        state.RecoveryOccurrenceByStepId.Remove(retryStepId);
                         state.RetryNotBeforeByStepId.Remove(retryStepId);
                         state.RetryDelayMsByStepId.Remove(retryStepId);
                         state.RetryScheduledForExecutionIdByStepId.Remove(retryStepId);
@@ -826,7 +848,9 @@ public static class StateProjector
                 state.HollowReasonByStepId.GetValueOrDefault(stepDefinition.StepId),
                 state.VerifyNotRunReasonByStepId.GetValueOrDefault(stepDefinition.StepId),
                 state.ConductorRejectedStepIds.Contains(stepDefinition.StepId),
-                state.FinishedDuringTeardownStepIds.Contains(stepDefinition.StepId)));
+                state.FinishedDuringTeardownStepIds.Contains(stepDefinition.StepId),
+                state.LatestRecoveryCauseByStepId.GetValueOrDefault(stepDefinition.StepId),
+                state.RecoveryOccurrenceByStepId.GetValueOrDefault(stepDefinition.StepId)));
         }
 
         var workflowStatus = DeriveWorkflowStatus(steps, snapshot);

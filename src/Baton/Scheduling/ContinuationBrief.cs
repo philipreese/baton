@@ -21,6 +21,40 @@ namespace Baton.Scheduling;
 public static class ContinuationBrief
 {
     /// <summary>
+    /// Returns the one bounded continuation for a vendor-backgrounded command, or the existing
+    /// timeout continuation for other retryable failures.
+    /// </summary>
+    public static string? ForRetry(StepState stepState, int maxAttempts, TimeSpan timeout)
+    {
+        ArgumentNullException.ThrowIfNull(stepState);
+
+        return stepState.LatestRecoveryCause is { Kind: RecoveryCauseKind.OutstandingToolAtTerminalSuccess }
+               && stepState.RecoveryOccurrence == 1
+            ? ForOutstandingTool(stepState.LatestRecoveryCause)
+            : ForRetryAfterTimeout(stepState, maxAttempts, timeout);
+    }
+
+    private static string ForOutstandingTool(RecoveryCause cause)
+    {
+        var command = cause.CommandLine is { Length: > 0 }
+            ? $" The command was `{cause.CommandLine}`."
+            : string.Empty;
+
+        return $"""
+            [baton] CONTINUATION BRIEF -- read this before the brief below.
+
+            This is the same workspace. Inspect and preserve the existing work; do not remap or restart the task. The named tool `{cause.ToolName}` was not observed completing.{command}
+
+            Run required commands synchronously and wait for them to finish. Finish the original acceptance and provide the remaining success evidence.
+
+            The original brief follows, unchanged.
+
+            ----------------------------------------------------------------------
+
+            """;
+    }
+
+    /// <summary>
     /// The brief for <paramref name="stepState"/>'s next attempt, or <see langword="null"/> when its
     /// previous attempt was not killed by the dispatch timeout — an ordinary failure retries with the
     /// unchanged brief exactly as before this issue.
