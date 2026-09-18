@@ -211,7 +211,7 @@
   },
   {
     "id": "janitor",
-    "tier": "cheap",
+    "tier": "janitor",
     "read_files": true,
     "write_files": true,
     "run_shell_commands": true,
@@ -230,7 +230,7 @@
     "verdict_schema": false,
     "verifies_workspace": true,
     "default_skills": ["baton-janitor"],
-    "purpose": "After an implementer commits: run the named mechanical checkers and make them green without changing behavior (#729). The shipped baton-janitor package is the canonical standing brief; the operator supplies the checkers to run via --spec/--spec-text each time. The checkers determine the work, so the cheap tier runs it; anything needing judgment comes back [NOT DONE], not guessed at. #1355 kept network_access true here for the same reason as implement -- see implement's purpose field for the full reasoning (it is not agy-specific), not restated here.",
+    "purpose": "After an implementer commits: run the named mechanical checkers and make them green without changing behavior (#729). The shipped baton-janitor package is the canonical standing brief; the operator supplies the checkers to run via --spec/--spec-text each time. The checkers determine the work, so the dedicated janitor tier runs it; anything needing judgment comes back [NOT DONE], not guessed at. #1355 kept network_access true here for the same reason as implement -- see implement's purpose field for the full reasoning (it is not vendor-specific), not restated here.",
     "outputs": [
       {
         "name": "janitor.md",

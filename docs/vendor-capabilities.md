@@ -492,7 +492,7 @@ judging how "deep" one model's answers actually read next to another's.
 depends on: that each vendor's model set hasn't moved out from under it.
 
 **Not to be confused with** `src/Baton.Vendors/WorkerTiers.json`'s
-frontier/standard/cheap/minimal/orchestrator vocabulary — that is role-dispatch's own internal
+frontier/standard/cheap/janitor/minimal/orchestrator vocabulary — that is role-dispatch's own internal
 dispatch-tier system, unrelated to this one, and never rendered to a person.
 
 | canonical | `claude` | `agy` | `codex` |
