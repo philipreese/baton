@@ -22,6 +22,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -255,6 +256,28 @@ def scrubbed_env():
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
+def record_phase(phase, event, member=None):
+    """Best-effort durable phase evidence for the pre-push hook; see spec/baton.md §7."""
+    path = os.environ.get("BATON_PRE_PUSH_PHASE_TIMELINE")
+    if not path:
+        return
+    row = {
+        "schemaVersion": 1,
+        "phase": phase,
+        "event": event,
+        "monotonicMs": time.monotonic_ns() // 1_000_000,
+    }
+    if member:
+        row["member"] = member
+    try:
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except (OSError, TypeError, ValueError):
+        pass
+
+
 # Quiet mode (#1560): a dispatched worker that runs `gates` inherits ~2,500 tests' worth of stdout
 # into its conversation context and then re-reads it on every subsequent model call -- one small
 # renderer lane measured 1.25M input + 43.8M cache-read tokens, most of it this file's inherited
@@ -285,11 +308,17 @@ def shutdown_build_servers(run=subprocess.run):
     prove the CALL SITES (after a test* gate, and in main()'s finally on a raise) without spawning a
     real `dotnet` process.
     """
+    record_phase("runner-cleanup", "start")
     try:
-        run(["dotnet", "build-server", "shutdown"], check=False,
-            capture_output=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+        if os.environ.get("BATON_PHASE_TEST_NOOP_CLEANUP") == "1":
+            return
+        try:
+            run(["dotnet", "build-server", "shutdown"], check=False,
+                capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    finally:
+        record_phase("runner-cleanup", "end")
 
 
 def run_gates(names, runner, shutdown=shutdown_build_servers):
@@ -301,7 +330,9 @@ def run_gates(names, runner, shutdown=shutdown_build_servers):
     failed = []
     blocked = []
     for name in names:
+        record_phase("member-execution", "start", name)
         code = runner(name)
+        record_phase("member-execution", "end", name)
         status = _status_word(code)
         print(f"  {status:>4}  {name}  (exit {code})", flush=True)
         if status == "FAIL":
@@ -325,6 +356,7 @@ def join_gates(procs, quiet=False):
     blocked = []
     for name, proc in procs:
         out, _ = proc.communicate()
+        record_phase("member-execution", "end", name)
         code = proc.returncode
         status = _status_word(code)
         if not quiet:
@@ -360,6 +392,14 @@ def pixi_runner(name):
     # Output is inherited, not captured: a captured gate would have to be re-printed to be
     # readable, and re-printing is where the filtering that caused this file creeps back in. (The
     # overlapped audits are the deliberate exception; join_gates re-prints them raw.)
+    phase_test_stub = os.environ.get("BATON_PHASE_TEST_STUB_MEMBERS") == "1"
+    if phase_test_stub or os.environ.get("BATON_PHASE_TEST_HANG_MEMBER") == name:
+        # A private scaled-selftest seam: the hook control can kill this runner without creating a
+        # second long-lived child process, leaving the member's durable start row incomplete.
+        if os.environ.get("BATON_PHASE_TEST_HANG_MEMBER") == name:
+            while True:
+                time.sleep(1)
+        return 0
     return subprocess.run(["pixi", "run", name], check=False).returncode
 
 
@@ -377,6 +417,9 @@ def pixi_spawner(name):
     # stderr folded into stdout so the join-time re-print loses nothing a terminal would have
     # shown. An overlapped audit that outgrows the OS pipe buffer just blocks until join drains
     # it -- late, never lost.
+    if os.environ.get("BATON_PHASE_TEST_STUB_MEMBERS") == "1":
+        return subprocess.Popen([sys.executable, "-c", "pass"],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return subprocess.Popen(["pixi", "run", name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
@@ -401,7 +444,10 @@ def run_all(after_build, spawner=pixi_spawner, runner=pixi_runner, quiet=False, 
     overlap = [n for n in overlap_names if n not in skip]
     build_phase = [n for n in build_phase_names if n not in skip]
     after_build = [n for n in after_build if n not in skip]
-    procs = [(name, spawner(name)) for name in overlap]
+    procs = []
+    for name in overlap:
+        record_phase("member-execution", "start", name)
+        procs.append((name, spawner(name)))
     failed, blocked = run_gates(build_phase, runner)
     join_failed, join_blocked = join_gates(procs, quiet=quiet)
     failed += join_failed
@@ -813,6 +859,13 @@ def _init_temp_repo(path):
     subprocess.run(["git", "-C", path, "commit", "-q", "-m", "initial"], check=True, env=env)
 
 
+def _shell_path(path):
+    """Spell a Windows path for a POSIX shell without changing Python's native path value."""
+    if os.name == "nt" and len(path) >= 2 and path[1] == ":":
+        return "/" + path[0].lower() + path[2:].replace("\\", "/")
+    return path
+
+
 def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0, lane_call_log=None, lane_exit=0):
     """A fake `pixi` on PATH: forwards `run gates-check-receipt` to the REAL gates.py (so the
     forged-receipt case exercises the real check-receipt logic end to end), and records any
@@ -832,11 +885,15 @@ def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0, lane_call_lo
     `exit 1` -- the miss-everything default every other unhandled invocation already gets.
     """
     stub = os.path.join(bin_dir, "pixi")
+    shell_python = _shell_path(sys.executable)
+    shell_gates_py = _shell_path(real_gates_py)
+    shell_call_log = _shell_path(call_log)
+    shell_lane_call_log = _shell_path(lane_call_log) if lane_call_log is not None else None
     lane_case = ""
     if lane_call_log is not None:
         lane_case = (
             'if [ "$1" = "run" ] && [ "$2" = "gates-lane-fast" ]; then\n'
-            f'    printf \'called\\n\' >> "{lane_call_log}"\n'
+            f'    printf \'called\\n\' >> "{shell_lane_call_log}"\n'
             f'    exit {lane_exit}\n'
             "fi\n"
         )
@@ -844,11 +901,11 @@ def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0, lane_call_lo
         f.write(
             "#!/bin/sh\n"
             'if [ "$1" = "run" ] && [ "$2" = "gates-check-receipt" ]; then\n'
-            f'    exec "{sys.executable}" -u "{real_gates_py}" --check-receipt\n'
+            f'    exec "{shell_python}" -u "{shell_gates_py}" --check-receipt\n'
             "fi\n"
             'if [ "$1" = "run" ] && [ "$2" = "gates-fast" ]; then\n'
-            f'    printf \'called\\n\' >> "{call_log}"\n'
-            f'    printf \'%s\\n\' "${{GIT_DIR-unset}}/${{GIT_INDEX_FILE-unset}}" >> "{call_log}"\n'
+            f'    printf \'called\\n\' >> "{shell_call_log}"\n'
+            f'    printf \'%s\\n\' "${{GIT_DIR-unset}}/${{GIT_INDEX_FILE-unset}}" >> "{shell_call_log}"\n'
             f'    exit {fast_exit}\n'
             "fi\n"
             f"{lane_case}"
@@ -856,6 +913,79 @@ def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0, lane_call_lo
         )
     os.chmod(stub, 0o755)
     return stub
+
+
+def _write_phase_timeline_stub_pixi(bin_dir, real_gates_py, hang_member=None):
+    """Install the scaled pre-push fixture used by the phase-timeline controls."""
+    stub = os.path.join(bin_dir, "pixi")
+    shell_python = _shell_path(sys.executable)
+    shell_gates_py = _shell_path(real_gates_py)
+    with open(stub, "w", encoding="utf-8", newline="\n") as f:
+        f.write(
+            "#!/bin/sh\n"
+            'if [ "$1" = "run" ] && [ "$2" = "gates-check-receipt" ]; then\n'
+            f'    exec "{shell_python}" -u "{shell_gates_py}" --check-receipt\n'
+            "fi\n"
+            'if [ "$1" = "run" ] && [ "$2" = "gates-lane-fast" ]; then\n'
+            f'    exec "{shell_python}" -u "{shell_gates_py}" --lane-fast\n'
+            "fi\n"
+            "exit 0\n"
+        )
+    os.chmod(stub, 0o755)
+    # The real runner cleanup command is replaced with a no-op so this control never touches a
+    # machine-wide tool; both names cover the POSIX and Windows command lookup paths.
+    for name, contents in (
+        ("dotnet", "#!/bin/sh\nexit 0\n"),
+        ("dotnet.cmd", "@exit /b 0\n"),
+    ):
+        path = os.path.join(bin_dir, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(contents)
+        os.chmod(path, 0o755)
+    return stub
+
+
+def _process_ids(image_name):
+    """Return the current PIDs for a named Windows image, for scoped selftest cleanup."""
+    if os.name != "nt":
+        return set()
+    result = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV"],
+                            capture_output=True, text=True, check=False)
+    pids = set()
+    for line in result.stdout.splitlines()[1:]:
+        try:
+            fields = next(csv.reader([line]))
+            pids.add(int(fields[1]))
+        except (IndexError, ValueError, StopIteration):
+            pass
+    return pids
+
+
+def _kill_process_tree(proc, extra_pids=()):
+    """Stop a selftest hook and its deliberately blocked child within a bounded wait."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True, check=False)
+        for pid in extra_pids:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, check=False)
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            proc.kill()
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            for pid in extra_pids:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, check=False)
+        proc.kill()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def selftest():
@@ -1289,12 +1419,21 @@ def selftest():
         # The hook itself (sh): a forged, currently-valid receipt makes it exit 0 with the skip
         # line and never call `pixi run gates-fast`; no receipt makes it fall through and call it.
         sh = shutil.which("sh")
+        if sh is None and os.name == "nt":
+            git_exe = shutil.which("git")
+            if git_exe:
+                git_root = os.path.dirname(os.path.dirname(git_exe))
+                candidate = os.path.join(git_root, "usr", "bin", "sh.exe")
+                if os.path.exists(candidate):
+                    sh = candidate
+        sh = sh or shutil.which("bash")
         if sh is None:
             print("  control FAILED: no `sh` on PATH -- cannot exercise .githooks/pre-push")
             ok = False
         else:
             hook = os.path.abspath(os.path.join(
                 os.path.dirname(__file__), "..", "..", ".githooks", "pre-push"))
+            shell_hook = _shell_path(hook)
             real_gates_py = os.path.abspath(__file__)
             bin_dir = os.path.join(td, "bin")
             os.makedirs(bin_dir)
@@ -1346,7 +1485,7 @@ def selftest():
             shutil.rmtree(member_receipt.member_dir(_git_dir(repo)), ignore_errors=True)
 
             write_receipt("fast", cwd=repo)
-            hit = subprocess.run([sh, hook], cwd=repo, env=env,
+            hit = subprocess.run([sh, shell_hook], cwd=repo, env=env,
                                  capture_output=True, text=True, check=False)
             if hit.returncode != 0 or "-- skipping" not in hit.stdout:
                 print(f"  control FAILED: hook did not skip on a valid receipt -- "
@@ -1357,7 +1496,7 @@ def selftest():
                 ok = False
 
             delete_receipt(cwd=repo)
-            miss = subprocess.run([sh, hook], cwd=repo, env=env,
+            miss = subprocess.run([sh, shell_hook], cwd=repo, env=env,
                                   capture_output=True, text=True, check=False)
             if not os.path.exists(call_log):
                 print(f"  control FAILED: hook did not attempt gates with no receipt -- "
@@ -1392,7 +1531,7 @@ def selftest():
             union_identity = tree_identity(repo)
             for name in fast_member_set():
                 member_receipt.write(_git_dir(repo), name, union_identity)
-            union_hit = subprocess.run([sh, hook], cwd=repo, env=env,
+            union_hit = subprocess.run([sh, shell_hook], cwd=repo, env=env,
                                        capture_output=True, text=True, check=False)
             if union_hit.returncode != 0 or "-- skipping" not in union_hit.stdout:
                 print(f"  control FAILED: hook did not skip on a covering member union -- "
@@ -1405,7 +1544,7 @@ def selftest():
             # One member short and it falls through again. The discriminating half: without it, a
             # covered() that returned everything it was asked about would pass the arm above.
             member_receipt.delete(_git_dir(repo), fast_member_set()[0])
-            union_miss = subprocess.run([sh, hook], cwd=repo, env=env,
+            union_miss = subprocess.run([sh, shell_hook], cwd=repo, env=env,
                                         capture_output=True, text=True, check=False)
             if not os.path.exists(call_log) or union_miss.returncode != 7:
                 print(f"  control FAILED: hook skipped with {fast_member_set()[0]!r} unreceipted -- "
@@ -1422,7 +1561,7 @@ def selftest():
                     os.remove(f)
             lane_env = dict(env)
             lane_env["BATON_LANE"] = "1"
-            lane_miss = subprocess.run([sh, hook], cwd=repo, env=lane_env,
+            lane_miss = subprocess.run([sh, shell_hook], cwd=repo, env=lane_env,
                                        capture_output=True, text=True, check=False)
             if not os.path.exists(lane_call_log) or os.path.exists(call_log) or lane_miss.returncode != 8:
                 print(f"  control FAILED: a BATON_LANE push with no receipt did not call "
@@ -1437,7 +1576,7 @@ def selftest():
                 if os.path.exists(f):
                     os.remove(f)
             write_receipt("fast", cwd=repo)
-            lane_hit = subprocess.run([sh, hook], cwd=repo, env=lane_env,
+            lane_hit = subprocess.run([sh, shell_hook], cwd=repo, env=lane_env,
                                       capture_output=True, text=True, check=False)
             if (lane_hit.returncode != 0 or "-- skipping" not in lane_hit.stdout
                     or os.path.exists(call_log) or os.path.exists(lane_call_log)):
@@ -1482,7 +1621,7 @@ def selftest():
                 ok = False
             write_receipt("fast", cwd=repo)
             before_timings = len(_timing_lines())
-            no_clock = subprocess.run([sh, hook], cwd=repo, env=broken_clock_env,
+            no_clock = subprocess.run([sh, shell_hook], cwd=repo, env=broken_clock_env,
                                       capture_output=True, text=True, check=False)
             if (no_clock.returncode != 0 or "-- skipping" not in no_clock.stdout
                     or no_clock.stderr.strip() or len(_timing_lines()) != before_timings):
@@ -1492,6 +1631,108 @@ def selftest():
                       f"{len(_timing_lines())}")
                 ok = False
             delete_receipt(cwd=repo)
+
+            # #2325: the timeline has to survive a kill inside a named member. The fixture runs the
+            # real hook and gates runner at scaled cost, blocks only fmt-check, and kills the process
+            # after its durable start row is visible. The same fixture then runs to completion to
+            # prove the control path and the hook's existing success status remain unchanged.
+            _write_phase_timeline_stub_pixi(bin_dir, real_gates_py, hang_member="fmt-check")
+            phase_file = os.path.join(output_dir, "pre-push-phase-timeline.jsonl")
+            push_file = os.path.join(output_dir, "push-timing.jsonl")
+
+            def _phase_rows():
+                try:
+                    with open(phase_file, encoding="utf-8") as f:
+                        return [json.loads(line) for line in f if line.strip()]
+                except (OSError, ValueError):
+                    return []
+
+            def _phase_has(rows, phase, event, member=None):
+                return any(row.get("phase") == phase and row.get("event") == event
+                           and (member is None or row.get("member") == member)
+                           for row in rows)
+
+            def _clear_phase_outputs():
+                for path in (phase_file, push_file):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+            _clear_phase_outputs()
+            kill_env = dict(env)
+            kill_env["BATON_LANE"] = "1"
+            kill_env["BATON_PHASE_TEST_HANG_MEMBER"] = "fmt-check"
+            kill_env["BATON_PHASE_TEST_STUB_MEMBERS"] = "1"
+            kill_env["BATON_PHASE_TEST_NOOP_CLEANUP"] = "1"
+            shell_pids_before = _process_ids("sh.exe")
+            kill_proc = subprocess.Popen(
+                [sh, shell_hook], cwd=repo, env=kill_env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=(os.name != "nt"))
+            deadline = time.monotonic() + 10
+            saw_named_start = False
+            while time.monotonic() < deadline:
+                if _phase_has(_phase_rows(), "member-execution", "start", "fmt-check"):
+                    saw_named_start = True
+                    break
+                time.sleep(0.01)
+            if not saw_named_start:
+                print("  control FAILED: scaled pre-push kill did not reach fmt-check")
+                ok = False
+            shell_pids_after = _process_ids("sh.exe") - shell_pids_before
+            _kill_process_tree(kill_proc, extra_pids=shell_pids_after)
+            partial_rows = _phase_rows()
+            if (not _phase_has(partial_rows, "receipt-check", "start")
+                    or not _phase_has(partial_rows, "receipt-check", "end")
+                    or not _phase_has(partial_rows, "fallback-gate", "start", "gates-lane-fast")
+                    or _phase_has(partial_rows, "fallback-gate", "end", "gates-lane-fast")
+                    or not _phase_has(partial_rows, "member-execution", "start", "fmt-check")
+                    or _phase_has(partial_rows, "member-execution", "end", "fmt-check")
+                    or any(not isinstance(row.get("monotonicMs"), int) for row in partial_rows)):
+                print(f"  control FAILED: killed hook did not leave the expected partial timeline -- "
+                      f"{partial_rows!r}")
+                ok = False
+
+            _write_phase_timeline_stub_pixi(bin_dir, real_gates_py)
+            _clear_phase_outputs()
+            success_env = dict(env)
+            success_env["BATON_LANE"] = "1"
+            success_env["BATON_PHASE_TEST_STUB_MEMBERS"] = "1"
+            success_env["BATON_PHASE_TEST_NOOP_CLEANUP"] = "1"
+            success_env.pop("BATON_PHASE_TEST_HANG_MEMBER", None)
+            success = subprocess.run([sh, shell_hook], cwd=repo, env=success_env,
+                                     capture_output=True, text=True, timeout=30, check=False)
+            success_rows = _phase_rows()
+            lane_members = lane_fast_member_set()
+            complete = all(
+                _phase_has(success_rows, "member-execution", "start", member)
+                and _phase_has(success_rows, "member-execution", "end", member)
+                for member in lane_members)
+            if (success.returncode != 0
+                    or not _phase_has(success_rows, "receipt-check", "start")
+                    or not _phase_has(success_rows, "receipt-check", "end")
+                    or not _phase_has(success_rows, "fallback-gate", "start", "gates-lane-fast")
+                    or not _phase_has(success_rows, "fallback-gate", "end", "gates-lane-fast")
+                    or not complete
+                    or not _phase_has(success_rows, "runner-cleanup", "start")
+                    or not _phase_has(success_rows, "runner-cleanup", "end")
+                    or not _phase_has(success_rows, "hook-completion", "start")
+                    or not _phase_has(success_rows, "hook-completion", "end")
+                    or not _phase_has(success_rows, "aggregate-append", "start")
+                    or not _phase_has(success_rows, "aggregate-append", "end")):
+                print(f"  control FAILED: successful pre-push timeline or exit status was incomplete -- "
+                      f"exit={success.returncode} rows={success_rows!r}")
+                ok = False
+            try:
+                with open(push_file, encoding="utf-8") as f:
+                    successful_timing = [json.loads(line) for line in f if line.strip()]
+            except (OSError, ValueError):
+                successful_timing = []
+            if len(successful_timing) != 1:
+                print(f"  control FAILED: successful scaled push did not retain its aggregate timing -- "
+                      f"{successful_timing!r}")
+                ok = False
 
     # Tripwire (#1648): _init_temp_repo must survive an inherited GIT_DIR/GIT_INDEX_FILE, not
     # merely work in a plain shell. A DECOY repo stands in for "the real repo an inherited
