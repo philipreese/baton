@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Baton.Accounting;
 using Baton.Memory;
@@ -127,17 +128,161 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
-    /// Path to SHA-256 over every vendor-authored file under <paramref name="directory"/>. Baton's
-    /// generated projection is excluded: #2138 deliberately adds or replaces that owned cache after
-    /// import, while the non-destructive claim remains byte-for-byte over every source file.
+    /// Path to SHA-256 over every file under <paramref name="directory"/>. The assertions that consume
+    /// this snapshot distinguish Baton's owned projection files from vendor-owned and unowned files.
     /// </summary>
     private static Dictionary<string, string> DigestTree(string directory) =>
         !Directory.Exists(directory)
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             : Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-            .Where(p => !string.Equals(
-                Path.GetFileName(p), ClaudeProjectionTarget.ProjectionFileName, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(p => p, Digest, StringComparer.OrdinalIgnoreCase);
+
+    private static Dictionary<string, byte[]> SnapshotTree(string directory) =>
+        !Directory.Exists(directory)
+            ? new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
+            : Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .ToDictionary(p => p, File.ReadAllBytes, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The import's source side is read-only, while the successful canonical write may publish the
+    /// compatibility projection, a bounded section in MEMORY.md, and explicitly Baton-named details.
+    /// This keeps the preservation claim byte-based for every other file and for every byte outside an
+    /// existing or newly-created owned index section.
+    /// </summary>
+    private static void AssertOnlyOwnedProjectionChanges(
+        string root,
+        IReadOnlyDictionary<string, string> before,
+        IReadOnlyDictionary<string, byte[]> beforeBytes)
+    {
+        var afterBytes = SnapshotTree(root);
+        var after = DigestTree(root);
+        var authorizedDetails = AuthorizedGeneratedDetails(beforeBytes, afterBytes);
+        var paths = before.Keys.Concat(after.Keys).Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths)
+        {
+            var existedBefore = before.TryGetValue(path, out var beforeDigest);
+            var existsAfter = after.TryGetValue(path, out var afterDigest);
+            if (existedBefore && existsAfter && string.Equals(beforeDigest, afterDigest, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var name = Path.GetFileName(path);
+            if (string.Equals(name, ClaudeProjectionTarget.ProjectionFileName, StringComparison.OrdinalIgnoreCase)
+                || authorizedDetails.Contains(path))
+            {
+                continue;
+            }
+
+            if (string.Equals(name, ClaudeProjectionTarget.IndexFileName, StringComparison.OrdinalIgnoreCase)
+                && IsProjectionTargetIndex(path, before, after))
+            {
+                Assert.True(existsAfter, $"Baton must not delete the vendor index: {path}");
+                var original = existedBefore ? beforeBytes[path] : [];
+                AssertOwnedIndexOutsideBytes(original, File.ReadAllBytes(path), path);
+                continue;
+            }
+
+            Assert.True(existedBefore && existsAfter, $"Import changed the file population outside its authorized generated set: {path}");
+            Assert.Equal(beforeBytes[path], afterBytes[path]);
+        }
+    }
+
+    private static HashSet<string> AuthorizedGeneratedDetails(
+        IReadOnlyDictionary<string, byte[]> beforeBytes,
+        IReadOnlyDictionary<string, byte[]> afterBytes)
+    {
+        var authorized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddFrom(beforeBytes);
+        AddFrom(afterBytes);
+        return authorized;
+
+        void AddFrom(IReadOnlyDictionary<string, byte[]> tree)
+        {
+            foreach (var (indexPath, bytes) in tree)
+            {
+                if (!string.Equals(Path.GetFileName(indexPath), ClaudeProjectionTarget.IndexFileName, StringComparison.OrdinalIgnoreCase)
+                    || !MemoryVendorIndexProjection.TryStripOwnedSection(Encoding.UTF8.GetString(bytes), out _))
+                {
+                    continue;
+                }
+
+                var directory = Path.GetDirectoryName(indexPath)!;
+                foreach (var detailName in MemoryVendorIndexProjection.OwnedDetailFileNames(bytes))
+                {
+                    var detailPath = Path.Combine(directory, detailName);
+                    if (tree.TryGetValue(detailPath, out var detailBytes)
+                        && MemoryVendorIndexProjection.IsOwnedDetailFile(detailName, detailBytes))
+                    {
+                        authorized.Add(detailPath);
+                    }
+                }
+            }
+        }
+    }
+
+    private static bool IsProjectionTargetIndex(
+        string path,
+        IReadOnlyDictionary<string, string> before,
+        IReadOnlyDictionary<string, string> after)
+    {
+        var projectionPath = Path.Combine(Path.GetDirectoryName(path)!, ClaudeProjectionTarget.ProjectionFileName);
+        return before.ContainsKey(projectionPath) || after.ContainsKey(projectionPath);
+    }
+
+    private static void AssertOwnedIndexOutsideBytes(byte[] before, byte[] after, string path)
+    {
+        var beforeText = Encoding.UTF8.GetString(before);
+        var afterText = Encoding.UTF8.GetString(after);
+        var expectedOutside = MemoryVendorIndexProjection.TryStripOwnedSection(beforeText, out var beforeOutside)
+            ? beforeOutside
+            : beforeText;
+
+        Assert.True(
+            MemoryVendorIndexProjection.TryStripOwnedSection(afterText, out var afterOutside),
+            $"Baton changed {path} without leaving a valid owned section");
+        Assert.Equal(expectedOutside, afterOutside);
+    }
+
+    private static void AssertProjectionMatchesStore(string root, IReadOnlyList<MemoryEntry> entries)
+    {
+        var indexPath = Path.Combine(root, ClaudeProjectionTarget.IndexFileName);
+        Assert.True(File.Exists(indexPath), $"Missing projected vendor index: {indexPath}");
+        var index = File.ReadAllText(indexPath);
+        Assert.True(MemoryVendorIndexProjection.TryStripOwnedSection(index, out _));
+
+        var details = Directory.EnumerateFiles(root)
+            .Select(Path.GetFileName)
+            .Where(name => name is not null && MemoryVendorIndexProjection.IsOwnedDetailFile(name))
+            .Cast<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries)
+        {
+            var detailName = MemoryVendorIndexProjection.DetailFileName(entry.Id);
+            Assert.Contains(detailName, details);
+            Assert.Equal(1, Count(index, detailName));
+            Assert.Contains(
+                MemoryProjection.FormatMarker,
+                File.ReadAllText(Path.Combine(root, detailName)),
+                StringComparison.Ordinal);
+        }
+
+        foreach (var detailName in details)
+        {
+            Assert.Equal(1, Count(index, detailName));
+        }
+    }
+
+    private static int Count(string text, string value)
+    {
+        var count = 0;
+        for (var index = 0; (index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0; index += value.Length)
+        {
+            count++;
+        }
+
+        return count;
+    }
 
     /// <summary>One file's SHA-256, for the arms whose claim is about a single file's bytes.</summary>
     private static string Digest(string filePath) =>
@@ -217,15 +362,29 @@ public sealed class MemoryImportTests : IDisposable
     public async Task Every_source_file_is_byte_identical_after_an_import()
     {
         await BuildStandardFixtureAsync();
+        File.WriteAllText(
+            Path.Combine(ClaudeHome, "projects", "C--baton", "memory", ClaudeProjectionTarget.IndexFileName),
+            "vendor-owned heading\r\nvendor-owned note\r\n");
+        File.WriteAllText(
+            Path.Combine(ClaudeHome, "projects", "C--baton-worktree", "memory", ClaudeProjectionTarget.IndexFileName),
+            "second vendor-owned heading\r\n");
+        File.WriteAllText(
+            Path.Combine(ClaudeHome, "projects", "C--baton", "memory", "baton-memory-release-notes.md"),
+            "vendor-owned prefix collision\r\n");
         var archived = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
 
         var memories = Path.Combine(UserHome, ".codex", "memories");
         Directory.CreateDirectory(memories);
         File.WriteAllText(Path.Combine(memories, "raw_memories.md"), "a codex memory");
+        File.WriteAllText(
+            Path.Combine(memories, ClaudeProjectionTarget.IndexFileName),
+            "codex-owned heading\r\n");
         File.WriteAllText(Path.Combine(UserHome, ".codex", "memories_1.sqlite"), "synthetic-not-a-database");
 
         var claudeBefore = DigestTree(ClaudeHome);
+        var claudeBeforeBytes = SnapshotTree(ClaudeHome);
         var homeBefore = DigestTree(UserHome);
+        var homeBeforeBytes = SnapshotTree(UserHome);
         Assert.NotEmpty(claudeBefore);
         Assert.NotEmpty(homeBefore);
         Assert.Contains(homeBefore.Keys, p => p.EndsWith("memories_1.sqlite", StringComparison.Ordinal));
@@ -235,8 +394,8 @@ public sealed class MemoryImportTests : IDisposable
             "--assert", $"{memories}=github.com/philipreese/baton",
             "--asserted-by", "the-test");
 
-        Assert.Equal(claudeBefore, DigestTree(ClaudeHome));
-        Assert.Equal(homeBefore, DigestTree(UserHome));
+        AssertOnlyOwnedProjectionChanges(ClaudeHome, claudeBefore, claudeBeforeBytes);
+        AssertOnlyOwnedProjectionChanges(UserHome, homeBefore, homeBeforeBytes);
 
         // The controls: the run must actually have carried the archived root and the Codex markdown,
         // or the assertions above are a statement about an import that did nothing.
@@ -401,7 +560,8 @@ public sealed class MemoryImportTests : IDisposable
         var secondRoot = Path.Combine(ClaudeHome, "projects", "C--baton-worktree", "memory");
 
         await RunAsync("--root", firstRoot);
-        var afterFirst = (await StoreAsync("github.com/philipreese/baton")).Select(e => e.Id).ToList();
+        var afterFirstEntries = await StoreAsync("github.com/philipreese/baton");
+        var afterFirst = afterFirstEntries.Select(e => e.Id).ToList();
 
         await RunAsync("--root", secondRoot);
         var afterSecond = await StoreAsync("github.com/philipreese/baton");
@@ -414,11 +574,19 @@ public sealed class MemoryImportTests : IDisposable
         Assert.Equal(2, manifests.Count);
 
         var claudeBefore = DigestTree(ClaudeHome);
+        var claudeBeforeBytes = SnapshotTree(ClaudeHome);
         var undone = await RunAsync("--undo", manifests[1]);
 
         Assert.Contains("No source memory file was touched", undone, StringComparison.Ordinal);
-        Assert.Equal(claudeBefore, DigestTree(ClaudeHome));
+        AssertOnlyOwnedProjectionChanges(ClaudeHome, claudeBefore, claudeBeforeBytes);
         Assert.Equal(afterFirst, (await StoreAsync("github.com/philipreese/baton")).Select(e => e.Id));
+
+        AssertProjectionMatchesStore(
+            Path.Combine(ClaudeHome, "projects", "C--baton", "memory"),
+            afterFirstEntries);
+        AssertProjectionMatchesStore(
+            Path.Combine(ClaudeHome, "projects", "C--baton-worktree", "memory"),
+            afterFirstEntries);
 
         // And the undone import can be replayed: the store returns to its post-second-import state,
         // which is what "reversible" has to mean if it is not to mean "deleted".

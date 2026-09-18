@@ -124,6 +124,30 @@ public sealed record MemoryImportPlan(
                     continue;
                 }
 
+                // An actual vendor index may carry vendor-authored content around Baton's bounded
+                // catalog. Keep that content importable, but never turn the generated links back
+                // into canonical memory. A section with nothing outside it is solely a Baton cache.
+                var importFile = file;
+                if (MemoryVendorIndexProjection.TryStripOwnedSection(file.Text, out var outside))
+                {
+                    if (string.IsNullOrWhiteSpace(outside))
+                    {
+                        projections.Add(new ImportSkippedRow(
+                            file.Path, file.Sha256, file.ModifiedUtc, file.SizeBytes,
+                            "a vendor index containing only Baton's bounded memory section; importing it " +
+                            "would re-ingest the canonical catalog as a new entry."));
+                        continue;
+                    }
+
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(outside);
+                    importFile = file with
+                    {
+                        Text = outside,
+                        Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(),
+                        SizeBytes = bytes.Length,
+                    };
+                }
+
                 if (source.Repository is not { Length: > 0 } repository)
                 {
                     unfiled.Add(new ImportSkippedRow(
@@ -137,19 +161,19 @@ public sealed record MemoryImportPlan(
 
                 var (kind, kindSource) = source.Archived
                     ? (MemoryKind.HistoricalNote, MemoryKindSource.InferredFromArchive)
-                    : MemoryKindInference.Infer(file.FileName, file.Text);
+                    : MemoryKindInference.Infer(importFile.FileName, importFile.Text);
 
                 entries.Add(new MemoryEntry(
-                    MemoryEntry.Derive(repository, file.Path, file.Sha256),
+                    MemoryEntry.Derive(repository, importFile.Path, importFile.Sha256),
                     repository,
                     kind,
                     kindSource,
-                    file.Text,
-                    file.Sha256,
-                    file.Path,
+                    importFile.Text,
+                    importFile.Sha256,
+                    importFile.Path,
                     source.SourceVendor,
                     source.SourceScope,
-                    file.ModifiedUtc,
+                    importFile.ModifiedUtc,
                     importedAtUtc));
             }
         }

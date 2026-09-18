@@ -85,7 +85,8 @@ public sealed record MemoryProjectionResult(
     IReadOnlyList<string> ProjectedEntryIds,
     IReadOnlyList<ProjectionOmission> Superseded,
     IReadOnlyList<ProjectionOmission> Overridden,
-    IReadOnlyList<ProjectionOmission> Dropped);
+    IReadOnlyList<ProjectionOmission> Dropped,
+    IReadOnlyList<MemoryProjectionCandidate> ProjectedEntries);
 
 /// <summary>
 /// Renders one repository's canonical memory into the bytes a vendor's memory root receives (#1852
@@ -304,7 +305,8 @@ public static class MemoryProjection
             sections.Select(s => s.EntryId).ToList(),
             superseded,
             overridden,
-            dropped);
+            dropped,
+            sections.Select(section => selected.First(candidate => candidate.Entry.Id == section.EntryId)).ToList());
     }
 
     /// <summary>

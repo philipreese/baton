@@ -379,7 +379,7 @@ public static class MemorySyncCommand
                     foreach (var target in targets)
                     {
                         writes.Add(WriteOrPreview(
-                            target, projection.Bytes, apply: true, projectionWriterOverride));
+                            target, projection, apply: true, projectionWriterOverride));
                     }
                 });
 
@@ -392,7 +392,7 @@ public static class MemorySyncCommand
         {
             foreach (var target in targets)
             {
-                writes.Add(WriteOrPreview(target, projection.Bytes, options.Apply, projectionWriterOverride));
+                writes.Add(WriteOrPreview(target, projection, options.Apply, projectionWriterOverride));
             }
         }
 
@@ -470,12 +470,16 @@ public static class MemorySyncCommand
     /// </remarks>
     private static SyncTargetReport WriteOrPreview(
         ProjectionTarget target,
-        byte[] bytes,
+        MemoryProjectionResult projection,
         bool apply,
         Action<string, byte[]>? projectionWriterOverride)
     {
+        // Read and validate the vendor index before touching even the compatibility cache. A bad
+        // marker is a fail-closed condition, not an invitation to "repair" an operator's file.
+        var existingIndex = File.Exists(target.IndexFilePath) ? File.ReadAllBytes(target.IndexFilePath) : null;
+        var publication = MemoryVendorIndexProjection.Build(projection, existingIndex);
         var existing = File.Exists(target.FilePath) ? File.ReadAllBytes(target.FilePath) : null;
-        var unchanged = existing is not null && existing.AsSpan().SequenceEqual(bytes);
+        var unchanged = existing is not null && existing.AsSpan().SequenceEqual(projection.Bytes);
 
         if (apply && !unchanged)
         {
@@ -488,11 +492,60 @@ public static class MemorySyncCommand
 
             if (projectionWriterOverride is not null)
             {
-                projectionWriterOverride(target.FilePath, bytes);
+                projectionWriterOverride(target.FilePath, projection.Bytes);
             }
             else
             {
-                WriteAtomic(target.FilePath, bytes);
+                WriteAtomic(target.FilePath, projection.Bytes);
+            }
+        }
+
+        if (apply)
+        {
+            if (!Directory.Exists(target.RootDirectoryPath))
+            {
+                throw new DirectoryNotFoundException(
+                    $"Discovered vendor memory root '{target.RootDirectoryPath}' disappeared before publication; " +
+                    "Baton will not recreate a vendor root.");
+            }
+
+            // Detail filenames are content-addressed entry ids. New details are published before
+            // the index that can name them, so an interrupted write leaves the previous index and
+            // every path it names readable. The index replacement is the single visibility point.
+            foreach (var detail in publication.Details)
+            {
+                var path = DirectDetailPath(target.RootDirectoryPath, detail.FileName);
+                var current = File.Exists(path) ? File.ReadAllBytes(path) : null;
+                if (current is null || !current.AsSpan().SequenceEqual(detail.Bytes))
+                {
+                    WriteTargetFile(path, detail.Bytes, projectionWriterOverride);
+                }
+            }
+
+            var currentIndex = existingIndex;
+            if (currentIndex is null || !currentIndex.AsSpan().SequenceEqual(publication.IndexBytes))
+            {
+                WriteTargetFile(target.IndexFilePath, publication.IndexBytes, projectionWriterOverride);
+            }
+
+            // Cleanup is deliberately after the new index is visible. A failed deletion can leave
+            // an unreferenced Baton detail, but can never leave the current index pointing at a
+            // missing detail; the durable projection obligation makes the cleanup retryable.
+            var liveDetails = publication.Details
+                .Select(detail => detail.FileName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var previouslyPublishedDetails = existingIndex is null
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                : MemoryVendorIndexProjection.OwnedDetailFileNames(existingIndex);
+            foreach (var path in Directory.EnumerateFiles(target.RootDirectoryPath))
+            {
+                var name = Path.GetFileName(path);
+                if (!liveDetails.Contains(name)
+                    && previouslyPublishedDetails.Contains(name)
+                    && MemoryVendorIndexProjection.IsOwnedDetailFile(name, File.ReadAllBytes(path)))
+                {
+                    File.Delete(DirectDetailPath(target.RootDirectoryPath, name));
+                }
             }
         }
 
@@ -501,8 +554,43 @@ public static class MemorySyncCommand
             target.RootDirectoryPath,
             target.FilePath,
             unchanged ? UnchangedDisposition : existing is null ? (apply ? "created" : "would create") : (apply ? "rewritten" : "would rewrite"),
-            bytes.Length,
-            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+            projection.Bytes.Length,
+            Convert.ToHexString(SHA256.HashData(projection.Bytes)).ToLowerInvariant());
+    }
+
+    private static void WriteTargetFile(
+        string path,
+        byte[] bytes,
+        Action<string, byte[]>? projectionWriterOverride)
+    {
+        if (projectionWriterOverride is not null)
+        {
+            projectionWriterOverride(path, bytes);
+            return;
+        }
+
+        WriteAtomic(path, bytes);
+    }
+
+    /// <summary>
+    /// Validates every generated detail path at the filesystem boundary. Canonical entry ids are
+    /// persisted input, so filename construction alone is not authority to leave the vendor root.
+    /// </summary>
+    private static string DirectDetailPath(string rootDirectoryPath, string fileName)
+    {
+        if (!MemoryVendorIndexProjection.IsOwnedDetailFile(fileName))
+        {
+            throw new InvalidDataException($"Memory detail filename '{fileName}' is not a valid derived-id detail filename.");
+        }
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectoryPath));
+        var path = Path.GetFullPath(Path.Combine(root, fileName));
+        if (!string.Equals(Path.GetDirectoryName(path), root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"Memory detail path '{path}' is not a direct child of vendor root '{root}'.");
+        }
+
+        return path;
     }
 
     private static SyncTargetReport SupersededReport(ProjectionTarget target, byte[] bytes) =>

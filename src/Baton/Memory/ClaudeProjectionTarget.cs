@@ -9,7 +9,11 @@ namespace Baton.Memory;
 /// <param name="RootDirectoryPath">The memory root the file goes in. Discovered, never constructed; see the target types' remarks.</param>
 /// <param name="FilePath">The one file this target's projection is written to.</param>
 public sealed record ProjectionTarget(
-    string Vendor, VendorMemoryScope Scope, string RootDirectoryPath, string FilePath);
+    string Vendor,
+    VendorMemoryScope Scope,
+    string RootDirectoryPath,
+    string FilePath,
+    string IndexFilePath);
 
 /// <summary>
 /// The Claude memory roots a projection is written into — <c>{claude-home}/projects/&lt;encoded-path&gt;/memory/</c>,
@@ -27,17 +31,16 @@ public sealed record ProjectionTarget(
 /// constructing one — is spec/baton.md §12's ruling.
 /// </para>
 /// <para>
-/// <b>One file, owned outright, and not the vendor's index.</b> Baton writes exactly
-/// <see cref="ProjectionFileName"/> and overwrites it in full; it does not touch <c>MEMORY.md</c> or
-/// any other file in the root. What follows from that, said outright rather than left to be worked
-/// out: Claude Code surfaces memories it has indexed, so a projection Baton did not add to the
-/// vendor's own index may not be read by the vendor until something points at it. Editing the
-/// vendor's index would make the projection reachable and would also make this verb destructive to a
-/// file the operator owns, which is the trade #1852 settles in the other direction throughout.
+/// <b>One compatibility file, plus the canonical bounded index section.</b> Baton writes exactly
+/// <see cref="ProjectionFileName"/> in full and may update <c>MEMORY.md</c> only inside the paired
+/// section described by the canonical bounded-index contract in spec/baton.md §12. Everything outside
+/// those markers remains vendor or operator owned.
 /// </para>
 /// </remarks>
 public static class ClaudeProjectionTarget
 {
+    /// <summary>The vendor-loaded index Baton extends only inside its bounded section (#2139).</summary>
+    public const string IndexFileName = "MEMORY.md";
     /// <summary>
     /// The one file Baton writes in a Claude memory root. Prefixed <c>baton-</c> so it cannot collide
     /// with a memory the vendor or the operator wrote, and suffixed <c>.md</c> because the root's other
@@ -54,7 +57,8 @@ public static class ClaudeProjectionTarget
             MemoryRootInventory.ClaudeVendor,
             VendorMemoryScope.Vendor,
             rootDirectoryPath,
-            Path.Combine(rootDirectoryPath, ProjectionFileName));
+            Path.Combine(rootDirectoryPath, ProjectionFileName),
+            Path.Combine(rootDirectoryPath, IndexFileName));
     }
 }
 
@@ -93,6 +97,7 @@ public static class CodexProjectionTarget
             "codex",
             scope,
             rootDirectoryPath,
-            Path.Combine(rootDirectoryPath, ProjectionFileName));
+            Path.Combine(rootDirectoryPath, ProjectionFileName),
+            Path.Combine(rootDirectoryPath, ClaudeProjectionTarget.IndexFileName));
     }
 }

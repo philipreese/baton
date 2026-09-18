@@ -7010,12 +7010,22 @@ root is refused by construction, and an operator assertion does not lift the ref
 a record of what was, a projection is the current reading, and `MemorySyncCommand`'s discovery remarks
 carry why the check has to run ahead of resolution. Every discovered root that is not a target is
 listed in the report with its reason, so "discovered and never written" is printed rather than only
-claimed. Each target root
-receives exactly one Baton-owned file and no other file in it is touched — not `MEMORY.md`, not the
-vendor's own memories. The honest consequence, stated because a reader's prior fills the gap the other
-way: a vendor that surfaces only the memories it has indexed may not read the projection until
-something points at it, and editing an index the operator owns is the destructive move #1852 declines
-everywhere else.
+claimed. Each target root receives a compact Baton-owned section in its real `MEMORY.md` (or that
+vendor surface's equivalent index) plus explicitly `baton-memory-<entry-id>.md` detail files. Baton
+preserves every byte outside its paired section markers. Missing, duplicate, nested, reordered, or
+malformed markers refuse publication rather than attempting a merge. The section lists every resolved
+live entry once, fleet first and then canonical repository order, with title, one-line description and
+relative detail path; retracted and superseded rows are absent. Details land before the atomically
+replaced index, so an index never names a missing file; old details are cleaned up only when the prior
+bounded section names them and their content carries Baton's matching ownership record. A read, write,
+replacement, or marker failure leaves the prior readable index in place and follows
+the existing durable projection obligation/retry path. `baton-projection.md` remains a compatible
+marker-bearing cache during migration, and import skips it and the detail files while stripping only
+Baton's bounded section from a mixed vendor index, so generated catalog lines cannot re-enter the
+canonical store. An empty resolved store leaves the markers but removes their lines and stale owned
+details. The honest consequence, stated because a reader's prior fills the gap the other way: a vendor
+that surfaces only the memories it has indexed can now discover the compact catalog; that does not
+establish that it loaded any detail.
 
 **`baton memory audit [--format text|json]` — phase A, shipped.** Read-only, and read-only *by
 construction* rather than by flag: nothing on the path opens a file for writing, so there is
