@@ -8,7 +8,7 @@ namespace Baton.Vendors.Tests;
 /// <summary>
 /// #2110: the four arms spec/baton.md §2 ("Role default skills") states — attached first, added to by
 /// <c>--skill</c>, removed by the opt-out, and the unresolvable-default refusal that names the role.
-/// The shipped three role-default packages are pinned here too — loadable, lint-clean, bounded in
+/// The shipped four role-default packages are pinned here too — loadable, lint-clean, bounded in
 /// size, and carrying nothing task-specific — because a default that fails to load turns every
 /// dispatch of that role into a refusal. The model-invoked conductor package is pinned separately:
 /// it is shipped through the same tree but is not inlined into worker prompts or registered to a role.
@@ -33,6 +33,7 @@ public sealed class RoleDefaultSkillsTests : IDisposable
         ["implement"] = "baton-implement",
         ["review"] = "baton-review",
         ["advise"] = "baton-advise",
+        ["janitor"] = "baton-janitor",
     };
 
     private static string ShippedSkillsDirectory => Path.Combine(AppContext.BaseDirectory, "skills");
@@ -82,6 +83,7 @@ public sealed class RoleDefaultSkillsTests : IDisposable
     [InlineData("baton-implement")]
     [InlineData("baton-review")]
     [InlineData("baton-advise")]
+    [InlineData("baton-janitor")]
     public void Package_line_endings_do_not_change_the_body_length_or_inlined_prompt(string name)
     {
         var package = SkillPackageReader.LoadPackage(Path.Combine(ShippedSkillsDirectory, name));
@@ -97,6 +99,7 @@ public sealed class RoleDefaultSkillsTests : IDisposable
     [InlineData("implement")]
     [InlineData("review")]
     [InlineData("advise")]
+    [InlineData("janitor")]
     public void A_roles_default_skill_is_attached_with_no_skill_flag_at_all(string roleId)
     {
         var binding = RoleDispatch.ToBinding(WorkerRoleCatalog.For(roleId), "Do the work.");
@@ -230,6 +233,7 @@ public sealed class RoleDefaultSkillsTests : IDisposable
     [InlineData("baton-implement")]
     [InlineData("baton-review")]
     [InlineData("baton-advise")]
+    [InlineData("baton-janitor")]
     public void Each_shipped_package_loads_lint_clean_from_the_next_to_the_assembly_rung(string name)
     {
         var package = SkillPackageReader.LoadPackage(Path.Combine(ShippedSkillsDirectory, name));
@@ -250,6 +254,7 @@ public sealed class RoleDefaultSkillsTests : IDisposable
     [InlineData("baton-implement")]
     [InlineData("baton-review")]
     [InlineData("baton-advise")]
+    [InlineData("baton-janitor")]
     public void Each_shipped_package_stays_short_and_carries_nothing_task_specific(string name)
     {
         var package = SkillPackageReader.LoadPackage(Path.Combine(ShippedSkillsDirectory, name));
