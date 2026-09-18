@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
