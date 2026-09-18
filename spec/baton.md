@@ -7016,8 +7016,9 @@ preserves every byte outside its paired section markers. Missing, duplicate, nes
 malformed markers refuse publication rather than attempting a merge. The section lists every resolved
 live entry once, fleet first and then canonical repository order, with title, one-line description and
 relative detail path; retracted and superseded rows are absent. Details land before the atomically
-replaced index, so an index never names a missing file; old unreferenced Baton details are then cleaned
-up. A read, write, replacement, or marker failure leaves the prior readable index in place and follows
+replaced index, so an index never names a missing file; old details are cleaned up only when the prior
+bounded section names them and their content carries Baton's matching ownership record. A read, write,
+replacement, or marker failure leaves the prior readable index in place and follows
 the existing durable projection obligation/retry path. `baton-projection.md` remains a compatible
 marker-bearing cache during migration, and import skips it and the detail files while stripping only
 Baton's bounded section from a mixed vendor index, so generated catalog lines cannot re-enter the

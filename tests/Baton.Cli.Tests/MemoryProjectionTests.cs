@@ -1036,7 +1036,7 @@ public sealed class MemoryProjectionTests : IDisposable
         Assert.NotEmpty(details);
         Assert.All(details, name => Assert.Contains(name!, index, StringComparison.Ordinal));
 
-        File.WriteAllText(Path.Combine(root, "baton-memory-stale.md"), "stale Baton detail");
+        File.WriteAllText(Path.Combine(root, "baton-memory-release-notes.md"), "vendor-owned prefix collision");
         var stored = await MemoryStore.ReadAllAsync(BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken);
         Assert.Equal(stored.Count, await MemoryStore.RemoveAsync(
             stored.Select(entry => entry.Id).ToList(), BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
@@ -1046,7 +1046,8 @@ public sealed class MemoryProjectionTests : IDisposable
         var emptyIndex = File.ReadAllText(indexPath);
         Assert.StartsWith("vendor heading\r\n", emptyIndex, StringComparison.Ordinal);
         Assert.DoesNotContain(MemoryVendorIndexProjection.DetailPrefix, emptyIndex, StringComparison.Ordinal);
-        Assert.Empty(Directory.GetFiles(root, MemoryVendorIndexProjection.DetailPrefix + "*.md"));
+        Assert.All(details, detail => Assert.False(File.Exists(Path.Combine(root, detail!))));
+        Assert.Equal("vendor-owned prefix collision", File.ReadAllText(Path.Combine(root, "baton-memory-release-notes.md")));
         Assert.Equal("leave me alone", File.ReadAllText(Path.Combine(root, "vendor-note.md")));
     }
 

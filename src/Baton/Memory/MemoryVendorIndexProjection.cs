@@ -40,16 +40,82 @@ public static class MemoryVendorIndexProjection
 
     public static string DetailFileName(string entryId)
     {
-        ArgumentException.ThrowIfNullOrEmpty(entryId);
+        if (!IsDerivedEntryId(entryId))
+        {
+            throw new InvalidDataException("A canonical memory entry id must be exactly 32 lower-case hexadecimal characters.");
+        }
+
         return DetailPrefix + entryId + DetailSuffix;
     }
 
-    /// <summary>Whether a root file is an explicitly Baton-named per-entry detail file.</summary>
+    /// <summary>Whether a file name has the exact derived-id detail-file grammar.</summary>
     public static bool IsOwnedDetailFile(string fileName) =>
-        fileName.StartsWith(DetailPrefix, StringComparison.OrdinalIgnoreCase)
-        && fileName.EndsWith(DetailSuffix, StringComparison.OrdinalIgnoreCase);
+        TryGetDetailEntryId(fileName, out _);
 
-    private static byte[] Merge(byte[] existing, byte[] section)
+    /// <summary>
+    /// Whether a syntactically valid detail file carries the content-backed ownership record Baton
+    /// writes. A filename alone is never deletion authority.
+    /// </summary>
+    public static bool IsOwnedDetailFile(string fileName, ReadOnlySpan<byte> bytes) =>
+        TryGetDetailEntryId(fileName, out var entryId)
+        && bytes.StartsWith(Encoding.UTF8.GetBytes(
+            MemoryProjection.FormatMarker + "\n<!-- baton:memory-detail id=" + entryId + " -->\n"));
+
+    /// <summary>
+    /// Returns only the exact detail links in a structurally valid owned section. This is the
+    /// persistent ownership evidence stale cleanup consumes; a prefix-shaped vendor filename is not
+    /// enough to make it deletable.
+    /// </summary>
+    public static IReadOnlySet<string> OwnedDetailFileNames(byte[] index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        if (!TryFindOwnedSection(index, out var section))
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var bodyStart = section.Start + StartBytes.Length;
+        var lines = Encoding.UTF8.GetString(index.AsSpan(bodyStart, section.End - bodyStart))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
+        {
+            if (!line.StartsWith("- [", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var close = ClosingLinkDelimiter(line);
+            if (close < 0)
+            {
+                continue;
+            }
+
+            var fileName = line[(close + 2)..];
+            var end = fileName.IndexOf(')');
+            if (end >= 0 && TryGetDetailEntryId(fileName[..end], out var entryId))
+            {
+                names.Add(DetailFileName(entryId));
+            }
+        }
+
+        return names;
+    }
+
+    private static int ClosingLinkDelimiter(string line)
+    {
+        for (var index = 3; index + 1 < line.Length; index++)
+        {
+            if (line[index] == ']' && line[index + 1] == '(' && (index == 0 || line[index - 1] != '\\'))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static byte[] Merge(byte[] existing, byte[] renderedSection)
     {
         var starts = Matches(existing, StartBytes);
         var ends = Matches(existing, EndBytes);
@@ -58,20 +124,18 @@ public static class MemoryVendorIndexProjection
             // A root that has never had a Baton section is the migration entry point. The old bytes
             // are retained as an exact prefix; the separator and section are newly Baton-owned bytes.
             var separator = existing.Length == 0 ? [] : new byte[] { (byte)'\n' };
-            return [.. existing, .. separator, .. section];
+            return [.. existing, .. separator, .. renderedSection];
         }
 
-        if (starts.Count != 1 || ends.Count != 1 || starts[0] >= ends[0]
-            || !IsWholeLine(existing, starts[0], StartBytes.Length)
-            || !IsWholeLine(existing, ends[0], EndBytes.Length))
+        if (!TryFindOwnedSection(existing, out var ownedSection))
         {
             throw new InvalidDataException(
                 "Baton memory index markers are missing, duplicated, nested, reordered, or malformed; " +
                 "Baton refused to rewrite the vendor index.");
         }
 
-        var before = existing.AsSpan(0, starts[0]);
-        var afterOffset = ends[0] + EndBytes.Length;
+        var before = existing.AsSpan(0, ownedSection.Start);
+        var afterOffset = ownedSection.End + EndBytes.Length;
         // The line ending immediately after our end marker is part of the section we generated.
         // Keeping it as surrounding content would add one newline on every regeneration.
         if (afterOffset < existing.Length && existing[afterOffset] == (byte)'\r')
@@ -85,7 +149,7 @@ public static class MemoryVendorIndexProjection
         }
 
         var after = existing.AsSpan(afterOffset);
-        return [.. before, .. section, .. after];
+        return [.. before, .. renderedSection, .. after];
     }
 
     private static List<int> Matches(byte[] bytes, byte[] marker)
@@ -105,6 +169,22 @@ public static class MemoryVendorIndexProjection
     private static bool IsWholeLine(byte[] bytes, int offset, int length) =>
         (offset == 0 || bytes[offset - 1] is (byte)'\n' or (byte)'\r')
         && (offset + length == bytes.Length || bytes[offset + length] is (byte)'\n' or (byte)'\r');
+
+    private static bool TryFindOwnedSection(byte[] bytes, out OwnedSection section)
+    {
+        var starts = Matches(bytes, StartBytes);
+        var ends = Matches(bytes, EndBytes);
+        if (starts.Count == 1 && ends.Count == 1 && starts[0] < ends[0]
+            && IsWholeLine(bytes, starts[0], StartBytes.Length)
+            && IsWholeLine(bytes, ends[0], EndBytes.Length))
+        {
+            section = new OwnedSection(starts[0], ends[0]);
+            return true;
+        }
+
+        section = default;
+        return false;
+    }
 
     private static byte[] RenderDetail(MemoryProjectionCandidate candidate)
     {
@@ -134,6 +214,8 @@ public static class MemoryVendorIndexProjection
     }
 
     private static string OneLine(string value) => string.Join(" ", value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        .Replace(SectionStart, "&lt;!-- baton:memory-index:start -->", StringComparison.Ordinal)
+        .Replace(SectionEnd, "&lt;!-- baton:memory-index:end -->", StringComparison.Ordinal)
         .Replace("[", "\\[").Replace("]", "\\]");
 
     /// <summary>
@@ -144,17 +226,14 @@ public static class MemoryVendorIndexProjection
     public static bool TryStripOwnedSection(string text, out string outside)
     {
         ArgumentNullException.ThrowIfNull(text);
-        var start = text.IndexOf(SectionStart, StringComparison.Ordinal);
-        var end = text.IndexOf(SectionEnd, StringComparison.Ordinal);
-        if (start < 0 || end < start
-            || text.IndexOf(SectionStart, start + SectionStart.Length, StringComparison.Ordinal) >= 0
-            || text.IndexOf(SectionEnd, end + SectionEnd.Length, StringComparison.Ordinal) >= 0)
+        var bytes = Encoding.UTF8.GetBytes(text);
+        if (!TryFindOwnedSection(bytes, out var section))
         {
             outside = text;
             return false;
         }
 
-        var prefixLength = start;
+        var prefixLength = section.Start;
         // Merge adds this separator as Baton-owned syntax, even when the vendor index already ended
         // in a newline, so stripping restores the exact vendor prefix in the ordinary UTF-8 case.
         if (prefixLength > 0 && text[prefixLength - 1] == '\n')
@@ -162,20 +241,47 @@ public static class MemoryVendorIndexProjection
             prefixLength--;
         }
 
-        var suffixStart = end + SectionEnd.Length;
-        if (suffixStart < text.Length && text[suffixStart] == '\r')
+        var suffixStart = section.End + EndBytes.Length;
+        if (suffixStart < bytes.Length && bytes[suffixStart] == (byte)'\r')
         {
             suffixStart++;
         }
 
-        if (suffixStart < text.Length && text[suffixStart] == '\n')
+        if (suffixStart < bytes.Length && bytes[suffixStart] == (byte)'\n')
         {
             suffixStart++;
         }
 
-        outside = text[..prefixLength] + text[suffixStart..];
+        outside = Encoding.UTF8.GetString(bytes.AsSpan(0, prefixLength))
+            + Encoding.UTF8.GetString(bytes.AsSpan(suffixStart));
         return true;
     }
+
+    private static bool TryGetDetailEntryId(string fileName, out string entryId)
+    {
+        entryId = string.Empty;
+        if (string.IsNullOrEmpty(fileName)
+            || !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal)
+            || !fileName.StartsWith(DetailPrefix, StringComparison.Ordinal)
+            || !fileName.EndsWith(DetailSuffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var idLength = fileName.Length - DetailPrefix.Length - DetailSuffix.Length;
+        if (idLength != 32)
+        {
+            return false;
+        }
+
+        entryId = fileName.Substring(DetailPrefix.Length, idLength);
+        return IsDerivedEntryId(entryId);
+    }
+
+    private static bool IsDerivedEntryId(string? entryId) =>
+        entryId is { Length: 32 } && entryId.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private readonly record struct OwnedSection(int Start, int End);
 }
 
 public sealed record VendorDetailFile(string FileName, byte[] Bytes);

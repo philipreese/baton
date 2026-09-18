@@ -154,7 +154,9 @@ public sealed class MemoryImportTests : IDisposable
         IReadOnlyDictionary<string, string> before,
         IReadOnlyDictionary<string, byte[]> beforeBytes)
     {
+        var afterBytes = SnapshotTree(root);
         var after = DigestTree(root);
+        var authorizedDetails = AuthorizedGeneratedDetails(beforeBytes, afterBytes);
         var paths = before.Keys.Concat(after.Keys).Distinct(StringComparer.OrdinalIgnoreCase);
         foreach (var path in paths)
         {
@@ -166,7 +168,8 @@ public sealed class MemoryImportTests : IDisposable
             }
 
             var name = Path.GetFileName(path);
-            if (IsOwnedProjectionFile(name))
+            if (string.Equals(name, ClaudeProjectionTarget.ProjectionFileName, StringComparison.OrdinalIgnoreCase)
+                || authorizedDetails.Contains(path))
             {
                 continue;
             }
@@ -180,18 +183,43 @@ public sealed class MemoryImportTests : IDisposable
                 continue;
             }
 
-            Assert.Fail(
-                existedBefore
-                    ? existsAfter
-                        ? $"Import changed an unowned file: {path}"
-                        : $"Import deleted an unowned file: {path}"
-                    : $"Import created an unowned file: {path}");
+            Assert.True(existedBefore && existsAfter, $"Import changed the file population outside its authorized generated set: {path}");
+            Assert.Equal(beforeBytes[path], afterBytes[path]);
         }
     }
 
-    private static bool IsOwnedProjectionFile(string fileName) =>
-        string.Equals(fileName, ClaudeProjectionTarget.ProjectionFileName, StringComparison.OrdinalIgnoreCase)
-        || MemoryVendorIndexProjection.IsOwnedDetailFile(fileName);
+    private static HashSet<string> AuthorizedGeneratedDetails(
+        IReadOnlyDictionary<string, byte[]> beforeBytes,
+        IReadOnlyDictionary<string, byte[]> afterBytes)
+    {
+        var authorized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddFrom(beforeBytes);
+        AddFrom(afterBytes);
+        return authorized;
+
+        void AddFrom(IReadOnlyDictionary<string, byte[]> tree)
+        {
+            foreach (var (indexPath, bytes) in tree)
+            {
+                if (!string.Equals(Path.GetFileName(indexPath), ClaudeProjectionTarget.IndexFileName, StringComparison.OrdinalIgnoreCase)
+                    || !MemoryVendorIndexProjection.TryStripOwnedSection(Encoding.UTF8.GetString(bytes), out _))
+                {
+                    continue;
+                }
+
+                var directory = Path.GetDirectoryName(indexPath)!;
+                foreach (var detailName in MemoryVendorIndexProjection.OwnedDetailFileNames(bytes))
+                {
+                    var detailPath = Path.Combine(directory, detailName);
+                    if (tree.TryGetValue(detailPath, out var detailBytes)
+                        && MemoryVendorIndexProjection.IsOwnedDetailFile(detailName, detailBytes))
+                    {
+                        authorized.Add(detailPath);
+                    }
+                }
+            }
+        }
+    }
 
     private static bool IsProjectionTargetIndex(
         string path,
@@ -340,6 +368,9 @@ public sealed class MemoryImportTests : IDisposable
         File.WriteAllText(
             Path.Combine(ClaudeHome, "projects", "C--baton-worktree", "memory", ClaudeProjectionTarget.IndexFileName),
             "second vendor-owned heading\r\n");
+        File.WriteAllText(
+            Path.Combine(ClaudeHome, "projects", "C--baton", "memory", "baton-memory-release-notes.md"),
+            "vendor-owned prefix collision\r\n");
         var archived = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
 
         var memories = Path.Combine(UserHome, ".codex", "memories");

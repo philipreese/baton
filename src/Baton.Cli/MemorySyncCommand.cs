@@ -514,7 +514,7 @@ public static class MemorySyncCommand
             // every path it names readable. The index replacement is the single visibility point.
             foreach (var detail in publication.Details)
             {
-                var path = Path.Combine(target.RootDirectoryPath, detail.FileName);
+                var path = DirectDetailPath(target.RootDirectoryPath, detail.FileName);
                 var current = File.Exists(path) ? File.ReadAllBytes(path) : null;
                 if (current is null || !current.AsSpan().SequenceEqual(detail.Bytes))
                 {
@@ -534,12 +534,17 @@ public static class MemorySyncCommand
             var liveDetails = publication.Details
                 .Select(detail => detail.FileName)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var previouslyPublishedDetails = existingIndex is null
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                : MemoryVendorIndexProjection.OwnedDetailFileNames(existingIndex);
             foreach (var path in Directory.EnumerateFiles(target.RootDirectoryPath))
             {
                 var name = Path.GetFileName(path);
-                if (MemoryVendorIndexProjection.IsOwnedDetailFile(name) && !liveDetails.Contains(name))
+                if (!liveDetails.Contains(name)
+                    && previouslyPublishedDetails.Contains(name)
+                    && MemoryVendorIndexProjection.IsOwnedDetailFile(name, File.ReadAllBytes(path)))
                 {
-                    File.Delete(path);
+                    File.Delete(DirectDetailPath(target.RootDirectoryPath, name));
                 }
             }
         }
@@ -565,6 +570,27 @@ public static class MemorySyncCommand
         }
 
         WriteAtomic(path, bytes);
+    }
+
+    /// <summary>
+    /// Validates every generated detail path at the filesystem boundary. Canonical entry ids are
+    /// persisted input, so filename construction alone is not authority to leave the vendor root.
+    /// </summary>
+    private static string DirectDetailPath(string rootDirectoryPath, string fileName)
+    {
+        if (!MemoryVendorIndexProjection.IsOwnedDetailFile(fileName))
+        {
+            throw new InvalidDataException($"Memory detail filename '{fileName}' is not a valid derived-id detail filename.");
+        }
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectoryPath));
+        var path = Path.GetFullPath(Path.Combine(root, fileName));
+        if (!string.Equals(Path.GetDirectoryName(path), root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"Memory detail path '{path}' is not a direct child of vendor root '{root}'.");
+        }
+
+        return path;
     }
 
     private static SyncTargetReport SupersededReport(ProjectionTarget target, byte[] bytes) =>

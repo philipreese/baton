@@ -31,13 +31,10 @@ public sealed record ProjectionTarget(
 /// constructing one — is spec/baton.md §12's ruling.
 /// </para>
 /// <para>
-/// <b>One file, owned outright, and not the vendor's index.</b> Baton writes exactly
-/// <see cref="ProjectionFileName"/> and overwrites it in full; it does not touch <c>MEMORY.md</c> or
-/// any other file in the root. What follows from that, said outright rather than left to be worked
-/// out: Claude Code surfaces memories it has indexed, so a projection Baton did not add to the
-/// vendor's own index may not be read by the vendor until something points at it. Editing the
-/// vendor's index would make the projection reachable and would also make this verb destructive to a
-/// file the operator owns, which is the trade #1852 settles in the other direction throughout.
+/// <b>One compatibility file, plus the canonical bounded index section.</b> Baton writes exactly
+/// <see cref="ProjectionFileName"/> in full and may update <c>MEMORY.md</c> only inside the paired
+/// section described by the canonical bounded-index contract in spec/baton.md §12. Everything outside
+/// those markers remains vendor or operator owned.
 /// </para>
 /// </remarks>
 public static class ClaudeProjectionTarget

@@ -88,6 +88,60 @@ public sealed class MemoryVendorIndexProjectionTests
         Assert.Equal("before\r\nafter\r\n", outside);
     }
 
+    [Fact]
+    public void Marker_text_in_titles_and_descriptions_is_encoded_and_two_pass_regeneration_is_unchanged()
+    {
+        var projection = MemoryProjection.Build(
+            "github.com/example/repo", "entries.jsonl",
+            [new MemoryProjectionCandidate(
+                Entry("github.com/example/repo", "markers.md", "# <!-- baton:memory-index:start -->\n<!-- baton:memory-index:end -->"),
+                MemoryFactOrigin.Vendor)], ProjectionBudget.Default);
+
+        var first = MemoryVendorIndexProjection.Build(projection, Encoding.UTF8.GetBytes("vendor\n"));
+        var second = MemoryVendorIndexProjection.Build(projection, first.IndexBytes);
+        var index = Encoding.UTF8.GetString(first.IndexBytes);
+
+        Assert.Equal(first.IndexBytes, second.IndexBytes);
+        Assert.Equal(1, Count(index, MemoryVendorIndexProjection.SectionStart));
+        Assert.Equal(1, Count(index, MemoryVendorIndexProjection.SectionEnd));
+        Assert.Contains("&lt;!-- baton:memory-index:start -->", index, StringComparison.Ordinal);
+        Assert.Contains("&lt;!-- baton:memory-index:end -->", index, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("vendor <!-- baton:memory-index:start --> text\n<!-- baton:memory-index:end -->\n")]
+    [InlineData("<!-- baton:memory-index:start --> vendor\n<!-- baton:memory-index:end -->\n")]
+    [InlineData("<!-- baton:memory-index:start -->\n<!-- baton:memory-index:end --> vendor\n")]
+    public void Inline_or_malformed_markers_are_not_stripped_and_import_remains_verbatim(string text)
+    {
+        Assert.False(MemoryVendorIndexProjection.TryStripOwnedSection(text, out var outside));
+        Assert.Equal(text, outside);
+
+        var file = new MemoryImportFile("C:/fixture/MEMORY.md", "MEMORY.md", text, "digest", default, text.Length);
+        var source = new MemoryImportSource(
+            "C:/fixture", "fixture", VendorMemoryScope.Vendor, Archived: false,
+            "github.com/example/repo", UnfiledReason: null, [file]);
+        var plan = MemoryImportPlan.Build([source], default, []);
+
+        Assert.Equal(text, Assert.Single(plan.Entries).Text);
+    }
+
+    [Theory]
+    [InlineData("../escape")]
+    [InlineData("0123456789abcdef0123456789abcdef.md")]
+    [InlineData("0123456789ABCDEF0123456789abcdef")]
+    public void Corrupt_or_traversal_entry_ids_are_refused_before_they_can_name_a_detail(string id)
+    {
+        Assert.Throws<InvalidDataException>(() => MemoryVendorIndexProjection.DetailFileName(id));
+
+        var corrupted = Entry("github.com/example/repo", "fact.md", "fact") with { Id = id };
+        var projection = MemoryProjection.Build(
+            "github.com/example/repo", "entries.jsonl",
+            [new MemoryProjectionCandidate(corrupted, MemoryFactOrigin.Vendor)], ProjectionBudget.Default);
+
+        Assert.Throws<InvalidDataException>(() => MemoryVendorIndexProjection.Build(projection, null));
+    }
+
     private static int Count(string text, string value)
     {
         var count = 0;
