@@ -1,6 +1,7 @@
 using Baton.Cli.Daemon;
 using Baton.Cli.Mcp;
 using Baton.Status;
+using Baton.Store;
 using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -22,6 +23,7 @@ public sealed class DaemonRoomInventoryTests
             var discoveryCalls = 0;
             var versionCalls = 0;
             var observationCalls = 0;
+            var initialRefresh = true;
             var rooms = Enumerable.Range(0, 1_001)
                 .Select(index => new FleetStatusTool.DiscoveredRoom($"room-{index}", null))
                 .ToList();
@@ -43,7 +45,17 @@ public sealed class DaemonRoomInventoryTests
                     return TerminalVersion(1);
                 },
                 _ => true,
-                () => now);
+                () => now,
+                _ =>
+                {
+                    if (initialRefresh)
+                    {
+                        initialRefresh = false;
+                        return null;
+                    }
+
+                    return new HashSet<string>(BatonPaths.RecordKeyComparer);
+                });
             var scheduler = new QueueSchedulerService(inventory);
             var projection = new FleetProjectionWriter(() => 8, roomInventory: inventory);
             var delivery = new DeliveryPoller(inventory);
@@ -330,6 +342,61 @@ public sealed class DaemonRoomInventoryTests
 
         Assert.Equal("Running", Assert.Single(rerun).View.State);
         Assert.Equal(2, observeCalls);
+    }
+
+    [Fact]
+    public async Task Change_journal_revalidates_only_the_rerun_terminal_room()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rerun = false;
+        var versionCalls = 0;
+        var observationCalls = 0;
+        IReadOnlySet<string>? changes = null;
+        var rooms = Enumerable.Range(0, 1_001)
+            .Select(index => new FleetStatusTool.DiscoveredRoom($"room-{index}", null))
+            .ToList();
+        var inventory = new DaemonRoomInventory(
+            _ => Task.FromResult<IReadOnlyList<FleetStatusTool.DiscoveredRoom>>(rooms),
+            (room, _, _) =>
+            {
+                observationCalls++;
+                return Task.FromResult<FleetRoomStatusView?>(
+                    View(room, rerun && room == "room-500" ? "Running" : "Succeeded"));
+            },
+            () => Version(1),
+            room =>
+            {
+                versionCalls++;
+                return rerun && room == "room-500" ? ActiveVersion(2) : TerminalVersion(1);
+            },
+            _ => true,
+            () => now,
+            _ =>
+            {
+                var result = changes;
+                changes = new HashSet<string>(BatonPaths.RecordKeyComparer);
+                return result;
+            });
+
+        await inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.All,
+            DaemonRoomInventory.InventoryFreshness.Current,
+            Ct);
+
+        rerun = true;
+        changes = new HashSet<string>(BatonPaths.RecordKeyComparer)
+        {
+            BatonPaths.RecordKey("room-500"),
+        };
+        now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
+        var active = await inventory.ObserveAsync(
+            DaemonRoomInventory.InventoryScope.Active,
+            DaemonRoomInventory.InventoryFreshness.Current,
+            Ct);
+
+        Assert.Equal("room-500", Assert.Single(active).Room.RoomDir);
+        Assert.Equal(1_002, versionCalls);
+        Assert.Equal(1_002, observationCalls);
     }
 
     [Fact]
