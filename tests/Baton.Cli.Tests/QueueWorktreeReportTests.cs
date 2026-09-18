@@ -87,7 +87,8 @@ public sealed class QueueWorktreeReportTests
             var candidateEntry = Find(report, "candidate");
             Assert.True(candidateEntry.Classification == "candidate",
                 $"candidate was {candidateEntry.Classification}: {string.Join(", ", candidateEntry.ReasonCodes)}");
-            Assert.Equal("candidate", Find(report, "cancelled-before-launch").Classification);
+            AssertReason(report, "cancelled-before-launch",
+                "upstream-publication-evidence-unavailable", "unknown");
             AssertReason(report, "operator", "origin-not-owned", "retain");
             AssertReason(report, "imported", "origin-not-owned", "retain");
             AssertReason(report, "historical", "origin-not-owned", "unknown");
@@ -331,6 +332,7 @@ public sealed class QueueWorktreeReportTests
         try
         {
             var repo = await RepoAsync(root, "referenced");
+            await GitAsync(repo.Path, "branch", "retained-referenced-head");
             var room = Path.Combine(BatonPaths.Rooms, "continuation-room");
             Directory.CreateDirectory(room);
             await WorkerBindingConfigWriter.SaveToFileAsync(

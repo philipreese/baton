@@ -169,6 +169,8 @@ internal sealed record QueueWorktreeEntry(
         if (size is null) reasons.Add("size-observation-unavailable");
 
         var candidate = reasons.Count == 0;
+        var publicationEvidenceUnavailable = git.ReasonCodes.Contains(
+            UpstreamPublicationEvidenceUnavailableReason, StringComparer.Ordinal);
         var unavailable = !exists
             || origins.Contains(WorkspaceOrigins.Unknown, StringComparer.Ordinal)
             || !referenceObservation.Complete
@@ -177,9 +179,12 @@ internal sealed record QueueWorktreeEntry(
             || git.ReasonCodes.Contains("repository-probe-unavailable", StringComparer.Ordinal)
             || git.ReasonCodes.Contains("expected-branch-probe-unavailable", StringComparer.Ordinal)
             || git.ReasonCodes.Contains(UpstreamAheadProbeUnavailableReason, StringComparer.Ordinal)
-            || git.ReasonCodes.Contains(UpstreamPublicationEvidenceUnavailableReason, StringComparer.Ordinal)
             || size is null;
-        var classification = candidate ? "candidate" : unavailable ? "unknown" : "retain";
+        var publicationEvidenceIsOnlyBlocker = publicationEvidenceUnavailable
+            && reasons.All(reason => reason == UpstreamPublicationEvidenceUnavailableReason);
+        var classification = candidate
+            ? "candidate"
+            : unavailable || publicationEvidenceIsOnlyBlocker ? "unknown" : "retain";
         return new QueueWorktreeEntry(
             path,
             string.Join(",", origins),
