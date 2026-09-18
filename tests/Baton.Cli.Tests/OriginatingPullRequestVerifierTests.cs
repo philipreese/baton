@@ -2,6 +2,8 @@ using Baton.Cli.Tests.TestSupport;
 using Baton.CrashTestHost;
 using Baton.Domain;
 using Baton.Queue;
+using Baton.Status;
+using Baton.Store;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
@@ -109,6 +111,86 @@ public sealed class OriginatingPullRequestVerifierTests
 
         Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateRecoveryEvidence(
             RecoveryOptions(), workspace, new QueueSnapshot([item])));
+    }
+
+    [Fact]
+    public async Task A_launched_recovery_claims_once_while_its_assigned_room_is_still_absent()
+    {
+        using var home = new IsolatedBatonHome();
+        var workspace = Directory.CreateDirectory(Path.Combine(home.Path, "workspace")).FullName;
+        var room = Path.Combine(home.Path, "rooms", "queue-2178-lane-future");
+        var attemptId = new FleetAttemptId(RecoveryAttemptId);
+        var item = new QueueItem
+        {
+            Tag = "2178-lane",
+            Role = "implement",
+            Workspace = workspace,
+            SpecFile = "2178.md",
+            State = QueueItemState.Launched,
+            Stage = WorkStage.Continue,
+            Repository = "github.com/aer-works/baton",
+            PullRequest = 2304,
+            Branch = "2178-lane",
+            RoomDirectory = room,
+            ExpectedOriginatingPullRequestHead = PreservedHead,
+            AttemptId = attemptId,
+            AttemptEnvelope = new QueueAttemptEnvelope(
+                attemptId, null, "2178", null, 2304, WorkStage.Continue,
+                "implement", null, null, null, [], null, null, "admitted", room,
+                BatonPaths.RecordKey(room), null, DateTimeOffset.UnixEpoch),
+        };
+        await QueueStore.MutateAsync(
+            BatonPaths.QueueFile, snapshot => snapshot with { Items = [item] },
+            TestContext.Current.CancellationToken);
+        var options = RecoveryOptions(room);
+
+        Assert.False(Directory.Exists(room));
+        Assert.Equal(
+            PreservedHead,
+            await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
+                options, workspace, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<CliArgumentException>(() =>
+            OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
+                options, workspace, TestContext.Current.CancellationToken));
+
+        var claimed = Assert.Single((await QueueStore.LoadAsync(
+            BatonPaths.QueueFile, TestContext.Current.CancellationToken)).Items);
+        Assert.Equal(attemptId, claimed.OriginatingPullRequestRecoveryClaim);
+        Assert.False(Directory.Exists(room));
+    }
+
+    [Fact]
+    public void A_future_path_compares_lexically_but_an_existing_link_ancestor_is_refused()
+    {
+        var root = Directory.CreateTempSubdirectory("baton-origin-room-").FullName;
+        try
+        {
+            var rooms = Directory.CreateDirectory(Path.Combine(root, "rooms")).FullName;
+            var future = Path.Combine(rooms, "queue-future");
+            Assert.True(OriginatingPullRequestVerifier.SameWorkspace(
+                future, Path.Combine(rooms, ".", "queue-future")));
+            Assert.Equal(
+                OperatingSystem.IsWindows(),
+                OriginatingPullRequestVerifier.SameWorkspace(future, future.ToUpperInvariant()));
+
+            var target = Directory.CreateDirectory(Path.Combine(root, "target")).FullName;
+            var alias = Path.Combine(root, "rooms-alias");
+            try
+            {
+                Directory.CreateSymbolicLink(alias, target);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return;
+            }
+
+            var aliasedFuture = Path.Combine(alias, "queue-future");
+            Assert.False(OriginatingPullRequestVerifier.SameWorkspace(aliasedFuture, aliasedFuture));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
     }
 
     [Theory]
@@ -246,8 +328,8 @@ public sealed class OriginatingPullRequestVerifierTests
         }
     }
 
-    private static DispatchOptions RecoveryOptions() => new(
-        "implement", "2178.md", "room",
+    private static DispatchOptions RecoveryOptions(string room = "room") => new(
+        "implement", "2178.md", room,
         OriginatingPullRequest: "aer-works/baton#2304",
         OriginatingPullRequestBranch: "2178-lane",
         OriginatingPullRequestRecoveryTag: "2178-lane",

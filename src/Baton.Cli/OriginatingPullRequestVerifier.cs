@@ -348,9 +348,9 @@ internal static class OriginatingPullRequestVerifier
     {
         try
         {
-            var recordedPath = Path.GetFullPath(recorded);
-            var requestedPath = Path.GetFullPath(canonicalWorkspace);
-            if (!IsExistingLinkFreeDirectory(recordedPath) || !IsExistingLinkFreeDirectory(requestedPath))
+            var recordedPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(recorded));
+            var requestedPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(canonicalWorkspace));
+            if (!HasLinkFreeExistingPath(recordedPath) || !HasLinkFreeExistingPath(requestedPath))
             {
                 return false;
             }
@@ -367,18 +367,22 @@ internal static class OriginatingPullRequestVerifier
         }
     }
 
-    private static bool IsExistingLinkFreeDirectory(string path)
+    private static bool HasLinkFreeExistingPath(string path)
     {
-        var directory = new DirectoryInfo(path);
-        if (!directory.Exists)
+        if (File.Exists(path))
         {
             return false;
         }
 
-        for (DirectoryInfo? current = directory; current is not null; current = current.Parent)
+        for (DirectoryInfo? current = new(path); current is not null; current = current.Parent)
         {
-            if (current.LinkTarget is not null
-                || (current.Attributes & FileAttributes.ReparsePoint) != 0)
+            current.Refresh();
+            if (File.Exists(current.FullName) || current.LinkTarget is not null)
+            {
+                return false;
+            }
+
+            if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
             {
                 return false;
             }

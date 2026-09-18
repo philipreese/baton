@@ -262,7 +262,16 @@ public sealed class WorkItemAdvancerTests
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
-            await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            var seeded = await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            var attemptId = new FleetAttemptId("retiring-recovery-attempt");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seeded with
+                {
+                    AttemptId = attemptId,
+                    OriginatingPullRequestRecoveryClaim = attemptId,
+                }],
+            }, Ct);
             var merged = $$$"""
                 [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
                   "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
@@ -277,6 +286,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
             Assert.Equal(Now, retired.Retirement?.At);
             Assert.Equal("trusted merged observation for PR #77", retired.Retirement?.Reason);
+            Assert.Null(retired.OriginatingPullRequestRecoveryClaim);
             var ledger = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
             Assert.Contains(ledger, entry => entry is { Decision: QueueDecisionEntry.Retired, Tag: "1934-lane" });
         }

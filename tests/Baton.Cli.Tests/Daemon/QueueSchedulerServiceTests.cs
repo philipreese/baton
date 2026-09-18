@@ -2195,6 +2195,64 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_post_claim_verification_refusal_fails_the_exact_attempt_and_releases_its_claim()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string retainedHead = "0123456789abcdef0123456789abcdef01234567";
+            var workspace = Directory.CreateDirectory(Path.Combine(home, "workspace")).FullName;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [Item("2178-lane", scope: null) with
+                {
+                    Adapter = "codex",
+                    Model = "gpt-5.6-terra",
+                    Effort = "medium",
+                    Workspace = workspace,
+                    Stage = WorkStage.Continue,
+                    Repository = "github.com/aer-works/baton",
+                    PullRequest = 2397,
+                    Branch = "2178-lane-2",
+                    ExpectedOriginatingPullRequestHead = retainedHead,
+                    Requirements = [],
+                }],
+            }, Ct);
+            DispatchOptions? recovery = null;
+            var service = new QueueSchedulerService(
+                async (request, cancellationToken) =>
+                {
+                    recovery = QueueLauncher.BuildOptions(request);
+                    Assert.False(Directory.Exists(request.RoomDirectory));
+                    Assert.Equal(
+                        retainedHead,
+                        await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
+                            recovery, workspace, cancellationToken));
+                    return new QueueLaunchOutcome(
+                        null, Error: "originating PR verification failed after recovery admission");
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceHead: (_, _) => Task.FromResult<string?>(retainedHead));
+
+            await service.TickOnceAsync(Ct);
+
+            var failed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, failed.State);
+            Assert.Null(failed.OriginatingPullRequestRecoveryClaim);
+            Assert.NotNull(recovery);
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(recovery, workspace, Ct));
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_scope_class_with_no_configured_tier_fails_the_item_rather_than_launching_it()
     {
         var home = CreateTempHome();
@@ -2273,9 +2331,19 @@ public sealed class QueueSchedulerServiceTests
                 """{"state":"Succeeded","steps":[{"id":"implement","state":"Succeeded","execution":"e1"}],"outputs":[],"error":null}""",
                 Ct);
 
+            var attemptId = new FleetAttemptId("terminal-recovery-attempt");
             await QueueStore.MutateAsync(
                 BatonPaths.QueueFile,
-                s => s with { Items = [Item() with { State = QueueItemState.Launched, RoomDirectory = room }] },
+                s => s with
+                {
+                    Items = [Item() with
+                    {
+                        State = QueueItemState.Launched,
+                        RoomDirectory = room,
+                        AttemptId = attemptId,
+                        OriginatingPullRequestRecoveryClaim = attemptId,
+                    }],
+                },
                 Ct);
 
             await Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null))).ResolveFinishedItemsAsync(Ct);
@@ -2283,6 +2351,7 @@ public sealed class QueueSchedulerServiceTests
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(QueueItemState.Done, item.State);
             Assert.Null(item.Error);
+            Assert.Null(item.OriginatingPullRequestRecoveryClaim);
         }
         finally
         {

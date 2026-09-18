@@ -260,6 +260,10 @@ public sealed class WorkItemAdvancer
                     {
                         Retirement = retirement,
                         ExpectedOriginatingPullRequestHead = null,
+                        OriginatingPullRequestRecoveryClaim =
+                            i.OriginatingPullRequestRecoveryClaim == i.AttemptId
+                                ? null
+                                : i.OriginatingPullRequestRecoveryClaim,
                         DispositionOperations = [.. i.DispositionOutbox, operation],
                     } : i).ToList()
                 };
@@ -898,6 +902,10 @@ public sealed class WorkItemAdvancer
                         var retired = item with
                         {
                             Retirement = retirement,
+                            OriginatingPullRequestRecoveryClaim =
+                                item.OriginatingPullRequestRecoveryClaim == item.AttemptId
+                                    ? null
+                                    : item.OriginatingPullRequestRecoveryClaim,
                             DispositionOperations = [.. item.DispositionOutbox, operation],
                         };
                         return item.AttemptEnvelope is not null

@@ -152,7 +152,8 @@ public sealed record QueueItem
     /// <summary>
     /// Durable single-use claim for the queue-owned continuation PR admission. It is written by the
     /// dispatch gate while the exact launched attempt and room are still current; argv values alone
-    /// never prove this claim. A later lifecycle transition clears it with the retained head.
+    /// never prove this claim. The exact attempt's refusal, terminal transition, or retirement clears
+    /// it atomically with the state that makes that attempt ineligible for replay.
     /// </summary>
     public FleetAttemptId? OriginatingPullRequestRecoveryClaim { get; init; }
 
