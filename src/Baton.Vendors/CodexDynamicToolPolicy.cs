@@ -109,6 +109,8 @@ public sealed class CodexDynamicToolPolicy
     /// number and learns it from a command this policy ran.
     /// </summary>
     private readonly OwnPullRequestOnlyRule? _ownPullRequestOnly;
+    private readonly Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? _memoryAddExecutor;
+    private readonly CodexMemoryAddHostAuthority? _memoryAddAuthority;
 
     /// <param name="commandCeiling">
     /// How long one <c>baton_run_command</c> of a given class may run before Baton kills its process
@@ -133,7 +135,9 @@ public sealed class CodexDynamicToolPolicy
         TimeProvider? timeProvider = null,
         GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
         OriginatingPullRequestOwnership? originatingPullRequestOwnership = null,
-        IEnumerable<string>? artifactOnlyOutputNames = null)
+        IEnumerable<string>? artifactOnlyOutputNames = null,
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null,
+        CodexMemoryAddHostAuthority? memoryAddAuthority = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -162,6 +166,8 @@ public sealed class CodexDynamicToolPolicy
         _repeats = new RepeatedToolCallLedger(timeProvider);
         _ownPullRequestOnly = OwnPullRequestOnlyRule.AppliesTo(grant) ? new OwnPullRequestOnlyRule() : null;
         _ownPullRequestOnly?.Observe(originatingPullRequestOwnership?.ToEvidence());
+        _memoryAddExecutor = memoryAddExecutor;
+        _memoryAddAuthority = memoryAddAuthority;
     }
 
     /// <summary>
@@ -180,10 +186,12 @@ public sealed class CodexDynamicToolPolicy
         Action<CancellationToken>? beforeCommandTimeoutStartsForTest = null,
         GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
         IReadOnlyList<string>? directGhPrefixArguments = null,
-        OriginatingPullRequestOwnership? originatingPullRequestOwnership = null)
+        OriginatingPullRequestOwnership? originatingPullRequestOwnership = null,
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null)
         : this(
             grant, workingDirectory, outputDirectory, inputPaths, producedOutputNames,
-            commandCeiling, timeProvider, pullRequestCreateProvenance, originatingPullRequestOwnership)
+            commandCeiling, timeProvider, pullRequestCreateProvenance, originatingPullRequestOwnership,
+            memoryAddExecutor: memoryAddExecutor)
     {
         _commandCaptureStreamFactory = commandCaptureStreamFactory ?? CreateCommandCaptureStream;
         _beforeCommandTimeoutStartsForTest = beforeCommandTimeoutStartsForTest;
@@ -1175,6 +1183,31 @@ public sealed class CodexDynamicToolPolicy
             case RepeatVerdict.Execute:
             default:
                 break;
+        }
+
+        if (_memoryAddExecutor is not null
+            && MemoryAddCommandPermission.TryParseAllowed(
+                commandLine, _grant.DeniedShellCommandExceptions, out var memoryAdd))
+        {
+            var parsedMemoryAdd = memoryAdd!;
+            var kind = Enum.GetValues<Baton.Memory.MemoryKind>().FirstOrDefault(candidate =>
+                Baton.Memory.MemoryJsonNames.Of(candidate).Equals(parsedMemoryAdd.Kind, StringComparison.OrdinalIgnoreCase));
+            if (!MemoryAddCommandPermission.IsWorkerAuthorable(kind))
+            {
+                return CodexDynamicToolResult.Refused(
+                    "A worker memory-add grant cannot author operator policy or preferences.", GrantRules.ShellPattern);
+            }
+            if (_memoryAddAuthority is null)
+            {
+                return CodexDynamicToolResult.Refused(
+                    "This broker has no host-materialized memory-add authority.", GrantRules.ShellPattern);
+            }
+            var execution = await _memoryAddExecutor(
+                parsedMemoryAdd with { HostAuthority = _memoryAddAuthority }, cancellationToken).ConfigureAwait(false);
+            RecordExecutedCommandOutcome(commandLine, execution.Output, execution.Success);
+            return execution.Success
+                ? CodexDynamicToolResult.Allowed(execution.Output)
+                : CodexDynamicToolResult.Failed(execution.Output);
         }
 
         var reference = "command-" + Guid.NewGuid().ToString("N");

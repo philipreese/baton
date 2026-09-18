@@ -66,6 +66,7 @@ public static class MemoryImportOperationStore
         var operationId = intent.OperationId!;
         var plannedEntries = intent.PlannedEntries!;
         var plannedLinks = intent.PlannedLinks ?? [];
+        MemoryAddDispatchConflictException? dispatchConflict = null;
 
         var appendedAliases = await MemoryAliasStore.AppendAndGetAppendedAsync(
             intent.PlannedAliases ?? [], BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
@@ -93,8 +94,26 @@ public static class MemoryImportOperationStore
             var slug = FleetMemory.SlugFor(group.Key);
             var entriesFile = BatonPaths.MemoryEntriesFile(slug);
             await MemoryStoreMetadataStore.EnsureAsync(group.Key, slug, cancellationToken).ConfigureAwait(false);
-            await MemoryStore.AppendAndGetAppendedAsync(group.ToList(), entriesFile, cancellationToken)
-                .ConfigureAwait(false);
+            var dispatchEntry = group.SingleOrDefault(entry => entry.MemoryAddDispatchId is { Length: > 0 });
+            if (dispatchEntry is not null)
+            {
+                if (group.Count() != 1)
+                {
+                    throw new BatonMemoryException("A memory-add dispatch operation must contain exactly one entry.");
+                }
+
+                var result = await MemoryStore.AppendDispatchEntryAsync(dispatchEntry, entriesFile, cancellationToken)
+                    .ConfigureAwait(false);
+                if (result.Conflict)
+                {
+                    dispatchConflict = new MemoryAddDispatchConflictException(dispatchEntry.MemoryAddDispatchId!);
+                }
+            }
+            else
+            {
+                await MemoryStore.AppendAndGetAppendedAsync(group.ToList(), entriesFile, cancellationToken)
+                    .ConfigureAwait(false);
+            }
             BoundaryObserver?.Invoke($"entries:{slug}");
 
             // A duplicate means another writer may have won, but the store is still initialized. The
@@ -162,6 +181,10 @@ public static class MemoryImportOperationStore
         BoundaryObserver?.Invoke("before-settlement");
         settled.Write(manifestPath);
         BoundaryObserver?.Invoke("settled");
+        if (dispatchConflict is not null)
+        {
+            throw dispatchConflict;
+        }
         return settled;
     }
 

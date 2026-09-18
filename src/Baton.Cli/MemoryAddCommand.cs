@@ -1,7 +1,9 @@
 using System.Globalization;
+using System.Text;
 using Baton.Accounting;
 using Baton.Memory;
 using Baton.Status;
+using Baton.Vendors;
 
 namespace Baton.Cli;
 
@@ -57,7 +59,9 @@ public static class MemoryAddCommand
         CancellationToken cancellationToken = default,
         string? claudeHomeOverride = null,
         string? userHomeOverride = null,
-        Action<string, byte[]>? projectionWriterOverride = null)
+        Action<string, byte[]>? projectionWriterOverride = null,
+        string? brokerOutputDirectory = null,
+        CodexMemoryAddHostAuthority? brokerAuthority = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -81,18 +85,47 @@ public static class MemoryAddCommand
                 "will not guess a subject — run it inside the checkout the memory is about, or name " +
                 "the repository. " + MemoryAddOptionsParser.Usage);
 
+        var laneAuthorization = assertedByOverride is null && brokerAuthority is not null
+            ? await MemoryAddLaneGrantGate.TryAuthorizeAsync(brokerAuthority, cancellationToken).ConfigureAwait(false)
+            : assertedByOverride is null
+                ? await MemoryAddLaneGrantGate.TryAuthorizeAsync(
+                    Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable), cancellationToken, brokerOutputDirectory).ConfigureAwait(false)
+                : null;
+        if ((brokerAuthority is not null
+                || Environment.GetEnvironmentVariable(MemoryLaneAssertion.ArtifactsRootVariable) is { Length: > 0 })
+            && assertedByOverride is null && laneAuthorization is null)
+        {
+            output.WriteLine("REFUSED  worker memory add requires the current room's exact durable memory-add grant.");
+            return 1;
+        }
+        if (laneAuthorization is not null && !string.Equals(repository, laneAuthorization.Repository, StringComparison.Ordinal))
+        {
+            output.WriteLine("REFUSED  a worker memory-add grant may write only its recorded repository.");
+            return 1;
+        }
+        if (laneAuthorization is not null && !MemoryAddCommandPermission.IsWorkerAuthorable(options.Kind))
+        {
+            output.WriteLine("REFUSED  a worker memory-add grant cannot author operator policy or preferences.");
+            return 1;
+        }
+
+        var normalizedText = options.Text.Normalize(NormalizationForm.FormC).Replace("\r\n", "\n").Replace('\r', '\n');
         var slug = FleetMemory.SlugFor(repository);
         var entriesFile = BatonPaths.MemoryEntriesFile(slug);
         var entry = AuthoredMemory.Create(
-            repository, options.Text, options.Kind, assertedByOverride ?? MemoryLaneAssertion.Resolve(),
-            DateTime.UtcNow);
+            repository, normalizedText, options.Kind, laneAuthorization?.AssertedBy ?? assertedByOverride ?? MemoryLaneAssertion.Resolve(),
+            DateTime.UtcNow, laneAuthorization?.DispatchId, laneAuthorization?.DispatchId, laneAuthorization?.Issue);
 
         // Read-then-append, and the ledger's own id check under its lock is the backstop: two adds of
         // one text racing would both pass this read and the second append would write nothing. What the
         // read buys is the REPORT — MemoryStore.AppendAsync returns no count, so without it a duplicate
         // add exits 0 saying it wrote a row that was already there.
         var stored = await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false);
-        if (stored.FirstOrDefault(e => string.Equals(e.Id, entry.Id, StringComparison.Ordinal)) is { } existing)
+        // Worker retries deliberately proceed to AppendDispatchEntryAsync. Its lookup and semantic
+        // comparison share the canonical entries lock, so a same-text/different-kind retry cannot be
+        // mistaken for an exact retry by this pre-lock reporting read.
+        if (laneAuthorization is null
+            && stored.FirstOrDefault(e => string.Equals(e.Id, entry.Id, StringComparison.Ordinal)) is { } existing)
         {
             output.WriteLine(
                 $"REFUSED  this memory is byte-identical to entry {existing.Id} " +
@@ -147,10 +180,27 @@ public static class MemoryAddCommand
         cancellationToken.ThrowIfCancellationRequested();
         manifest.Write(manifestPath);
         output.WriteLine($"RECOVERY {manifestPath} -- durable intent recorded; retry or undo is safe after interruption.");
-        manifest = await MemoryImportOperationStore
-            .ApplyAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            manifest = await MemoryImportOperationStore
+                .ApplyAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (MemoryAddDispatchConflictException)
+        {
+            output.WriteLine("REFUSED  this durable memory-add grant was already used for a different normalized payload.");
+            return 1;
+        }
         if (!manifest.Appended.Any())
         {
+            if (laneAuthorization is not null
+                && (await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false))
+                    .FirstOrDefault(existing => string.Equals(existing.SourcePath, entry.SourcePath, StringComparison.OrdinalIgnoreCase))
+                    is { } committed
+                && string.Equals(committed.Id, entry.Id, StringComparison.Ordinal))
+            {
+                output.WriteLine($"ADDED    {committed.Id} already committed; retry returned the canonical entry.");
+                return 0;
+            }
             output.WriteLine(
                 $"REFUSED  this memory became entry {entry.Id}, but a concurrent writer appended it first.");
             output.WriteLine("         Nothing was appended by this call, so its durable intent owns no canonical row.");

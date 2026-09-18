@@ -25,10 +25,11 @@ public static class TaskRequirements
     public const string Network = "network";
     public const string GitHubRead = "github-read";
     public const string GitHubWrite = "github-write";
+    public const string MemoryAdd = "memory-add";
     public const string ArtifactPrefix = "artifact:";
 
     public static readonly IReadOnlyList<string> Fixed =
-    [RepositoryRead, FileWrite, Shell, Network, GitHubRead, GitHubWrite];
+    [RepositoryRead, FileWrite, Shell, Network, GitHubRead, GitHubWrite, MemoryAdd];
 
     public static IReadOnlyList<string> Normalize(IEnumerable<string> requirements)
     {

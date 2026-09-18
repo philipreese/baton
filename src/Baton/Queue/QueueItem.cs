@@ -71,6 +71,12 @@ public sealed record QueueItem
     public IReadOnlyList<string>? Requirements { get; init; }
 
     /// <summary>
+    /// The explicit, immutable per-dispatch authority to add repository memory. Null means no grant;
+    /// capability absence is never inferred from the worker role or from ordinary shell access.
+    /// </summary>
+    public MemoryAddDispatchGrant? MemoryAddGrant { get; init; }
+
+    /// <summary>
     /// The most recent local admission comparison. Kept on the item as well as the append-only queue
     /// ledger so the current queue row stays inspectable after the role catalog changes.
     /// </summary>

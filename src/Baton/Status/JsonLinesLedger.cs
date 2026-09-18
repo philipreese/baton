@@ -147,7 +147,7 @@ internal sealed class JsonLinesLedger<TEntry>(
             () => AppendAndGetAppendedUnlocked(entries, ledgerFilePath));
     }
 
-    private IReadOnlyList<TEntry> AppendAndGetAppendedUnlocked(IReadOnlyList<TEntry> entries, string ledgerFilePath)
+    internal IReadOnlyList<TEntry> AppendAndGetAppendedUnlocked(IReadOnlyList<TEntry> entries, string ledgerFilePath)
     {
         var alreadyRecorded = ReadAllUnlocked(ledgerFilePath)
             .Select(executionIdSelector)

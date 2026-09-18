@@ -9,6 +9,9 @@
          Baton.Vendors.Tests suite to be serialised. Testing the writer against a throwaway path
          instead removes the shared state rather than scheduling around it. -->
     <InternalsVisibleTo Include="Baton.Vendors.Tests" />
+    <!-- The CLI test owns the complete broker-host command route; it needs the broker's
+         production protocol-construction seam without widening that seam into product API. -->
+    <InternalsVisibleTo Include="Baton.Cli.Tests" />
   </ItemGroup>
 
   <ItemGroup>

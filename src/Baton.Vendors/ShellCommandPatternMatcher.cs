@@ -629,6 +629,11 @@ public static class ShellCommandPatternMatcher
         string segment, IReadOnlyList<string> deniedPatterns, IReadOnlyList<string>? deniedExceptions,
         bool unscopedWithDeny, bool folded)
     {
+        if (MemoryAddCommandPermission.Allows(segment, deniedExceptions))
+        {
+            return false;
+        }
+
         bool direct = unscopedWithDeny
             ? IsDeniedByTokenizedHead(segment, deniedPatterns, deniedExceptions, anyOffset: folded)
             : IsAllowed(segment, deniedPatterns) && !IsAllowed(segment, deniedExceptions);

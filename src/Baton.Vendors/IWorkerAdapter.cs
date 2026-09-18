@@ -152,6 +152,13 @@ public interface IWorkerAdapter : Baton.Outcomes.IFailureClassifier, Baton.Statu
     bool WithheldWritesReachTheOutbox => false;
 
     /// <summary>
+    /// Whether this adapter executes worker-requested capabilities through a Baton-hosted executor
+    /// rather than handing the worker a directly selectable command surface. Defaults closed: a
+    /// capability that needs host mediation must refuse until its adapter explicitly provides it.
+    /// </summary>
+    bool HasHostMediatedExecutor => false;
+
+    /// <summary>
     /// True when this adapter binds the workspace a lane was <em>dispatched against</em>
     /// (<see cref="WorkerInvocation.WorktreeSourceRepository"/>) readable to the worker, so a
     /// worktree-provisioned lane can still read that directory by absolute path (#1987) — its

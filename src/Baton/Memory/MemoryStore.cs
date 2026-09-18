@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 using Baton.Status;
 
 namespace Baton.Memory;
@@ -43,6 +44,8 @@ namespace Baton.Memory;
 /// </remarks>
 public static class MemoryStore
 {
+    public sealed record DispatchAppendResult(MemoryEntry? Existing, bool Conflict, IReadOnlyList<MemoryEntry> Appended);
+
     /// <summary>
     /// This store's shared ledger. <c>baton-memory-store</c> is deliberately unlike
     /// <c>baton-cost-ledger</c>'s and <c>QuotaLedgerStore</c>'s prefixes, so the files never contend;
@@ -84,6 +87,51 @@ public static class MemoryStore
     public static Task<IReadOnlyList<MemoryEntry>> AppendAndGetAppendedAsync(
         IReadOnlyList<MemoryEntry> entries, string entriesFilePath, CancellationToken cancellationToken = default) =>
         MemoryCanonicalGeneration.AppendAsync(Ledger, entries, entriesFilePath, cancellationToken);
+
+    /// <summary>
+    /// Checks a dispatch key and appends under the same canonical entries lock. A different payload
+    /// under an already-used key is a conflict, never a second canonical row.
+    /// </summary>
+    public static Task<DispatchAppendResult> AppendDispatchEntryAsync(
+        MemoryEntry entry, string entriesFilePath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        if (string.IsNullOrWhiteSpace(entry.MemoryAddDispatchId))
+        {
+            throw new ArgumentException("A dispatch memory entry requires its dispatch identity.", nameof(entry));
+        }
+
+        return Ledger.RunUnderLockAsync(
+            entriesFilePath,
+            () =>
+            {
+                var existing = Ledger.ReadAllUnlocked(entriesFilePath)
+                    .FirstOrDefault(candidate => string.Equals(
+                        candidate.SourcePath, entry.SourcePath, StringComparison.OrdinalIgnoreCase));
+                if (existing is not null)
+                {
+                    return new DispatchAppendResult(existing, !SameDispatchPayload(existing, entry), []);
+                }
+
+                var appended = Ledger.AppendAndGetAppendedUnlocked([entry], entriesFilePath);
+                return new DispatchAppendResult(null, false, appended);
+            },
+            cancellationToken,
+            action => MemoryCanonicalGeneration.MutateLedger(entriesFilePath, action));
+    }
+
+    private static bool SameDispatchPayload(MemoryEntry existing, MemoryEntry proposed) =>
+        string.Equals(existing.Repository, proposed.Repository, StringComparison.Ordinal)
+        && existing.Kind == proposed.Kind
+        && existing.KindSource == proposed.KindSource
+        && string.Equals(existing.Text.Normalize(NormalizationForm.FormC), proposed.Text.Normalize(NormalizationForm.FormC), StringComparison.Ordinal)
+        && string.Equals(existing.Sha256, proposed.Sha256, StringComparison.Ordinal)
+        && string.Equals(existing.SourcePath, proposed.SourcePath, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(existing.SourceVendor, proposed.SourceVendor, StringComparison.Ordinal)
+        && existing.SourceScope == proposed.SourceScope
+        && string.Equals(existing.AssertedBy, proposed.AssertedBy, StringComparison.Ordinal)
+        && string.Equals(existing.MemoryAddDispatchId, proposed.MemoryAddDispatchId, StringComparison.Ordinal)
+        && existing.Issue == proposed.Issue;
 
     /// <summary>
     /// This file's entries as they sit on disk, oldest first — <b>with no supersession resolved</b>.

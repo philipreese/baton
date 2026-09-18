@@ -272,6 +272,90 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_well_formed_memory_add_grant_on_a_host_mediated_adapter_is_admitted()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var grant = new MemoryAddDispatchGrant("a" + new string('1', 31), "github.com/owner/repo");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("memory-admitted") with
+                {
+                    Issue = 2100,
+                    Repository = grant.Repository,
+                    Adapter = "codex",
+                    Model = "gpt-5.6-sol",
+                    Requirements = [TaskRequirements.MemoryAdd],
+                    MemoryAddGrant = grant,
+                }],
+            }, Ct);
+            var launches = new List<QueueLaunchRequest>();
+            var service = Service((request, _) =>
+            {
+                launches.Add(request);
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.True(launches.Count == 1, item.Error);
+            var launch = launches.Single();
+            Assert.Equal(grant, launch.Item.MemoryAddGrant);
+            Assert.Equal(QueueItemState.Launched, item.State);
+            Assert.Equal(grant, item.MemoryAddGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_memory_add_grant_on_an_unsupported_adapter_is_refused_before_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var grant = new MemoryAddDispatchGrant("b" + new string('2', 31), "github.com/owner/repo");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("memory-unsupported") with
+                {
+                    Issue = 2100,
+                    Repository = grant.Repository,
+                    Adapter = "claude",
+                    Model = "sonnet",
+                    Requirements = [TaskRequirements.MemoryAdd],
+                    MemoryAddGrant = grant,
+                }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Equal(TaskRequirementAdmission.Refused, item.LastAdmission!.Result);
+            Assert.Equal([TaskRequirements.MemoryAdd], item.LastAdmission.Missing);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task Compatible_implement_requirements_are_admitted_and_recorded_before_launch()
     {
         var home = CreateTempHome();

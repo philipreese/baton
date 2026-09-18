@@ -20,4 +20,14 @@ public static class WorkerAdapterRegistry
         [WorkflowTemplateComposer.CaptureAdapter] = new CaptureWorkerAdapter(),
         [CommandWorkerAdapter.AdapterName] = new CommandWorkerAdapter(),
     };
+
+    /// <summary>
+    /// The registry-owned admission predicate for capabilities whose execution must remain in the
+    /// Baton host. Adapters opt in through <see cref="IWorkerAdapter.HasHostMediatedExecutor"/>;
+    /// an unknown or ordinary direct-command adapter is deliberately not eligible.
+    /// </summary>
+    public static bool ProvidesHostMediatedExecution(string? adapter) =>
+        adapter is not null
+        && Default.TryGetValue(adapter, out var registered)
+        && registered.HasHostMediatedExecutor;
 }

@@ -205,6 +205,48 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_refuses_memory_add_for_an_adapter_without_host_mediation_before_any_queue_side_effect()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "record this", Ct);
+            var repositoryResolved = false;
+            var provisioned = false;
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "unsupported-memory", Role: "implement", SpecFilePath: brief,
+                    Issue: 2100, Adapter: "claude", Requirements: [TaskRequirements.MemoryAdd]),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) =>
+                {
+                    repositoryResolved = true;
+                    return Task.FromResult<RepositoryIdentity?>(null);
+                },
+                (_, _, _, _, _, _, _) =>
+                {
+                    provisioned = true;
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree("never", "never-lane"));
+                }));
+
+            Assert.Contains("memory-add", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("host-mediated adapter", refusal.Message, StringComparison.Ordinal);
+            Assert.False(repositoryResolved);
+            Assert.False(provisioned);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_refuses_a_provisioned_implement_lane_whose_inherited_ceiling_withholds_required_categories()
     {
         var home = CreateTempHome();

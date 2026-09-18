@@ -289,7 +289,9 @@ public sealed record WorkerBindingConfigEntry(
     // that asked for nothing from an older binding that predates requirement declarations.
     IReadOnlyList<string>? TaskRequirements = null,
     TaskRequirementAdmission? TaskRequirementAdmission = null,
-    TaskSizeDeclaration? DeclaredTaskSize = null);
+    TaskSizeDeclaration? DeclaredTaskSize = null,
+    // #2100: present only on a queue-materialized room; absent is no authority.
+    MemoryAddDispatchGrant? MemoryAddGrant = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

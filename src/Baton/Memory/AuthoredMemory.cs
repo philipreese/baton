@@ -84,14 +84,15 @@ public static class AuthoredMemory
     /// </param>
     /// <param name="addedAtUtc">Stamped on the row as <see cref="MemoryEntry.ImportedAtUtc"/>.</param>
     public static MemoryEntry Create(
-        string repository, string text, MemoryKind kind, string assertedBy, DateTime addedAtUtc)
+        string repository, string text, MemoryKind kind, string assertedBy, DateTime addedAtUtc,
+        string? idempotencyKey = null, string? memoryAddDispatchId = null, int? issue = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(repository);
         ArgumentException.ThrowIfNullOrEmpty(text);
         ArgumentException.ThrowIfNullOrEmpty(assertedBy);
 
         var sha256 = Digest(text);
-        var sourcePath = SourcePathFor(repository, sha256);
+        var sourcePath = SourcePathFor(repository, idempotencyKey ?? sha256);
 
         return new MemoryEntry(
             MemoryEntry.Derive(repository, sourcePath, sha256),
@@ -105,7 +106,9 @@ public static class AuthoredMemory
             VendorMemoryScope.BatonManaged,
             addedAtUtc,
             addedAtUtc,
-            AssertedBy: assertedBy);
+            AssertedBy: assertedBy,
+            MemoryAddDispatchId: memoryAddDispatchId,
+            Issue: issue);
     }
 
     /// <summary>Lower-case hex SHA-256 of <paramref name="text"/>'s UTF-8 bytes, BOM-free.</summary>
