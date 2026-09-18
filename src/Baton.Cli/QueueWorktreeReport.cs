@@ -265,6 +265,9 @@ internal sealed record QueueWorktreeEntry(
         var cleanliness = status.Success ? string.IsNullOrWhiteSpace(status.Stdout) ? "clean" : "dirty" : "unknown";
         if (!status.Success) reasons.Add("git-status-unavailable");
 
+        var unpublishedReason = await ObserveUnpublishedReasonAsync(path, cancellationToken).ConfigureAwait(false);
+        if (unpublishedReason is not null) reasons.Add(unpublishedReason);
+
         var exact = registered && repositoryMatches && branchMatches && refHead.Success
             && string.Equals(refHead.Stdout.Trim(), head, StringComparison.Ordinal);
 
@@ -278,6 +281,31 @@ internal sealed record QueueWorktreeEntry(
             cleanliness,
             identity?.Value,
             reasons);
+    }
+
+    private static async Task<string?> ObserveUnpublishedReasonAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        var upstream = await RunGitAsync(
+            path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cancellationToken)
+            .ConfigureAwait(false);
+        if (!upstream.Success) return null;
+
+        var divergence = await RunGitAsync(
+            path, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cancellationToken)
+            .ConfigureAwait(false);
+        if (!divergence.Success) return "upstream-ahead-probe-unavailable";
+
+        var counts = divergence.Stdout.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (counts.Length != 2
+            || !long.TryParse(counts[0], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var ahead)
+            || !long.TryParse(counts[1], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out _))
+            return "upstream-ahead-probe-unavailable";
+
+        return ahead > 0 ? "unpushed-commits" : null;
     }
 
     private static bool ParseRegistration(string porcelain, string expectedPath, out string? head, out string? branch)

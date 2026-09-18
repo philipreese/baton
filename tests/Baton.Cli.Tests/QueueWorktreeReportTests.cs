@@ -157,6 +157,37 @@ public sealed class QueueWorktreeReportTests
     }
 
     [Fact]
+    public async Task Clean_branch_ahead_of_upstream_is_retained_as_unpushed()
+    {
+        var sandbox = Temp("unpushed");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var bareRemote = Path.Combine(sandbox, "published.git");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await GitAsync(sandbox, "init", "-q", "--bare", bareRemote);
+            var repo = await RepoAsync(root, "unpushed");
+            await GitAsync(repo.Path, "remote", "add", "published", bareRemote);
+            await GitAsync(repo.Path, "push", "-q", "-u", "published", repo.Branch);
+            await File.WriteAllTextAsync(Path.Combine(repo.Path, "local.txt"), "unpublished", Ct);
+            await GitAsync(repo.Path, "add", "local.txt");
+            await CommitAsync(repo.Path, "unpublished commit");
+
+            var entry = Find(await QueueWorktreeReport.CreateAsync(
+                [Item(repo, "unpushed")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "unpushed");
+
+            Assert.Contains("unpushed-commits", entry.ReasonCodes);
+            Assert.Equal("retain", entry.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
     public async Task Raw_status_is_bounded_without_hiding_dirtiness()
     {
         var sandbox = Temp("bounded-status");
