@@ -6126,7 +6126,7 @@ Each line has this canonical schema:
 |---|---|
 | `schemaVersion` | Integer `1`. A reader must reject an unknown version rather than reinterpret it. |
 | `phase` | One of `receipt-check`, `fallback-gate`, `member-execution`, `runner-cleanup`, `hook-completion`, or `aggregate-append`. |
-| `event` | `start` or `end`; a `start` without its matching `end` is durable evidence that the process was killed or failed before that milestone completed. |
+| `event` | `start` or `end`; a `start` without its matching `end` proves only that completion was not retained. The process may have been killed or failed before completion, or the failure-tolerant recorder may have failed to append the `end`. |
 | `monotonicMs` | The local monotonic-clock reading at append time; it is not wall-clock time and is never used for cost or timeout policy. |
 | `member` | Present only for `fallback-gate` and `member-execution`: the selected fallback task or canonical gate-member name. |
 
