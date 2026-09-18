@@ -632,12 +632,9 @@ public sealed class WorkItemAdvancerTests
                 item with { AttemptId = new FleetAttemptId("2178continuationattempt000000000000") },
                 new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
                 Path.Combine(home, "continue-room")));
-            Assert.Equal("1934-lane", options.OriginatingPullRequestRecoveryTag);
-            Assert.Equal("2178continuationattempt000000000000", options.OriginatingPullRequestRecoveryAttemptId);
-
             var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
-            Assert.Equal(options.OriginatingPullRequestRecoveryTag, parsed.OriginatingPullRequestRecoveryTag);
-            Assert.Equal(options.OriginatingPullRequestRecoveryAttemptId, parsed.OriginatingPullRequestRecoveryAttemptId);
+            Assert.DoesNotContain("--originating-pr-recovery-tag", QueueLauncher.BuildArguments(options));
+            Assert.DoesNotContain("--originating-pr-recovery-attempt-id", QueueLauncher.BuildArguments(options));
             Assert.Contains(facts, fact => fact.Reason!.Contains("fix → continue", StringComparison.Ordinal));
         }
         finally

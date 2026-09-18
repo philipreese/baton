@@ -1299,6 +1299,7 @@ public static class QueueCommand
                             item.OriginatingPullRequestRecoveryClaim == item.AttemptId
                                 ? null
                                 : item.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = null,
                         DispositionOperations = AppendDisposition(item, operation),
                     }
                     : item).ToList()
@@ -1456,6 +1457,7 @@ public static class QueueCommand
                             item.OriginatingPullRequestRecoveryClaim == item.AttemptId
                                 ? null
                                 : item.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = null,
                         DispositionOperations = AppendDisposition(item, operation),
                     }
                     : item).ToList(),

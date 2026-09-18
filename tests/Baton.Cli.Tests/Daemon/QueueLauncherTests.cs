@@ -796,17 +796,15 @@ public sealed class QueueLauncherTests : IDisposable
             @"C:\rooms\next"));
         var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToList());
 
-        Assert.Equal("2178-lane", options.OriginatingPullRequestRecoveryTag);
-        Assert.Equal("2178continuationattempt000000000000", options.OriginatingPullRequestRecoveryAttemptId);
-        Assert.Equal(options.OriginatingPullRequestRecoveryTag, parsed.OriginatingPullRequestRecoveryTag);
-        Assert.Equal(options.OriginatingPullRequestRecoveryAttemptId, parsed.OriginatingPullRequestRecoveryAttemptId);
+        Assert.DoesNotContain("--originating-pr-recovery-tag", QueueLauncher.BuildArguments(options));
+        Assert.DoesNotContain("--originating-pr-recovery-attempt-id", QueueLauncher.BuildArguments(options));
 
         var fixOptions = QueueLauncher.BuildOptions(new QueueLaunchRequest(
             item with { Stage = WorkStage.Fix },
             new QueueTierResolution("engine", "codex", "gpt-5.6-terra", "medium", false, null),
             @"C:\rooms\next"));
-        Assert.Null(fixOptions.OriginatingPullRequestRecoveryTag);
-        Assert.Null(fixOptions.OriginatingPullRequestRecoveryAttemptId);
+        Assert.DoesNotContain("--originating-pr-recovery-tag", QueueLauncher.BuildArguments(fixOptions));
+        Assert.DoesNotContain("--originating-pr-recovery-attempt-id", QueueLauncher.BuildArguments(fixOptions));
     }
 
     [Theory]
@@ -851,6 +849,7 @@ public sealed class QueueLauncherTests : IDisposable
 
         Assert.True(startInfo.RedirectStandardOutput);
         Assert.True(startInfo.RedirectStandardError);
+        Assert.False(startInfo.RedirectStandardInput);
         Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardOutputEncoding);
         Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardErrorEncoding);
         Assert.Equal(["Baton.Cli.dll", "dispatch", "implement", "--room-dir", @"C:\r"], startInfo.ArgumentList);
@@ -864,6 +863,15 @@ public sealed class QueueLauncherTests : IDisposable
 
         // And the shape is the one the detached seam accepts.
         Assert.Null(DetachedProcess.Refusal(startInfo));
+
+        var recoveryStartInfo = ChildProcessStartInfo.Create(
+            "baton.exe",
+            psi => QueueLauncher.ConfigureLaneStartInfo(
+                psi, ["Baton.Cli.dll"], ["dispatch", "implement", "--room-dir", @"C:\r"], redirectStandardInput: true));
+        Assert.True(recoveryStartInfo.RedirectStandardInput);
+        Assert.True(recoveryStartInfo.RedirectStandardOutput);
+        Assert.True(recoveryStartInfo.RedirectStandardError);
+        Assert.Null(DetachedProcess.Refusal(recoveryStartInfo));
     }
 
     /// <summary>

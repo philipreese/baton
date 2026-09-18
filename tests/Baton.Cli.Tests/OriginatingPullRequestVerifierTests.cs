@@ -1,4 +1,6 @@
 using Baton.Cli.Tests.TestSupport;
+using System.Security.Cryptography;
+using System.Text;
 using Baton.CrashTestHost;
 using Baton.Domain;
 using Baton.Queue;
@@ -120,6 +122,7 @@ public sealed class OriginatingPullRequestVerifierTests
         var workspace = Directory.CreateDirectory(Path.Combine(home.Path, "workspace")).FullName;
         var room = Path.Combine(home.Path, "rooms", "queue-2178-lane-future");
         var attemptId = new FleetAttemptId(RecoveryAttemptId);
+        const string proof = "one-shot-proof";
         var item = new QueueItem
         {
             Tag = "2178-lane",
@@ -133,6 +136,7 @@ public sealed class OriginatingPullRequestVerifierTests
             Branch = "2178-lane",
             RoomDirectory = room,
             ExpectedOriginatingPullRequestHead = PreservedHead,
+            OriginatingPullRequestRecoveryProofDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(proof))),
             AttemptId = attemptId,
             AttemptEnvelope = new QueueAttemptEnvelope(
                 attemptId, null, "2178", null, 2304, WorkStage.Continue,
@@ -145,17 +149,26 @@ public sealed class OriginatingPullRequestVerifierTests
         var options = RecoveryOptions(room);
 
         Assert.False(Directory.Exists(room));
-        Assert.Equal(
-            PreservedHead,
-            await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
+        var originalInput = Console.In;
+        try
+        {
+            Console.SetIn(new StringReader(proof + Environment.NewLine));
+            Assert.Equal(
+                PreservedHead,
+                await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
+                    options, workspace, TestContext.Current.CancellationToken));
+            Assert.Null(await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
                 options, workspace, TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<CliArgumentException>(() =>
-            OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
-                options, workspace, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            Console.SetIn(originalInput);
+        }
 
         var claimed = Assert.Single((await QueueStore.LoadAsync(
             BatonPaths.QueueFile, TestContext.Current.CancellationToken)).Items);
         Assert.Equal(attemptId, claimed.OriginatingPullRequestRecoveryClaim);
+        Assert.Null(claimed.OriginatingPullRequestRecoveryProofDigest);
         Assert.False(Directory.Exists(room));
     }
 
@@ -331,7 +344,5 @@ public sealed class OriginatingPullRequestVerifierTests
     private static DispatchOptions RecoveryOptions(string room = "room") => new(
         "implement", "2178.md", room,
         OriginatingPullRequest: "aer-works/baton#2304",
-        OriginatingPullRequestBranch: "2178-lane",
-        OriginatingPullRequestRecoveryTag: "2178-lane",
-        OriginatingPullRequestRecoveryAttemptId: RecoveryAttemptId);
+        OriginatingPullRequestBranch: "2178-lane");
 }

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Baton.Domain;
@@ -123,26 +124,36 @@ internal static class OriginatingPullRequestVerifier
     internal static async Task<string?> ResolveRecoveryExpectedHeadAsync(
         DispatchOptions options, string workspace, CancellationToken cancellationToken)
     {
-        var tag = options.OriginatingPullRequestRecoveryTag;
-        var attemptId = options.OriginatingPullRequestRecoveryAttemptId;
-        if (tag is null && attemptId is null)
+        if (options.OriginatingPullRequest is null || options.OriginatingPullRequestBranch is null)
         {
             return null;
         }
 
-        if (tag is null || attemptId is null)
-        {
-            throw new CliArgumentException(
-                "The preserved continuation PR recovery identity requires both its queue tag and attempt id; ownership was refused before launch.");
-        }
-
         try
         {
+            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            if (!snapshot.Items.Any(item => RecoveryEvidenceMatches(options, workspace, item)
+                && item.OriginatingPullRequestRecoveryProofDigest is not null
+                && item.OriginatingPullRequestRecoveryClaim is null))
+            {
+                return null;
+            }
+
+            var proof = await Console.In.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (proof is null)
+            {
+                throw new CliArgumentException(
+                    "The queue recovery admission proof was absent; originating PR ownership was refused before launch.");
+            }
+
             string? claimedHead = null;
             await QueueStore.MutateAsync(BatonPaths.QueueFile, current =>
             {
                 var matches = current.Items
-                    .Where(item => string.Equals(item.Tag, tag, StringComparison.Ordinal))
+                    .Where(item => RecoveryEvidenceMatches(options, workspace, item)
+                        && item.OriginatingPullRequestRecoveryProofDigest is { } digest
+                        && FixedTimeEquals(digest, proof)
+                        && item.OriginatingPullRequestRecoveryClaim is null)
                     .ToArray();
                 if (matches.Length != 1)
                 {
@@ -159,7 +170,8 @@ internal static class OriginatingPullRequestVerifier
                 claimedHead = item.ExpectedOriginatingPullRequestHead;
                 var claimed = item with
                 {
-                    OriginatingPullRequestRecoveryClaim = new FleetAttemptId(attemptId),
+                    OriginatingPullRequestRecoveryClaim = item.AttemptId,
+                    OriginatingPullRequestRecoveryProofDigest = null,
                 };
                 return current with
                 {
@@ -187,18 +199,13 @@ internal static class OriginatingPullRequestVerifier
     internal static string ValidateRecoveryEvidence(
         DispatchOptions options, string workspace, QueueSnapshot snapshot)
     {
-        var tag = options.OriginatingPullRequestRecoveryTag;
-        var attemptId = options.OriginatingPullRequestRecoveryAttemptId;
-        if (tag is null || attemptId is null
-            || options.OriginatingPullRequest is null || options.OriginatingPullRequestBranch is null)
+        if (options.OriginatingPullRequest is null || options.OriginatingPullRequestBranch is null)
         {
             throw new CliArgumentException(
                 "The preserved continuation PR recovery identity is incomplete; ownership was refused before launch.");
         }
 
-        var matches = snapshot.Items
-            .Where(item => string.Equals(item.Tag, tag, StringComparison.Ordinal))
-            .ToArray();
+        var matches = snapshot.Items.Where(item => RecoveryEvidenceMatches(options, workspace, item)).ToArray();
         if (matches.Length != 1)
         {
             throw new CliArgumentException(
@@ -206,7 +213,7 @@ internal static class OriginatingPullRequestVerifier
         }
 
         var item = matches[0];
-        if (!RecoveryEvidenceMatches(options, workspace, item)
+        if (item.OriginatingPullRequestRecoveryProofDigest is null
             || item.OriginatingPullRequestRecoveryClaim is not null)
         {
             throw new CliArgumentException(
@@ -220,14 +227,11 @@ internal static class OriginatingPullRequestVerifier
     {
         if (options.OriginatingPullRequest is null
             || options.OriginatingPullRequestBranch is null
-            || options.OriginatingPullRequestRecoveryTag is null
-            || options.OriginatingPullRequestRecoveryAttemptId is not { } attemptId
             || item.Stage != WorkStage.Continue
             || item.State != QueueItemState.Launched
             || item.AttemptId is not { } currentAttempt
             || item.AttemptEnvelope is not { } envelope
-            || !string.Equals(currentAttempt.Value, attemptId, StringComparison.Ordinal)
-            || !string.Equals(envelope.AttemptId.Value, attemptId, StringComparison.Ordinal)
+            || !string.Equals(currentAttempt.Value, envelope.AttemptId.Value, StringComparison.Ordinal)
             || envelope.Stage != WorkStage.Continue
             || item.RoomDirectory is not { Length: > 0 } recordedRoom
             || !SameWorkspace(recordedRoom, options.RoomDirectoryPath)
@@ -243,6 +247,20 @@ internal static class OriginatingPullRequestVerifier
         }
 
         return SameWorkspace(item.Workspace, workspace);
+    }
+
+    private static bool FixedTimeEquals(string digest, string proof)
+    {
+        try
+        {
+            return CryptographicOperations.FixedTimeEquals(
+                Convert.FromHexString(digest),
+                SHA256.HashData(Encoding.UTF8.GetBytes(proof)));
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 
     internal static OriginatingPullRequestOwnership ValidateResponse(

@@ -547,6 +547,7 @@ public sealed class QueueSchedulerService : BackgroundService
                             AttemptSettledFactDurable = false,
                             LaunchRecoveryKind = null,
                             OriginatingPullRequestRecoveryClaim = null,
+                            OriginatingPullRequestRecoveryProofDigest = null,
                             LastAdmission = null,
                             RoomDirectory = null,
                         });
@@ -825,6 +826,10 @@ public sealed class QueueSchedulerService : BackgroundService
                         && existing.OriginatingPullRequestRecoveryClaim == failedAttempt
                             ? null
                             : existing.OriginatingPullRequestRecoveryClaim,
+                    OriginatingPullRequestRecoveryProofDigest = attemptId is not null
+                        && existing.AttemptId == attemptId
+                            ? null
+                            : existing.OriginatingPullRequestRecoveryProofDigest,
                 };
                 var next = snapshot with { Items = Replace(snapshot.Items, item.Tag, _ => updated) };
                 return updated.AttemptEnvelope is { } envelope
@@ -1059,6 +1064,9 @@ public sealed class QueueSchedulerService : BackgroundService
                                     i.OriginatingPullRequestRecoveryClaim == outcome.AttemptId
                                         ? null
                                         : i.OriginatingPullRequestRecoveryClaim,
+                                OriginatingPullRequestRecoveryProofDigest = i.AttemptId == outcome.AttemptId
+                                    ? null
+                                    : i.OriginatingPullRequestRecoveryProofDigest,
                             }
                             : i)
                         .ToList(),
@@ -1428,6 +1436,10 @@ public sealed class QueueSchedulerService : BackgroundService
                         current.OriginatingPullRequestRecoveryClaim == item.AttemptEnvelope!.AttemptId
                             ? null
                             : current.OriginatingPullRequestRecoveryClaim,
+                    OriginatingPullRequestRecoveryProofDigest =
+                        current.AttemptId == item.AttemptEnvelope!.AttemptId
+                            ? null
+                            : current.OriginatingPullRequestRecoveryProofDigest,
                     Error = detail
                         ?? $"attempt '{item.AttemptEnvelope!.AttemptId.Value}' may have begun but has no authoritative room evidence; recovery halted",
                 }
@@ -1455,6 +1467,9 @@ public sealed class QueueSchedulerService : BackgroundService
                     current.OriginatingPullRequestRecoveryClaim == attemptId
                         ? null
                         : current.OriginatingPullRequestRecoveryClaim,
+                OriginatingPullRequestRecoveryProofDigest = current.AttemptId == attemptId
+                    ? null
+                    : current.OriginatingPullRequestRecoveryProofDigest,
             };
             var next = snapshot with { Items = Replace(snapshot.Items, tag, _ => updated) };
             return QueueFleetEventOutbox.Enqueue(
@@ -1492,6 +1507,9 @@ public sealed class QueueSchedulerService : BackgroundService
                             current.OriginatingPullRequestRecoveryClaim == attemptId
                                 ? null
                                 : current.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = current.AttemptId == attemptId
+                            ? null
+                            : current.OriginatingPullRequestRecoveryProofDigest,
                     }
                     : current),
         }, CancellationToken.None);

@@ -264,6 +264,7 @@ public sealed class WorkItemAdvancer
                             i.OriginatingPullRequestRecoveryClaim == i.AttemptId
                                 ? null
                                 : i.OriginatingPullRequestRecoveryClaim,
+                        OriginatingPullRequestRecoveryProofDigest = null,
                         DispositionOperations = [.. i.DispositionOutbox, operation],
                     } : i).ToList()
                 };
@@ -584,6 +585,7 @@ public sealed class WorkItemAdvancer
                 ? pr.HeadSha
                 : null,
             OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -629,6 +631,7 @@ public sealed class WorkItemAdvancer
             AttemptBaseRevision = null,
             ExpectedOriginatingPullRequestHead = null,
             OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             AttemptEnvelope = null,
             LaunchMayHaveBegunAt = null,
             AttemptAdmissionFactDurable = false,
@@ -689,6 +692,7 @@ public sealed class WorkItemAdvancer
             RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
             ExpectedOriginatingPullRequestHead = null,
             OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             Halted = true,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
@@ -729,6 +733,7 @@ public sealed class WorkItemAdvancer
             ReconciliationKind = null,
             ExpectedOriginatingPullRequestHead = null,
             OriginatingPullRequestRecoveryClaim = null,
+            OriginatingPullRequestRecoveryProofDigest = null,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 
@@ -906,6 +911,7 @@ public sealed class WorkItemAdvancer
                                 item.OriginatingPullRequestRecoveryClaim == item.AttemptId
                                     ? null
                                     : item.OriginatingPullRequestRecoveryClaim,
+                            OriginatingPullRequestRecoveryProofDigest = null,
                             DispositionOperations = [.. item.DispositionOutbox, operation],
                         };
                         return item.AttemptEnvelope is not null

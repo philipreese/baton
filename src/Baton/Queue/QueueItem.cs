@@ -158,6 +158,14 @@ public sealed record QueueItem
     public FleetAttemptId? OriginatingPullRequestRecoveryClaim { get; init; }
 
     /// <summary>
+    /// SHA-256 digest of the launcher-minted, single-use recovery proof. The proof itself crosses only
+    /// the queue child's redirected standard input and is never persisted, logged, or transported as
+    /// an argument. Consumption clears this value while claiming <see
+    /// cref="OriginatingPullRequestRecoveryClaim"/> for the exact attempt.
+    /// </summary>
+    public string? OriginatingPullRequestRecoveryProofDigest { get; init; }
+
+    /// <summary>
     /// Opaque ownership token for a readiness reconciliation that has crossed its local linearization
     /// point. While present, cancellation and same-tag replacement must not supersede the row: the
     /// already-authorized GitHub mutation is allowed to finish and commit its observation first.

@@ -82,8 +82,6 @@ public static class DispatchOptionsParser
         string? overrideRunwayReason = null;
         string? originatingPullRequest = null;
         string? originatingPullRequestBranch = null;
-        string? originatingPullRequestRecoveryTag = null;
-        string? originatingPullRequestRecoveryAttemptId = null;
         string? memoryAddDispatch = null;
         string? memoryAddRepository = null;
         var attachments = new List<string>();
@@ -211,14 +209,6 @@ public static class DispatchOptionsParser
                 case "--originating-pr-branch":
                     originatingPullRequestBranch = RequireValue(args, ref i, arg);
                     break;
-                // Internal queue transport. The command gate resolves the retained PR head from the
-                // matching durable queue attempt; neither a caller nor argv carries that authority.
-                case "--originating-pr-recovery-tag":
-                    originatingPullRequestRecoveryTag = RequireValue(args, ref i, arg);
-                    break;
-                case "--originating-pr-recovery-attempt-id":
-                    originatingPullRequestRecoveryAttemptId = RequireValue(args, ref i, arg);
-                    break;
                 // Conductor-only transport. The command gate independently requires the matching
                 // durable queue row, so typing these flags cannot manufacture authority.
                 case "--memory-add-dispatch":
@@ -308,19 +298,6 @@ public static class DispatchOptionsParser
             throw new CliArgumentException("The queue memory-add transport requires both its dispatch identity and repository.");
         }
 
-        if ((originatingPullRequestRecoveryTag is null) != (originatingPullRequestRecoveryAttemptId is null))
-        {
-            throw new CliArgumentException(
-                "The preserved continuation PR recovery identity requires both its queue tag and attempt id.");
-        }
-
-        if (originatingPullRequestRecoveryTag is not null
-            && (originatingPullRequest is null || originatingPullRequestBranch is null))
-        {
-            throw new CliArgumentException(
-                "The preserved continuation PR recovery identity requires the originating PR and recorded branch.");
-        }
-
         var memoryAddGrant = memoryAddDispatch is null
             ? null
             : new MemoryAddDispatchGrant(memoryAddDispatch, memoryAddRepository!);
@@ -355,8 +332,6 @@ public static class DispatchOptionsParser
             ParseTaskSizeDeclaration(declaredSize, sizeRationale),
             originatingPullRequest,
             originatingPullRequestBranch,
-            originatingPullRequestRecoveryTag,
-            originatingPullRequestRecoveryAttemptId,
             memoryAddGrant);
     }
 
