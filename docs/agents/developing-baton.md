@@ -135,6 +135,12 @@ Each was paid for by a specific failure, named so it stays concrete instead of b
 Roughly ordered by when they first bite, but several bite continuously — treat the order as a reading
 aid, not a schedule.
 
+**Codex on Windows:** run `pixi` verification in the host environment on the first attempt. The
+restricted `CodexSandboxOffline` identity cannot resolve Pixi's user-home storage, so a sandboxed
+`pixi run` fails before the named task starts with `FileStorageError`. This is an execution-boundary
+requirement, not permission to skip or replace the task. Project-local `.codex/config.toml` keeps
+automation shells non-login so the interactive Starship prompt is not initialized under `TERM=dumb`.
+
 **Cite a gate by its slug, never its number.** Every heading carries one (`common-sense`,
 `right-instrument`, …). Numbers are positional: merging two gates once already invalidated every
 citation elsewhere in the repo, and the slug is what survives the next restructure.

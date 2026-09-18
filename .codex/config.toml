@@ -1,0 +1,3 @@
+# Agent shell tools are automation, not interactive terminals. Loading the user's prompt profile
+# makes Starship treat TERM=dumb as an error on every command.
+allow_login_shell = false

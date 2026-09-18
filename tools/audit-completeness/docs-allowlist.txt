@@ -1,6 +1,7 @@
 AGENTS.md
 CHANGELOG.md
 CLAUDE.md
+OPERATOR-PERMISSIONS.md
 README.md
 benchmarks/README.md
 benchmarks/comparator.md
