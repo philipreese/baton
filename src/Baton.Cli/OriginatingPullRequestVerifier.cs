@@ -132,11 +132,20 @@ internal static class OriginatingPullRequestVerifier
         try
         {
             var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-            if (!snapshot.Items.Any(item => RecoveryEvidenceMatches(options, workspace, item)
-                && item.OriginatingPullRequestRecoveryProofDigest is not null
-                && item.OriginatingPullRequestRecoveryClaim is null))
+            var recoveryRows = snapshot.Items
+                .Where(item => RecoveryIdentityMatches(options, workspace, item))
+                .ToArray();
+            if (recoveryRows.Length == 0)
             {
                 return null;
+            }
+            if (recoveryRows.Length != 1
+                || !RecoveryEvidenceMatches(options, workspace, recoveryRows[0])
+                || recoveryRows[0].OriginatingPullRequestRecoveryProofDigest is null
+                || recoveryRows[0].OriginatingPullRequestRecoveryClaim is not null)
+            {
+                throw new CliArgumentException(
+                    "No unused queue-owned recovery admission matches the launched continuation room; ownership was refused before launch.");
             }
 
             var proof = await Console.In.ReadLineAsync(cancellationToken).ConfigureAwait(false);
@@ -225,15 +234,19 @@ internal static class OriginatingPullRequestVerifier
 
     private static bool RecoveryEvidenceMatches(DispatchOptions options, string workspace, QueueItem item)
     {
+        return item.State == QueueItemState.Launched && RecoveryIdentityMatches(options, workspace, item);
+    }
+
+    private static bool RecoveryIdentityMatches(DispatchOptions options, string workspace, QueueItem item)
+    {
         if (options.OriginatingPullRequest is null
             || options.OriginatingPullRequestBranch is null
             || item.Stage != WorkStage.Continue
-            || item.State != QueueItemState.Launched
             || item.AttemptId is not { } currentAttempt
             || item.AttemptEnvelope is not { } envelope
             || !string.Equals(currentAttempt.Value, envelope.AttemptId.Value, StringComparison.Ordinal)
             || envelope.Stage != WorkStage.Continue
-            || item.RoomDirectory is not { Length: > 0 } recordedRoom
+            || (item.RoomDirectory ?? envelope.RoomDirectory) is not { Length: > 0 } recordedRoom
             || !SameWorkspace(recordedRoom, options.RoomDirectoryPath)
             || item.ExpectedOriginatingPullRequestHead is not { } expectedHead
             || !IsCanonicalSha(expectedHead)

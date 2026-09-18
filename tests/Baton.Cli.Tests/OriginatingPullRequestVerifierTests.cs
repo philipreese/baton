@@ -157,8 +157,9 @@ public sealed class OriginatingPullRequestVerifierTests
                 PreservedHead,
                 await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
                     options, workspace, TestContext.Current.CancellationToken));
-            Assert.Null(await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
-                options, workspace, TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
+                    options, workspace, TestContext.Current.CancellationToken));
         }
         finally
         {

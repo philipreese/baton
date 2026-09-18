@@ -1,4 +1,6 @@
 using Baton.Cli.Daemon;
+using System.Security.Cryptography;
+using System.Text;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
@@ -2202,6 +2204,7 @@ public sealed class QueueSchedulerServiceTests
         try
         {
             const string retainedHead = "0123456789abcdef0123456789abcdef01234567";
+            const string proof = "queue-private-one-shot-proof";
             var workspace = Directory.CreateDirectory(Path.Combine(home, "workspace")).FullName;
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
             {
@@ -2216,6 +2219,8 @@ public sealed class QueueSchedulerServiceTests
                     PullRequest = 2397,
                     Branch = "2178-lane-2",
                     ExpectedOriginatingPullRequestHead = retainedHead,
+                    OriginatingPullRequestRecoveryProofDigest =
+                        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(proof))),
                     Requirements = [],
                 }],
             }, Ct);
@@ -2237,14 +2242,24 @@ public sealed class QueueSchedulerServiceTests
                 () => DateTimeOffset.UtcNow,
                 workspaceHead: (_, _) => Task.FromResult<string?>(retainedHead));
 
-            await service.TickOnceAsync(Ct);
+            var originalInput = Console.In;
+            try
+            {
+                Console.SetIn(new StringReader(proof + Environment.NewLine));
+                await service.TickOnceAsync(Ct);
 
-            var failed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
-            Assert.Equal(QueueItemState.Failed, failed.State);
-            Assert.Null(failed.OriginatingPullRequestRecoveryClaim);
-            Assert.NotNull(recovery);
-            await Assert.ThrowsAsync<CliArgumentException>(() =>
-                OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(recovery, workspace, Ct));
+                var failed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+                Assert.Equal(QueueItemState.Failed, failed.State);
+                Assert.Null(failed.OriginatingPullRequestRecoveryClaim);
+                Assert.Null(failed.OriginatingPullRequestRecoveryProofDigest);
+                Assert.NotNull(recovery);
+                await Assert.ThrowsAsync<CliArgumentException>(() =>
+                    OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(recovery, workspace, Ct));
+            }
+            finally
+            {
+                Console.SetIn(originalInput);
+            }
         }
         finally
         {
