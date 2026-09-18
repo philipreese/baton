@@ -1225,10 +1225,12 @@ def _agy_elicitation():
             # Distinguish "agy never loaded the server" from "agy loaded it and refused the tool".
             # CAPS.json separates them: it is written at initialize, before any tool call.
             loaded = isinstance(caps, dict)
-            return INCONCLUSIVE, (
-                f"{label}: control tool never ran; server "
-                f"{'DID load (declared=' + str(declared) + ') so agy declined the tool itself'
-                   if loaded else 'never initialized -- instrument failure'}")
+            server_state = (
+                f"DID load (declared={declared}) so agy declined the tool itself"
+                if loaded
+                else "never initialized -- instrument failure"
+            )
+            return INCONCLUSIVE, f"{label}: control tool never ran; server {server_state}"
         if declared is None:
             declared = (isinstance(caps, dict)
                         and "elicitation" in (caps.get("capabilities") or {}))
