@@ -98,8 +98,9 @@ public sealed record CoreDispatchTarget(
     Func<string, string?>? TryGetSessionId = null,
     Func<string, string, IReadOnlyList<string>>? ResumeArgs = null,
     Func<string, string, CoreDispatchTarget>? ResumeTarget = null,
-    // #2002: the adapter may interpret the captured stream and return the one typed fact the
-    // outcome classifier needs. Core never parses vendor envelopes.
+    // #2002: the adapter may interpret each complete, line-framed stdout record and return the one
+    // typed fact the outcome classifier needs. Core never parses vendor envelopes or retains their
+    // unbounded stream; the adapter owns its bounded structured state.
     Func<string, OutstandingToolAtTerminalSuccess?>? DetectsOutstandingToolAtTerminalSuccess = null)
 {
     /// <summary>Returns a target whose broker is restricted to the named declared-output tools.</summary>
@@ -1055,10 +1056,12 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         // so the latch is visible.
         var terminalSuccessObserved = false;
         var terminalResultObserved = false;
+        OutstandingToolAtTerminalSuccess? outstandingToolAtTerminalSuccess = null;
         var detectsTerminalSuccess = target.DetectsTerminalSuccess;
         var detectsTerminalResult = target.DetectsTerminalResult;
+        var detectsOutstandingTool = target.DetectsOutstandingToolAtTerminalSuccess;
         Action<string>? stdoutLineSink = target.OnStdoutLine;
-        if (detectsTerminalSuccess is not null || detectsTerminalResult is not null)
+        if (detectsTerminalSuccess is not null || detectsTerminalResult is not null || detectsOutstandingTool is not null)
         {
             var innerProgress = target.OnStdoutLine;
             stdoutLineSink = line =>
@@ -1072,6 +1075,11 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                 if (!terminalResultObserved && detectsTerminalResult is not null && detectsTerminalResult(line))
                 {
                     terminalResultObserved = true;
+                }
+
+                if (detectsOutstandingTool?.Invoke(line) is { } outstanding)
+                {
+                    outstandingToolAtTerminalSuccess = outstanding;
                 }
             };
         }
@@ -1302,11 +1310,10 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
             capturedStdoutTail = stdoutTail.ToTailOrNull();
         }
 
-        var outstandingToolAtTerminalSuccess = terminalSuccessLatched
-            && target.DetectsOutstandingToolAtTerminalSuccess is { } detectOutstanding
-            && capturedStdoutTail is { } stdout
-            ? detectOutstanding(stdout)
-            : null;
+        if (!terminalSuccessLatched)
+        {
+            outstandingToolAtTerminalSuccess = null;
+        }
 
         string? capturedStderr;
         lock (stderrLock)

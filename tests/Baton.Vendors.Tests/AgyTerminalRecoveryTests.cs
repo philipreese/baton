@@ -30,4 +30,44 @@ public sealed class AgyTerminalRecoveryTests
 
         Assert.Null(fact);
     }
+
+    [Fact]
+    public void The_incremental_observer_retains_active_state_past_the_stdout_tail_boundary()
+    {
+        var observe = AgyTerminalStreamRecoveryDetector.CreateObserver();
+
+        Assert.Null(observe("""
+            {"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"dotnet build -warnaserror"}}}}
+            """));
+
+        foreach (var _ in Enumerable.Range(0, 250))
+        {
+            Assert.Null(observe(new string('x', 10)));
+        }
+
+        var fact = observe("""
+            {"event":"result","result":{"status":"SUCCESS","response":"done"}}
+            """);
+
+        Assert.NotNull(fact);
+        Assert.Equal("run_command", fact.ToolName);
+        Assert.Equal("dotnet build -warnaserror", fact.CommandLine);
+    }
+
+    [Fact]
+    public void An_unmatched_completion_does_not_erase_concurrent_same_tool_steps()
+    {
+        const string capturedStream = """
+            {"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"first"}}}}
+            {"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"second"}}}}
+            {"event":"step_update","step_update":{"step_index":99,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{}}}
+            {"event":"result","result":{"status":"SUCCESS","response":"done"}}
+            """;
+
+        var fact = AgyTerminalStreamRecoveryDetector.Detect(capturedStream);
+
+        Assert.NotNull(fact);
+        Assert.Equal("run_command", fact.ToolName);
+        Assert.Null(fact.CommandLine);
+    }
 }

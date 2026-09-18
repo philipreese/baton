@@ -206,6 +206,52 @@ public class CoreDispatcherTests
         }
     }
 
+    [Fact]
+    public async Task DispatchAsync_observes_outstanding_state_before_the_stdout_tail_is_evicted()
+    {
+        var artifactsRoot = Path.Combine(Path.GetTempPath(), $"artifacts-{Guid.NewGuid():N}");
+        var logPath = Path.Combine(Path.GetTempPath(), $"flow-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, ExecutionId);
+            var request = MakeRequest(ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot));
+            var filler = string.Join(" & ", Enumerable.Repeat("echo 0123456789", 250));
+            var activeSeen = false;
+            var baseTarget = new CoreDispatchTarget(
+                "cmd",
+                ["/c", $"echo ACTIVE_MARKER & {filler} & echo SUCCESS_MARKER"]);
+            var target = baseTarget with
+            {
+                DetectsTerminalSuccess = line => line.Contains("SUCCESS_MARKER", StringComparison.Ordinal),
+                DetectsOutstandingToolAtTerminalSuccess = line =>
+                {
+                    if (line.Contains("ACTIVE_MARKER", StringComparison.Ordinal))
+                    {
+                        activeSeen = true;
+                    }
+
+                    return line.Contains("SUCCESS_MARKER", StringComparison.Ordinal) && activeSeen
+                        ? new OutstandingToolAtTerminalSuccess("run_command", "dotnet build -warnaserror")
+                        : null;
+                }
+            };
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var result = await new CoreDispatcher(writer, writer)
+                .DispatchAsync(request, target, TestContext.Current.CancellationToken);
+
+            Assert.True(result.TerminalSuccessObserved);
+            Assert.Equal(
+                new OutstandingToolAtTerminalSuccess("run_command", "dotnet build -warnaserror"),
+                result.OutstandingToolAtTerminalSuccess);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(artifactsRoot);
+            FileCleanup.Delete(logPath);
+        }
+    }
+
     private static CoreDispatchTarget EchoLineToStdout(string line) =>
         new("cmd", ["/c", $"echo {line}"]);
 

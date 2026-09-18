@@ -10,6 +10,12 @@ namespace Baton.Vendors;
 /// </summary>
 internal static class AgyTerminalStreamRecoveryDetector
 {
+    public static Func<string, OutstandingToolAtTerminalSuccess?> CreateObserver()
+    {
+        var state = new StreamState();
+        return state.Observe;
+    }
+
     public static OutstandingToolAtTerminalSuccess? Detect(string? stdoutTail)
     {
         if (string.IsNullOrWhiteSpace(stdoutTail))
@@ -17,13 +23,42 @@ internal static class AgyTerminalStreamRecoveryDetector
             return null;
         }
 
-        var active = new Dictionary<string, ActiveTool>(StringComparer.Ordinal);
+        var state = new StreamState();
         foreach (var root in ReadObjects(stdoutTail))
+        {
+            if (state.Observe(root) is { } fact)
+            {
+                return fact;
+            }
+        }
+
+        return null;
+    }
+
+    private sealed class StreamState
+    {
+        private readonly Dictionary<string, ActiveTool> active = new(StringComparer.Ordinal);
+        private int anonymousStep;
+
+        public OutstandingToolAtTerminalSuccess? Observe(string line)
+        {
+            foreach (var root in ReadObjects(line))
+            {
+                if (Observe(root) is { } fact)
+                {
+                    return fact;
+                }
+            }
+
+            return null;
+        }
+
+        public OutstandingToolAtTerminalSuccess? Observe(JsonElement root)
         {
             if (!root.TryGetProperty("event", out var eventProperty)
                 || eventProperty.ValueKind != JsonValueKind.String)
             {
-                continue;
+                return null;
             }
 
             if (eventProperty.GetString() == "step_update"
@@ -37,7 +72,7 @@ internal static class AgyTerminalStreamRecoveryDetector
                 && nameProperty.ValueKind == JsonValueKind.String
                 && nameProperty.GetString() is { Length: > 0 } toolName)
             {
-                var key = StepKey(step, toolName);
+                var key = StepKey(step) ?? $"anonymous:{++anonymousStep}";
                 var state = stateProperty.GetString();
                 if (state == "ACTIVE")
                 {
@@ -45,19 +80,24 @@ internal static class AgyTerminalStreamRecoveryDetector
                 }
                 else if (state is "DONE" or "ERROR")
                 {
-                    if (!active.Remove(key))
+                    if (StepKey(step) is { } exactKey)
                     {
-                        foreach (var candidate in active
-                                     .Where(pair => string.Equals(pair.Value.ToolName, toolName, StringComparison.Ordinal))
-                                     .Select(pair => pair.Key)
-                                     .ToList())
+                        active.Remove(exactKey);
+                    }
+                    else
+                    {
+                        var candidates = active
+                            .Where(pair => string.Equals(pair.Value.ToolName, toolName, StringComparison.Ordinal))
+                            .Select(pair => pair.Key)
+                            .ToList();
+                        if (candidates.Count == 1)
                         {
-                            active.Remove(candidate);
+                            active.Remove(candidates[0]);
                         }
                     }
                 }
 
-                continue;
+                return null;
             }
 
             if (eventProperty.GetString() == "result"
@@ -66,19 +106,34 @@ internal static class AgyTerminalStreamRecoveryDetector
                 && result.TryGetProperty("status", out var statusProperty)
                 && statusProperty.ValueKind == JsonValueKind.String
                 && statusProperty.GetString() == "SUCCESS"
-                && active.Values.FirstOrDefault() is { } outstanding)
+                && active.Count > 0)
             {
-                return new OutstandingToolAtTerminalSuccess(outstanding.ToolName, outstanding.CommandLine);
-            }
-        }
+                var outstanding = active.Values.ToList();
+                if (outstanding.Count == 1)
+                {
+                    return new OutstandingToolAtTerminalSuccess(outstanding[0].ToolName, outstanding[0].CommandLine);
+                }
 
-        return null;
+                // Multiple active steps are evidence of an outstanding tool, but their command is
+                // ambiguous. Preserve the recovery fact without manufacturing a command from the
+                // first dictionary entry; same-tool concurrency remains fail-closed.
+                var terminalToolName = outstanding
+                    .Select(tool => tool.ToolName)
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+                    .First();
+                return new OutstandingToolAtTerminalSuccess(terminalToolName);
+            }
+
+            return null;
+        }
     }
 
-    private static string StepKey(JsonElement step, string toolName) =>
-        step.TryGetProperty("step_index", out var index) && index.ValueKind is JsonValueKind.Number or JsonValueKind.String
-            ? index.ToString()
-            : toolName;
+    private static string? StepKey(JsonElement step) =>
+        step.TryGetProperty("step_index", out var index)
+            && index.ValueKind is JsonValueKind.Number or JsonValueKind.String
+            ? $"step_index:{index}"
+            : null;
 
     private static string? CommandLine(JsonElement step)
     {
