@@ -228,6 +228,9 @@ public static class StateProjector
                     state.RecoveryOccurrenceByStepId.Remove(lateFailureStepId);
                     state.FinishedDuringTeardownStepIds.Remove(lateFailureStepId);
                     state.LatestLateFailureReasonByStepId[lateFailureStepId] = lateFailure.Reason;
+                    state.WorkspaceChangedByStepId[lateFailureStepId] = lateFailure.WorkspaceChanged;
+                    state.HollowByStepId[lateFailureStepId] = lateFailure.Hollow;
+                    state.HollowReasonByStepId[lateFailureStepId] = lateFailure.HollowReason;
                 }
 
                 break;

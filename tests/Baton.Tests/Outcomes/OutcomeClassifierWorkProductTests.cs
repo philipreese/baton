@@ -134,6 +134,33 @@ public sealed class OutcomeClassifierWorkProductTests : IDisposable
     }
 
     [Fact]
+    public void An_eligible_late_failure_with_a_measured_zero_write_calls_and_an_unchanged_tree_fails()
+    {
+        var (worktree, outputDirectory) = ProvisionUntouchedWorktree();
+        File.WriteAllText(Path.Combine(outputDirectory, "changes.md"), "claimed completion");
+        var contract = new WorkerContract("implement", [], [new ProducedOutput("changes.md")], []);
+
+        var classification = OutcomeClassifier.Classify(
+            new CoreDispatchResult(
+                1,
+                CoreExitReason.Natural,
+                StderrTail: "late capacity failure",
+                TerminalResultObserved: true),
+            contract,
+            outputDirectory,
+            new LateCapacityClassifier(),
+            changesTreeWorkingDirectory: worktree,
+            changesTree: true,
+            writeToolCallCount: 0);
+
+        Assert.Equal(OutcomeVerdict.Failed, classification.Verdict);
+        Assert.Equal(FailureClassification.Permanent, classification.FailureClassification);
+        Assert.Contains("zero write-tool calls", classification.Reason!, StringComparison.Ordinal);
+        Assert.False(classification.WorkspaceChanged);
+        Assert.True(classification.Hollow);
+    }
+
+    [Fact]
     public void An_artifact_only_lane_with_measured_zero_write_calls_and_an_unchanged_tree_succeeds()
     {
         var (worktree, outputDirectory) = ProvisionUntouchedWorktree();
@@ -233,6 +260,20 @@ public sealed class OutcomeClassifierWorkProductTests : IDisposable
         _ = process.StandardOutput.ReadToEndAsync();
         process.WaitForExit();
         Assert.True(process.ExitCode == 0, $"git {string.Join(' ', args)} failed: {stderr.Result}");
+    }
+
+    private sealed class LateCapacityClassifier : IFailureClassifier
+    {
+        public bool TryClassifyFailure(
+            string? stderrTail,
+            TimeProvider timeProvider,
+            out FailureClassification? classification,
+            out DateTimeOffset? retryNotBefore)
+        {
+            classification = stderrTail == "late capacity failure" ? FailureClassification.Retryable : null;
+            retryNotBefore = null;
+            return classification is not null;
+        }
     }
 
     public void Dispose()

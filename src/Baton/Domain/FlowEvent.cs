@@ -111,7 +111,10 @@ public abstract record FlowEvent
     /// </summary>
     public sealed record ExecutionSucceededWithLateFailure(
         ExecutionId ExecutionId,
-        string Reason) : FlowEvent;
+        string Reason,
+        bool? WorkspaceChanged = null,
+        bool? Hollow = null,
+        string? HollowReason = null) : FlowEvent;
 
     /// <summary>Flow has classified a completed execution as failed.</summary>
     /// <param name="Reason">

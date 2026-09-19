@@ -18,7 +18,8 @@ public class StateProjectorTests
         var events = new FlowEvent[]
         {
             new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId, Architect)),
-            new FlowEvent.ExecutionSucceededWithLateFailure(executionId, reason),
+            new FlowEvent.ExecutionSucceededWithLateFailure(
+                executionId, reason, WorkspaceChanged: false, Hollow: true, HollowReason: "no diff"),
         };
 
         var snapshot = new WorkflowDefinitionSnapshot(
@@ -31,6 +32,9 @@ public class StateProjectorTests
         var architect = StepFor(state, Architect);
         Assert.Equal(StepStatus.Succeeded, architect.Status);
         Assert.Equal(reason, architect.LateFailureReason);
+        Assert.False(architect.WorkspaceChanged);
+        Assert.True(architect.Hollow);
+        Assert.Equal("no diff", architect.HollowReason);
         Assert.Equal(WorkflowOutcome.SucceededWithLateFailure, WorkflowOutcome.Describe(state));
     }
 

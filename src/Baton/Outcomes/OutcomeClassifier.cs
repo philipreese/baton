@@ -296,9 +296,16 @@ public static class OutcomeClassifier
 
             if (identified && lateFailureClassification is FailureClassification.Retryable or FailureClassification.ExhaustedUntil)
             {
-                return new OutcomeClassification(
-                    OutcomeVerdict.SucceededWithLateFailure,
-                    Reason: BuildLateVendorFailureReason(result));
+                var completion = BuildSucceededClassification(
+                    contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles,
+                    writeToolCallCount, verifiesWorkspace);
+                return completion.Verdict == OutcomeVerdict.Succeeded
+                    ? completion with
+                    {
+                        Verdict = OutcomeVerdict.SucceededWithLateFailure,
+                        Reason = BuildLateVendorFailureReason(result),
+                    }
+                    : completion;
             }
 
             // A terminal result without positive eligible evidence remains an ordinary failure.

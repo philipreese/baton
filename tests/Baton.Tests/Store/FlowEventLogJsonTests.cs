@@ -36,7 +36,9 @@ public class FlowEventLogJsonTests
             new Dictionary<StepId, ExecutionId>())),
         new FlowEvent.ExecutionRequestRejected(ExecutionId, "rejected"),
         new FlowEvent.ExecutionSucceeded(ExecutionId),
-        new FlowEvent.ExecutionSucceededWithLateFailure(ExecutionId, "vendor reported a terminal failure after delivery"),
+        new FlowEvent.ExecutionSucceededWithLateFailure(
+            ExecutionId, "vendor reported a terminal failure after delivery",
+            WorkspaceChanged: false, Hollow: true, HollowReason: "no diff"),
         new FlowEvent.ExecutionFailed(ExecutionId, FailureClassification.Permanent, "reason"),
         new FlowEvent.ExecutionCancelled(ExecutionId),
         new FlowEvent.CancellationRequested(ExecutionId),
