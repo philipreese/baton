@@ -408,7 +408,7 @@ public sealed class QueueOptionsParserTests
         var options = QueueOptionsParser.Parse([
             "add", "2410-lane", "--issue", "2410", "--lifecycle",
             "--declared-size", "medium", "--size-rationale", "one seam",
-            "--require", "file-write", "--stage", "review", "--require", " Network ",
+            "--scope", "engine", "--require", "file-write", "--stage", "review", "--require", " Network ",
         ]);
 
         var selection = Assert.Single(options.StageSelections!);
@@ -418,5 +418,6 @@ public sealed class QueueOptionsParserTests
         Assert.Null(selection.Effort);
         Assert.Equal(["network"], selection.Requirements);
         Assert.Equal(["file-write"], options.Requirements);
+        Assert.Equal("engine", options.ScopeClass);
     }
 }

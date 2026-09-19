@@ -127,9 +127,54 @@ public sealed class QueueSchedulerServiceTests
             var persisted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.NotNull(launch);
             Assert.Equal(QueueItemState.Launched, persisted.State);
-            Assert.DoesNotContain(sourceRequirements, requirement => launch!.Item.Requirements!.Contains(requirement));
-            Assert.Equal(launch.Item.Requirements, persisted.LastAdmission!.Requested);
-            Assert.DoesNotContain(sourceRequirements, requirement => persisted.LastAdmission.Requested!.Contains(requirement));
+            var destinationRequirements = TaskRequirementPreflight.RequirementsFor(WorkerRoleCatalog.For("review"));
+            Assert.Equal(sourceRequirements, persisted.Requirements);
+            Assert.Equal(destinationRequirements, launch!.Item.Requirements);
+            Assert.Equal(destinationRequirements, persisted.LastAdmission!.Requested);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_narrow_implement_declaration_survives_a_restrictive_ceiling_without_inflation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "narrow-implement-workspace");
+            Directory.CreateDirectory(workspace);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: false,
+                    RunShellCommands: false, NetworkAccess: false), ProjectCeilingStore.DefaultPath);
+            var declaredRequirements = new[] { TaskRequirements.RepositoryRead };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("narrow-implement", scope: null) with
+                {
+                    Workspace = workspace,
+                    Stage = WorkStage.Implement,
+                    Requirements = declaredRequirements,
+                }],
+            }, Ct);
+            QueueLaunchRequest? launch = null;
+            var service = Service((request, _) =>
+            {
+                launch = request;
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            var persisted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.NotNull(launch);
+            Assert.Equal(QueueItemState.Launched, persisted.State);
+            Assert.Equal(declaredRequirements, persisted.Requirements);
+            Assert.Equal(declaredRequirements, launch!.Item.Requirements);
+            Assert.Equal(declaredRequirements, persisted.LastAdmission!.Requested);
         }
         finally
         {

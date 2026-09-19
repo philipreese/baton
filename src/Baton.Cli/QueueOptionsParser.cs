@@ -467,7 +467,10 @@ public static class QueueOptionsParser
                     $"'--stage {WorkStages.Token(selection.Stage)}' needs at least one of '--adapter', '--model' or '--effort'.");
             }
 
-            if (scope is not null && string.IsNullOrWhiteSpace(selection.Reason))
+            var selectionOverridesAnAxis = selection.Adapter is not null
+                || selection.Model is not null
+                || selection.Effort is not null;
+            if (scope is not null && selectionOverridesAnAxis && string.IsNullOrWhiteSpace(selection.Reason))
             {
                 throw new CliArgumentException(
                     $"A '{WorkStages.Token(selection.Stage)}' stage selection that overrides its tier needs '--reason <why>'.");

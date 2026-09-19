@@ -101,6 +101,11 @@ internal static class TaskRequirementPreflight
 
         var destinationRole = WorkerRoleCatalog.For(WorkStages.RoleFor(stage));
         var destinationSelection = QueueTierTable.SelectionForStage(item, stage).Selection;
+        if (stage == WorkStage.Implement && destinationSelection?.Requirements is null)
+        {
+            return item;
+        }
+
         return item with
         {
             Requirements = RequirementsFor(destinationRole, destinationSelection?.Requirements),
