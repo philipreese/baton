@@ -523,17 +523,15 @@ produces no line at all:** `--disallowedTools` makes the CLI refuse a withheld t
 standing denied shell family typed unchained, *before* the `PreToolUse` hook is consulted
 (`ClaudeWorkerAdapter.StandingShellDenials` states that ordering and what it buys), so a claude room's
 refusal share is a share over the rungs the hook can see — biased by role toward the hook-reachable
-ones, not merely a few short — while codex records the equivalent refusals in full. **Where the line
-lands follows the enforcement point** (`spec/baton.md` §9,
-*Where a tool rule is enforced*): the codex broker writes it into that execution's captured
-`.stdout.log`, beside the `item.completed` for the same call, because the broker is that stream's
-writer; the claude and agy `PreToolUse` hooks are subprocesses of the vendor CLI that cannot write
-that file, so they append the identical line to `.baton-grants.ndjson` in the same execution
-directory. One schema, two files, both under `artifacts/execution_*/`, both dot-prefixed so neither
-can be a declared output, and both registered in the stream-log filter a deliverable listing would
-read — a filter no production caller applies today, there being no such listing yet
-(`ReservedOutputNames` records that once). Reading a whole room means both — a hook-vendor room has no
-grant lines in its stream, and a codex room writes no `.baton-grants.ndjson` at all.
+ones, not merely a few short — while codex records the equivalent refusals in full. **Every
+enforcement point appends the line to that execution's unrolled `.baton-grants.ndjson` authority log**
+(`spec/baton.md` §9, *Where a tool rule is enforced*). The codex broker also mirrors the identical
+line into its captured `.stdout.log` beside the `item.completed` for the same call; the claude and agy
+`PreToolUse` hooks cannot write that stream because they are vendor subprocesses. One schema, with the
+authority log as the lifecycle reader's source of truth and the captured stream as Codex's diagnostic
+mirror. Both are under `artifacts/execution_*/`, dot-prefixed so neither can be a declared output, and
+registered in the stream-log filter a deliverable listing would read — a filter no production caller
+applies today, there being no such listing yet (`ReservedOutputNames` records that once).
 
 Two limits, because a reader will otherwise fill them in wrongly. **The hook-side count can
 undercount.** A vendor issuing parallel tool calls runs parallel hook subprocesses, each appending to

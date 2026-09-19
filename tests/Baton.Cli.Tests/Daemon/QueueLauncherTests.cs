@@ -747,6 +747,7 @@ public sealed class QueueLauncherTests : IDisposable
     }
 
     [Theory]
+    [InlineData(WorkStage.Implement)]
     [InlineData(WorkStage.Continue)]
     [InlineData(WorkStage.Fix)]
     public void A_follow_on_lane_forwards_the_canonical_repository_qualified_PR(WorkStage stage)
