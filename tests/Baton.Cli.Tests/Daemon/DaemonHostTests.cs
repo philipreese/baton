@@ -51,6 +51,79 @@ public class DaemonHostTests
     }
 
     [Fact]
+    public void DaemonOptionsParser_EmptyArgs_AcceptsTheDefault()
+    {
+        Assert.False(DaemonOptionsParser.Parse([]));
+    }
+
+    [Fact]
+    public void DaemonOptionsParser_NoMutex_AcceptsTheOnlySupportedOption()
+    {
+        Assert.True(DaemonOptionsParser.Parse(["--no-mutex"]));
+    }
+
+    [Fact]
+    public void DaemonOptionsParser_Status_RejectsTheUnsupportedPositionalArgumentWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => DaemonOptionsParser.Parse(["status"]));
+
+        Assert.Contains("Unexpected argument 'status'", ex.Message);
+        Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public void DaemonOptionsParser_AnotherPositionalArgument_RejectsItWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => DaemonOptionsParser.Parse(["anything-else"]));
+
+        Assert.Contains("Unexpected argument 'anything-else'", ex.Message);
+        Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public void DaemonOptionsParser_UnknownOption_RejectsItWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => DaemonOptionsParser.Parse(["--unknown"]));
+
+        Assert.Contains("Unknown option '--unknown'", ex.Message);
+        Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public void DaemonOptionsParser_DuplicateNoMutex_RejectsItWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => DaemonOptionsParser.Parse(["--no-mutex", "--no-mutex"]));
+
+        Assert.Contains("may only be specified once", ex.Message);
+        Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public async Task RunDaemonAsync_InvalidArguments_RefusesBeforeBuildingAHostOrWritingStorage()
+    {
+        var tempHome = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
+        try
+        {
+            var hostBuilt = false;
+
+            var ex = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                DaemonHost.RunDaemonAsync(["status"], _ => hostBuilt = true));
+
+            Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+            Assert.False(hostBuilt);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(tempHome));
+        }
+        finally
+        {
+            if (Directory.Exists(tempHome))
+            {
+                Directory.Delete(tempHome, true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task RunDaemonAsync_SecondInstance_RefusesWithoutBuildingOrRunningAHost()
     {
         var tempHome = CreateTempHome();
