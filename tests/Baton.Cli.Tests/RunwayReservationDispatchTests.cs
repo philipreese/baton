@@ -342,6 +342,7 @@ public sealed class RunwayReservationDispatchTests : IDisposable
             ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
             ["agy"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
             ["codex"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            [WorkflowTemplateComposer.CaptureAdapter] = new CaptureWorkerAdapter(),
         };
 
     private static RunwayDecision AdmitAt84(string vendor, DateTimeOffset harvestedAt) =>
