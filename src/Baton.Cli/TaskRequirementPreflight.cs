@@ -85,6 +85,22 @@ internal static class TaskRequirementPreflight
             : new TaskRequirementAdmission(requested, effectiveGrant, TaskRequirementAdmission.Refused, missing, VendorUsage: 0);
     }
 
+    /// <summary>
+    /// Materializes the canonical declaration for a lifecycle destination. The role grant and its
+    /// declared outputs are the baseline; only requirements explicitly attached to that stage may
+    /// add to it.
+    /// </summary>
+    internal static IReadOnlyList<string> RequirementsFor(
+        WorkerRole role, IEnumerable<string>? explicitRequirements = null)
+    {
+        ArgumentNullException.ThrowIfNull(role);
+
+        var effectiveGrant = EffectiveGrant(role.Grant, role.Outputs.Select(output => output.Name));
+        return explicitRequirements is null
+            ? effectiveGrant
+            : TaskRequirements.Normalize(effectiveGrant.Concat(explicitRequirements));
+    }
+
     private static IReadOnlyList<string> EffectiveGrant(PermissionGrant grant, IEnumerable<string> declaredOutputs)
     {
         var capabilities = new List<string>();

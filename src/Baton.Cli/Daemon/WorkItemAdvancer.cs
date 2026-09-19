@@ -4,6 +4,7 @@ using Baton.Accounting;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Vendors;
 
 namespace Baton.Cli.Daemon;
 
@@ -531,6 +532,10 @@ public sealed class WorkItemAdvancer
         CancellationToken cancellationToken)
     {
         var next = transition.NextStage!.Value;
+        var destinationRole = WorkStages.RoleFor(next);
+        var destinationSelection = QueueTierTable.SelectionForStage(item, next).Selection;
+        var destinationRequirements = TaskRequirementPreflight.RequirementsFor(
+            WorkerRoleCatalog.For(destinationRole), destinationSelection?.Requirements);
 
         if (next == WorkStage.Continue)
         {
@@ -590,7 +595,11 @@ public sealed class WorkItemAdvancer
         var advanced = await TryMarkAsync(item, existing => existing with
         {
             Stage = next,
-            Role = WorkStages.RoleFor(next),
+            Role = destinationRole,
+            Requirements = destinationRequirements,
+            // Admission describes the attempt that just settled. It must not remain visible while
+            // the next stage is queued, or status would project the source role's grant.
+            LastAdmission = null,
             // A frozen assignment belongs to the attempt that just settled. The next lifecycle
             // stage has its own role and stage plan; carrying the old tuple forward would silently
             // run review/fix/re-review on the implementation worker.
