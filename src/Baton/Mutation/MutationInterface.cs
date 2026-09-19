@@ -900,6 +900,9 @@ public static class MutationInterface
         var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRootPath, executionId);
         var environment = ArtifactManager.BuildEnvironment(inputPaths, outputDirectory, artifactsRootPath);
         var (hookCanaryArmed, hookVerdictLedgerFileName) = CaptureHookCanaryArmingFields(processBinding);
+        var deliveryGeneratedPaths = DeliveryArtifactInventory.For(processBinding);
+        var deliveryAuthorizedPaths = DeliveryArtifactInventory.AuthorizedByBrief(
+            processBinding.Target.PromptText, deliveryGeneratedPaths);
 
         var request = new ExecutionRequest(
             executionId,
@@ -919,7 +922,9 @@ public static class MutationInterface
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
             DeliversBranch: processBinding.DeliversBranch,
-            ProducedOutputs: processBinding.Contract.ProducedOutputs);
+            ProducedOutputs: processBinding.Contract.ProducedOutputs,
+            DeliveryGeneratedPaths: deliveryGeneratedPaths,
+            DeliveryAuthorizedPaths: deliveryAuthorizedPaths);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -2018,6 +2023,13 @@ public static class MutationInterface
 
         var processBindingForRequest = binding as WorkerBinding.Process;
         var (hookCanaryArmed, hookVerdictLedgerFileName) = CaptureHookCanaryArmingFields(processBindingForRequest);
+        var deliveryGeneratedPaths = processBindingForRequest is { } deliveryBinding
+            ? DeliveryArtifactInventory.For(deliveryBinding)
+            : null;
+        var deliveryAuthorizedPaths = processBindingForRequest is { } authorizedBinding
+            ? DeliveryArtifactInventory.AuthorizedByBrief(
+                authorizedBinding.Target.PromptText, deliveryGeneratedPaths ?? [])
+            : null;
 
         var request = new ExecutionRequest(
             executionId,
@@ -2035,7 +2047,9 @@ public static class MutationInterface
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
             DeliversBranch: processBindingForRequest?.DeliversBranch,
-            ProducedOutputs: binding.Contract.ProducedOutputs);
+            ProducedOutputs: binding.Contract.ProducedOutputs,
+            DeliveryGeneratedPaths: deliveryGeneratedPaths,
+            DeliveryAuthorizedPaths: deliveryAuthorizedPaths);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -2440,7 +2454,9 @@ public static class MutationInterface
                     deliveryOutcomeBeforeVerify = await DeliveryVerifier.CheckAsync(
                         binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
                         shippingCeilingExceeded: shippingCeilingExceeded,
-                        workspaceHeadShaAtStart: workspaceHeadShaAtStart).ConfigureAwait(false);
+                        workspaceHeadShaAtStart: workspaceHeadShaAtStart,
+                        generatedPaths: prepared.Request.DeliveryGeneratedPaths,
+                        authorizedPaths: prepared.Request.DeliveryAuthorizedPaths).ConfigureAwait(false);
                 }
 
                 if (deliveryOutcomeBeforeVerify.Status is DeliveryCheckStatus.Failed

@@ -55,6 +55,36 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     [Fact]
+    public async Task A_direct_delivery_with_a_valid_change_and_generated_handoff_is_rejected_before_success()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-generated-handoff");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var finalState = await RunSingleStepPumpAsync(
+                roomDirectory, artifactsRoot, logPath,
+                DeliveryBinding(workspace,
+                    "echo production>production.txt && echo generated>changes.md && git add production.txt changes.md && git commit -m delivered -q && git push -q origin HEAD && echo done>%BATON_OUTPUT_DIR%\\changes.md"));
+
+            var step = Assert.Single(finalState.Steps);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.True(step.IndeterminateAwaitingResolution);
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["generated-files-forbidden"], failed.FailingMembers);
+            Assert.Contains("changes.md", failed.Tail, StringComparison.Ordinal);
+            Assert.Contains("declared worker output handoff", failed.Tail, StringComparison.Ordinal);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
     public async Task A_dirty_workspace_with_unchanged_HEAD_fails_delivery_and_keeps_the_lane_indeterminate()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-dirty-unchanged");

@@ -38,6 +38,72 @@ public sealed class DeliveryVerifierTests
     }
 
     [Fact]
+    public async Task A_delivered_production_change_with_generated_handoffs_is_rejected_with_each_provenance()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-generated-delivery");
+        try
+        {
+            var attemptStart = GitRevParseHead(workspace);
+            File.WriteAllText(Path.Combine(workspace, "production.txt"), "real change\n");
+            File.WriteAllText(Path.Combine(workspace, "changes.md"), "handoff\n");
+            File.WriteAllText(Path.Combine(workspace, "pr-body.md"), "draft body\n");
+            TempGitRepository.CommitAll(workspace, "deliver production change");
+            TempGitRepository.Push(workspace, "origin", "feature-generated-delivery");
+
+            var outcome = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: false, TestContext.Current.CancellationToken,
+                workspaceHeadShaAtStart: attemptStart,
+                generatedPaths:
+                [
+                    new DeliveryArtifactPath("changes.md", "declared worker output handoff 'changes.md'"),
+                    new DeliveryArtifactPath("pr-body.md", "direct pull-request creation body-file request"),
+                ]);
+
+            Assert.Equal(DeliveryCheckStatus.Failed, outcome.Status);
+            Assert.Equal(["generated-files-forbidden"], outcome.FailingMembers);
+            Assert.Contains("changes.md", outcome.Tail, StringComparison.Ordinal);
+            Assert.Contains("declared worker output handoff", outcome.Tail, StringComparison.Ordinal);
+            Assert.Contains("pr-body.md", outcome.Tail, StringComparison.Ordinal);
+            Assert.Contains("direct pull-request creation body-file request", outcome.Tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
+    [Fact]
+    public async Task An_explicitly_authorized_exact_skill_path_remains_allowed()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-authorized-skill");
+        try
+        {
+            var attemptStart = GitRevParseHead(workspace);
+            var generated = new DeliveryArtifactPath(".claude/skills/example/SKILL.md", "engine seed requested by example");
+            File.WriteAllText(Path.Combine(workspace, "production.txt"), "real change\n");
+            var skillPath = Path.Combine(workspace, ".claude", "skills", "example", "SKILL.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(skillPath)!);
+            File.WriteAllText(skillPath, "product skill\n");
+            TempGitRepository.CommitAll(workspace, "deliver authorized skill change");
+            TempGitRepository.Push(workspace, "origin", "feature-authorized-skill");
+
+            var authorized = DeliveryArtifactInventory.AuthorizedByBrief(
+                "Explicitly authorize the exact repository path .claude/skills/example/SKILL.md as a product change.",
+                [generated]);
+            var outcome = await DeliveryVerifier.CheckAsync(
+                workspace, expectPr: false, TestContext.Current.CancellationToken,
+                workspaceHeadShaAtStart: attemptStart, generatedPaths: [generated], authorizedPaths: authorized);
+
+            Assert.Equal([".claude/skills/example/SKILL.md"], authorized);
+            Assert.Equal(DeliveryCheckStatus.Passed, outcome.Status);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
+    [Fact]
     public async Task A_remote_advanced_since_attempt_start_but_the_PR_head_is_stale_fails_delivery()
     {
         var (workspace, origin) = CreatePushedWorkspace("feature-pr-stale");
