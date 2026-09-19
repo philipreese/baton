@@ -12,15 +12,18 @@ namespace Baton.Cli.Mcp;
 /// </summary>
 public static class McpCommand
 {
+    public const string Usage = McpOptionsParser.Usage;
+
     public static async Task<int> RunAsync(string[] args)
     {
-        var captureFilePath = ParseArgValue(args, "--capture-file");
+        var options = McpOptionsParser.Parse(args);
+        var captureFilePath = options.CaptureFilePath;
         // #833: no literal path arrives on the command line -- see Baton.Vendors.ClaudeWorkerAdapter's
         // EnsureMemoryProposalMcpConfig for why (canonical: the resolve-once-per-binding seam and the
         // env-inheritance mechanism this flag rests on). This flag only says whether to enable the tool.
-        var enableMemoryProposalTool = args.Contains("--memory-proposal-tool");
-        var enableFleetStatusTool = args.Contains("--fleet-status-tool");
-        var enableRoomDetailTool = args.Contains("--room-detail-tool");
+        var enableMemoryProposalTool = options.EnableMemoryProposalTool;
+        var enableFleetStatusTool = options.EnableFleetStatusTool;
+        var enableRoomDetailTool = options.EnableRoomDetailTool;
 
         List<IMcpTool> tools = [];
         if (captureFilePath is not null)
@@ -97,25 +100,12 @@ public static class McpCommand
 
         if (tools.Count == 0)
         {
-            Console.Error.WriteLine("Usage: baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
+            Console.Error.WriteLine(Usage);
             return 1;
         }
 
         var host = new McpServerHost("baton-mcp-host", "1.0.0", tools);
         await host.RunAsync(Console.In, Console.Out).ConfigureAwait(false);
         return 0;
-    }
-
-    private static string? ParseArgValue(string[] args, string flag)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == flag)
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
     }
 }

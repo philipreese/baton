@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.Vendors;
 using Baton.Cli.Daemon;
 using Baton.Concurrency;
@@ -41,6 +42,26 @@ public class DaemonHostTests
         return tempHome;
     }
 
+    private static Process StartBatonProcessInHome(string batonHome, params string[] args)
+    {
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        startInfo.Environment["BATON_HOME"] = batonHome;
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add(typeof(DaemonHost).Assembly.Location);
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
+    }
+
     /// <summary>Registers a stop trigger the moment the host finishes starting -- <see cref="IHostApplicationLifetime.ApplicationStarted"/>
     /// only fires once every registered <see cref="IHostedService"/>'s StartAsync has returned, so this
     /// is the earliest point a test can stop the host without racing its own startup.</summary>
@@ -69,6 +90,9 @@ public class DaemonHostTests
 
         Assert.Contains("Unexpected argument 'status'", ex.Message);
         Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+        Assert.Equal(DaemonOptionsParser.ObservabilityTryInvocation, ex.TryInvocation);
+        Assert.Contains("baton queue list", DaemonOptionsParser.Usage);
+        Assert.Contains("Fleet Glass", DaemonOptionsParser.Usage);
     }
 
     [Fact]
@@ -78,6 +102,7 @@ public class DaemonHostTests
 
         Assert.Contains("Unexpected argument 'anything-else'", ex.Message);
         Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+        Assert.Equal(DaemonOptionsParser.ObservabilityTryInvocation, ex.TryInvocation);
     }
 
     [Fact]
@@ -87,6 +112,7 @@ public class DaemonHostTests
 
         Assert.Contains("Unknown option '--unknown'", ex.Message);
         Assert.Contains(DaemonOptionsParser.Usage, ex.Message);
+        Assert.Equal(DaemonOptionsParser.ObservabilityTryInvocation, ex.TryInvocation);
     }
 
     [Fact]
@@ -116,10 +142,89 @@ public class DaemonHostTests
         }
         finally
         {
-            if (Directory.Exists(tempHome))
-            {
-                Directory.Delete(tempHome, true);
-            }
+            DirectoryCleanup.DeleteRecursively(tempHome);
+        }
+    }
+
+    [Fact]
+    public async Task Process_DaemonInvalidArguments_RefusesCleanlyWithoutSecondProcessOrFleetMutation()
+    {
+        var tempHome = CreateTempHome();
+        try
+        {
+            var mutexName = DaemonHost.MutexName(tempHome);
+            using var existingDaemonMutex = new Mutex(true, mutexName, out var ownsMutex);
+            Assert.True(ownsMutex);
+
+            using var process = StartBatonProcessInHome(tempHome, "daemon", "status");
+            var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, process.ExitCode);
+            Assert.DoesNotContain("Unhandled exception", stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("   at ", stderr, StringComparison.Ordinal);
+            Assert.Contains("Unexpected argument 'status'", stderr);
+            Assert.Contains(DaemonOptionsParser.Usage, stderr);
+            Assert.Contains($"Try: {DaemonOptionsParser.ObservabilityTryInvocation}", stderr);
+            Assert.DoesNotContain("Another instance of the Baton daemon is already running.", stdout);
+            Assert.DoesNotContain("Another instance of the Baton daemon is already running.", stderr);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(tempHome));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempHome);
+        }
+    }
+
+    [Fact]
+    public async Task Process_DaemonArbitraryTrailingArgument_RefusesCleanlyWithoutSecondProcessOrFleetMutation()
+    {
+        var tempHome = CreateTempHome();
+        try
+        {
+            var mutexName = DaemonHost.MutexName(tempHome);
+            using var existingDaemonMutex = new Mutex(true, mutexName, out var ownsMutex);
+            Assert.True(ownsMutex);
+
+            using var process = StartBatonProcessInHome(tempHome, "daemon", "arbitrary-token");
+            var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, process.ExitCode);
+            Assert.DoesNotContain("Unhandled exception", stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("   at ", stderr, StringComparison.Ordinal);
+            Assert.Contains("Unexpected argument 'arbitrary-token'", stderr);
+            Assert.Contains(DaemonOptionsParser.Usage, stderr);
+            Assert.Contains($"Try: {DaemonOptionsParser.ObservabilityTryInvocation}", stderr);
+            Assert.DoesNotContain("Another instance of the Baton daemon is already running.", stdout);
+            Assert.DoesNotContain("Another instance of the Baton daemon is already running.", stderr);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(tempHome));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempHome);
+        }
+    }
+
+    [Fact]
+    public async Task Process_McpUnexpectedTrailingArgument_RefusesCleanly()
+    {
+        var tempHome = CreateTempHome();
+        try
+        {
+            using var process = StartBatonProcessInHome(tempHome, "mcp", "status");
+            var (_, stderr) = await BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, process.ExitCode);
+            Assert.DoesNotContain("Unhandled exception", stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("   at ", stderr, StringComparison.Ordinal);
+            Assert.Contains("Unexpected argument 'status'", stderr);
+            Assert.Contains("Usage: baton mcp", stderr);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempHome);
         }
     }
 

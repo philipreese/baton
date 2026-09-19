@@ -1,6 +1,8 @@
 using System.Reflection;
 using Baton.Vendors;
 using Baton.Cli;
+using Baton.Cli.Daemon;
+using Baton.Cli.Mcp;
 using Baton;
 using Baton.Accounting;
 using Baton.Conductor;
@@ -97,15 +99,41 @@ if (args.Length >= 1 && args[0] == "codex-broker")
 // rather than joining the CommandResult/FlowStateReporter shape every mutating command below shares.
 if (args.Length >= 1 && args[0] == "mcp")
 {
-    return await Baton.Cli.Mcp.McpCommand.RunAsync(args[1..]).ConfigureAwait(false);
+    try
+    {
+        return await McpCommand.RunAsync(args[1..]).ConfigureAwait(false);
+    }
+    catch (BatonFlowException ex)
+    {
+        WriteErrorWithTry(ex);
+        return 1;
+    }
+    catch (Exception ex) when (CliOperationalFailureClassifier.IsOperational(ex))
+    {
+        Console.Error.WriteLine($"Baton command failed: {ex.Message}");
+        return 1;
+    }
 }
 
 // #1458: folded from the standalone Baton.Daemon executable -- a long-running background host, not
 // a one-shot command, so it never reaches the CommandResult/FlowStateReporter shape below either.
 if (args.Length >= 1 && args[0] == "daemon")
 {
-    await Baton.Cli.Daemon.DaemonHost.RunDaemonAsync(args[1..]).ConfigureAwait(false);
-    return 0;
+    try
+    {
+        await DaemonHost.RunDaemonAsync(args[1..]).ConfigureAwait(false);
+        return 0;
+    }
+    catch (BatonFlowException ex)
+    {
+        WriteErrorWithTry(ex);
+        return 1;
+    }
+    catch (Exception ex) when (CliOperationalFailureClassifier.IsOperational(ex))
+    {
+        Console.Error.WriteLine($"Baton command failed: {ex.Message}");
+        return 1;
+    }
 }
 
 var knownSubcommands = CliVerbTable.KnownSubcommands;
@@ -157,9 +185,8 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
         "pauses launches without stopping the daemon)");
     Console.Error.WriteLine($"       {JanitorOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {ConductorOptionsParser.Usage[7..]}");
-    Console.Error.WriteLine(
-        "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
-    Console.Error.WriteLine("       baton daemon [--no-mutex]");
+    Console.Error.WriteLine($"       {McpOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {DaemonOptionsParser.Usage[7..]}");
     Console.Error.WriteLine("       baton --version");
     Console.Error.WriteLine();
     Console.Error.WriteLine($"  {RunOptionsParser.ResumeNote}");
