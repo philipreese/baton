@@ -105,6 +105,74 @@ public sealed class ConductorContinuationTests
     }
 
     [Fact]
+    public async Task Scheduler_requires_the_obligation_tag_when_selecting_continuation_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceAttempt = new FleetAttemptId("attempt-1");
+            var room = Path.Combine(home, "rooms", "settled-source");
+            Directory.CreateDirectory(room);
+            var log = new FleetEventLog(
+                BatonPaths.FleetEventsFile,
+                BatonPaths.FleetEventsRolloverFile,
+                100_000);
+            var store = new ConductorObligationStore(log, BatonPaths.ConductorObligationsFile);
+            var request = ConductorContinuation.TryRequest(
+                Item(sourceAttempt, room),
+                room,
+                new WorkflowStatusView(
+                    WorkflowOutcome.Failed,
+                    [new WorkflowStatusStepView("implement", "Failed", "execution-1")],
+                    [],
+                    null),
+                null,
+                new WorkItemTransition(WorkItemTransitionKind.Dispatch, WorkStage.Continue, 1, "retry"),
+                DateTimeOffset.UnixEpoch)!;
+            await store.EnqueueAsync(request, Ct);
+
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                snapshot => snapshot with
+                {
+                    Items =
+                    [
+                        Item(sourceAttempt, room) with
+                        {
+                            Tag = "different-tag",
+                            Stage = WorkStage.Continue,
+                            Round = 1,
+                            ParentAttemptId = sourceAttempt,
+                            AttemptId = new FleetAttemptId("child-attempt"),
+                            State = QueueItemState.Failed,
+                            Halted = true,
+                        },
+                    ],
+                },
+                Ct);
+
+            var service = new QueueSchedulerService(
+                (_, _) => throw new InvalidOperationException("a mismatched tag must not satisfy recovery"),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UnixEpoch,
+                conductorObligations: store);
+
+            await service.TickOnceAsync(Ct);
+
+            var blocked = await store.ReadAsync(request.IdempotencyKey, Ct);
+            Assert.Equal(ConductorObligationStatus.Blocked, blocked!.Status);
+            Assert.Contains("source attempt", blocked.Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Scheduler_blocks_an_open_obligation_when_its_source_disappears()
     {
         var home = CreateTempHome();

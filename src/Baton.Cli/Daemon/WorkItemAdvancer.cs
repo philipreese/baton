@@ -534,28 +534,34 @@ public sealed class WorkItemAdvancer
 
         if (next == WorkStage.Continue)
         {
-            if (room is not null && sentinel is not null)
+            if (string.IsNullOrWhiteSpace(room) || sentinel is null)
             {
-                var createdAt = item.LaunchedAt ?? item.AddedAt;
-                if (createdAt is { } stableCreatedAt)
-                {
-                    var request = ConductorContinuation.TryRequest(
-                        item,
-                        room,
-                        sentinel,
-                        pr.HeadSha,
-                        transition,
-                        stableCreatedAt);
-                    if (request is not null)
-                    {
-                        var obligation = await _conductorObligations.EnqueueAsync(request, cancellationToken)
-                            .ConfigureAwait(false);
-                        if (obligation.Status != ConductorObligationStatus.Pending)
-                        {
-                            return null;
-                        }
-                    }
-                }
+                return null;
+            }
+
+            var createdAt = item.LaunchedAt ?? item.AddedAt;
+            if (createdAt is not { } stableCreatedAt)
+            {
+                return null;
+            }
+
+            var request = ConductorContinuation.TryRequest(
+                item,
+                room,
+                sentinel,
+                pr.HeadSha,
+                transition,
+                stableCreatedAt);
+            if (request is null)
+            {
+                return null;
+            }
+
+            var obligation = await _conductorObligations.EnqueueAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            if (obligation.Status != ConductorObligationStatus.Pending)
+            {
+                return null;
             }
         }
 

@@ -769,7 +769,7 @@ public sealed class QueueSchedulerService : BackgroundService
         {
             if (!string.Equals(obligation.RequestedAction, ConductorContinuation.Action, StringComparison.Ordinal)
                 || !ConductorContinuation.TryParseKey(
-                    obligation.IdempotencyKey, out _, out var sourceAttemptId, out var nextRound))
+                    obligation.IdempotencyKey, out var tag, out var sourceAttemptId, out var nextRound))
             {
                 await _conductorObligations.BlockAsync(
                     obligation.IdempotencyKey,
@@ -780,6 +780,7 @@ public sealed class QueueSchedulerService : BackgroundService
 
             var candidates = snapshot.Items
                 .Where(item => item.Stage == WorkStage.Continue
+                    && string.Equals(item.Tag, tag, StringComparison.Ordinal)
                     && item.ParentAttemptId == sourceAttemptId
                     && item.Round == nextRound
                     && string.Equals(item.Repository, obligation.TargetProject, StringComparison.Ordinal))

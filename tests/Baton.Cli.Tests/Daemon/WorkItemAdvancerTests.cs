@@ -175,7 +175,8 @@ public sealed class WorkItemAdvancerTests
     /// <c>outputs</c> point at — the same path <c>WatchFireService</c> reads one from.</summary>
     private static async Task<string> WriteSettledRoomAsync(
         string home, string outcome, string? verdictJson,
-        IReadOnlyList<ExecutionDeliveryStatusView>? delivery = null)
+        IReadOnlyList<ExecutionDeliveryStatusView>? delivery = null,
+        IReadOnlyList<WorkflowStatusStepView>? steps = null)
     {
         var room = Path.Combine(home, "rooms", "queue-1934-lane-" + Guid.NewGuid().ToString("n")[..8]);
         Directory.CreateDirectory(room);
@@ -188,7 +189,10 @@ public sealed class WorkItemAdvancerTests
             outputs.Add(verdictPath);
         }
 
-        await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(outcome, [], outputs, null, Delivery: delivery), Ct);
+        await TerminalSentinelWriter.WriteAsync(
+            room,
+            new WorkflowStatusView(outcome, steps ?? [], outputs, null, Delivery: delivery),
+            Ct);
         return room;
     }
 
@@ -206,7 +210,8 @@ public sealed class WorkItemAdvancerTests
 
     private static async Task<QueueItem> SeedAsync(
         string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0,
-        bool? automaticFixUsed = false, IReadOnlyList<QueueStageSelection>? stageSelections = null)
+        bool? automaticFixUsed = false, IReadOnlyList<QueueStageSelection>? stageSelections = null,
+        FleetAttemptId? attemptId = null, DateTimeOffset? launchedAt = null)
     {
         var workspace = Path.Combine(home, "w1934");
         Directory.CreateDirectory(workspace);
@@ -229,6 +234,8 @@ public sealed class WorkItemAdvancerTests
             AutomaticFixUsed = automaticFixUsed,
             State = state,
             RoomDirectory = room,
+            AttemptId = attemptId,
+            LaunchedAt = launchedAt,
             Instructions = "Build the lifecycle.",
             StageSelections = stageSelections,
         };
@@ -253,6 +260,15 @@ public sealed class WorkItemAdvancerTests
         Directory.CreateDirectory(home);
         return home;
     }
+
+    private static ConductorObligationStore NewObligationStore() =>
+        new(
+            new FleetEventLog(
+                BatonPaths.FleetEventsFile,
+                BatonPaths.FleetEventsRolloverFile,
+                100_000),
+            BatonPaths.ConductorObligationsFile,
+            () => Now);
 
     [Fact]
     public async Task A_merged_pr_retires_a_failed_item_only_after_its_room_is_terminal()
@@ -612,8 +628,19 @@ public sealed class WorkItemAdvancerTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
-            var seeded = await SeedAsync(home, WorkStage.Fix, room, round: 2, automaticFixUsed: true);
+            var room = await WriteSettledRoomAsync(
+                home,
+                WorkflowOutcome.Failed,
+                verdictJson: null,
+                steps: [new WorkflowStatusStepView("fix", "Failed", "execution-fix-continue")]);
+            var seeded = await SeedAsync(
+                home,
+                WorkStage.Fix,
+                room,
+                round: 2,
+                automaticFixUsed: true,
+                attemptId: new FleetAttemptId("attempt-fix-continue"),
+                launchedAt: Now);
             await QueueStore.MutateAsync(
                 BatonPaths.QueueFile,
                 state => state with { Items = [seeded with { AttemptBaseRevision = FullPushedSha }] },
@@ -1534,7 +1561,13 @@ public sealed class WorkItemAdvancerTests
         try
         {
             var room = await WriteArrestedRoomAsync(home, workspaceChanged);
-            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            await SeedAsync(
+                home,
+                WorkStage.Implement,
+                room,
+                QueueItemState.Failed,
+                attemptId: new FleetAttemptId("attempt-arrested"),
+                launchedAt: Now);
             var workspaceHead = pushed ? PushedSha : "ffff0000ffff0000ffff0000ffff0000";
 
             var facts = await new WorkItemAdvancer(
@@ -1583,8 +1616,15 @@ public sealed class WorkItemAdvancerTests
                             "failed",
                             FailingMembers: ["revision-not-created"],
                             Reason: "revision-not-created: no new revision"))
-                ]);
-            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+                ],
+                steps: [new WorkflowStatusStepView("implement", "Failed", "delivery-execution")]);
+            await SeedAsync(
+                home,
+                WorkStage.Implement,
+                room,
+                QueueItemState.Failed,
+                attemptId: new FleetAttemptId("attempt-revision-not-created"),
+                launchedAt: Now);
 
             var facts = await Advancer(
                 new FakeGh(PrJson(77, PushedSha)),
@@ -1799,8 +1839,18 @@ public sealed class WorkItemAdvancerTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
-            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var room = await WriteSettledRoomAsync(
+                home,
+                WorkflowOutcome.Failed,
+                verdictJson: null,
+                steps: [new WorkflowStatusStepView("implement", "Failed", "execution-stalled")]);
+            await SeedAsync(
+                home,
+                WorkStage.Implement,
+                room,
+                QueueItemState.Failed,
+                attemptId: new FleetAttemptId("attempt-stalled-pushed"),
+                launchedAt: Now);
 
             // Pushed: the workspace head IS the PR's head.
             var pushedFacts = await new WorkItemAdvancer(
@@ -1811,7 +1861,13 @@ public sealed class WorkItemAdvancerTests
 
             // Unpushed: the ONE input that differs is the workspace head, which is what "the commit
             // never reached the PR" means.
-            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            await SeedAsync(
+                home,
+                WorkStage.Implement,
+                room,
+                QueueItemState.Failed,
+                attemptId: new FleetAttemptId("attempt-stalled-unpushed"),
+                launchedAt: Now);
             var unpushedFacts = await new WorkItemAdvancer(
                 new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>("ffff0000ffff0000ffff0000ffff0000"))
                 .AdvanceAsync(Now, Ct);
@@ -1851,7 +1907,11 @@ public sealed class WorkItemAdvancerTests
             Assert.DoesNotContain("Build the lifecycle.", fixBrief, StringComparison.Ordinal);
 
             // Round 2: that fix lane stalls without pushing.
-            var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            var fixRoom = await WriteSettledRoomAsync(
+                home,
+                WorkflowOutcome.Failed,
+                verdictJson: null,
+                steps: [new WorkflowStatusStepView("fix", "Failed", "execution-instructions")]);
             await QueueStore.MutateAsync(
                 BatonPaths.QueueFile,
                 s => s with
@@ -1861,6 +1921,8 @@ public sealed class WorkItemAdvancerTests
                         State = QueueItemState.Failed,
                         RoomDirectory = fixRoom,
                         AttemptBaseRevision = PushedSha,
+                        AttemptId = new FleetAttemptId("attempt-instructions-continue"),
+                        LaunchedAt = Now,
                     }],
                 },
                 Ct);
@@ -2227,6 +2289,98 @@ public sealed class WorkItemAdvancerTests
             var revision = Assert.Single(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
             Assert.Equal(attemptId, revision.AttemptId);
             Assert.Equal(new FleetRevisionId(FullPushedSha), revision.RevisionId);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_valid_continuation_persists_its_obligation_before_queueing_the_next_round()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(
+                home,
+                WorkflowOutcome.Failed,
+                verdictJson: null,
+                steps: [new WorkflowStatusStepView("implement", "Failed", "execution-continuation")]);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var sourceAttempt = new FleetAttemptId("attempt-valid-continuation");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                snapshot => snapshot with
+                {
+                    Items = [seeded with { AttemptId = sourceAttempt, LaunchedAt = Now }],
+                },
+                Ct);
+            var obligations = NewObligationStore();
+
+            var facts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(null),
+                conductorObligations: obligations).AdvanceAsync(Now, Ct);
+
+            var queued = await ReadBackAsync();
+            Assert.Single(facts);
+            Assert.Equal(WorkStage.Continue, queued.Stage);
+            Assert.Equal(QueueItemState.Queued, queued.State);
+            var obligation = await obligations.ReadAsync(
+                ConductorContinuation.IdempotencyKey(queued.Tag, sourceAttempt, queued.Round), Ct);
+            Assert.NotNull(obligation);
+            Assert.Equal(ConductorObligationStatus.Pending, obligation.Status);
+            Assert.Equal(BatonPaths.RecordKey(room), obligation.TargetRoom);
+            Assert.Equal("execution-continuation", obligation.TargetExecution);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_ambiguous_or_missing_execution_evidence_queues_nothing(bool ambiguous)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            IReadOnlyList<WorkflowStatusStepView> steps = ambiguous
+                ? [
+                    new WorkflowStatusStepView("implement", "Failed", "execution-one"),
+                    new WorkflowStatusStepView("review", "Failed", "execution-two"),
+                ]
+                : [];
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null, steps: steps);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var sourceAttempt = new FleetAttemptId("attempt-no-execution-evidence");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                snapshot => snapshot with
+                {
+                    Items = [seeded with { AttemptId = sourceAttempt, LaunchedAt = Now }],
+                },
+                Ct);
+            var obligations = NewObligationStore();
+
+            var facts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(null),
+                conductorObligations: obligations).AdvanceAsync(Now, Ct);
+
+            var retained = await ReadBackAsync();
+            Assert.Empty(facts);
+            Assert.Equal(WorkStage.Implement, retained.Stage);
+            Assert.Equal(QueueItemState.Failed, retained.State);
+            Assert.Equal(room, retained.RoomDirectory);
+            Assert.Empty(await obligations.ReconcileAsync(Ct));
+            Assert.Null(await obligations.ReadAsync(
+                ConductorContinuation.IdempotencyKey(retained.Tag, sourceAttempt, 1), Ct));
         }
         finally
         {
