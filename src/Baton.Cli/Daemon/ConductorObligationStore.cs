@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -60,7 +62,10 @@ public sealed record ConductorObligation(
 /// <summary>The result returned by a transport boundary. Accepted means receipt only.</summary>
 public sealed record ConductorTransportResult(bool Accepted, string? Receipt = null);
 
-/// <summary>A transport boundary supplied by a caller; this package does not choose a vendor.</summary>
+/// <summary>
+/// A transport boundary supplied by a caller; this package does not choose a vendor. The boundary
+/// is at-least-once and must deduplicate calls by <see cref="ConductorObligation.IdempotencyKey"/>.
+/// </summary>
 public delegate Task<ConductorTransportResult> ConductorObligationTransport(
     ConductorObligation obligation,
     CancellationToken cancellationToken);
@@ -99,6 +104,13 @@ public sealed class ConductorObligationStoreException : BatonFlowException
 public sealed class ConductorObligationStore
 {
     private const string LockNamePrefix = "baton-conductor-obligations";
+    private const int ProjectionVersion = 1;
+    private const int TerminalFilterBytes = 131_072;
+    private const int TerminalFilterHashes = 4;
+    private const string CorruptLogRecovery =
+        "Operator recovery: restore or remove the identified malformed fleet-event row, then retry.";
+    private const string IncompleteFactRecovery =
+        "Operator recovery: restore or remove the identified incomplete conductor-obligation fact, then retry.";
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -179,8 +191,22 @@ public sealed class ConductorObligationStore
     {
         ArgumentException.ThrowIfNullOrEmpty(idempotencyKey);
         var projections = await ReadProjectedAsync(cancellationToken).ConfigureAwait(false);
-        return projections.FirstOrDefault(item =>
+        var projection = projections.FirstOrDefault(item =>
             string.Equals(item.IdempotencyKey, idempotencyKey, StringComparison.Ordinal));
+        if (projection is not null)
+        {
+            return projection;
+        }
+
+        var snapshot = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        if (MightContainTerminalKey(snapshot.TerminalKeyFilter, idempotencyKey))
+        {
+            throw new ConductorObligationStoreException(
+                $"Conductor obligation '{idempotencyKey}' is retired and cannot be reopened. "
+                + "Operator recovery: use a new idempotency key only for a genuinely new obligation.");
+        }
+
+        return null;
     }
 
     /// <summary>Returns obligations that can still receive work after a process restart.</summary>
@@ -197,8 +223,8 @@ public sealed class ConductorObligationStore
     }
 
     /// <summary>
-    /// Submits through the caller's boundary. A crash after the boundary returns is safe: a later
-    /// call retries the same idempotency key until the local transport-ack fact is durable.
+    /// Submits through the caller's at-least-once boundary. A crash after the boundary returns is
+    /// recovered by retrying the same idempotency key; the boundary must deduplicate that retry.
     /// </summary>
     public async Task<ConductorObligation> SubmitAsync(
         string idempotencyKey,
@@ -378,11 +404,20 @@ public sealed class ConductorObligationStore
     private async Task<IReadOnlyList<ConductorObligation>> ReadProjectedAsync(CancellationToken cancellationToken)
     {
         var snapshot = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        var rows = await _eventLog.ReadRetained(cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<FleetEvent> rows;
+        try
+        {
+            rows = await _eventLog.ReadRetainedRepairingTornTails(cancellationToken).ConfigureAwait(false);
+        }
+        catch (FleetEventLogReadException ex)
+        {
+            throw new ConductorObligationStoreException($"{ex.Message} {CorruptLogRecovery}", ex);
+        }
+
         var eventGroups = rows
             .Where(row => ObligationKinds.Contains(row.Kind))
             .GroupBy(row => row.ObligationIdempotencyKey ?? string.Empty, StringComparer.Ordinal);
-        var projected = snapshot.ToDictionary(item => item.IdempotencyKey, StringComparer.Ordinal);
+        var projected = snapshot.OpenObligations.ToDictionary(item => item.IdempotencyKey, StringComparer.Ordinal);
         foreach (var group in eventGroups)
         {
             if (string.IsNullOrEmpty(group.Key))
@@ -390,10 +425,22 @@ public sealed class ConductorObligationStore
                 throw new ConductorObligationStoreException("A conductor-obligation fact has no idempotency key.");
             }
 
-            projected[group.Key] = Project(group.OrderBy(row => row.Id).ToList());
+            var retained = Project(group.OrderBy(row => row.Id).ToList());
+            if (MightContainTerminalKey(snapshot.TerminalKeyFilter, group.Key)
+                && !IsTerminal(retained.Status))
+            {
+                projected.Remove(group.Key);
+                continue;
+            }
+
+            projected[group.Key] = projected.TryGetValue(group.Key, out var materialized)
+                ? MergeLifecycle(materialized, retained)
+                : retained;
         }
 
-        return projected.Values.ToList();
+        var result = projected.Values.ToList();
+        await SaveProjectionAsync(result, cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     private static ConductorObligation Project(IReadOnlyList<FleetEvent> rows)
@@ -455,7 +502,7 @@ public sealed class ConductorObligationStore
             || row.ObligationAdapterSupported is not { } supported)
         {
             throw new ConductorObligationStoreException(
-                $"Conductor obligation fact '{row.DedupeKey}' has an incomplete payload.");
+                $"Conductor obligation fact '{row.DedupeKey}' has an incomplete payload. {IncompleteFactRecovery}");
         }
 
         return new(
@@ -499,7 +546,12 @@ public sealed class ConductorObligationStore
             && next is ConductorObligationStatus.ActionObserved
                 or ConductorObligationStatus.Blocked);
 
-    private async Task SaveProjectionAsync(ConductorObligation obligation, CancellationToken cancellationToken)
+    private Task SaveProjectionAsync(ConductorObligation obligation, CancellationToken cancellationToken) =>
+        SaveProjectionAsync([obligation], cancellationToken);
+
+    private async Task SaveProjectionAsync(
+        IReadOnlyList<ConductorObligation> obligations,
+        CancellationToken cancellationToken)
     {
         await Task.Run(
                 () => MutexGuardedFileLock.RunUnderLock(
@@ -509,51 +561,173 @@ public sealed class ConductorObligationStore
                     () =>
                     {
                         var current = ReadSnapshotUnlocked();
-                        var updated = current
-                            .Where(item => !string.Equals(item.IdempotencyKey, obligation.IdempotencyKey, StringComparison.Ordinal))
-                            .Append(obligation)
-                            .OrderBy(item => item.CreatedAt)
-                            .ToList();
-                        var parent = Path.GetDirectoryName(_snapshotPath);
-                        if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-                        var temp = $"{_snapshotPath}.{Guid.NewGuid():N}.tmp";
-                        try
+                        var open = current.OpenObligations.ToDictionary(
+                            item => item.IdempotencyKey, StringComparer.Ordinal);
+                        var terminalFilter = current.TerminalKeyFilter.ToArray();
+                        foreach (var obligation in obligations)
                         {
-                            File.WriteAllText(temp, JsonSerializer.Serialize(updated, Json) + "\n", new UTF8Encoding(false));
-                            File.Move(temp, _snapshotPath, overwrite: true);
+                            if (IsTerminal(obligation.Status))
+                            {
+                                open.Remove(obligation.IdempotencyKey);
+                                AddTerminalKey(terminalFilter, obligation.IdempotencyKey);
+                                continue;
+                            }
+
+                            if (MightContainTerminalKey(terminalFilter, obligation.IdempotencyKey))
+                            {
+                                open.Remove(obligation.IdempotencyKey);
+                                continue;
+                            }
+
+                            open[obligation.IdempotencyKey] = open.TryGetValue(obligation.IdempotencyKey, out var retained)
+                                ? MergeLifecycle(retained, obligation)
+                                : obligation;
                         }
-                        finally
+
+                        var updated = new ProjectionFile(
+                            ProjectionVersion,
+                            open.Values.OrderBy(item => item.CreatedAt).ToList(),
+                            terminalFilter);
+                        if (!SameProjection(current, updated))
                         {
-                            File.Delete(temp);
+                            WriteProjectionUnlocked(updated);
                         }
                     }),
                 cancellationToken)
             .ConfigureAwait(false);
     }
 
-    private Task<IReadOnlyList<ConductorObligation>> ReadSnapshotAsync(CancellationToken cancellationToken) =>
+    private Task<ProjectionFile> ReadSnapshotAsync(CancellationToken cancellationToken) =>
         Task.Run(
             () => MutexGuardedFileLock.RunUnderLock(
                 _snapshotPath,
                 LockNamePrefix,
                 LockTimeout,
-                () => (IReadOnlyList<ConductorObligation>)ReadSnapshotUnlocked()),
+                ReadSnapshotUnlocked),
             cancellationToken);
 
-    private List<ConductorObligation> ReadSnapshotUnlocked()
+    private ProjectionFile ReadSnapshotUnlocked()
     {
-        if (!File.Exists(_snapshotPath)) return [];
+        if (!File.Exists(_snapshotPath))
+        {
+            return new(ProjectionVersion, [], new byte[TerminalFilterBytes]);
+        }
+
         try
         {
-            return JsonSerializer.Deserialize<List<ConductorObligation>>(File.ReadAllText(_snapshotPath, Encoding.UTF8), Json)
+            var content = File.ReadAllText(_snapshotPath, Encoding.UTF8);
+            using var document = JsonDocument.Parse(content);
+            if (document.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                var legacy = JsonSerializer.Deserialize<List<ConductorObligation>>(content, Json)
+                    ?? throw new InvalidDataException("The conductor-obligation projection contains JSON null.");
+                var terminalFilter = new byte[TerminalFilterBytes];
+                foreach (var item in legacy.Where(item => IsTerminal(item.Status)))
+                {
+                    AddTerminalKey(terminalFilter, item.IdempotencyKey);
+                }
+
+                return new(
+                    ProjectionVersion,
+                    legacy.Where(item => !IsTerminal(item.Status)).ToList(),
+                    terminalFilter);
+            }
+
+            var projection = JsonSerializer.Deserialize<ProjectionFile>(content, Json)
                 ?? throw new InvalidDataException("The conductor-obligation projection contains JSON null.");
+            if (projection.Version != ProjectionVersion
+                || projection.OpenObligations is null
+                || projection.TerminalKeyFilter is null
+                || projection.TerminalKeyFilter.Length != TerminalFilterBytes)
+            {
+                throw new InvalidDataException("The conductor-obligation projection has an unsupported shape.");
+            }
+
+            return projection;
         }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException or NotSupportedException)
+        catch (Exception ex) when (ex is JsonException
+            or InvalidDataException
+            or InvalidOperationException
+            or NotSupportedException)
         {
             throw new ConductorObligationStoreException(
-                $"Conductor-obligation projection '{_snapshotPath}' is malformed.", ex);
+                $"Conductor-obligation projection '{_snapshotPath}' is malformed. "
+                + "Operator recovery: restore a valid projection or remove it and recover from retained fleet events.",
+                ex);
         }
     }
+
+    private void WriteProjectionUnlocked(ProjectionFile projection)
+    {
+        var parent = Path.GetDirectoryName(_snapshotPath);
+        if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+        var temp = $"{_snapshotPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temp, JsonSerializer.Serialize(projection, Json) + "\n", new UTF8Encoding(false));
+            File.Move(temp, _snapshotPath, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
+
+    private static ConductorObligation MergeLifecycle(
+        ConductorObligation materialized,
+        ConductorObligation retained)
+    {
+        RequireSamePayload(materialized, retained);
+        if (materialized.Status == retained.Status || CanTransition(retained.Status, materialized.Status))
+        {
+            return materialized;
+        }
+
+        if (CanTransition(materialized.Status, retained.Status))
+        {
+            return retained;
+        }
+
+        throw new ConductorObligationStoreException(
+            $"Conductor obligation '{materialized.IdempotencyKey}' has contradictory terminal projections "
+            + $"'{materialized.Status}' and '{retained.Status}'.");
+    }
+
+    private static bool IsTerminal(ConductorObligationStatus status) =>
+        status is ConductorObligationStatus.ActionObserved
+            or ConductorObligationStatus.Blocked
+            or ConductorObligationStatus.Unsupported;
+
+    private static void AddTerminalKey(byte[] filter, string idempotencyKey)
+    {
+        foreach (var index in TerminalKeyIndexes(idempotencyKey))
+        {
+            filter[index / 8] |= (byte)(1 << (index % 8));
+        }
+    }
+
+    private static bool MightContainTerminalKey(byte[] filter, string idempotencyKey) =>
+        TerminalKeyIndexes(idempotencyKey).All(index => (filter[index / 8] & (1 << (index % 8))) != 0);
+
+    private static IEnumerable<int> TerminalKeyIndexes(string idempotencyKey)
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(idempotencyKey));
+        for (var index = 0; index < TerminalFilterHashes; index++)
+        {
+            yield return (int)(BinaryPrimitives.ReadUInt32LittleEndian(digest.AsSpan(index * 4, 4))
+                % (TerminalFilterBytes * 8));
+        }
+    }
+
+    private static bool SameProjection(ProjectionFile left, ProjectionFile right) =>
+        left.Version == right.Version
+        && left.TerminalKeyFilter.AsSpan().SequenceEqual(right.TerminalKeyFilter)
+        && left.OpenObligations.SequenceEqual(right.OpenObligations);
+
+    private sealed record ProjectionFile(
+        int Version,
+        List<ConductorObligation> OpenObligations,
+        byte[] TerminalKeyFilter);
 
     private static ConductorObligation NewObligation(ConductorObligationRequest request) => new(
         Guid.NewGuid().ToString("N"),

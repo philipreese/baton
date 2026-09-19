@@ -464,6 +464,27 @@ public sealed class FleetEventLog
     }
 
     /// <summary>
+    /// Reads every retained row and repairs only an incomplete final row. Complete malformed rows
+    /// remain durable-source corruption and are reported with their file and line number.
+    /// </summary>
+    internal Task<IReadOnlyList<FleetEvent>> ReadRetainedRepairingTornTails(
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+            _livePath,
+            LockNamePrefix,
+            LockTimeout,
+            () =>
+            {
+                var rollover = Read(_rolloverPath);
+                var live = Read(_livePath);
+                RemoveTornTail(_rolloverPath, rollover.TornTailOffset);
+                RemoveTornTail(_livePath, live.TornTailOffset);
+                return (IReadOnlyList<FleetEvent>)rollover.Events.Concat(live.Events).ToList();
+            }), cancellationToken);
+    }
+
+    /// <summary>
     /// A strict, read-deny-write snapshot of both retained segments for an operator proof. Unlike
     /// display replay, a torn tail or unreadable segment cannot be treated as absence. The caller
     /// holds the streams through its queue commit so append/rotation cannot invalidate the proof.
