@@ -3,14 +3,13 @@ using Baton.Domain;
 namespace Baton.Dispatch;
 
 /// <summary>
-/// The hook-side sink for <see cref="GrantDecision"/> lines (#2009): one NDJSON file per execution,
-/// in that execution's own output directory, appended to by the <c>PreToolUse</c> subprocess that took
-/// the decision.
+/// The durable authority sink for <see cref="GrantDecision"/> lines (#2009): one NDJSON file per
+/// execution, in that execution's own output directory. Hooks and the Codex broker both append here.
 /// <para>
-/// <b>Why a file rather than the room's captured stream.</b> The codex broker writes its decisions
-/// straight into that stream because it is that stream's writer. A hook is a subprocess of the vendor
-/// CLI: its stdout is the vendor's protocol channel and its stderr is the refusal text the model reads,
-/// so neither can carry a Baton fact, and <c>.stdout.log</c> itself is
+/// <b>Why this file is the authority.</b> A hook is a subprocess of the vendor CLI: its stdout is the
+/// vendor's protocol channel and its stderr is the refusal text the model reads, so neither can carry a
+/// Baton fact. The Codex broker can write the captured stream, but that stream is bounded and rolls over;
+/// correctness must not depend on the current <c>.stdout.log</c> file, which is
 /// <see cref="ExecutionStreamLogger"/>'s alone — that file's whole invariant is that it is a byte
 /// prefix of what the worker emitted, which a second writer would destroy. The only thing a hook shares
 /// with the engine is the output directory it is handed in <c>BATON_OUTPUT_DIR</c>, which is exactly
@@ -76,6 +75,22 @@ public static class GrantDecisionLog
                                        or ArgumentException or NotSupportedException)
         {
         }
+    }
+
+    /// <summary>Returns whether one canonical log contains a denial by <paramref name="rule"/>.</summary>
+    public static bool ContainsDenial(string path, GrantRule rule)
+    {
+        foreach (var line in File.ReadLines(path))
+        {
+            if (GrantDecision.TryParseJsonLine(line, out var decision)
+                && decision is { Allowed: false }
+                && decision.Rule == rule)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 

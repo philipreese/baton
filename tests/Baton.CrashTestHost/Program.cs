@@ -123,14 +123,14 @@ if (args is ["rev-parse", "--path-format=absolute", "--git-common-dir"])
     await Console.Out.WriteLineAsync("C:\\fixture\\.git");
     return 0;
 }
-if (args is ["pr", "view", "2304", "--repo", "aer-works/baton", "--json", "state,headRefName,headRefOid"])
+if (args is ["pr", "view", "2304", "--repo", "aer-works/baton", "--json", "state,headRefName,headRefOid,isCrossRepository"])
 {
     if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_GH_MARKER") is { Length: > 0 } marker)
     {
         await File.WriteAllTextAsync(marker, Environment.ProcessPath ?? string.Empty);
     }
     await Console.Out.WriteLineAsync(
-        $$"""{"state":"OPEN","headRefName":"2190-verified-pr-ownership","headRefOid":"{{HermeticHead}}"}""");
+        $$"""{"state":"OPEN","headRefName":"2190-verified-pr-ownership","headRefOid":"{{HermeticHead}}","isCrossRepository":false}""");
     return 0;
 }
 if (args.Contains("diff", StringComparer.Ordinal))
