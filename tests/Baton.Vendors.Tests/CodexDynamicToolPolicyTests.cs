@@ -1918,6 +1918,11 @@ public sealed class CodexDynamicToolPolicyTests
             ["pr", "create", "--draft", "--body-file", "body.md", "--repo", "aer-works/baton",
              "--head", "2190-verified-pr-ownership"],
             File.ReadAllLines(fixture.DirectGhArguments));
+        var ledger = DeliveryArtifactLedger.Read(fixture.Output);
+        Assert.Null(ledger.Problem);
+        Assert.Equal(
+            [new DeliveryArtifactPath("body.md", "runtime direct pull-request creation body-file request")],
+            ledger.Artifacts);
         Assert.True(after.Success, after.Text);
         Assert.DoesNotContain(OwnPullRequestOnlyRule.Rule, after.Text, StringComparison.Ordinal);
         // And the sibling stays refused with the room's own number now named in the refusal, so the
@@ -1988,6 +1993,48 @@ public sealed class CodexDynamicToolPolicyTests
         {
             Assert.Equal(["pr-not-open"], delivery.FailingMembers);
         }
+    }
+
+    [Fact]
+    public async Task Runtime_direct_PR_body_file_provenance_rejects_a_generated_file_beside_product_work()
+    {
+        const string branch = "2190-runtime-body-provenance";
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant, ["changes.md"],
+            directGhOutput: "https://github.com/aer-works/baton/pull/2430");
+        var origin = Path.Combine(fixture.Root, "origin.git");
+        RunGitSetup(fixture.Root, "init", "--bare", origin);
+        RunGitSetup(fixture.Workspace, "init");
+        RunGitSetup(fixture.Workspace, "config", "user.email", "fixture@example.test");
+        RunGitSetup(fixture.Workspace, "config", "user.name", "Fixture");
+        RunGitSetup(fixture.Workspace, "checkout", "-b", branch);
+        RunGitSetup(fixture.Workspace, "add", ".");
+        RunGitSetup(fixture.Workspace, "commit", "-m", "initial");
+        RunGitSetup(fixture.Workspace, "remote", "add", "origin", origin);
+        RunGitSetup(fixture.Workspace, "push", "-u", "origin", branch);
+        var attemptStart = RunGitSetup(fixture.Workspace, "rev-parse", "HEAD").Trim();
+
+        var create = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = "gh pr create --draft --body-file pr-body.md" });
+        Assert.True(create.Success, create.Text);
+
+        File.WriteAllText(Path.Combine(fixture.Workspace, "production.txt"), "product change\n");
+        File.WriteAllText(Path.Combine(fixture.Workspace, "pr-body.md"), "generated body\n");
+        RunGitSetup(fixture.Workspace, "add", "production.txt", "pr-body.md");
+        RunGitSetup(fixture.Workspace, "commit", "-m", "deliver product change");
+        RunGitSetup(fixture.Workspace, "push", "origin", branch);
+
+        var ledger = DeliveryArtifactLedger.Read(fixture.Output);
+        Assert.Null(ledger.Problem);
+        var delivery = await DeliveryVerifier.CheckAsync(
+            fixture.Workspace, expectPr: false, TestContext.Current.CancellationToken,
+            workspaceHeadShaAtStart: attemptStart, generatedPaths: ledger.Artifacts);
+
+        Assert.Equal(DeliveryCheckStatus.Failed, delivery.Status);
+        Assert.Equal(["generated-files-forbidden"], delivery.FailingMembers);
+        Assert.Contains("pr-body.md", delivery.Tail, StringComparison.Ordinal);
+        Assert.Contains("runtime direct pull-request creation body-file request", delivery.Tail, StringComparison.Ordinal);
     }
 
     [Fact]

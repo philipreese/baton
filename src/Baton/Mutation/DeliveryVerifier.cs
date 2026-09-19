@@ -51,8 +51,9 @@ public sealed record DeliveryCheckOutcome(
 }
 
 /// <summary>
-/// The producer-owned delivery inventory for one process binding. It is assembled from the binding's
-/// declared outputs and dispatch seed requests, not from a repository-wide filename list.
+/// The producer-owned delivery inventory for one process binding and attempt. It is assembled from the
+/// binding's declared outputs, dispatch seed requests, and the runtime producer ledger, not from a
+/// repository-wide filename list.
 /// </summary>
 public static class DeliveryArtifactInventory
 {
@@ -102,6 +103,20 @@ public static class DeliveryArtifactInventory
             .Where(path => !string.IsNullOrWhiteSpace(path.Path))
             .DistinctBy(path => (path.Path, path.Provenance))
             .ToArray();
+    }
+
+    public static DeliveryArtifactInventoryReading ForAttempt(
+        WorkerBinding.Process binding,
+        string outputDirectory,
+        IReadOnlyList<DeliveryArtifactPath>? acceptedPaths = null)
+    {
+        var staticPaths = acceptedPaths ?? For(binding);
+        var observed = DeliveryArtifactLedger.Read(outputDirectory);
+        return new(
+            staticPaths.Concat(observed.Artifacts)
+                .DistinctBy(path => (path.Path, path.Provenance))
+                .ToArray(),
+            observed.Problem);
     }
 
     /// <summary>
@@ -161,6 +176,10 @@ public static class DeliveryArtifactInventory
         return NormalizeForBrief(path);
     }
 }
+
+public sealed record DeliveryArtifactInventoryReading(
+    IReadOnlyList<DeliveryArtifactPath> Paths,
+    string? Problem = null);
 
 /// <summary>The immutable, machine-owned post-execution delivery observation.</summary>
 public sealed record DeliveryEvidence(

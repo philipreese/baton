@@ -2451,12 +2451,19 @@ public static class MutationInterface
                 }
                 else
                 {
-                    deliveryOutcomeBeforeVerify = await DeliveryVerifier.CheckAsync(
-                        binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
-                        shippingCeilingExceeded: shippingCeilingExceeded,
-                        workspaceHeadShaAtStart: workspaceHeadShaAtStart,
-                        generatedPaths: prepared.Request.DeliveryGeneratedPaths,
-                        authorizedPaths: prepared.Request.DeliveryAuthorizedPaths).ConfigureAwait(false);
+                    var deliveryInventory = DeliveryArtifactInventory.ForAttempt(
+                        binding, prepared.OutputDirectory, prepared.Request.DeliveryGeneratedPaths);
+                    deliveryOutcomeBeforeVerify = deliveryInventory.Problem is { } inventoryProblem
+                        ? new DeliveryCheckOutcome(
+                            DeliveryCheckStatus.Failed,
+                            ["generated-file-provenance-unavailable"],
+                            inventoryProblem)
+                        : await DeliveryVerifier.CheckAsync(
+                            binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
+                            shippingCeilingExceeded: shippingCeilingExceeded,
+                            workspaceHeadShaAtStart: workspaceHeadShaAtStart,
+                            generatedPaths: deliveryInventory.Paths,
+                            authorizedPaths: prepared.Request.DeliveryAuthorizedPaths).ConfigureAwait(false);
                 }
 
                 if (deliveryOutcomeBeforeVerify.Status is DeliveryCheckStatus.Failed

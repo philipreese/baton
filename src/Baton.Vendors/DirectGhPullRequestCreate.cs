@@ -1,3 +1,5 @@
+using Baton.Domain;
+
 namespace Baton.Vendors;
 
 /// <summary>
@@ -17,7 +19,11 @@ internal static class DirectGhPullRequestCreate
         "--base", "--body", "--body-file", "--head", "--repo", "-R", "--template", "--title",
     };
 
-    internal sealed record Compilation(bool IsCreateCommand, IReadOnlyList<string>? Arguments, string? Refusal);
+    internal sealed record Compilation(
+        bool IsCreateCommand,
+        IReadOnlyList<string>? Arguments,
+        string? Refusal,
+        IReadOnlyList<DeliveryArtifactPath>? DeliveryArtifacts = null);
 
     public static Compilation Compile(string? commandLine, GhPullRequestCreateProvenance? provenance)
     {
@@ -54,6 +60,7 @@ internal static class DirectGhPullRequestCreate
         }
 
         var arguments = new List<string> { "pr", "create" };
+        var deliveryArtifacts = new List<DeliveryArtifactPath>();
         string? repository = null;
         string? head = null;
         for (var i = 3; i < tokens.Count; i++)
@@ -86,6 +93,13 @@ internal static class DirectGhPullRequestCreate
             if (value.Length == 0 || option == "--body-file" && value == "-")
             {
                 return Refuse($"`{option}` has an unsupported empty or interactive value.");
+            }
+
+            if (option == "--body-file")
+            {
+                deliveryArtifacts.Add(new DeliveryArtifactPath(
+                    value,
+                    "runtime direct pull-request creation body-file request"));
             }
 
             if (option is "--repo" or "-R")
@@ -125,7 +139,7 @@ internal static class DirectGhPullRequestCreate
         arguments.Add(provenance.Repository);
         arguments.Add("--head");
         arguments.Add(provenance.HeadBranch);
-        return new Compilation(true, arguments, null);
+        return new Compilation(true, arguments, null, deliveryArtifacts);
     }
 
     private static Compilation Refuse(string reason) => new(true, null, reason);
