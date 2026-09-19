@@ -36,6 +36,7 @@ public class FlowEventLogJsonTests
             new Dictionary<StepId, ExecutionId>())),
         new FlowEvent.ExecutionRequestRejected(ExecutionId, "rejected"),
         new FlowEvent.ExecutionSucceeded(ExecutionId),
+        new FlowEvent.ExecutionSucceededWithLateFailure(ExecutionId, "vendor reported a terminal failure after delivery"),
         new FlowEvent.ExecutionFailed(ExecutionId, FailureClassification.Permanent, "reason"),
         new FlowEvent.ExecutionCancelled(ExecutionId),
         new FlowEvent.CancellationRequested(ExecutionId),
@@ -423,7 +424,10 @@ public class FlowEventLogJsonTests
     {
         // DeciderKind is absent for the same reason as GrantAuditMode: born with
         // JsonStringEnumConverter, so its former entry here pinned nothing.
-        var pinned = new[] { typeof(FailureClassification), typeof(CoreExitReason), typeof(DecisionType) };
+        var pinned = new[]
+        {
+            typeof(FailureClassification), typeof(CoreExitReason), typeof(DecisionType), typeof(OutputSchema),
+        };
 
         var reachable = new HashSet<Type>();
         var seen = new HashSet<Type>();

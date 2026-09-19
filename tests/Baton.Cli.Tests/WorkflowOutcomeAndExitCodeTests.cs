@@ -353,7 +353,7 @@ public class WorkflowOutcomeAndExitCodeTests
             [
                 // #1945 added FinishedDuringTeardown; the sweep below was walked for it.
                 "Cancelled", "Failed", "FinishedDuringTeardown", "Indeterminate", "Paused", "Running",
-                "Succeeded",
+                "Succeeded", "SucceededWithLateFailure",
             ],
             members);
         // Adding a member? Sweep: RunExitCodeResolver.Resolve, RedispatchCommand's parent gate,
