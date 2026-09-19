@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.CompilerServices;
 using Baton;
 using Baton.Domain;
 using Baton.Status;
@@ -28,6 +29,12 @@ public enum FleetEventKind
     DaemonStarted,
     DaemonStopped,
     GlassWriteRefused,
+    ConductorObligationPending,
+    ConductorObligationSubmitted,
+    ConductorObligationTransportAcknowledged,
+    ConductorObligationActionObserved,
+    ConductorObligationBlocked,
+    ConductorObligationUnsupported,
 }
 
 internal sealed class FleetEventKindJsonConverter : JsonConverter<FleetEventKind>
@@ -215,7 +222,22 @@ public sealed record FleetEventDraft(
     DateTimeOffset? CheckStartedAt = null,
     DateTimeOffset? CheckCompletedAt = null,
     string? Stage = null,
-    string? AttemptBaseRevision = null);
+    string? AttemptBaseRevision = null,
+    string? ObligationId = null,
+    string? ObligationIdempotencyKey = null,
+    string? ObligationTargetProject = null,
+    string? ObligationTargetRoom = null,
+    string? ObligationTargetExecution = null,
+    string? ObligationPullRequestHead = null,
+    string? ObligationRequestedAction = null,
+    string? ObligationOwner = null,
+    DateTimeOffset? ObligationCreatedAt = null,
+    string? ObligationAdapter = null,
+    string? ObligationAdapterCapability = null,
+    bool? ObligationAdapterSupported = null,
+    string? ObligationReason = null,
+    string? ObligationTransportReceipt = null,
+    string? ObligationActionProof = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -288,7 +310,37 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("stage")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Stage = null,
     [property: JsonPropertyName("attemptBaseRevision")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AttemptBaseRevision = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AttemptBaseRevision = null,
+    [property: JsonPropertyName("obligationId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationId = null,
+    [property: JsonPropertyName("obligationIdempotencyKey")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationIdempotencyKey = null,
+    [property: JsonPropertyName("obligationTargetProject")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationTargetProject = null,
+    [property: JsonPropertyName("obligationTargetRoom")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationTargetRoom = null,
+    [property: JsonPropertyName("obligationTargetExecution")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationTargetExecution = null,
+    [property: JsonPropertyName("obligationPullRequestHead")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationPullRequestHead = null,
+    [property: JsonPropertyName("obligationRequestedAction")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationRequestedAction = null,
+    [property: JsonPropertyName("obligationOwner")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationOwner = null,
+    [property: JsonPropertyName("obligationCreatedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? ObligationCreatedAt = null,
+    [property: JsonPropertyName("obligationAdapter")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationAdapter = null,
+    [property: JsonPropertyName("obligationAdapterCapability")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationAdapterCapability = null,
+    [property: JsonPropertyName("obligationAdapterSupported")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? ObligationAdapterSupported = null,
+    [property: JsonPropertyName("obligationReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationReason = null,
+    [property: JsonPropertyName("obligationTransportReceipt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationTransportReceipt = null,
+    [property: JsonPropertyName("obligationActionProof")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationActionProof = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -299,7 +351,12 @@ public sealed record FleetEvent(
         draft.CheckConclusion, draft.ElapsedMilliseconds, draft.LastMeaningfulProgressAt?.ToUniversalTime(),
         draft.Usage, draft.ArtifactReferences, draft.RevisionKind, draft.CheckRunId, draft.CheckName,
         draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime(),
-        draft.Stage, draft.AttemptBaseRevision);
+        draft.Stage, draft.AttemptBaseRevision, draft.ObligationId, draft.ObligationIdempotencyKey,
+        draft.ObligationTargetProject, draft.ObligationTargetRoom, draft.ObligationTargetExecution,
+        draft.ObligationPullRequestHead, draft.ObligationRequestedAction, draft.ObligationOwner,
+        draft.ObligationCreatedAt?.ToUniversalTime(), draft.ObligationAdapter,
+        draft.ObligationAdapterCapability, draft.ObligationAdapterSupported, draft.ObligationReason,
+        draft.ObligationTransportReceipt, draft.ObligationActionProof);
 }
 
 /// <summary>
@@ -338,6 +395,7 @@ public sealed class FleetEventLog
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
+    private static readonly ConditionalWeakTable<FleetEvent, SourceLocation> SourceLocations = new();
 
     private readonly string _livePath;
     private readonly string _rolloverPath;
@@ -384,6 +442,27 @@ public sealed class FleetEventLog
     }
 
     /// <summary>
+    /// Reads every retained row and repairs only an incomplete final row. Complete malformed rows
+    /// remain durable-source corruption and are reported with their file and line number.
+    /// </summary>
+    internal Task<IReadOnlyList<FleetEvent>> ReadRetainedRepairingTornTails(
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+            _livePath,
+            LockNamePrefix,
+            LockTimeout,
+            () =>
+            {
+                var rollover = Read(_rolloverPath);
+                var live = Read(_livePath);
+                RemoveTornTail(_rolloverPath, rollover.TornTailOffset);
+                RemoveTornTail(_livePath, live.TornTailOffset);
+                return (IReadOnlyList<FleetEvent>)rollover.Events.Concat(live.Events).ToList();
+            }), cancellationToken);
+    }
+
+    /// <summary>
     /// A strict, read-deny-write snapshot of both retained segments for an operator proof. Unlike
     /// display replay, a torn tail or unreadable segment cannot be treated as absence. The caller
     /// holds the streams through its queue commit so append/rotation cannot invalidate the proof.
@@ -425,6 +504,11 @@ public sealed class FleetEventLog
     }
 
     internal static string Serialize(FleetEvent entry) => JsonSerializer.Serialize(entry, Json);
+
+    internal static string? EvidenceLocation(FleetEvent entry) =>
+        SourceLocations.TryGetValue(entry, out var location)
+            ? $"'{location.Path}' line {location.Line}"
+            : null;
 
     internal static string SerializeDraft(FleetEventDraft draft) => JsonSerializer.Serialize(draft, DraftJson);
 
@@ -513,7 +597,7 @@ public sealed class FleetEventLog
 
             try
             {
-                result.Add(ParseCompleteRow(row));
+                result.Add(ParseCompleteRow(row, path, lineNumber));
             }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or OverflowException)
             {
@@ -531,7 +615,7 @@ public sealed class FleetEventLog
         return new(result, null);
     }
 
-    private static FleetEvent ParseCompleteRow(ReadOnlySpan<byte> row)
+    private static FleetEvent ParseCompleteRow(ReadOnlySpan<byte> row, string path, int lineNumber)
     {
         using var document = JsonDocument.Parse(row.ToArray());
         var root = document.RootElement;
@@ -548,8 +632,10 @@ public sealed class FleetEventLog
             throw new JsonException("Expected id, at, kind, and non-empty dedupeKey fields.");
         }
 
-        return root.Deserialize<FleetEvent>(Json)
+        var entry = root.Deserialize<FleetEvent>(Json)
             ?? throw new JsonException("Expected a fleet event object.");
+        SourceLocations.Add(entry, new(path, lineNumber));
+        return entry;
     }
 
     private static bool IsIncompleteJsonPrefix(ReadOnlySpan<byte> row)
@@ -603,4 +689,6 @@ public sealed class FleetEventLog
     }
 
     private sealed record FleetEventReadResult(IReadOnlyList<FleetEvent> Events, long? TornTailOffset);
+
+    private sealed record SourceLocation(string Path, int Line);
 }
