@@ -1,6 +1,7 @@
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Outcomes;
 using Baton.Store;
 using Baton.Artifacts;
 
@@ -24,7 +25,11 @@ public sealed class MutationInterfaceRecoveryTests
                 [new WorkflowStepDefinition(stepId, "review", [], ["report.md"], [], new RetryPolicy(1))]);
             var contract = new WorkerContract(
                 "review", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
-            var binding = new WorkerBinding.Process(contract, new CoreDispatchTarget("unused", []), TimeSpan.FromSeconds(30));
+            var binding = new WorkerBinding.Process(
+                contract,
+                new CoreDispatchTarget("unused", []),
+                TimeSpan.FromSeconds(30),
+                FailureClassifier: new LateCapacityClassifier());
             var dispatcher = new LiveLateFailureDispatcher(artifactsRoot);
 
             await using var writer = new FlowEventLogWriter(logPath);
@@ -52,6 +57,100 @@ public sealed class MutationInterfaceRecoveryTests
             Assert.DoesNotContain(events, e => e is FlowEvent.ExecutionFailed);
             var accepted = Assert.Single(events.OfType<FlowEvent.ExecutionRequestAccepted>());
             Assert.Equal(contract.ProducedOutputs, accepted.Request.ProducedOutputs);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Live_late_failure_does_not_settle_undelivered_implementation_work()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"late-undelivered-{Guid.NewGuid():N}");
+        var artifactsRoot = Path.Combine(roomDirectory, "artifacts");
+        var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+        try
+        {
+            var stepId = new StepId("implement");
+            var snapshot = new WorkflowDefinitionSnapshot(
+                new WorkflowDefinitionSnapshotId("late-undelivered-snapshot"),
+                new WorkflowTemplateId("late-undelivered"),
+                1,
+                [new WorkflowStepDefinition(stepId, "implement", [], ["report.md"], [], new RetryPolicy(1))]);
+            var contract = new WorkerContract(
+                "implement", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+            var binding = new WorkerBinding.Process(
+                contract,
+                new CoreDispatchTarget("unused", []),
+                TimeSpan.FromSeconds(30),
+                FailureClassifier: new LateCapacityClassifier(),
+                DeliversBranch: true);
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var state = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("late-undelivered-workflow"),
+                roomDirectory,
+                snapshot,
+                new Dictionary<string, WorkerBinding> { ["implement"] = binding },
+                artifactsRoot,
+                reader,
+                writer,
+                new LiveLateFailureDispatcher(artifactsRoot),
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>());
+            Assert.Contains(events, e => e is FlowEvent.VerifyFailed { Kind: VerifyFailedKind.DeliveryNotRun });
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Live_late_failure_does_not_settle_when_workspace_verification_fails()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"late-verify-failure-{Guid.NewGuid():N}");
+        var artifactsRoot = Path.Combine(roomDirectory, "artifacts");
+        var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+        try
+        {
+            var stepId = new StepId("implement");
+            var snapshot = new WorkflowDefinitionSnapshot(
+                new WorkflowDefinitionSnapshotId("late-verify-failure-snapshot"),
+                new WorkflowTemplateId("late-verify-failure"),
+                1,
+                [new WorkflowStepDefinition(stepId, "implement", [], ["report.md"], [], new RetryPolicy(1))]);
+            var contract = new WorkerContract(
+                "implement", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+            var binding = new WorkerBinding.Process(
+                contract,
+                new CoreDispatchTarget("unused", []),
+                TimeSpan.FromSeconds(30),
+                FailureClassifier: new LateCapacityClassifier(),
+                VerifyCommandOverride: "cmd /c exit 1");
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var state = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("late-verify-failure-workflow"),
+                roomDirectory,
+                snapshot,
+                new Dictionary<string, WorkerBinding> { ["implement"] = binding },
+                artifactsRoot,
+                reader,
+                writer,
+                new LiveLateFailureDispatcher(artifactsRoot),
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>());
+            Assert.Contains(events, e => e is FlowEvent.VerifyFailed { Kind: VerifyFailedKind.GatesFailed });
         }
         finally
         {
@@ -156,6 +255,20 @@ public sealed class MutationInterfaceRecoveryTests
                 CoreExitReason.Natural,
                 StderrTail: "late capacity failure",
                 TerminalResultObserved: true));
+        }
+    }
+
+    private sealed class LateCapacityClassifier : IFailureClassifier
+    {
+        public bool TryClassifyFailure(
+            string? stderrTail,
+            TimeProvider timeProvider,
+            out FailureClassification? classification,
+            out DateTimeOffset? retryNotBefore)
+        {
+            classification = stderrTail == "late capacity failure" ? FailureClassification.Retryable : null;
+            retryNotBefore = null;
+            return classification is not null;
         }
     }
 }

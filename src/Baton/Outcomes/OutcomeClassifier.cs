@@ -275,17 +275,40 @@ public static class OutcomeClassifier
                 RecoveryCause: recoveryCause);
         }
 
-        // #2412: preserve a terminal vendor failure only when every declared output is already
-        // contract-valid. The validator is the gate, so missing, partial, malformed, and otherwise
-        // unsatisfied outputs stay on their existing failure/indeterminate paths.
+        // #2412: preserve only a positively classified, retryable late vendor failure when every
+        // declared output is already contract-valid. The validator is the gate, while the adapter's
+        // existing structured failure evidence distinguishes eligible capacity/transport failures
+        // from policy, tool, authentication, configuration, and other permanent failures.
         if (result.Reason == CoreExitReason.Natural
             && result.TerminalResultObserved
             && !result.TerminalSuccessObserved
             && ContractValidator.IsSatisfied(contract, outputDirectory))
         {
+            FailureClassification? lateFailureClassification = null;
+            DateTimeOffset? lateRetryNotBefore = null;
+            var identified = failureClassifier is not null
+                && failureClassifier.TryClassifySatisfiedRunFailure(
+                    result.StderrTail,
+                    result.StdoutTail,
+                    timeProvider ?? TimeProvider.System,
+                    out lateFailureClassification,
+                    out lateRetryNotBefore);
+
+            if (identified && lateFailureClassification is FailureClassification.Retryable or FailureClassification.ExhaustedUntil)
+            {
+                return new OutcomeClassification(
+                    OutcomeVerdict.SucceededWithLateFailure,
+                    Reason: BuildLateVendorFailureReason(result));
+            }
+
+            // A terminal result without positive eligible evidence remains an ordinary failure.
+            // Carry the adapter's classification and reset evidence forward when it supplied them;
+            // an absent classification remains absent, as it did on the ordinary failure path.
             return new OutcomeClassification(
-                OutcomeVerdict.SucceededWithLateFailure,
-                Reason: BuildLateVendorFailureReason(result));
+                OutcomeVerdict.Failed,
+                identified ? lateFailureClassification : null,
+                WithStderr(BuildLateVendorFailureReason(result), result.StderrTail),
+                identified ? lateRetryNotBefore : null);
         }
 
         if (result.Reason == CoreExitReason.TimedOut)

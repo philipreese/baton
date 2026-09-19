@@ -43,11 +43,41 @@ public class OutcomeClassifierTests
                     StderrTail: "capacity exhausted",
                     TerminalResultObserved: true),
                 contract,
-                directory);
+                directory,
+                new TestQuotaClassifier("capacity exhausted", FailureClassification.Retryable, null));
 
             Assert.Equal(OutcomeVerdict.SucceededWithLateFailure, classification.Verdict);
             Assert.Contains("capacity exhausted", classification.Reason);
             Assert.True(File.Exists(Path.Combine(directory, "report.md")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_keeps_a_generic_terminal_error_failed_even_when_outputs_are_valid()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            File.WriteAllText(Path.Combine(directory, "report.md"), "complete report");
+            var contract = new WorkerContract(
+                "worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(
+                    1,
+                    CoreExitReason.Natural,
+                    StderrTail: "invalid configuration",
+                    TerminalResultObserved: true),
+                contract,
+                directory,
+                new TestQuotaClassifier("invalid configuration", FailureClassification.Permanent, null));
+
+            Assert.Equal(OutcomeVerdict.Failed, classification.Verdict);
+            Assert.Equal(FailureClassification.Permanent, classification.FailureClassification);
+            Assert.Contains("invalid configuration", classification.Reason);
         }
         finally
         {

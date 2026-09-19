@@ -2,6 +2,7 @@ using Baton.Artifacts;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Outcomes;
 using Baton.Status;
 using Baton.Store;
 using Baton.Tests.TestSupport;
@@ -1241,15 +1242,16 @@ public class MutationInterfaceCrashRecoveryTests
             await using var writer = new FlowEventLogWriter(logPath);
             var reader = new FlowEventLogReader(logPath);
             var workflowId = new WorkflowId("wf-late-failure-restart");
+            // late-failure replay fixture
             var executionId = new ExecutionId(Guid.NewGuid().ToString("n"));
             var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, executionId);
             var contract = new WorkerContract(
-                "unresolvable-worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+                "stub-worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
             var request = new ExecutionRequest(
                 executionId,
                 workflowId,
                 A,
-                "unresolvable-worker",
+                "stub-worker",
                 Inputs: [],
                 Outputs: ["report.md"],
                 Timeout,
@@ -1265,6 +1267,7 @@ public class MutationInterfaceCrashRecoveryTests
                     executionId,
                     ExitCode: 1,
                     CoreExitReason.Natural,
+                    StderrTail: "late capacity failure",
                     TerminalSuccessObserved: false,
                     TerminalResultObserved: true),
                 TestContext.Current.CancellationToken);
@@ -1273,7 +1276,11 @@ public class MutationInterfaceCrashRecoveryTests
                 workflowId,
                 roomDirectory,
                 snapshot,
-                new Dictionary<string, WorkerBinding>(),
+                new Dictionary<string, WorkerBinding>
+                {
+                    ["stub-worker"] = new WorkerBinding.Process(
+                        contract, Target, Timeout, FailureClassifier: new LateCapacityClassifier()),
+                },
                 artifactsRoot,
                 reader,
                 writer,
@@ -1285,6 +1292,73 @@ public class MutationInterfaceCrashRecoveryTests
             Assert.Single(events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>());
             Assert.DoesNotContain(events, e => e is FlowEvent.ExecutionSucceeded);
             Assert.DoesNotContain(events, e => e is FlowEvent.ExecutionFailed);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Restart_late_failure_without_delivery_evidence_does_not_settle()
+    {
+        var snapshot = MakeSnapshot(new WorkflowStepDefinition(
+            A, "stub-worker", [], ["report.md"], [], new RetryPolicy(1)));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-late-failure-missing-delivery");
+            var executionId = new ExecutionId(Guid.NewGuid().ToString("n"));
+            var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, executionId);
+            var contract = new WorkerContract(
+                "stub-worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+            var request = new ExecutionRequest(
+                executionId,
+                workflowId,
+                A,
+                "stub-worker",
+                Inputs: [],
+                Outputs: ["report.md"],
+                Timeout,
+                ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot),
+                UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
+                DeliversBranch: true,
+                ProducedOutputs: contract.ProducedOutputs);
+
+            await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(request), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionStarted(executionId, Pid: 4242), TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, "report.md"), "complete report", TestContext.Current.CancellationToken);
+            await writer.AppendAsync(
+                new CoreEvent.ExecutionExited(
+                    executionId,
+                    ExitCode: 1,
+                    CoreExitReason.Natural,
+                    StderrTail: "late capacity failure",
+                    TerminalResultObserved: true),
+                TestContext.Current.CancellationToken);
+
+            var state = await MutationInterface.StartWorkflowAsync(
+                workflowId,
+                roomDirectory,
+                snapshot,
+                new Dictionary<string, WorkerBinding>
+                {
+                    ["stub-worker"] = new WorkerBinding.Process(
+                        contract, Target, Timeout, FailureClassifier: new LateCapacityClassifier(), DeliversBranch: true),
+                },
+                artifactsRoot,
+                reader,
+                writer,
+                new StubCoreDispatcher(),
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>());
+            var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Equal(VerifyFailedKind.EngineRestart, failure.Kind);
         }
         finally
         {
@@ -1398,6 +1472,20 @@ public class MutationInterfaceCrashRecoveryTests
     {
         ["stub-worker"] = new WorkerBinding.Process(ProcessContract, Target, Timeout, Adapter: adapter, Model: model),
     };
+
+    private sealed class LateCapacityClassifier : IFailureClassifier
+    {
+        public bool TryClassifyFailure(
+            string? stderrTail,
+            TimeProvider timeProvider,
+            out FailureClassification? classification,
+            out DateTimeOffset? retryNotBefore)
+        {
+            classification = stderrTail == "late capacity failure" ? FailureClassification.Retryable : null;
+            retryNotBefore = null;
+            return classification is not null;
+        }
+    }
 
     /// <summary>
     /// #724's title case, distinct from the absent-worker arm above: the binding is PRESENT but
