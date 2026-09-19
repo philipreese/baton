@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.53.0](https://github.com/philipreese/baton/compare/v0.52.0...v0.53.0) (2026-09-19)
+
+
+### Features
+
+* **conductor:** Persist durable obligation facts ([#2406](https://github.com/philipreese/baton/issues/2406)) ([f380cac](https://github.com/philipreese/baton/commit/f380cac6b0e98dc1346dc6221c495be55281133e))
+
 ## [0.52.0](https://github.com/philipreese/baton/compare/v0.51.3...v0.52.0) (2026-09-18)
 
 
