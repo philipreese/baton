@@ -171,6 +171,11 @@ public class CoreDispatcherTests
             Assert.Equal(0, result.ExitCode);
             Assert.True(result.TerminalResultObserved);
             Assert.False(result.TerminalSuccessObserved);
+
+            var coreEvents = await new FlowEventLogReader(logPath).ReadAllCoreEventsAsync(TestContext.Current.CancellationToken);
+            var exited = Assert.Single(coreEvents.OfType<CoreEvent.ExecutionExited>());
+            Assert.True(exited.TerminalResultObserved);
+            Assert.False(exited.TerminalSuccessObserved);
         }
         finally
         {

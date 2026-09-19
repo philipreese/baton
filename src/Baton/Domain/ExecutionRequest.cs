@@ -106,4 +106,7 @@ public sealed record ExecutionRequest(
     string? HookVerdictLedgerFileName = null,
     // #2309: recorded before spawn so crash recovery does not infer the delivery obligation from
     // a catalog or binding that may have changed or become unavailable since this execution ran.
-    bool? DeliversBranch = null);
+    bool? DeliversBranch = null,
+    // #2412: retain the output contract needed to validate a terminal vendor failure after restart;
+    // names alone cannot reject malformed or partial recovery artifacts.
+    IReadOnlyList<ProducedOutput>? ProducedOutputs = null);

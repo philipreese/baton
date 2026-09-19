@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Baton.Domain;
 using Baton.Projection;
+using Baton.Status;
 using Baton.Store;
 using Baton.Tests.Shared;
 
@@ -9,6 +10,34 @@ namespace Baton.Tests.Projection;
 
 public class StateProjectorTests
 {
+    [Fact]
+    public void A_late_failure_execution_projects_as_succeeded_with_the_failure_reason_once()
+    {
+        var executionId = new ExecutionId("exec-1");
+        const string reason = "late vendor capacity failure";
+        var events = new FlowEvent[]
+        {
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId, Architect)),
+            new FlowEvent.ExecutionSucceededWithLateFailure(
+                executionId, reason, WorkspaceChanged: false, Hollow: true, HollowReason: "no diff"),
+        };
+
+        var snapshot = new WorkflowDefinitionSnapshot(
+            new WorkflowDefinitionSnapshotId("late-failure-snapshot"),
+            new WorkflowTemplateId("late-failure"),
+            WorkflowTemplateVersion: 1,
+            Steps: [new WorkflowStepDefinition(Architect, "architect", [], [], [], new RetryPolicy(1))]);
+        var state = StateProjector.Project(events, snapshot);
+
+        var architect = StepFor(state, Architect);
+        Assert.Equal(StepStatus.Succeeded, architect.Status);
+        Assert.Equal(reason, architect.LateFailureReason);
+        Assert.False(architect.WorkspaceChanged);
+        Assert.True(architect.Hollow);
+        Assert.Equal("no diff", architect.HollowReason);
+        Assert.Equal(WorkflowOutcome.SucceededWithLateFailure, WorkflowOutcome.Describe(state));
+    }
+
     private static readonly StepId Architect = new("architect");
     private static readonly StepId Critic = new("critic");
 

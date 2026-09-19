@@ -620,7 +620,8 @@ public static class MutationInterface
             Timeout: null,
             environment,
             UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
-            GrantAuditMode: nonProcess.GrantAuditMode);
+            GrantAuditMode: nonProcess.GrantAuditMode,
+            ProducedOutputs: nonProcess.Contract.ProducedOutputs);
 
 
         // The write-sequence discipline still applies: appended and fsync'd before this method
@@ -917,7 +918,8 @@ public static class MutationInterface
             Model: processBinding.Model,
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
-            DeliversBranch: processBinding.DeliversBranch);
+            DeliversBranch: processBinding.DeliversBranch,
+            ProducedOutputs: processBinding.Contract.ProducedOutputs);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -1131,6 +1133,7 @@ public static class MutationInterface
                         string? worktreePath = null;
                         string? worktreeBaseRef = null;
                         IWorkerResponseParser? responseParser = null;
+                        IFailureClassifier? failureClassifier = null;
                         var changesTree = false;
                         var verifiesWorkspace = true;
                         string? changesTreeWorkingDirectory = null;
@@ -1149,6 +1152,7 @@ public static class MutationInterface
                                 }
 
                                 responseParser = p.ResponseParser;
+                                failureClassifier = p.FailureClassifier;
                                 // #1622/#1390: the same bit the live-dispatch path reads off
                                 // `binding.ChangesTree` below. 7c (#1720 review) corrects the
                                 // mechanism this used to state: the binding is NOT re-derived from
@@ -1243,8 +1247,14 @@ public static class MutationInterface
                             : 0;
                         var classification = OutcomeClassifier.Classify(
                             new CoreDispatchResult(
-                                exit.ExitCode, exit.Reason, exit.StderrTail, EnginePlacedFiles: enginePlacedFiles),
+                                exit.ExitCode,
+                                exit.Reason,
+                                exit.StderrTail,
+                                exit.TerminalSuccessObserved,
+                                TerminalResultObserved: exit.TerminalResultObserved,
+                                EnginePlacedFiles: enginePlacedFiles),
                             contract, outputDirectory,
+                            failureClassifier: failureClassifier,
                             grantAuditMode: grantAuditMode, worktreePath: worktreePath, responseParser: responseParser,
                             usageParser: usageParser, worktreeBaseRef: worktreeBaseRef, changesTree: changesTree,
                             changesTreeWorkingDirectory: changesTreeWorkingDirectory, toolCallCount: toolCallCount,
@@ -1257,7 +1267,7 @@ public static class MutationInterface
                         // A recorded exit is not a recorded delivery. The exact obligation was
                         // journalled before spawn; neither a worker file nor today's remote state
                         // can turn an unobserved/malformed delivery into replay success.
-                        if (classification.Verdict == OutcomeVerdict.Succeeded && request.DeliversBranch == true)
+                        if (IsSucceededShaped(classification.Verdict) && request.DeliversBranch == true)
                         {
                             var recorded = priorDeliveryObservations.LastOrDefault(observation => observation.ExecutionId == executionId);
                             var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
@@ -2024,7 +2034,8 @@ public static class MutationInterface
             Model: processBindingForRequest?.Model,
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
-            DeliversBranch: processBindingForRequest?.DeliversBranch);
+            DeliversBranch: processBindingForRequest?.DeliversBranch,
+            ProducedOutputs: binding.Contract.ProducedOutputs);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -2406,7 +2417,7 @@ public static class MutationInterface
 
             FlowEvent.DeliveryObservationRecorded? recordedDelivery = null;
             DeliveryCheckOutcome? deliveryOutcomeBeforeVerify = null;
-            if (classification.Verdict == OutcomeVerdict.Succeeded && binding.DeliversBranch)
+            if (IsSucceededShaped(classification.Verdict) && binding.DeliversBranch)
             {
                 // Delivery is the cheaper necessary condition. A branch that is not pushed (or has no
                 // required PR) cannot be rescued by an expensive workspace gate, so establish that
@@ -2480,7 +2491,7 @@ public static class MutationInterface
             // is Baton.Vendors.WorkerRole.VerifiesWorkspace's to say (spec/baton.md §3). False
             // withholds both; only an operator's own `--verify` still resolves. Gated HERE rather than
             // inside Resolve so that method's three-arm precedence contract stays one thing.
-            ResolvedVerifyCommand? resolvedVerify = classification.Verdict == OutcomeVerdict.Succeeded
+            ResolvedVerifyCommand? resolvedVerify = IsSucceededShaped(classification.Verdict)
                 ? VerifyCommandResolver.Resolve(
                     binding.VerifiesWorkspace ? committedVerifyDeclaration : null,
                     binding.VerifyCommandOverride,
@@ -2569,7 +2580,7 @@ public static class MutationInterface
                 }
             }
 
-            if (classification.Verdict == OutcomeVerdict.Succeeded && binding.DeliversBranch)
+            if (IsSucceededShaped(classification.Verdict) && binding.DeliversBranch)
             {
                 var deliveryOutcome = deliveryOutcomeBeforeVerify!;
                 if (recordedDelivery is null)
@@ -3026,6 +3037,9 @@ public static class MutationInterface
             .ConfigureAwait(false);
     }
 
+    private static bool IsSucceededShaped(OutcomeVerdict verdict) =>
+        verdict is OutcomeVerdict.Succeeded or OutcomeVerdict.SucceededWithLateFailure;
+
     /// <summary>
     /// Maps a classified outcome to the terminal <see cref="FlowEvent"/> it owes, shared by
     /// a fresh dispatch's own completion (<see cref="DispatchAndRecordOutcomeAsync"/>) and M10 Phase
@@ -3044,6 +3058,9 @@ public static class MutationInterface
             OutcomeVerdict.Succeeded => new FlowEvent.ExecutionSucceeded(
                 executionId, classification.WorkspaceChanged, classification.Hollow, classification.HollowReason,
                 peakBilledInWindow, classification.FinishedDuringTeardown),
+            OutcomeVerdict.SucceededWithLateFailure => new FlowEvent.ExecutionSucceededWithLateFailure(
+                executionId, classification.Reason ?? "Vendor ended with a late failure after valid declared outputs.",
+                classification.WorkspaceChanged, classification.Hollow, classification.HollowReason),
             OutcomeVerdict.Failed => new FlowEvent.ExecutionFailed(
                 executionId, classification.FailureClassification, classification.Reason, classification.RetryNotBefore,
                 classification.CapturedResponseFile, classification.UnsatisfiedOutputNames, peakBilledInWindow,
@@ -3439,7 +3456,7 @@ public static class MutationInterface
         return new WorkerContract(
             request.Worker,
             RequiredInputs: [],
-            ProducedOutputs: [.. request.Outputs.Select(o => new ProducedOutput(o))],
+            ProducedOutputs: request.ProducedOutputs ?? [.. request.Outputs.Select(o => new ProducedOutput(o))],
             OptionalMetadata: []);
     }
 

@@ -655,6 +655,7 @@ public static class WorkflowStatusProjector
                     {
                         FlowEvent.ExecutionRequestAccepted accepted => accepted.Request.ExecutionId.Value,
                         FlowEvent.ExecutionSucceeded succeeded => succeeded.ExecutionId.Value,
+                        FlowEvent.ExecutionSucceededWithLateFailure lateFailure => lateFailure.ExecutionId.Value,
                         FlowEvent.ExecutionFailed failed => failed.ExecutionId.Value,
                         FlowEvent.ExecutionCancelled cancelled => cancelled.ExecutionId.Value,
                         // #1608 review finding 8 / #1623: same terminal-event timestamp as

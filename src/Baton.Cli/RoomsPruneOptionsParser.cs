@@ -18,6 +18,7 @@ public static class RoomsPruneOptionsParser
     private static readonly IReadOnlyList<string> AllowedStates =
     [
         WorkflowOutcome.Succeeded,
+        WorkflowOutcome.SucceededWithLateFailure,
         // #1945: a terminal word like any other here — a room that settled it is prunable, and
         // omitting it would leave one class of finished room unreachable by --state.
         WorkflowOutcome.FinishedDuringTeardown,

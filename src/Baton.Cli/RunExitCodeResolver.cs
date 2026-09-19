@@ -80,6 +80,9 @@ public static class RunExitCodeResolver
             // fix it — spec/baton.md §3's terminal-vocabulary row lists every consumer that owes it
             // this reading, and WorkflowOutcome.FinishedDuringTeardown glosses the word itself.
             WorkflowOutcome.FinishedDuringTeardown => RunExitCode.Succeeded,
+            // #2412: valid artifacts are lifecycle-succeeded, but the vendor failure remains
+            // visible to a direct run caller through the non-zero exit code.
+            WorkflowOutcome.SucceededWithLateFailure => RunExitCode.Failed,
             WorkflowOutcome.Cancelled => RunExitCode.Cancelled,
             WorkflowOutcome.Failed => ResolveFailed(result.State.Steps),
             // #1608 / #1623: WorkflowOutcome.Describe returns this whenever a step reads
@@ -111,7 +114,7 @@ public static class RunExitCodeResolver
             _ => throw new UnreachableException(
                 $"WorkflowOutcome.Describe returned '{outcome}', which is not one of the known " +
                 "WorkflowOutcome members (Succeeded, FinishedDuringTeardown, Failed, Cancelled, " +
-                "Indeterminate, Running, Paused). " +
+                "SucceededWithLateFailure, Indeterminate, Running, Paused). " +
                 "A new member was added without sweeping this switch — also sweep RedispatchCommand's " +
                 "parent gate, StatusCommand, FleetStatusTool, glass.html's chipsHtml + render buckets, " +
                 "and spec/baton.md §3's table."),

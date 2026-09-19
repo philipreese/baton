@@ -13,6 +13,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(ExecutionAttemptStarted), "executionAttemptStarted")]
 [JsonDerivedType(typeof(ExecutionRequestRejected), "executionRequestRejected")]
 [JsonDerivedType(typeof(ExecutionSucceeded), "executionSucceeded")]
+[JsonDerivedType(typeof(ExecutionSucceededWithLateFailure), "executionSucceededWithLateFailure")]
 [JsonDerivedType(typeof(ExecutionFailed), "executionFailed")]
 [JsonDerivedType(typeof(ExecutionCancelled), "executionCancelled")]
 [JsonDerivedType(typeof(CancellationRequested), "cancellationRequested")]
@@ -102,6 +103,18 @@ public abstract record FlowEvent
         string? HollowReason = null,
         long? PeakBilledInWindow = null,
         bool FinishedDuringTeardown = false) : FlowEvent;
+
+    /// <summary>
+    /// The declared artifacts were complete and contract-valid, but the vendor reported a terminal
+    /// failure afterward. This preserves the artifact evidence and the late failure as one durable
+    /// outcome rather than collapsing either fact into clean success or ordinary failure.
+    /// </summary>
+    public sealed record ExecutionSucceededWithLateFailure(
+        ExecutionId ExecutionId,
+        string Reason,
+        bool? WorkspaceChanged = null,
+        bool? Hollow = null,
+        string? HollowReason = null) : FlowEvent;
 
     /// <summary>Flow has classified a completed execution as failed.</summary>
     /// <param name="Reason">

@@ -33,8 +33,18 @@ public abstract record CoreEvent
     /// </param>
     public sealed record ExecutionStarted(ExecutionId ExecutionId, uint Pid, DateTime? ProcessStartTimeUtc = null) : CoreEvent;
 
-    /// <summary>The Core-managed process for this execution has exited.</summary>
-    public sealed record ExecutionExited(ExecutionId ExecutionId, int ExitCode, CoreExitReason Reason, string? StderrTail = null) : CoreEvent;
+    /// <summary>
+    /// The Core-managed process for this execution has exited. The terminal-result fields preserve
+    /// the adapter-owned final vendor observation so restart reconciliation can use the same
+    /// settlement rule as the live path.
+    /// </summary>
+    public sealed record ExecutionExited(
+        ExecutionId ExecutionId,
+        int ExitCode,
+        CoreExitReason Reason,
+        string? StderrTail = null,
+        bool TerminalSuccessObserved = false,
+        bool TerminalResultObserved = false) : CoreEvent;
 }
 
 /// <summary>

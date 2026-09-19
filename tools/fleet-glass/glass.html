@@ -606,6 +606,7 @@ function primaryStateChip(room){
     // person looked at it and closed it. `resolvedBy` is the fleet view's field for exactly that
     // (spec/baton.md §6's room schema).
     : st === "Failed" && room.resolvedBy ? ["CLOSED","c-warn"]
+    : st === "SucceededWithLateFailure" ? ["SUCCEEDED (LATE FAILURE)","c-warn"]
     : st === "Succeeded" ? ["SUCCEEDED","c-ok"]
     // #1945: a succeeded-shaped word -- the lane finished and pushed inside its box and the timeout
     // kill landed after that push. Same "done, nobody needs to act" green as SUCCEEDED, never
@@ -1242,7 +1243,10 @@ function roomDetailHtml(room, timelines, openTimelinePaths, derivedAt, roomsByPa
   const terminal = room.state === "Failed" || room.state === "Succeeded" || room.state === "Cancelled"
     // #1945: a FinishedDuringTeardown room is as terminal as a Succeeded one -- its terminal.json is
     // written the same way -- so the detail pane owes it the same `baton room delete` verb.
-    || room.state === "FinishedDuringTeardown";
+    || room.state === "FinishedDuringTeardown"
+    // #2412: artifacts succeeded but the vendor reported a late failure, so this remains terminal
+    // and deletable while its distinct chip preserves that it was not a clean success.
+    || room.state === "SucceededWithLateFailure";
   const title = room.label ? esc(room.label) : esc(room.name);
   const roomIdLine = room.label ? `<div class="roomid">${esc(room.name)}</div>` : "";
   const isTlOpen = !!(openTimelinePaths && room.path && openTimelinePaths.has(room.path));
@@ -1324,7 +1328,11 @@ function render(rooms, pushedAt, underhood, heartbeatAt, timelines, staleHiddenC
   // the same c-ok chip in primaryStateChip. Same truthy-unrecognised-state hole Stalled (#1582),
   // Indeterminate (#1586 S1) and Cancelled (#1698) each fell into before their own arm: without
   // this it matches no bucket and is not `!r.state` either, so the room vanishes off the board.
-  const isDoneLike = (r) => r.state === "Succeeded" || r.state === "FinishedDuringTeardown";
+  const isDoneLike = (r) => r.state === "Succeeded"
+    || r.state === "FinishedDuringTeardown"
+    // #2412: the outputs are complete and the lane is terminal, but the warning chip keeps the
+    // recorded vendor failure visible instead of presenting this as an ordinary clean success.
+    || r.state === "SucceededWithLateFailure";
   const done    = rooms.filter(isDoneLike);
   const other   = rooms.filter(r => !r.state);
   // #1656: fold in whatever terminal-archive pages the operator has already loaded via "load
@@ -2802,7 +2810,8 @@ document.addEventListener("click", (ev) => {
       // carries Cancelled (isFailedLike, #1698), so this map has always under-swept it -- widening
       // that is pre-existing drift with its own population, not this change.
       const matchesSection = section === "failed" ? (s) => s === "Failed"
-        : section === "succeeded" ? (s) => s === "Succeeded" || s === "FinishedDuringTeardown"
+        : section === "succeeded" ? (s) => s === "Succeeded"
+          || s === "FinishedDuringTeardown" || s === "SucceededWithLateFailure"
         : section === "stalled" ? (s) => s === "Stalled"
         : null;
       if(matchesSection){

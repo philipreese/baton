@@ -178,6 +178,10 @@ public static partial class CostLedgerStore
                         : "Succeeded";
                     break;
 
+                case FlowEvent.ExecutionSucceededWithLateFailure lateFailure:
+                    outcomeByExecutionId[lateFailure.ExecutionId.Value] = Status.WorkflowOutcome.SucceededWithLateFailure;
+                    break;
+
                 case FlowEvent.ExecutionFailed failed:
                     outcomeByExecutionId[failed.ExecutionId.Value] = failed.FailureClassification?.ToString() ?? "Failed";
                     break;

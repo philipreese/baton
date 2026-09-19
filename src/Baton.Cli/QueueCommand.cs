@@ -1706,7 +1706,7 @@ public static class QueueCommand
     }
 
     private static bool IsTerminalOutcome(string? outcome) => outcome is
-        WorkflowOutcome.Succeeded or WorkflowOutcome.FinishedDuringTeardown or WorkflowOutcome.Failed
+        WorkflowOutcome.Succeeded or WorkflowOutcome.SucceededWithLateFailure or WorkflowOutcome.FinishedDuringTeardown or WorkflowOutcome.Failed
         or WorkflowOutcome.Cancelled or WorkflowOutcome.Indeterminate;
 
     internal sealed class LegacyRetirementProofLease(

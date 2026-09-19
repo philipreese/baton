@@ -152,6 +152,10 @@ public static class QuotaLedgerStore
                         : "Succeeded";
                     break;
 
+                case FlowEvent.ExecutionSucceededWithLateFailure lateFailure:
+                    outcomeByExecutionId[lateFailure.ExecutionId.Value] = WorkflowOutcome.SucceededWithLateFailure;
+                    break;
+
                 case FlowEvent.ExecutionFailed failed:
                     outcomeByExecutionId[failed.ExecutionId.Value] = failed.FailureClassification?.ToString() ?? "Failed";
                     break;

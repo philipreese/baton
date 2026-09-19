@@ -162,11 +162,9 @@ public static class RedispatchCommand
                 });
         }
 
-        // #1945: FinishedDuringTeardown is a succeeded-shaped word, so it must not draw the
-        // did-not-succeed warning — see WorkflowOutcome.FinishedDuringTeardown's own remarks.
+        // #1945/#2412: succeeded-shaped words must not draw the did-not-succeed warning.
         if (parentTerminal is not null
-            && !string.Equals(parentTerminal.State, WorkflowOutcome.Succeeded, StringComparison.Ordinal)
-            && !string.Equals(parentTerminal.State, WorkflowOutcome.FinishedDuringTeardown, StringComparison.Ordinal))
+            && !WorkflowOutcome.IsSucceededShaped(parentTerminal.State))
         {
             Console.Error.WriteLine(
                 $"Warning: parent room '{options.ParentRoomDirectoryPath}' did not succeed "

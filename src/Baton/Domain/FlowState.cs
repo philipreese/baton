@@ -291,6 +291,8 @@ public sealed record StepState(
     // clean, already-pushed workspace -- see FlowEvent.ExecutionSucceeded.FinishedDuringTeardown.
     // Read only by Status.WorkflowOutcome, to pick the room-level word.
     bool FinishedDuringTeardown = false,
+    // #2412: valid declared artifacts survived a terminal vendor failure on the latest execution.
+    string? LateFailureReason = null,
     // #2002: the latest structured recovery fact and its consecutive occurrence count.
     RecoveryCause? LatestRecoveryCause = null,
     int RecoveryOccurrence = 0);
