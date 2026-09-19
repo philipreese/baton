@@ -1209,6 +1209,20 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         }
     }
 
+    public void ValidateRequestedInvocation(string? model, string? effort)
+    {
+        if (effort is { } requestedEffort)
+        {
+            ReconcileAgyEffort(model, EffortTierMapping.ResolveForAgy(requestedEffort));
+        }
+        else if (RequiresAgyEffort(model))
+        {
+            throw new IncoherentVendorEffortException(
+                "agy",
+                $"--model {model} requires --effort (available: low, medium, high).");
+        }
+    }
+
     private static readonly HashSet<string> AgyEffortValues =
         new(StringComparer.OrdinalIgnoreCase) { "low", "medium", "high" };
 

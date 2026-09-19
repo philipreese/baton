@@ -801,6 +801,12 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
 
     public void ValidateRequestedModel(string model) => ValidateModel(model);
 
+    public void ValidateRequestedEffort(string? model, string effort)
+    {
+        ValidateModel(model);
+        ValidateEffort(model, EffortTierMapping.ResolveForCodex(effort));
+    }
+
     private static void ValidateModel(string? model)
     {
         if (model is { Length: > 0 } && !KnownEffortsByModel.ContainsKey(model))

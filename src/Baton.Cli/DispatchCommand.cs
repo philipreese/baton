@@ -231,10 +231,17 @@ public static class DispatchCommand
         // before runway admission, room provisioning, or any other dispatch write.
         foreach (var (workerName, binding) in bindings)
         {
-            if (WorkerInvocationModelPolicy.RefusalMessage(binding.Adapter, binding.Model, binding.ModelResolved) is { } refusal)
+            try
             {
-                throw WorkerInvocationModelPolicy.Refusal(
-                    $"Worker '{workerName}' {refusal}", binding.Adapter);
+                WorkerInvocationValidation.Validate(
+                    binding.Adapter, binding.Model, binding.ModelResolved, binding.Effort, adapters);
+            }
+            catch (CliArgumentException ex)
+            {
+                var message = $"Worker '{workerName}' {ex.Message}";
+                throw ex.TryInvocation is { } tryInvocation
+                    ? new CliArgumentException(message, tryInvocation)
+                    : new CliArgumentException(message);
             }
         }
 

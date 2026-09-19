@@ -205,6 +205,32 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_refuses_an_incompatible_model_effort_pair_before_queue_persistence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "agy-effort-mismatch", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: home, Adapter: "agy", Model: "gemini-3.6-flash-low", Effort: "high"),
+                TextWriter.Null, Ct));
+
+            Assert.Contains("conflicts with --effort 'high'", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_refuses_memory_add_for_an_adapter_without_host_mediation_before_any_queue_side_effect()
     {
         var home = CreateTempHome();

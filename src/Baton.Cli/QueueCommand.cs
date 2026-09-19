@@ -2076,9 +2076,10 @@ public static class QueueCommand
                 $"--model '{options.Model}' is known by {string.Join(", ", adapters)}, but the resolved {actualAdapter} adapter cannot use it.");
         }
 
-        if (options.Model is not null && options.Adapter is null && tier.Adapter is not null)
+        if (tier.Adapter is { } resolvedAdapter && (tier.Model is not null || tier.Effort is not null))
         {
-            ValidateAdapterModel(tier.Adapter, options.Model);
+            WorkerInvocationValidation.Validate(
+                resolvedAdapter, tier.Model, null, tier.Effort, WorkerAdapterRegistry.Default);
         }
 
         return (adapter, tier, adapterFromModel, stageSelections);
@@ -2109,7 +2110,8 @@ public static class QueueCommand
     {
         if (adapter is not null && model is not null)
         {
-            ValidateAdapterModel(adapter, model);
+            WorkerInvocationValidation.Validate(
+                adapter, model, null, null, WorkerAdapterRegistry.Default, includeModelPolicy: false);
         }
 
         var candidates = model is null
@@ -2150,51 +2152,21 @@ public static class QueueCommand
 
             var tier = QueueTierTable.ResolveForStage(
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
-            if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+            if (tier.Adapter is { } adapter)
             {
-                throw WorkerInvocationModelPolicy.Refusal(
-                    $"The {WorkStages.Token(stage)} selection is invalid: {refusal}", tier.Adapter);
-            }
-
-            if (tier.Adapter is { } adapter && tier.Model is { } model)
-            {
-                var candidates = WorkerModelCatalog.AdaptersFor(model);
-                if (candidates.Count > 0 && !candidates.Contains(adapter, StringComparer.OrdinalIgnoreCase))
-                {
-                    throw new CliArgumentException(
-                        $"The {WorkStages.Token(stage)} selection's resolved model '{model}' is known by "
-                        + $"{string.Join(", ", candidates)}, but the resolved {adapter} adapter cannot use it.");
-                }
-
                 try
                 {
-                    ValidateAdapterModel(adapter, model);
+                    WorkerInvocationValidation.Validate(
+                        adapter, tier.Model, null, tier.Effort, WorkerAdapterRegistry.Default);
                 }
                 catch (CliArgumentException ex)
                 {
-                    throw new CliArgumentException(
-                        $"The {WorkStages.Token(stage)} selection's resolved {adapter}/{model} tuple is invalid: {ex.Message}");
+                    var message = $"The {WorkStages.Token(stage)} selection is invalid: {ex.Message}";
+                    throw ex.TryInvocation is { } tryInvocation
+                        ? new CliArgumentException(message, tryInvocation)
+                        : new CliArgumentException(message);
                 }
             }
-        }
-    }
-
-    private static void ValidateAdapterModel(string adapter, string model)
-    {
-        var worker = WorkerAdapterRegistry.Default
-            .FirstOrDefault(pair => string.Equals(pair.Key, adapter, StringComparison.OrdinalIgnoreCase)).Value;
-        if (worker is null)
-        {
-            throw new CliArgumentException($"Unknown adapter '{adapter}'.");
-        }
-
-        try
-        {
-            worker.ValidateRequestedModel(model);
-        }
-        catch (BatonFlowException ex)
-        {
-            throw new CliArgumentException(ex.Message);
         }
     }
 

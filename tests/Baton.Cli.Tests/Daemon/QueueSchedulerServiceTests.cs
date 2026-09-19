@@ -259,6 +259,44 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_persisted_invalid_model_effort_item_fails_once_without_automatic_retry()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("imported-effort", scope: null) with
+                {
+                    Adapter = "agy",
+                    Model = "gemini-3.6-flash-low",
+                    Effort = "high",
+                }],
+            }, Ct);
+            var launchCount = 0;
+            var service = Service((_, _) =>
+            {
+                launchCount++;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(0, launchCount);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Contains("conflicts with --effort 'high'", item.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_saved_lifecycle_item_with_explicit_skills_fails_once_before_launch()
     {
         var home = CreateTempHome();

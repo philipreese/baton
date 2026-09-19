@@ -1452,6 +1452,9 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
 
     public void ValidateRequestedModel(string model) => RefuseDotDelimitedClaudeModelId(model);
 
+    public void ValidateRequestedEffort(string? model, string effort) =>
+        _ = EffortTierMapping.ResolveForClaude(effort);
+
     private static void RefuseDotDelimitedClaudeModelId(string model)
     {
         if (DotDelimitedClaudeVersion.IsMatch(model))
