@@ -70,6 +70,12 @@ namespace Baton.Vendors;
 /// exception narrows stays off the vendor flag and rests on the hook —
 /// <c>ClaudeWorkerAdapter.StandingShellDenials</c> records that trade.
 /// </param>
+/// <param name="ExactFileRestore">
+/// Grants access to Baton's exact-file restore primitive. This is a Baton-owned MCP tool, not a
+/// shell grant: dispatch captures the admitted base commit and the worker may name only one literal,
+/// tracked repository-relative file per call. The capability is inert unless that immutable base
+/// identity is also present on the resolved binding.
+/// </param>
 public sealed record PermissionGrant(
     bool ReadFiles = false,
     bool WriteFiles = false,
@@ -79,7 +85,8 @@ public sealed record PermissionGrant(
     IReadOnlyList<string>? DeniedShellCommandPatterns = null,
     bool ShellCommandsAreReadOnly = false,
     IReadOnlyList<string>? DeniedShellOptionTokens = null,
-    IReadOnlyList<string>? DeniedShellCommandExceptions = null)
+    IReadOnlyList<string>? DeniedShellCommandExceptions = null,
+    bool ExactFileRestore = false)
 {
     /// <summary>
     /// True when every category is unset — the structured equivalent of a blank
@@ -90,7 +97,8 @@ public sealed record PermissionGrant(
     public bool IsEmpty => !ReadFiles && !WriteFiles && !RunShellCommands && !NetworkAccess
         && (ShellCommandPatterns is null || ShellCommandPatterns.Count == 0)
         && (DeniedShellCommandPatterns is null || DeniedShellCommandPatterns.Count == 0)
-        && (DeniedShellOptionTokens is null || DeniedShellOptionTokens.Count == 0);
+        && (DeniedShellOptionTokens is null || DeniedShellOptionTokens.Count == 0)
+        && !ExactFileRestore;
 
     /// <summary>
     /// The categories this grant WITHHOLDS that a granted shell reaches anyway — empty when the

@@ -26,4 +26,7 @@ public static class WorkerEnvironment
     /// </para>
     /// </remarks>
     public const string WorkspaceVariable = "BATON_WORKSPACE_DIR";
+
+    /// <summary>The dispatch-captured base commit for the exact-file restore MCP tool.</summary>
+    public const string ExactFileRestoreBaseVariable = "BATON_EXACT_FILE_RESTORE_BASE";
 }

@@ -602,10 +602,12 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         // so a real workspace directory carrying .agents/mcp_config.json has to exist on disk for
         // --add-dir to point at. Opt-in only, so a dispatch that does not ask for it keeps today's
         // exact argv.
-        if (invocation.EnableMemoryProposalTool)
+        if (invocation.EnableMemoryProposalTool || invocation.EnableExactFileRestoreTool)
         {
             args.Add("--add-dir");
-            args.Add(EnsureMemoryProposalWorkspace());
+            args.Add(EnsureMcpWorkspace(
+                enableMemoryProposal: invocation.EnableMemoryProposalTool,
+                enableExactFileRestore: invocation.EnableExactFileRestoreTool));
         }
 
         if (invocation.SessionId is not null && invocation.ResumeSession)
@@ -731,6 +733,11 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         if (invocation.WorkingDirectory is { } workspace)
         {
             environment.Add((WorkerEnvironment.WorkspaceVariable, workspace));
+        }
+
+        if (invocation.EnableExactFileRestoreTool && invocation.ExactFileRestoreBaseSha is { } baseSha)
+        {
+            environment.Add((WorkerEnvironment.ExactFileRestoreBaseVariable, baseSha));
         }
 
         // #1084: under `--mode accept-edits` agy headless-DENIES a write tool because it cannot
@@ -900,7 +907,10 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// fail-open-and-silent reason (#530) -- doubly so here, since agy is the vendor whose own
     /// hook-check fails open on a bad path.
     /// </remarks>
-    private static string EnsureMemoryProposalWorkspace()
+    private static string EnsureMemoryProposalWorkspace() =>
+        EnsureMcpWorkspace(enableMemoryProposal: true, enableExactFileRestore: false);
+
+    private static string EnsureMcpWorkspace(bool enableMemoryProposal, bool enableExactFileRestore)
     {
         var workspace = Path.Combine(BatonPaths.WorkerLaunchConfig, MemoryProposalWorkspaceDirectoryName);
         Directory.CreateDirectory(Path.Combine(workspace, ".agents"));
@@ -915,16 +925,28 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
                 "loudly here instead, before any worker is dispatched.");
         }
 
+        var servers = new Dictionary<string, object>();
+        if (enableMemoryProposal)
+        {
+            servers["baton-memory-proposal"] = new
+            {
+                command = "dotnet",
+                args = new[] { hostDllPath, "mcp", "--memory-proposal-tool" },
+            };
+        }
+
+        if (enableExactFileRestore)
+        {
+            servers["baton-exact-file-restore"] = new
+            {
+                command = "dotnet",
+                args = new[] { hostDllPath, "mcp", "--exact-file-restore-tool" },
+            };
+        }
+
         var json = JsonSerializer.Serialize(new
         {
-            mcpServers = new Dictionary<string, object>
-            {
-                ["baton-memory-proposal"] = new
-                {
-                    command = "dotnet",
-                    args = new[] { hostDllPath, "mcp", "--memory-proposal-tool" },
-                },
-            },
+            mcpServers = servers,
         });
 
         AtomicLaunchConfigWriter.Write(Path.Combine(workspace, ".agents", "mcp_config.json"), json);
