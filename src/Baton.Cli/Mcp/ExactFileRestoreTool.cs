@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Baton;
 using Baton.Vendors;
 
 namespace Baton.Cli.Mcp;
@@ -301,17 +302,18 @@ public sealed class ExactFileRestoreTool(
     {
         using var timeout = new CancellationTokenSource(GitTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
-        var startInfo = new ProcessStartInfo("git")
+        var startInfo = ChildProcessStartInfo.Create("git", startInfo =>
         {
-            WorkingDirectory = workspaceDirectory,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
+            startInfo.WorkingDirectory = workspaceDirectory;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+            foreach (var argument in arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+        });
 
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("git did not start");
         using var stdoutBuffer = new MemoryStream();
