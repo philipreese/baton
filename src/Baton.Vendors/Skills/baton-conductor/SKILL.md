@@ -26,18 +26,12 @@ Queue state and triage labels are observations and routing aids, not permission 
 
 ## Durable obligations
 
-Conductor obligations are keyed by an idempotency key and have one authoritative payload and at
-most one durable action-observed completion. `conductor-obligations.json` is authoritative
-materialized obligation state: it retains the complete terminal payload, completion proof,
-timestamps, receipt, and reason even after supporting fleet-event facts rotate. The fleet log is
-supporting replay evidence, not permission to discard terminal state. Recovery must preserve the
-state file when it is the only surviving authority; never delete it to make a malformed or missing
-fleet fact disappear. A malformed fact is quarantined for its affected key while unrelated valid
-obligations remain eligible for reconciliation.
+Conductor obligations are keyed by an idempotency key and have one authoritative payload and at most one durable action-observed completion. `conductor-obligations.json` is authoritative materialized obligation state: it retains the complete terminal payload, completion proof, timestamps, receipt, and reason even after supporting fleet-event facts rotate; the fleet log is supporting replay evidence, not permission to discard terminal state.
+Recovery must preserve the state file when it is the only surviving authority and never delete it to make a malformed or missing fleet fact disappear. A malformed fact is quarantined for its affected key; unrelated valid obligations remain eligible for reconciliation.
 
 ## The operating loop
 
-Repeat this loop while actionable work remains. Reconcile again after every material transition.
+Repeat this loop while actionable work remains; reconcile again after every material transition.
 
 1. **Reconcile.** Read the open backlog, queue, worker rooms, lifecycle WIP, pull requests, reviews,
    CI, merge state, installed version, and current operator grants before choosing work or claiming a
@@ -122,7 +116,4 @@ Apply the intermediate-state rule from operating-loop step 5 before emitting **`
 
 ## Completion
 
-Do not report the conducting pass complete until queue, workers, pull requests, reviews, CI, merge
-authority, installed behavior, and backlog have all been reconciled. Every dispatched item must be
-merged or durably disposed; every remaining actionable issue must be moving, deliberately deferred
-with a recorded reason, or waiting on one explicitly named operator decision or external event.
+Do not report the conducting pass complete until queue, workers, pull requests, reviews, CI, merge authority, installed behavior, and backlog have all been reconciled. Every dispatched item must be merged or durably disposed; every remaining actionable issue must be moving, deliberately deferred with a recorded reason, or waiting on one explicitly named operator decision or external event.
