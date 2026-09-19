@@ -401,4 +401,22 @@ public sealed class QueueOptionsParserTests
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["worktrees", "--format", "xml"]));
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["worktrees", "--apply", "--apply"]));
     }
+
+    [Fact]
+    public void Lifecycle_stage_requirements_are_attached_to_the_selected_stage_without_axes()
+    {
+        var options = QueueOptionsParser.Parse([
+            "add", "2410-lane", "--issue", "2410", "--lifecycle",
+            "--declared-size", "medium", "--size-rationale", "one seam",
+            "--require", "file-write", "--stage", "review", "--require", " Network ",
+        ]);
+
+        var selection = Assert.Single(options.StageSelections!);
+        Assert.Equal(Baton.Queue.WorkStage.Review, selection.Stage);
+        Assert.Null(selection.Adapter);
+        Assert.Null(selection.Model);
+        Assert.Null(selection.Effort);
+        Assert.Equal(["network"], selection.Requirements);
+        Assert.Equal(["file-write"], options.Requirements);
+    }
 }

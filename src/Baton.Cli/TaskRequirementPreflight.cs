@@ -86,6 +86,28 @@ internal static class TaskRequirementPreflight
     }
 
     /// <summary>
+    /// Projects a persisted lifecycle row's declaration for the stage that is about to launch.
+    /// This is intentionally an evaluation-time view: the queue row remains historical, while
+    /// admission, launch options and the current admission status all see the destination stage.
+    /// </summary>
+    internal static QueueItem NormalizeLifecycleRequirements(QueueItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+
+        if (item.Stage is not { } stage || WorkStages.IsTerminal(stage) || item.Requirements is null)
+        {
+            return item;
+        }
+
+        var destinationRole = WorkerRoleCatalog.For(WorkStages.RoleFor(stage));
+        var destinationSelection = QueueTierTable.SelectionForStage(item, stage).Selection;
+        return item with
+        {
+            Requirements = RequirementsFor(destinationRole, destinationSelection?.Requirements),
+        };
+    }
+
+    /// <summary>
     /// Materializes the canonical declaration for a lifecycle destination. The role grant and its
     /// declared outputs are the baseline; only requirements explicitly attached to that stage may
     /// add to it.

@@ -313,9 +313,14 @@ public sealed class QueueSchedulerService : BackgroundService
             else
             {
                 WorkerRole role;
+                QueueItem admissionItem;
                 try
                 {
-                    role = WorkerRoleCatalog.For(item.Role);
+                    role = WorkerRoleCatalog.For(
+                        item.Stage is { } destinationStage && !WorkStages.IsTerminal(destinationStage)
+                            ? WorkStages.RoleFor(destinationStage)
+                            : item.Role);
+                    admissionItem = TaskRequirementPreflight.NormalizeLifecycleRequirements(item);
                     tier = item.Stage is { } stage
                         ? QueueTierTable.ResolveForStage(
                             item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
@@ -377,7 +382,7 @@ public sealed class QueueSchedulerService : BackgroundService
 
                 // The role catalog is read on every admission, rather than trusting the grant that was
                 // current when queue add ran. This check remains before a room claim or vendor spawn.
-                var hasMemoryAdd = item.Requirements?.Contains(TaskRequirements.MemoryAdd, StringComparer.Ordinal) == true;
+                var hasMemoryAdd = admissionItem.Requirements?.Contains(TaskRequirements.MemoryAdd, StringComparer.Ordinal) == true;
                 if (hasMemoryAdd
                     && (item.MemoryAddGrant is not { IsWellFormed: true } memoryGrant
                         || !string.Equals(memoryGrant.Repository, item.Repository, StringComparison.Ordinal)
@@ -385,7 +390,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 {
                     var reason = $"task requirement '{TaskRequirements.MemoryAdd}' requires an exact durable grant and a host-mediated adapter; no lane was started.";
                     var refusedAdmission = new TaskRequirementAdmission(
-                        item.Requirements, [], TaskRequirementAdmission.Refused, [TaskRequirements.MemoryAdd], VendorUsage: 0);
+                        admissionItem.Requirements, [], TaskRequirementAdmission.Refused, [TaskRequirements.MemoryAdd], VendorUsage: 0);
                     envelope = CreateEnvelope(item, tier, FleetAttemptId.New(), refusedAdmission, now, room: null, baseRevision: null);
                     await CommitAdmissionAsync(
                         item, envelope, AdmissionEvent(envelope), refusedAdmission, QueueItemState.Failed, reason,
@@ -395,12 +400,12 @@ public sealed class QueueSchedulerService : BackgroundService
                 }
                 attemptId = FleetAttemptId.New();
                 var preflightItem = hasMemoryAdd
-                    ? item with
+                    ? admissionItem with
                     {
-                        Requirements = item.Requirements!.Where(requirement =>
+                        Requirements = admissionItem.Requirements!.Where(requirement =>
                             !string.Equals(requirement, TaskRequirements.MemoryAdd, StringComparison.Ordinal)).ToArray(),
                     }
-                    : item;
+                    : admissionItem;
                 var projectPreflight = RecordedProjectCeilingAdmission.Evaluate(
                     preflightItem, role, settings.RequireDeclaredRequirements);
                 admission = projectPreflight.Admission;
@@ -464,6 +469,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 // retained binding it must observe once this tick wins the launch claim.
                 item = admitted with
                 {
+                    Requirements = admissionItem.Requirements,
                     LastAdmission = admission,
                     AttemptId = attemptId,
                     AttemptBaseRevision = attemptBaseRevision,
@@ -1393,7 +1399,9 @@ public sealed class QueueSchedulerService : BackgroundService
             current.DeclaredTaskSize.Rationale,
             (declaredTaskSize ?? admitted.DeclaredTaskSize).Rationale,
             StringComparison.Ordinal)
-        && SameRequirements(current.Requirements, admitted.Requirements);
+        && SameRequirements(
+            TaskRequirementPreflight.NormalizeLifecycleRequirements(current).Requirements,
+            TaskRequirementPreflight.NormalizeLifecycleRequirements(admitted).Requirements);
 
     private static bool SameRequirements(IReadOnlyList<string>? left, IReadOnlyList<string>? right) =>
         left is null || right is null
