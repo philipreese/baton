@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.54.3](https://github.com/philipreese/baton/compare/v0.54.2...v0.54.3) (2026-09-19)
+
+
+### Bug Fixes
+
+* **dispatch:** Validate vendor model and effort before queue admission ([#2425](https://github.com/philipreese/baton/issues/2425)) ([47fa395](https://github.com/philipreese/baton/commit/47fa3951ed05c776516cd6a1543dce8cdb4a4a51))
+
 ## [0.54.2](https://github.com/philipreese/baton/compare/v0.54.1...v0.54.2) (2026-09-19)
 
 
