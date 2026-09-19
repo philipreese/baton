@@ -109,4 +109,7 @@ public sealed record ExecutionRequest(
     bool? DeliversBranch = null,
     // #2412: retain the output contract needed to validate a terminal vendor failure after restart;
     // names alone cannot reject malformed or partial recovery artifacts.
-    IReadOnlyList<ProducedOutput>? ProducedOutputs = null);
+    IReadOnlyList<ProducedOutput>? ProducedOutputs = null,
+    // #2414: retain producer-owned delivery inventory and exact-path exceptions for recovery.
+    IReadOnlyList<DeliveryArtifactPath>? DeliveryGeneratedPaths = null,
+    IReadOnlyList<string>? DeliveryAuthorizedPaths = null);

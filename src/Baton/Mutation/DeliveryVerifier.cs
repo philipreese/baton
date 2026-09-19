@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Baton.Core;
 using Baton.Domain;
 
@@ -48,6 +49,137 @@ public sealed record DeliveryCheckOutcome(
     public static readonly DeliveryCheckOutcome Pass = new(DeliveryCheckStatus.Passed);
     public static readonly DeliveryCheckOutcome CancelledOutcome = new(DeliveryCheckStatus.Cancelled);
 }
+
+/// <summary>
+/// The producer-owned delivery inventory for one process binding and attempt. It is assembled from the
+/// binding's declared outputs, dispatch seed requests, and the runtime producer ledger, not from a
+/// repository-wide filename list.
+/// </summary>
+public static class DeliveryArtifactInventory
+{
+    private static readonly Regex ExplicitScopeLanguage = new(
+        "(?:explicit(?:ly)?\\s+authoriz|product\\s+change|task\\s+scope|exact\\s+(?:repository\\s+)?path)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    public static IReadOnlyList<DeliveryArtifactPath> For(WorkerBinding.Process binding)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        var paths = new List<DeliveryArtifactPath>();
+
+        foreach (var output in binding.Contract.ProducedOutputs)
+        {
+            paths.Add(new DeliveryArtifactPath(output.Name,
+                $"declared worker output handoff '{output.Name}'"));
+        }
+
+        if (binding.Target.SeedCopies is { Count: > 0 } seedCopies)
+        {
+            foreach (var seedCopy in seedCopies)
+            {
+                paths.Add(new DeliveryArtifactPath(
+                    NormalizeForInventory(seedCopy.PathTemplate, binding.Target.WorkingDirectory),
+                    seedCopy.Group is { Length: > 0 }
+                        ? $"engine seed requested by {seedCopy.Group}"
+                        : "engine seed requested by the dispatch binding"));
+            }
+        }
+
+        for (var index = 0; index < binding.Target.Args.Count - 1; index++)
+        {
+            if (!string.Equals(binding.Target.Args[index], "--body-file", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var bodyPath = binding.Target.Args[index + 1];
+            if (!string.IsNullOrWhiteSpace(bodyPath))
+            {
+                paths.Add(new DeliveryArtifactPath(bodyPath,
+                    "direct pull-request creation body-file request"));
+            }
+        }
+
+        return paths
+            .Where(path => !string.IsNullOrWhiteSpace(path.Path))
+            .DistinctBy(path => (path.Path, path.Provenance))
+            .ToArray();
+    }
+
+    public static DeliveryArtifactInventoryReading ForAttempt(
+        WorkerBinding.Process binding,
+        string outputDirectory,
+        IReadOnlyList<DeliveryArtifactPath>? acceptedPaths = null)
+    {
+        var staticPaths = acceptedPaths ?? For(binding);
+        var observed = DeliveryArtifactLedger.Read(outputDirectory);
+        return new(
+            staticPaths.Concat(observed.Artifacts)
+                .DistinctBy(path => (path.Path, path.Provenance))
+                .ToArray(),
+            observed.Problem);
+    }
+
+    /// <summary>
+    /// Records only an exact generated path named in explicit product-scope language. Ordinary
+    /// mentions such as "write changes.md" do not authorize a repository file.
+    /// </summary>
+    public static IReadOnlyList<string> AuthorizedByBrief(
+        string? brief, IReadOnlyList<DeliveryArtifactPath> generatedPaths)
+    {
+        if (string.IsNullOrWhiteSpace(brief) || generatedPaths.Count == 0)
+        {
+            return [];
+        }
+
+        var authorized = new List<string>();
+        foreach (var generatedPath in generatedPaths)
+        {
+            var normalized = NormalizeForBrief(generatedPath.Path);
+            if (normalized.Length == 0)
+            {
+                continue;
+            }
+
+            foreach (var sentence in Regex.Split(brief, "(?<=[.!?\\r\\n])\\s+"))
+            {
+                var pathMentioned = sentence.Contains(normalized, StringComparison.OrdinalIgnoreCase)
+                    || sentence.Contains(normalized.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase);
+                if (pathMentioned && ExplicitScopeLanguage.IsMatch(sentence))
+                {
+                    authorized.Add(normalized);
+                    break;
+                }
+            }
+        }
+
+        return authorized.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static string NormalizeForBrief(string path)
+    {
+        path = path.Replace('\\', '/');
+        while (path.StartsWith("./", StringComparison.Ordinal))
+        {
+            path = path[2..];
+        }
+
+        return path;
+    }
+
+    private static string NormalizeForInventory(string path, string? workingDirectory)
+    {
+        if (workingDirectory is not null && Path.IsPathFullyQualified(path))
+        {
+            path = Path.GetRelativePath(workingDirectory, path);
+        }
+
+        return NormalizeForBrief(path);
+    }
+}
+
+public sealed record DeliveryArtifactInventoryReading(
+    IReadOnlyList<DeliveryArtifactPath> Paths,
+    string? Problem = null);
 
 /// <summary>The immutable, machine-owned post-execution delivery observation.</summary>
 public sealed record DeliveryEvidence(
@@ -162,11 +294,13 @@ public static class DeliveryVerifier
         string gitProgram = "git",
         string ghProgram = "gh",
         bool shippingCeilingExceeded = false,
-        string? workspaceHeadShaAtStart = null)
+        string? workspaceHeadShaAtStart = null,
+        IReadOnlyList<DeliveryArtifactPath>? generatedPaths = null,
+        IReadOnlyList<string>? authorizedPaths = null)
     {
         var outcome = await CheckCoreAsync(
             workingDirectory, expectPr, cancellationToken, gitProgram, ghProgram, shippingCeilingExceeded,
-            workspaceHeadShaAtStart).ConfigureAwait(false);
+            workspaceHeadShaAtStart, generatedPaths, authorizedPaths).ConfigureAwait(false);
 
         // #1788 review: cancellation wins over whatever the accumulated verdict happened to compute --
         // the same precedence VerifyRunner.RunProcessAsync's own post-capture check applies, so an
@@ -407,7 +541,8 @@ public static class DeliveryVerifier
 
     private static async Task<DeliveryCheckOutcome> CheckCoreAsync(
         string? workingDirectory, bool expectPr, CancellationToken cancellationToken, string gitProgram, string ghProgram,
-        bool shippingCeilingExceeded, string? workspaceHeadShaAtStart)
+        bool shippingCeilingExceeded, string? workspaceHeadShaAtStart,
+        IReadOnlyList<DeliveryArtifactPath>? generatedPaths, IReadOnlyList<string>? authorizedPaths)
     {
         if (string.IsNullOrWhiteSpace(workingDirectory))
         {
@@ -464,6 +599,17 @@ public static class DeliveryVerifier
                     DeliveryCheckStatus.Failed,
                     ["revision-not-created"],
                     $"revision-not-created: local HEAD {ShortObjectId(attemptHead)} did not advance from the attempt-start HEAD; {workspaceState}");
+            }
+        }
+
+        if (generatedPaths is { Count: > 0 } && IsObjectId(workspaceHeadShaAtStart))
+        {
+            var generatedCheck = await CheckGeneratedPathsAsync(
+                gitProgram, workingDirectory, workspaceHeadShaAtStart!, generatedPaths, authorizedPaths,
+                cancellationToken).ConfigureAwait(false);
+            if (generatedCheck is not null)
+            {
+                return generatedCheck;
             }
         }
 
@@ -580,6 +726,68 @@ public static class DeliveryVerifier
                 CheckedPullRequestNumber = checkedPr?.Number,
                 CheckedPullRequestHead = checkedPr?.Head,
             };
+    }
+
+    /// <summary>
+    /// Checks only the generated paths changed by this attempt. Live delivery calls this as one
+    /// necessary condition before remote/PR checks; restart reconciliation uses the same local seam
+    /// when a crash landed after exit but before the live observation was journalled.
+    /// </summary>
+    public static async Task<DeliveryCheckOutcome?> CheckGeneratedPathsAsync(
+        string gitProgram, string workingDirectory, string attemptStartHead,
+        IReadOnlyList<DeliveryArtifactPath> generatedPaths, IReadOnlyList<string>? authorizedPaths,
+        CancellationToken cancellationToken)
+    {
+        var diff = await RunAsync(
+            gitProgram, ["diff", "--name-only", "--find-renames", attemptStartHead, "HEAD"],
+            workingDirectory, cancellationToken).ConfigureAwait(false);
+        if (!diff.Spawned || diff.ExitCode != 0)
+        {
+            return new DeliveryCheckOutcome(
+                DeliveryCheckStatus.NotRun,
+                NotRunReason: "delivery check not run: could not inspect the delivered commit diff for generated files");
+        }
+
+        var changedPaths = diff.Output
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(path => NormalizeRepositoryPath(path, workingDirectory))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var authorized = (authorizedPaths ?? [])
+            .Select(path => NormalizeRepositoryPath(path, workingDirectory))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var forbidden = generatedPaths
+            .Select(path => (Path: NormalizeRepositoryPath(path.Path, workingDirectory), path.Provenance))
+            .Where(path => path.Path.Length > 0 && changedPaths.Contains(path.Path) && !authorized.Contains(path.Path))
+            .Distinct()
+            .OrderBy(path => path.Path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (forbidden.Count == 0)
+        {
+            return null;
+        }
+
+        var details = forbidden.Select(path =>
+            $"generated-files-forbidden: {path.Path} (provenance: {path.Provenance})");
+        return new DeliveryCheckOutcome(
+            DeliveryCheckStatus.Failed,
+            ["generated-files-forbidden"],
+            string.Join("\n", details));
+    }
+
+    private static string NormalizeRepositoryPath(string path, string? workingDirectory = null)
+    {
+        if (workingDirectory is not null && Path.IsPathFullyQualified(path))
+        {
+            path = Path.GetRelativePath(workingDirectory, path);
+        }
+
+        path = path.Replace('\\', '/');
+        while (path.StartsWith("./", StringComparison.Ordinal))
+        {
+            path = path[2..];
+        }
+
+        return path;
     }
 
     /// <summary>

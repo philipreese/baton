@@ -70,6 +70,8 @@ public static class TempGitRepository
 
     public static void Push(string path, string remote, string refspec) => Run(path, "push", remote, refspec);
 
+    public static string Head(string path) => RunCapturingOutput(path, "rev-parse", "HEAD").Trim();
+
     private static void Run(string workingDirectory, params string[] args) =>
         RunCapturingOutput(workingDirectory, args);
 

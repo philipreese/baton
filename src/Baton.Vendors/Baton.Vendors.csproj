@@ -12,6 +12,7 @@
     <!-- The CLI test owns the complete broker-host command route; it needs the broker's
          production protocol-construction seam without widening that seam into product API. -->
     <InternalsVisibleTo Include="Baton.Cli.Tests" />
+    <InternalsVisibleTo Include="Baton.Tests" />
   </ItemGroup>
 
   <ItemGroup>

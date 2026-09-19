@@ -1136,6 +1136,14 @@ public sealed class CodexDynamicToolPolicy
         }
         var directCreateArguments = directCreate.Arguments;
 
+        // The command is the producer of this path, and the request only exists at runtime, so the
+        // pre-spawn binding scan cannot see it. Persist the observation in this attempt's durable
+        // output directory before starting gh; delivery verification consumes the same ledger.
+        if (directCreate.DeliveryArtifacts is { Count: > 0 } directArtifacts)
+        {
+            DeliveryArtifactLedger.Append(_outputRoot, directArtifacts);
+        }
+
         // #1998: the ceiling is per command CLASS. A shipping or gate command is known to be progressing
         // while it runs — a `git push` here spends most of its wall clock inside the repository's own
         // pre-push gate — so the flat ceiling killed finished work rather than runaway work. The classes,

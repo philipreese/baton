@@ -23,6 +23,9 @@ public sealed class DirectGhPullRequestCreateTests
             ["pr", "create", "--draft", "--title", "fix(codex): Example [proof]", "--body-file",
              "body.md", "--repo", "aer-works/baton", "--head", "2190-verified-pr-ownership"],
             compiled.Arguments);
+        Assert.Equal(
+            [new DeliveryArtifactPath("body.md", "runtime direct pull-request creation body-file request")],
+            compiled.DeliveryArtifacts);
     }
 
     [Fact]

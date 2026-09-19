@@ -55,6 +55,36 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     }
 
     [Fact]
+    public async Task A_direct_delivery_with_a_valid_change_and_generated_handoff_is_rejected_before_success()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-generated-handoff");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var finalState = await RunSingleStepPumpAsync(
+                roomDirectory, artifactsRoot, logPath,
+                DeliveryBinding(workspace,
+                    "echo production>production.txt && echo generated>changes.md && git add production.txt changes.md && git commit -m delivered -q && git push -q origin HEAD && echo done>%BATON_OUTPUT_DIR%\\changes.md"));
+
+            var step = Assert.Single(finalState.Steps);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.True(step.IndeterminateAwaitingResolution);
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["generated-files-forbidden"], failed.FailingMembers);
+            Assert.Contains("changes.md", failed.Tail, StringComparison.Ordinal);
+            Assert.Contains("declared worker output handoff", failed.Tail, StringComparison.Ordinal);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
     public async Task A_dirty_workspace_with_unchanged_HEAD_fails_delivery_and_keeps_the_lane_indeterminate()
     {
         var (workspace, origin) = CreatePushedWorkspace("lane-dirty-unchanged");
@@ -564,6 +594,36 @@ public sealed class MutationInterfaceDeliveryVerificationTests
         finally { DirectoryCleanup.DeleteRecursively(roomDirectory); DirectoryCleanup.DeleteRecursively(workspace); DirectoryCleanup.DeleteRecursively(origin); }
     }
 
+    [Fact]
+    public async Task A_runtime_direct_producer_artifact_is_rejected_by_the_live_lifecycle_inventory()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("lane-runtime-provenance");
+        var (roomDirectory, artifactsRoot, logPath) = CreateRoomPaths();
+        try
+        {
+            var finalState = await RunSingleStepPumpAsync(
+                roomDirectory, artifactsRoot, logPath,
+                DeliveryBinding(workspace, "ignored"),
+                new RuntimeDirectProducerDispatcher(workspace, artifactsRoot, "lane-runtime-provenance"));
+
+            var step = Assert.Single(finalState.Steps);
+            var events = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var failed = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.True(step.IndeterminateAwaitingResolution);
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failed.Kind);
+            Assert.Equal(["generated-files-forbidden"], failed.FailingMembers);
+            Assert.Contains("pr-body.md", failed.Tail, StringComparison.Ordinal);
+            Assert.Contains("runtime direct pull-request creation body-file request", failed.Tail, StringComparison.Ordinal);
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
     private static IReadOnlyDictionary<string, WorkerBinding> DeliveryBinding(
         string workspace, string command, string? verifyCommandOverride = null) =>
         new Dictionary<string, WorkerBinding>
@@ -626,6 +686,23 @@ public sealed class MutationInterfaceDeliveryVerificationTests
             using var registration = cancellationToken.Register(() => arrested.TrySetResult());
             await arrested.Task.WaitAsync(TimeSpan.FromSeconds(120), CancellationToken.None);
             return new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+        }
+    }
+
+    private sealed class RuntimeDirectProducerDispatcher(
+        string workspace, string artifactsRoot, string branch) : ICoreDispatcher
+    {
+        public async Task<CoreDispatchResult> DispatchAsync(
+            ExecutionRequest request,
+            CoreDispatchTarget target,
+            CancellationToken cancellationToken = default)
+        {
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, request.ExecutionId);
+            using var producer = new RuntimeDirectPullRequestProducer(workspace, outputDirectory);
+            await producer.ProduceAsync();
+            TempGitRepository.CommitAll(workspace, "deliver product change");
+            TempGitRepository.Push(workspace, "origin", branch);
+            return new CoreDispatchResult(0, CoreExitReason.Natural);
         }
     }
 

@@ -900,6 +900,9 @@ public static class MutationInterface
         var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRootPath, executionId);
         var environment = ArtifactManager.BuildEnvironment(inputPaths, outputDirectory, artifactsRootPath);
         var (hookCanaryArmed, hookVerdictLedgerFileName) = CaptureHookCanaryArmingFields(processBinding);
+        var deliveryGeneratedPaths = DeliveryArtifactInventory.For(processBinding);
+        var deliveryAuthorizedPaths = DeliveryArtifactInventory.AuthorizedByBrief(
+            processBinding.Target.PromptText, deliveryGeneratedPaths);
 
         var request = new ExecutionRequest(
             executionId,
@@ -919,7 +922,9 @@ public static class MutationInterface
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
             DeliversBranch: processBinding.DeliversBranch,
-            ProducedOutputs: processBinding.Contract.ProducedOutputs);
+            ProducedOutputs: processBinding.Contract.ProducedOutputs,
+            DeliveryGeneratedPaths: deliveryGeneratedPaths,
+            DeliveryAuthorizedPaths: deliveryAuthorizedPaths);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -1270,57 +1275,92 @@ public static class MutationInterface
                         if (IsSucceededShaped(classification.Verdict) && request.DeliversBranch == true)
                         {
                             var recorded = priorDeliveryObservations.LastOrDefault(observation => observation.ExecutionId == executionId);
-                            var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
-                            if (reading.Evidence is not { } evidence)
+                            if (recorded is null)
                             {
+                                if (!workerBindings.TryGetValue(request.Worker, out var recoveredBinding)
+                                    || recoveredBinding is not WorkerBinding.Process recoveredProcess)
+                                {
+                                    await eventLogWriter.AppendAsync(
+                                        new FlowEvent.VerifyFailed(executionId,
+                                            Tail: "delivery observation event is absent and the recorded process binding is unavailable",
+                                            Kind: VerifyFailedKind.EngineRestart), ioCancellationToken).ConfigureAwait(false);
+                                    continue;
+                                }
+
+                                var generatedOutcome = await CheckGeneratedDeliveryAsync(
+                                    recoveredProcess, request, outputDirectory, workspaceHeadShaAtStart,
+                                    ioCancellationToken).ConfigureAwait(false);
+                                if (generatedOutcome is { } deliveryOutcome
+                                    && await ApplyDeliveryOutcomeAsync(
+                                        executionId, deliveryOutcome, eventLogWriter, ioCancellationToken).ConfigureAwait(false))
+                                {
+                                    continue;
+                                }
+
+                                // Recovery must not manufacture the missing post-exit observation from
+                                // today's remote state. The local generated-path check above can still
+                                // make the required provenance-based refusal; otherwise the absent
+                                // observation remains the fail-closed EngineRestart decision.
                                 await eventLogWriter.AppendAsync(
-                                    new FlowEvent.VerifyFailed(executionId, Tail: reading.Problem,
+                                    new FlowEvent.VerifyFailed(executionId,
+                                        Tail: "delivery observation event is absent",
                                         Kind: VerifyFailedKind.EngineRestart), ioCancellationToken).ConfigureAwait(false);
                                 continue;
                             }
-
-                            // A replayed passing stamp is still bound by the durable attempt-start
-                            // revision. Older code could stamp a pre-existing pushed branch as passed;
-                            // once the start fact exists, that stale success must take the same typed
-                            // delivery-failure path as the live preflight.
-                            if (evidence.Verification == DeliveryCheckStatus.Passed
-                                && workspaceHeadShaAtStart is { Length: 40 or 64 }
-                                && string.Equals(evidence.LocalHead, workspaceHeadShaAtStart, StringComparison.OrdinalIgnoreCase))
+                            else
                             {
-                                await eventLogWriter.AppendAsync(
-                                    new FlowEvent.VerifyFailed(
-                                        executionId,
-                                        ["revision-not-created"],
-                                        "revision-not-created: the recorded delivery HEAD did not advance from the attempt-start HEAD",
-                                        VerifyFailedKind.DeliveryFailed),
-                                    ioCancellationToken).ConfigureAwait(false);
-                                continue;
-                            }
-
-                            switch (evidence.Verification)
-                            {
-                                case DeliveryCheckStatus.Failed:
+                                var reading = DeliveryVerifier.ReadRecordedEvidence(recorded);
+                                if (reading.Evidence is not { } evidence)
+                                {
                                     await eventLogWriter.AppendAsync(
-                                        new FlowEvent.VerifyFailed(executionId, evidence.FailingMembers,
-                                            evidence.VerificationReason, VerifyFailedKind.DeliveryFailed), ioCancellationToken)
-                                        .ConfigureAwait(false);
+                                        new FlowEvent.VerifyFailed(executionId, Tail: reading.Problem,
+                                            Kind: VerifyFailedKind.EngineRestart), ioCancellationToken).ConfigureAwait(false);
                                     continue;
-                                case DeliveryCheckStatus.Cancelled:
-                                    await eventLogWriter.AppendAsync(new FlowEvent.ExecutionCancelled(executionId), ioCancellationToken)
-                                        .ConfigureAwait(false);
-                                    continue;
-                                case DeliveryCheckStatus.NotRun:
+                                }
+
+                                // A replayed passing stamp is still bound by the durable attempt-start
+                                // revision. Older code could stamp a pre-existing pushed branch as passed;
+                                // once the start fact exists, that stale success must take the same typed
+                                // delivery-failure path as the live preflight.
+                                if (evidence.Verification == DeliveryCheckStatus.Passed
+                                    && workspaceHeadShaAtStart is { Length: 40 or 64 }
+                                    && string.Equals(evidence.LocalHead, workspaceHeadShaAtStart, StringComparison.OrdinalIgnoreCase))
+                                {
                                     await eventLogWriter.AppendAsync(
                                         new FlowEvent.VerifyFailed(
                                             executionId,
-                                            Tail: evidence.VerificationReason ?? "delivery observation did not run",
-                                            Kind: VerifyFailedKind.DeliveryNotRun),
+                                            ["revision-not-created"],
+                                            "revision-not-created: the recorded delivery HEAD did not advance from the attempt-start HEAD",
+                                            VerifyFailedKind.DeliveryFailed),
                                         ioCancellationToken).ConfigureAwait(false);
                                     continue;
-                                case DeliveryCheckStatus.Passed:
-                                    break;
-                                default:
-                                    throw new ArgumentOutOfRangeException(nameof(evidence.Verification));
+                                }
+
+                                switch (evidence.Verification)
+                                {
+                                    case DeliveryCheckStatus.Failed:
+                                        await eventLogWriter.AppendAsync(
+                                            new FlowEvent.VerifyFailed(executionId, evidence.FailingMembers,
+                                                evidence.VerificationReason, VerifyFailedKind.DeliveryFailed), ioCancellationToken)
+                                            .ConfigureAwait(false);
+                                        continue;
+                                    case DeliveryCheckStatus.Cancelled:
+                                        await eventLogWriter.AppendAsync(new FlowEvent.ExecutionCancelled(executionId), ioCancellationToken)
+                                            .ConfigureAwait(false);
+                                        continue;
+                                    case DeliveryCheckStatus.NotRun:
+                                        await eventLogWriter.AppendAsync(
+                                            new FlowEvent.VerifyFailed(
+                                                executionId,
+                                                Tail: evidence.VerificationReason ?? "delivery observation did not run",
+                                                Kind: VerifyFailedKind.DeliveryNotRun),
+                                            ioCancellationToken).ConfigureAwait(false);
+                                        continue;
+                                    case DeliveryCheckStatus.Passed:
+                                        break;
+                                    default:
+                                        throw new ArgumentOutOfRangeException(nameof(evidence.Verification));
+                                }
                             }
                         }
 
@@ -2018,6 +2058,13 @@ public static class MutationInterface
 
         var processBindingForRequest = binding as WorkerBinding.Process;
         var (hookCanaryArmed, hookVerdictLedgerFileName) = CaptureHookCanaryArmingFields(processBindingForRequest);
+        var deliveryGeneratedPaths = processBindingForRequest is { } deliveryBinding
+            ? DeliveryArtifactInventory.For(deliveryBinding)
+            : null;
+        var deliveryAuthorizedPaths = processBindingForRequest is { } authorizedBinding
+            ? DeliveryArtifactInventory.AuthorizedByBrief(
+                authorizedBinding.Target.PromptText, deliveryGeneratedPaths ?? [])
+            : null;
 
         var request = new ExecutionRequest(
             executionId,
@@ -2035,7 +2082,9 @@ public static class MutationInterface
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
             DeliversBranch: processBindingForRequest?.DeliversBranch,
-            ProducedOutputs: binding.Contract.ProducedOutputs);
+            ProducedOutputs: binding.Contract.ProducedOutputs,
+            DeliveryGeneratedPaths: deliveryGeneratedPaths,
+            DeliveryAuthorizedPaths: deliveryAuthorizedPaths);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -2437,10 +2486,9 @@ public static class MutationInterface
                 }
                 else
                 {
-                    deliveryOutcomeBeforeVerify = await DeliveryVerifier.CheckAsync(
-                        binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
-                        shippingCeilingExceeded: shippingCeilingExceeded,
-                        workspaceHeadShaAtStart: workspaceHeadShaAtStart).ConfigureAwait(false);
+                    deliveryOutcomeBeforeVerify = await CheckDeliveryAsync(
+                        binding, prepared.Request, prepared.OutputDirectory, workspaceHeadShaAtStart,
+                        shippingCeilingExceeded, dispatchCancellationToken).ConfigureAwait(false);
                 }
 
                 if (deliveryOutcomeBeforeVerify.Status is DeliveryCheckStatus.Failed
@@ -2662,6 +2710,61 @@ public static class MutationInterface
         {
             inFlightExecutions.Unregister(prepared.Request.ExecutionId);
         }
+    }
+
+    private static async Task<DeliveryCheckOutcome> CheckDeliveryAsync(
+        WorkerBinding.Process binding,
+        ExecutionRequest request,
+        string outputDirectory,
+        string? workspaceHeadShaAtStart,
+        bool shippingCeilingExceeded,
+        CancellationToken cancellationToken)
+    {
+        var deliveryInventory = DeliveryArtifactInventory.ForAttempt(
+            binding, outputDirectory, request.DeliveryGeneratedPaths);
+        if (deliveryInventory.Problem is { } inventoryProblem)
+        {
+            return new DeliveryCheckOutcome(
+                DeliveryCheckStatus.Failed,
+                ["generated-file-provenance-unavailable"],
+                inventoryProblem);
+        }
+
+        return await DeliveryVerifier.CheckAsync(
+            binding.Target.WorkingDirectory, binding.ExpectPr, cancellationToken,
+            shippingCeilingExceeded: shippingCeilingExceeded,
+            workspaceHeadShaAtStart: workspaceHeadShaAtStart,
+            generatedPaths: deliveryInventory.Paths,
+            authorizedPaths: request.DeliveryAuthorizedPaths).ConfigureAwait(false);
+    }
+
+    private static async Task<DeliveryCheckOutcome?> CheckGeneratedDeliveryAsync(
+        WorkerBinding.Process binding,
+        ExecutionRequest request,
+        string outputDirectory,
+        string? workspaceHeadShaAtStart,
+        CancellationToken cancellationToken)
+    {
+        var deliveryInventory = DeliveryArtifactInventory.ForAttempt(
+            binding, outputDirectory, request.DeliveryGeneratedPaths);
+        if (deliveryInventory.Problem is { } inventoryProblem)
+        {
+            return new DeliveryCheckOutcome(
+                DeliveryCheckStatus.Failed,
+                ["generated-file-provenance-unavailable"],
+                inventoryProblem);
+        }
+
+        if (deliveryInventory.Paths.Count == 0
+            || string.IsNullOrWhiteSpace(binding.Target.WorkingDirectory)
+            || workspaceHeadShaAtStart is not { Length: 40 or 64 })
+        {
+            return null;
+        }
+
+        return await DeliveryVerifier.CheckGeneratedPathsAsync(
+            "git", binding.Target.WorkingDirectory!, workspaceHeadShaAtStart,
+            deliveryInventory.Paths, request.DeliveryAuthorizedPaths, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<DeliveryCheckOutcome> RecordDeliveryEvidenceAsync(
