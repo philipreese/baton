@@ -21,6 +21,11 @@ public static class WorkflowOutcome
     public const string Succeeded = "Succeeded";
     public const string Failed = "Failed";
     public const string Cancelled = "Cancelled";
+    /// <summary>
+    /// #2412: every declared artifact is valid, but the vendor ended with a terminal failure. This
+    /// remains succeeded-shaped for lifecycle completion while preserving the non-clean vendor fact.
+    /// </summary>
+    public const string SucceededWithLateFailure = "SucceededWithLateFailure";
 
     /// <summary>
     /// #1945: every step succeeded, and at least one did so on
@@ -49,7 +54,8 @@ public static class WorkflowOutcome
     /// </remarks>
     public static bool IsSucceededShaped(string? outcome) =>
         string.Equals(outcome, Succeeded, StringComparison.Ordinal)
-        || string.Equals(outcome, FinishedDuringTeardown, StringComparison.Ordinal);
+        || string.Equals(outcome, FinishedDuringTeardown, StringComparison.Ordinal)
+        || string.Equals(outcome, SucceededWithLateFailure, StringComparison.Ordinal);
 
     /// <summary>
     /// #1586 S1 (state-truth design, ratified 2026-09-01 amendment): journal facts alone cannot
@@ -116,6 +122,11 @@ public static class WorkflowOutcome
 
         if (steps.All(step => step.Status == StepStatus.Succeeded))
         {
+            if (steps.Any(step => step.LateFailureReason is not null))
+            {
+                return SucceededWithLateFailure;
+            }
+
             // #1945: ahead of the plain Succeeded return, or it could never fire. A FLAG, never a
             // reason-string prefix the way IsTimeoutFailure below has to work: StateProjector nulls
             // LatestFailureReason on the succeeded path by construction, so no sentence survives that

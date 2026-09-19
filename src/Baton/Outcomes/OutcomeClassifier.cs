@@ -5,10 +5,14 @@ using Baton.Status;
 
 namespace Baton.Outcomes;
 
-/// <summary>The four terminal outcomes a completed dispatch is classified into.</summary>
+/// <summary>The terminal outcomes a completed dispatch is classified into.</summary>
 public enum OutcomeVerdict
 {
     Succeeded,
+    /// <summary>
+    /// Every declared output is contract-valid, but the vendor's terminal result reported failure.
+    /// </summary>
+    SucceededWithLateFailure,
     Failed,
     Cancelled,
 
@@ -33,7 +37,8 @@ public enum OutcomeVerdict
 /// <see cref="Domain.FlowEvent"/> terminal case the <c>MutationInterface</c> appends to the log.
 /// </summary>
 /// <param name="Reason">
-/// A human-readable diagnostic for a <see cref="OutcomeVerdict.Failed"/> or (#1608)
+/// A human-readable diagnostic for a <see cref="OutcomeVerdict.Failed"/>,
+/// <see cref="OutcomeVerdict.SucceededWithLateFailure"/> or (#1608)
 /// <see cref="OutcomeVerdict.Indeterminate"/> verdict — why exit code, exit reason, and contract
 /// state add up to that verdict, computed once here from data available at classification time.
 /// Distinct from <paramref name="FailureClassification"/>, which is the worker's own self-reported
@@ -268,6 +273,19 @@ public static class OutcomeClassifier
                 repeated ? FailureClassification.Permanent : FailureClassification.Retryable,
                 reason,
                 RecoveryCause: recoveryCause);
+        }
+
+        // #2412: preserve a terminal vendor failure only when every declared output is already
+        // contract-valid. The validator is the gate, so missing, partial, malformed, and otherwise
+        // unsatisfied outputs stay on their existing failure/indeterminate paths.
+        if (result.Reason == CoreExitReason.Natural
+            && result.TerminalResultObserved
+            && !result.TerminalSuccessObserved
+            && ContractValidator.IsSatisfied(contract, outputDirectory))
+        {
+            return new OutcomeClassification(
+                OutcomeVerdict.SucceededWithLateFailure,
+                Reason: BuildLateVendorFailureReason(result));
         }
 
         if (result.Reason == CoreExitReason.TimedOut)
@@ -840,6 +858,16 @@ public static class OutcomeClassifier
     /// unsatisfied output, so a reason that promised to name them all named one. With the per-item
     /// bounds in place the final <see cref="Truncate"/> is a backstop that should not normally fire.
     /// </remarks>
+    private static string BuildLateVendorFailureReason(CoreDispatchResult result)
+    {
+        var detail = result.StderrTail is { Length: > 0 }
+            ? $" Vendor diagnostic: {result.StderrTail}."
+            : result.ExitCode != 0
+                ? $" Vendor exited with code {result.ExitCode}."
+                : " The vendor did not report a successful terminal result.";
+        return "Vendor ended with a late failure after all declared outputs were contract-valid." + detail;
+    }
+
     private static string BuildContractFailureReason(
         IReadOnlyList<UnsatisfiedOutput> unsatisfiedOutputs,
         string? suffix = null)

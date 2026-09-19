@@ -87,7 +87,8 @@ public sealed record ProjectionCheckpointState(
     Dictionary<ExecutionId, List<EnginePlacedFile>>? EnginePlacedFilesByExecutionId = null,
     HashSet<StepId>? FinishedDuringTeardownStepIds = null,
     Dictionary<StepId, RecoveryCause?>? LatestRecoveryCauseByStepId = null,
-    Dictionary<StepId, int>? RecoveryOccurrenceByStepId = null)
+    Dictionary<StepId, int>? RecoveryOccurrenceByStepId = null,
+    Dictionary<StepId, string?>? LatestLateFailureReasonByStepId = null)
 {
     public Dictionary<StepId, int> ExecutionCountByStepId { get; init; } = ExecutionCountByStepId ?? new();
 
@@ -248,6 +249,9 @@ public sealed record ProjectionCheckpointState(
     /// <summary>#2002: how many consecutive times the latest recovery cause has occurred.</summary>
     public Dictionary<StepId, int> RecoveryOccurrenceByStepId { get; init; } = RecoveryOccurrenceByStepId ?? new();
 
+    /// <summary>#2412: the latest valid-artifacts-plus-late-vendor-failure outcome.</summary>
+    public Dictionary<StepId, string?> LatestLateFailureReasonByStepId { get; init; } = LatestLateFailureReasonByStepId ?? new();
+
     public static ProjectionCheckpointState CreateEmpty() => new(
         new Dictionary<StepId, ExecutionId>(),
         new Dictionary<StepId, Dictionary<StepId, ExecutionId>>(),
@@ -274,7 +278,8 @@ public sealed record ProjectionCheckpointState(
         new Dictionary<ExecutionId, ExecutionRequest>(),
         new HashSet<ExecutionId>(),
         new Dictionary<ExecutionId, CoreEvent.ExecutionExited>(),
-        new Dictionary<StepId, int>());
+        new Dictionary<StepId, int>(),
+        new Dictionary<StepId, string?>());
 
     public ProjectionCheckpointState DeepCopy() => new(
         new Dictionary<StepId, ExecutionId>(LatestExecutionIdByStepId),
@@ -321,5 +326,6 @@ public sealed record ProjectionCheckpointState(
         EnginePlacedFilesByExecutionId.ToDictionary(kvp => kvp.Key, kvp => new List<EnginePlacedFile>(kvp.Value)),
         new HashSet<StepId>(FinishedDuringTeardownStepIds),
         LatestRecoveryCauseByStepId.ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
-        new Dictionary<StepId, int>(RecoveryOccurrenceByStepId));
+        new Dictionary<StepId, int>(RecoveryOccurrenceByStepId),
+        new Dictionary<StepId, string?>(LatestLateFailureReasonByStepId));
 }

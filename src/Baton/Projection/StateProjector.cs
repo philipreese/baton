@@ -150,6 +150,7 @@ public static class StateProjector
                     // #1945: same clear, same reason -- a prior attempt having finished during its own
                     // teardown says nothing about this one.
                     state.FinishedDuringTeardownStepIds.Remove(acceptedStepId);
+                    state.LatestLateFailureReasonByStepId.Remove(acceptedStepId);
 
                     // #2002: retain the predecessor's structured cause through acceptance so a
                     // repeated mismatch can be recognized when this attempt settles. Success or an
@@ -184,6 +185,7 @@ public static class StateProjector
                     state.LatestUnsatisfiedOutputNamesByStepId[succeededStepId] = null;
                     state.LatestRecoveryCauseByStepId.Remove(succeededStepId);
                     state.RecoveryOccurrenceByStepId.Remove(succeededStepId);
+                    state.LatestLateFailureReasonByStepId.Remove(succeededStepId);
                     // #1622/#1390: carried verbatim off the event -- see FlowEvent.ExecutionSucceeded's
                     // own remarks for the null-means-not-tree-changing-or-history-predates-the-field
                     // reading.
@@ -206,6 +208,30 @@ public static class StateProjector
 
                 break;
 
+            case FlowEvent.ExecutionSucceededWithLateFailure lateFailure:
+                state.UnmatchedVerifyExecutionIds.Remove(lateFailure.ExecutionId);
+                state.SucceededExecutionIds.Add(lateFailure.ExecutionId);
+                state.TerminalStatusByExecutionId[lateFailure.ExecutionId] = StepStatus.Succeeded;
+                if (state.StepIdByExecutionId.TryGetValue(lateFailure.ExecutionId, out var lateFailureStepId))
+                {
+                    state.IndeterminateAwaitingResolutionStepIds.Remove(lateFailureStepId);
+                    state.IndeterminateReasonByStepId.Remove(lateFailureStepId);
+                    state.IndeterminateProducerByStepId.Remove(lateFailureStepId);
+                    state.IndeterminateVerifyTailByStepId.Remove(lateFailureStepId);
+                    state.ConsecutiveFailureCountByStepId[lateFailureStepId] = 0;
+                    state.LatestFailureClassificationByStepId[lateFailureStepId] = null;
+                    state.LatestFailureReasonByStepId[lateFailureStepId] = lateFailure.Reason;
+                    state.LatestExecutionFailedRetryNotBeforeByStepId[lateFailureStepId] = null;
+                    state.LatestCapturedResponseFileByStepId[lateFailureStepId] = null;
+                    state.LatestUnsatisfiedOutputNamesByStepId[lateFailureStepId] = null;
+                    state.LatestRecoveryCauseByStepId.Remove(lateFailureStepId);
+                    state.RecoveryOccurrenceByStepId.Remove(lateFailureStepId);
+                    state.FinishedDuringTeardownStepIds.Remove(lateFailureStepId);
+                    state.LatestLateFailureReasonByStepId[lateFailureStepId] = lateFailure.Reason;
+                }
+
+                break;
+
             case FlowEvent.ExecutionFailed failed:
                 state.UnmatchedVerifyExecutionIds.Remove(failed.ExecutionId);
                 state.TerminalStatusByExecutionId[failed.ExecutionId] = StepStatus.Failed;
@@ -223,6 +249,7 @@ public static class StateProjector
                     state.LatestCapturedResponseFileByStepId[failedStepId] = failed.CapturedResponseFile;
                     state.LatestUnsatisfiedOutputNamesByStepId[failedStepId] =
                         failed.UnsatisfiedOutputNames is null ? null : new List<string>(failed.UnsatisfiedOutputNames);
+                    state.LatestLateFailureReasonByStepId.Remove(failedStepId);
                     if (failed.RecoveryCause is { } recoveryCause)
                     {
                         var priorCause = state.LatestRecoveryCauseByStepId.GetValueOrDefault(failedStepId);
@@ -849,6 +876,7 @@ public static class StateProjector
                 state.VerifyNotRunReasonByStepId.GetValueOrDefault(stepDefinition.StepId),
                 state.ConductorRejectedStepIds.Contains(stepDefinition.StepId),
                 state.FinishedDuringTeardownStepIds.Contains(stepDefinition.StepId),
+                state.LatestLateFailureReasonByStepId.GetValueOrDefault(stepDefinition.StepId),
                 state.LatestRecoveryCauseByStepId.GetValueOrDefault(stepDefinition.StepId),
                 state.RecoveryOccurrenceByStepId.GetValueOrDefault(stepDefinition.StepId)));
         }

@@ -3044,6 +3044,8 @@ public static class MutationInterface
             OutcomeVerdict.Succeeded => new FlowEvent.ExecutionSucceeded(
                 executionId, classification.WorkspaceChanged, classification.Hollow, classification.HollowReason,
                 peakBilledInWindow, classification.FinishedDuringTeardown),
+            OutcomeVerdict.SucceededWithLateFailure => new FlowEvent.ExecutionSucceededWithLateFailure(
+                executionId, classification.Reason ?? "Vendor ended with a late failure after valid declared outputs."),
             OutcomeVerdict.Failed => new FlowEvent.ExecutionFailed(
                 executionId, classification.FailureClassification, classification.Reason, classification.RetryNotBefore,
                 classification.CapturedResponseFile, classification.UnsatisfiedOutputNames, peakBilledInWindow,
