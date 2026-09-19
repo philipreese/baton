@@ -191,12 +191,13 @@ public static class QueueCommand
                 "choose a role whose grant supplies the requirement, or amend --require before queueing the task.");
         }
 
-        // #2142: queue admission uses the already-resolved tuple the launcher will forward, not the
-        // raw item fields and not RoleDispatch's display-only stamp. Refuse before the early tag read,
-        // spec copy, worktree provision, or queue mutation so a bad request leaves no queue side effect.
-        if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+        // Admission uses the already-resolved tuple the launcher will forward. Refuse before the
+        // early tag read, spec copy, worktree provision, or queue mutation so a bad request leaves
+        // no queue side effect.
+        if (tier.Adapter is { } resolvedAdapter)
         {
-            throw WorkerInvocationModelPolicy.Refusal(refusal, tier.Adapter);
+            WorkerInvocationValidation.Validate(
+                resolvedAdapter, tier.Model, null, tier.Effort, WorkerAdapterRegistry.Default);
         }
 
         // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
@@ -2076,12 +2077,6 @@ public static class QueueCommand
                 $"--model '{options.Model}' is known by {string.Join(", ", adapters)}, but the resolved {actualAdapter} adapter cannot use it.");
         }
 
-        if (tier.Adapter is { } resolvedAdapter && (tier.Model is not null || tier.Effort is not null))
-        {
-            WorkerInvocationValidation.Validate(
-                resolvedAdapter, tier.Model, null, tier.Effort, WorkerAdapterRegistry.Default);
-        }
-
         return (adapter, tier, adapterFromModel, stageSelections);
     }
 
@@ -2110,8 +2105,7 @@ public static class QueueCommand
     {
         if (adapter is not null && model is not null)
         {
-            WorkerInvocationValidation.Validate(
-                adapter, model, null, null, WorkerAdapterRegistry.Default, includeModelPolicy: false);
+            ValidateAdapterModel(adapter, model);
         }
 
         var candidates = model is null
@@ -2130,6 +2124,25 @@ public static class QueueCommand
 
         var adapterFromModel = scopeClass is null && adapter is null && candidates.Count == 1;
         return (adapterFromModel ? candidates[0] : adapter, candidates, adapterFromModel);
+    }
+
+    private static void ValidateAdapterModel(string adapter, string model)
+    {
+        var worker = WorkerAdapterRegistry.Default
+            .FirstOrDefault(pair => string.Equals(pair.Key, adapter, StringComparison.OrdinalIgnoreCase)).Value;
+        if (worker is null)
+        {
+            throw new CliArgumentException($"Unknown adapter '{adapter}'.");
+        }
+
+        try
+        {
+            worker.ValidateRequestedModel(model);
+        }
+        catch (BatonFlowException ex)
+        {
+            throw WorkerInvocationModelPolicy.Refusal(ex.Message, adapter);
+        }
     }
 
     /// <summary>

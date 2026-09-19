@@ -231,6 +231,61 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_accepts_a_bare_agy_model_with_explicit_effort()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            var output = new StringWriter();
+
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "bare-agy-effort", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: home, Adapter: "agy", Model: "gemini-3.7-flash", Effort: "high"),
+                output, Ct);
+
+            Assert.Equal(0, exit);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("agy", item.Adapter);
+            Assert.Equal("gemini-3.7-flash", item.Model);
+            Assert.Equal("high", item.Effort);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_a_bare_agy_model_missing_effort_before_queue_persistence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "bare-agy-missing-effort", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: home, Adapter: "agy", Model: "gemini-3.7-flash"),
+                TextWriter.Null, Ct));
+
+            Assert.Contains("requires --effort", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_refuses_memory_add_for_an_adapter_without_host_mediation_before_any_queue_side_effect()
     {
         var home = CreateTempHome();
