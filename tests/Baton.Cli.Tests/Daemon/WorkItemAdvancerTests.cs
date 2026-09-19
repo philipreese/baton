@@ -1,7 +1,9 @@
 using Baton.Cli;
 using Baton.Cli.Daemon;
 using Baton.Accounting;
+using Baton.Artifacts;
 using Baton.Domain;
+using Baton.Dispatch;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Tests.Shared;
@@ -196,6 +198,18 @@ public sealed class WorkItemAdvancerTests
             new WorkflowStatusView(outcome, steps ?? [], outputs, null, Delivery: delivery),
             Ct);
         return room;
+    }
+
+    private static async Task WriteGrantDecisionAsync(
+        string room, string execution, GrantRule rule)
+    {
+        var outputDirectory = Path.Combine(
+            room, ArtifactManager.ArtifactsDirectoryName, "execution_" + execution);
+        Directory.CreateDirectory(outputDirectory);
+        var decision = new GrantDecision(
+            "codex", "run_command", false, rule, "fixture refusal", "input", Now);
+        await File.WriteAllTextAsync(
+            Path.Combine(outputDirectory, GrantDecisionLog.FileName), decision.ToJsonLine(), Ct);
     }
 
     private static async Task<string> WriteArrestedRoomAsync(string home, bool? workspaceChanged)
@@ -650,6 +664,67 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
             Assert.Contains("implement → review", fact.Reason!, StringComparison.Ordinal);
             Assert.Equal(room, fact.Room);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_incidental_denied_tool_does_not_halt_a_successful_lane_with_its_PR()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string execution = "incidental-refusal";
+            var room = await WriteSettledRoomAsync(
+                home,
+                WorkflowOutcome.Succeeded,
+                verdictJson: null,
+                steps: [new WorkflowStatusStepView("implement", "Succeeded", execution)]);
+            await WriteGrantDecisionAsync(room, execution, GrantRules.ShellPattern);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Done);
+
+            var facts = await Advancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+
+            Assert.Equal(WorkStage.Review, (await ReadBackAsync()).Stage);
+            Assert.Equal(QueueDecisionEntry.Advanced, Assert.Single(facts).Decision);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_owned_PR_refusal_without_a_bound_PR_persists_reconciliation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string execution = "owned-pr-refusal";
+            var room = await WriteSettledRoomAsync(
+                home,
+                WorkflowOutcome.Failed,
+                verdictJson: null,
+                steps: [new WorkflowStatusStepView("continue", "Failed", execution)]);
+            await WriteGrantDecisionAsync(room, execution, GrantRules.OwnPullRequestOnly);
+            await SeedAsync(home, WorkStage.Continue, room, QueueItemState.Failed);
+
+            var facts = await Advancer(
+                new FakeGh("[]"),
+                (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, Assert.Single(facts).Decision);
+            Assert.True(item.Halted);
+            Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, item.ReconciliationKind);
+            Assert.Contains("typed pull-request authority refusal", item.Error!, StringComparison.Ordinal);
         }
         finally
         {

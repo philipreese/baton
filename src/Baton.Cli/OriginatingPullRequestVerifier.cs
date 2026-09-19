@@ -46,7 +46,11 @@ internal static class OriginatingPullRequestVerifier
             info.StandardOutputEncoding = Encoding.UTF8;
             info.StandardErrorEncoding = Encoding.UTF8;
         });
-        foreach (var argument in new[] { "pr", "view", number.ToString(), "--repo", repository, "--json", "state,headRefName,headRefOid" }) start.ArgumentList.Add(argument);
+        foreach (var argument in new[]
+        {
+            "pr", "view", number.ToString(), "--repo", repository, "--json",
+            "state,headRefName,headRefOid,isCrossRepository",
+        }) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new CliArgumentException("Could not start gh to verify '--originating-pr'.");
         using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         bound.CancelAfter(GhVerificationTimeout);
@@ -324,8 +328,11 @@ internal static class OriginatingPullRequestVerifier
             var state = stateValue.GetString();
             var branch = branchValue.GetString();
             var head = headValue.GetString();
+            var isCrossRepository = root.TryGetProperty("isCrossRepository", out var crossRepositoryValue)
+                && crossRepositoryValue.ValueKind == JsonValueKind.True;
             var requiredHead = expectedHead ?? launchHead;
             if (!string.Equals(state, "OPEN", StringComparison.OrdinalIgnoreCase)
+                || isCrossRepository
                 || !string.Equals(branch, identity.HeadBranch, StringComparison.Ordinal)
                 || !string.Equals(head, requiredHead, StringComparison.OrdinalIgnoreCase))
             {

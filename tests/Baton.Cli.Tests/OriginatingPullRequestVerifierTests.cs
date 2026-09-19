@@ -54,7 +54,7 @@ public sealed class OriginatingPullRequestVerifierTests
     {
         var ownership = OriginatingPullRequestVerifier.ValidateResponse(
             "aer-works/baton", 2304, Identity, Head, 0,
-            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head.ToUpperInvariant()}}"}""");
+            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head.ToUpperInvariant()}}","isCrossRepository":false}""");
 
         Assert.Equal(new OriginatingPullRequestOwnership("aer-works/baton", 2304, "2178-lane", Head), ownership);
     }
@@ -64,7 +64,7 @@ public sealed class OriginatingPullRequestVerifierTests
     {
         var ownership = OriginatingPullRequestVerifier.ValidateResponse(
             "aer-works/baton", 2304, Identity, Head, 0,
-            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{PreservedHead}}"}""",
+            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{PreservedHead}}","isCrossRepository":false}""",
             PreservedHead);
 
         Assert.Equal(new OriginatingPullRequestOwnership("aer-works/baton", 2304, "2178-lane", Head), ownership);
@@ -94,7 +94,7 @@ public sealed class OriginatingPullRequestVerifierTests
     {
         Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
             "aer-works/baton", 2304, Identity, Head,
-            0, $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head}}"}""",
+            0, $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head}}","isCrossRepository":false}""",
             PreservedHead));
     }
 
@@ -103,7 +103,7 @@ public sealed class OriginatingPullRequestVerifierTests
     {
         Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
             "aer-works/baton", 2304, Identity, Head,
-            0, $$"""{"state":"OPEN","headRefName":"unrelated-lane","headRefOid":"{{Head}}"}"""));
+            0, $$"""{"state":"OPEN","headRefName":"unrelated-lane","headRefOid":"{{Head}}","isCrossRepository":false}"""));
     }
 
     [Fact]
@@ -111,7 +111,7 @@ public sealed class OriginatingPullRequestVerifierTests
     {
         Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
             "aer-works/baton", 2304, Identity, Head, 0,
-            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{PreservedHead}}"}""",
+            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{PreservedHead}}","isCrossRepository":false}""",
             "not-a-sha"));
     }
 
@@ -251,7 +251,7 @@ public sealed class OriginatingPullRequestVerifierTests
     public void A_closed_merged_or_workspace_mismatched_PR_is_refused(
         string state, string branch, string head)
     {
-        var response = $$"""{"state":"{{state}}","headRefName":"{{branch}}","headRefOid":"{{head}}"}""";
+        var response = $$"""{"state":"{{state}}","headRefName":"{{branch}}","headRefOid":"{{head}}","isCrossRepository":false}""";
 
         Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
             "aer-works/baton", 2304, Identity, Head, 0, response));

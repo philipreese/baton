@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Artifacts;
 using Baton.Domain;
+using Baton.Dispatch;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Vendors;
@@ -305,7 +307,8 @@ public sealed class WorkItemAdvancer
             reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
             sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null,
-            item.AttemptBaseRevision, deliveryFailingMembers, HasPolicyRefusal(sentinel));
+            item.AttemptBaseRevision, deliveryFailingMembers,
+            HasPullRequestAuthorityRefusal(room, sentinel));
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
@@ -1632,12 +1635,105 @@ public sealed class WorkItemAdvancer
     }
 
     /// <summary>
-    /// Reads the current terminal execution's typed policy-refusal tally. A refusal is authority
-    /// evidence, not a worker result to retry; the pure lifecycle turns this fact into a halted
-    /// conductor obligation before any next-stage dispatch is reserved.
+    /// Reads the current terminal execution's engine-owned grant decisions. The aggregate refused-tool
+    /// count is deliberately not used here: a denied shell command is incidental, while only a denied
+    /// <see cref="GrantRules.OwnPullRequestOnly"/> decision proves that the lane was refused its exact
+    /// originating-PR authority.
     /// </summary>
-    private static bool HasPolicyRefusal(WorkflowStatusView? sentinel) =>
-        sentinel?.Steps?.Any(step => step.Usage?.RefusedToolSteps is > 0) == true;
+    private static bool HasPullRequestAuthorityRefusal(
+        string? roomDirectory, WorkflowStatusView? sentinel)
+    {
+        if (roomDirectory is not { Length: > 0 })
+        {
+            return false;
+        }
+
+        try
+        {
+            var artifactsRoot = Path.Combine(roomDirectory, ArtifactManager.ArtifactsDirectoryName);
+            if (!Directory.Exists(artifactsRoot))
+            {
+                return false;
+            }
+
+            var executionIds = sentinel?.Steps
+                .Select(step => step.Execution)
+                .Where(execution => execution is { Length: > 0 })
+                .Select(execution => execution!)
+                .ToHashSet(StringComparer.Ordinal) ?? [];
+            foreach (var path in Directory.EnumerateFiles(artifactsRoot, "*", SearchOption.AllDirectories))
+            {
+                var fileName = Path.GetFileName(path);
+                if (fileName is not (GrantDecisionLog.FileName or ExecutionStreamLogger.StdoutLogFileName)
+                    || !IsTerminalExecutionArtifact(path, artifactsRoot, executionIds))
+                {
+                    continue;
+                }
+
+                if (FileContainsOwnPullRequestDenial(path))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // An unreadable optional observation is not evidence of a refusal. The lifecycle will
+            // retain its ordinary settled-row handling and the operator can inspect the room.
+        }
+
+        return false;
+    }
+
+    private static bool IsTerminalExecutionArtifact(
+        string path, string artifactsRoot, IReadOnlySet<string> executionIds)
+    {
+        if (executionIds.Count == 0)
+        {
+            return true;
+        }
+
+        var relative = Path.GetRelativePath(artifactsRoot, path);
+        var first = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
+        return first.StartsWith("execution_", StringComparison.Ordinal)
+            && executionIds.Contains(first["execution_".Length..]);
+    }
+
+    private static bool FileContainsOwnPullRequestDenial(string path)
+    {
+        foreach (var line in File.ReadLines(path))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                if (root.ValueKind == JsonValueKind.Object
+                    && root.TryGetProperty("type", out var type)
+                    && type.ValueKind == JsonValueKind.String
+                    && type.GetString() == GrantDecision.EventType
+                    && root.TryGetProperty("decision", out var decision)
+                    && decision.ValueKind == JsonValueKind.String
+                    && decision.GetString() == "deny"
+                    && root.TryGetProperty("rule", out var rule)
+                    && rule.ValueKind == JsonValueKind.String
+                    && rule.GetString() == GrantRules.OwnPullRequestOnly.Id)
+                {
+                    return true;
+                }
+            }
+            catch (JsonException)
+            {
+                // The stream may contain vendor lines beside the typed grant decision; ignore those.
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// The verdict, through <see cref="ReviewVerdictSchema.TryParse"/> and no second reader. A file that

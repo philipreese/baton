@@ -32,10 +32,10 @@ public sealed class WorkItemLifecycleTests
         bool? workerStepsRecorded = null,
         string? attemptBaseRevision = null,
         IReadOnlyList<string>? deliveryFailingMembers = null,
-        bool policyRefusalObserved = false) =>
+        bool pullRequestAuthorityRefusalObserved = false) =>
         new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead,
             prObserved, prOpen, prDraft, requiredChecks, workspaceChanged, indeterminateProducer,
-            workerStepsRecorded, attemptBaseRevision, deliveryFailingMembers, policyRefusalObserved);
+            workerStepsRecorded, attemptBaseRevision, deliveryFailingMembers, pullRequestAuthorityRefusalObserved);
 
     /// <summary>
     /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
@@ -72,7 +72,7 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
-    public void An_identical_pull_request_policy_refusal_halts_without_spending_another_round()
+    public void An_owned_pull_request_refusal_without_a_bound_pr_waits_for_exact_reconciliation()
     {
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Continue,
@@ -80,13 +80,27 @@ public sealed class WorkItemLifecycleTests
             round: WorkStages.MaxRounds,
             workspaceHead: PreviousHead,
             attemptBaseRevision: CurrentHead,
-            policyRefusalObserved: true));
+            pr: null,
+            prHead: null,
+            pullRequestAuthorityRefusalObserved: true));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, transition.ReconciliationKind);
         Assert.Null(transition.NextStage);
         Assert.Equal(0, transition.Round);
-        Assert.Contains("pull-request policy refusal", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("typed pull-request authority refusal", transition.Reason, StringComparison.Ordinal);
         Assert.Contains("another worker round", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_incidental_refusal_does_not_outrank_a_successful_bound_PR_lane()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement,
+            pullRequestAuthorityRefusalObserved: true));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.Review, transition.NextStage);
     }
 
     [Theory]

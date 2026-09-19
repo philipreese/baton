@@ -64,33 +64,6 @@ public static class WorkItemLifecycle
             return WorkItemTransition.None("the room has not settled yet");
         }
 
-        // A policy refusal is a terminal authority fact, not an implementation failure to retry.
-        // Re-dispatching the same follow-on would spend another worker round repeating the exact
-        // denied operation instead of putting the obligation in front of the conductor.
-        if (observation.PolicyRefusalObserved)
-        {
-            return WorkItemTransition.NeedsOperator(
-                $"the {WorkStages.Token(observation.Stage)} lane encountered a pull-request policy refusal; "
-                + "the queue will not retry the identical refused operation or spend another worker round; "
-                + Recovery(observation.Stage));
-        }
-
-        // A repair without a distinct revision is not a repair. In particular, a cancelled or
-        // arrested fix can leave the PR and workspace at the prior review's head; sending that head
-        // to re-review spends a reviewer to rediscover the same findings. Keep the terminal attempt
-        // and prior verdict for the operator instead. This deliberately uses the exact baseline and
-        // authoritative local head used by WorkItemAdvancer's revisionProduced event, so absent
-        // evidence fails closed rather than turning a narrative claim into revision evidence.
-        if (observation.Stage is WorkStage.Fix or WorkStage.Continue
-            && !HasDistinctAttemptRevision(observation))
-        {
-            return WorkItemTransition.NeedsOperator(
-                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with no distinct "
-                + $"revision (attempt base {Short(observation.AttemptBaseRevision)}; authoritative workspace HEAD "
-                + $"{Short(observation.WorkspaceHeadSha)}) — retain the terminal attempt and prior verdict/findings for "
-                + $"operator recovery; {Recovery(observation.Stage)}");
-        }
-
         // #2131 readiness policy: an unavailable forge answer is an obligation to retry, never
         // evidence that no PR exists. Likewise, a closed/merged PR is terminal forge state: this
         // lifecycle may observe it but must never reopen it or dispatch work as though it were open.
@@ -113,6 +86,38 @@ public static class WorkItemLifecycle
             return WorkItemTransition.None(
                 $"PR #{observation.PullRequest} open/draft state was not readable; retaining this settled "
                 + "round for reconciliation");
+        }
+
+        // Only a typed denial of the room's own pull-request authority can establish this recovery
+        // obligation. Other denied tools are incidental worker evidence and must not outrank the
+        // normal outcome/verdict handling below. A bound PR also keeps the normal lifecycle path:
+        // the denial did not leave the mutating lane without its originating PR.
+        if (observation.PullRequestAuthorityRefusalObserved
+            && observation.PullRequest is null
+            && observation.Stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane encountered a typed pull-request authority refusal "
+                + "before an exact open PR was bound; the queue will not retry the identical refused operation "
+                + "or spend another worker round; open the exact lineage PR and Baton will reconcile this retained "
+                + "terminal row",
+                QueueReconciliationKind.AwaitingVerifiedPullRequest);
+        }
+
+        // A repair without a distinct revision is not a repair. In particular, a cancelled or
+        // arrested fix can leave the PR and workspace at the prior review's head; sending that head
+        // to re-review spends a reviewer to rediscover the same findings. Keep the terminal attempt
+        // and prior verdict for the operator instead. This deliberately uses the exact baseline and
+        // authoritative local head used by WorkItemAdvancer's revisionProduced event, so absent
+        // evidence fails closed rather than turning a narrative claim into revision evidence.
+        if (observation.Stage is WorkStage.Fix or WorkStage.Continue
+            && !HasDistinctAttemptRevision(observation))
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with no distinct "
+                + $"revision (attempt base {Short(observation.AttemptBaseRevision)}; authoritative workspace HEAD "
+                + $"{Short(observation.WorkspaceHeadSha)}) — retain the terminal attempt and prior verdict/findings for "
+                + $"operator recovery; {Recovery(observation.Stage)}");
         }
 
         // A branch-delivery no-op is an incomplete mutating lane even when an old PR already points
@@ -551,6 +556,10 @@ public static class WorkItemLifecycle
 /// available. In particular, <c>revision-not-created</c> keeps a no-op delivery on the incomplete
 /// continuation path even when an older PR already matches the workspace head.
 /// </param>
+/// <param name="PullRequestAuthorityRefusalObserved">
+/// True only when the terminal execution contains a denied typed <c>own-pr-only</c> grant decision;
+/// other refused tool steps are incidental and do not affect lifecycle routing.
+/// </param>
 public sealed record WorkItemObservation(
     WorkStage Stage,
     int Round,
@@ -570,7 +579,7 @@ public sealed record WorkItemObservation(
     bool? WorkerStepsRecorded = null,
     string? AttemptBaseRevision = null,
     IReadOnlyList<string>? DeliveryFailingMembers = null,
-    bool PolicyRefusalObserved = false);
+    bool PullRequestAuthorityRefusalObserved = false);
 
 /// <summary>What the queue does with a work item next.</summary>
 /// <param name="Kind">Which of the three shapes below.</param>
