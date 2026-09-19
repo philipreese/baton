@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.CompilerServices;
 using Baton;
 using Baton.Domain;
 using Baton.Status;
@@ -394,6 +395,7 @@ public sealed class FleetEventLog
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
+    private static readonly ConditionalWeakTable<FleetEvent, SourceLocation> SourceLocations = new();
 
     private readonly string _livePath;
     private readonly string _rolloverPath;
@@ -437,30 +439,6 @@ public sealed class FleetEventLog
         return Task.Run(() => MutexGuardedFileLock.RunUnderLock(
             _livePath, LockNamePrefix, LockTimeout,
             () => (IReadOnlyList<FleetEvent>)Read(_livePath).Events.Where(e => e.Id > cursor).ToList()), cancellationToken);
-    }
-
-    /// <summary>
-    /// Reads every retained row from the rollover and live segments under the same lock used by
-    /// append. Projectors use this recovery view; the operational SSE cursor intentionally continues
-    /// to read only the live segment.
-    /// </summary>
-    public Task<IReadOnlyList<FleetEvent>> ReadRetained(CancellationToken cancellationToken = default)
-    {
-        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(
-            _livePath,
-            LockNamePrefix,
-            LockTimeout,
-            () =>
-            {
-                var rollover = Read(_rolloverPath);
-                var live = Read(_livePath);
-                if (rollover.TornTailOffset is not null || live.TornTailOffset is not null)
-                {
-                    throw new IOException("The retained fleet-event projection has an incomplete tail.");
-                }
-
-                return (IReadOnlyList<FleetEvent>)rollover.Events.Concat(live.Events).ToList();
-            }), cancellationToken);
     }
 
     /// <summary>
@@ -526,6 +504,11 @@ public sealed class FleetEventLog
     }
 
     internal static string Serialize(FleetEvent entry) => JsonSerializer.Serialize(entry, Json);
+
+    internal static string? EvidenceLocation(FleetEvent entry) =>
+        SourceLocations.TryGetValue(entry, out var location)
+            ? $"'{location.Path}' line {location.Line}"
+            : null;
 
     internal static string SerializeDraft(FleetEventDraft draft) => JsonSerializer.Serialize(draft, DraftJson);
 
@@ -614,7 +597,7 @@ public sealed class FleetEventLog
 
             try
             {
-                result.Add(ParseCompleteRow(row));
+                result.Add(ParseCompleteRow(row, path, lineNumber));
             }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or OverflowException)
             {
@@ -632,7 +615,7 @@ public sealed class FleetEventLog
         return new(result, null);
     }
 
-    private static FleetEvent ParseCompleteRow(ReadOnlySpan<byte> row)
+    private static FleetEvent ParseCompleteRow(ReadOnlySpan<byte> row, string path, int lineNumber)
     {
         using var document = JsonDocument.Parse(row.ToArray());
         var root = document.RootElement;
@@ -649,8 +632,10 @@ public sealed class FleetEventLog
             throw new JsonException("Expected id, at, kind, and non-empty dedupeKey fields.");
         }
 
-        return root.Deserialize<FleetEvent>(Json)
+        var entry = root.Deserialize<FleetEvent>(Json)
             ?? throw new JsonException("Expected a fleet event object.");
+        SourceLocations.Add(entry, new(path, lineNumber));
+        return entry;
     }
 
     private static bool IsIncompleteJsonPrefix(ReadOnlySpan<byte> row)
@@ -704,4 +689,6 @@ public sealed class FleetEventLog
     }
 
     private sealed record FleetEventReadResult(IReadOnlyList<FleetEvent> Events, long? TornTailOffset);
+
+    private sealed record SourceLocation(string Path, int Line);
 }

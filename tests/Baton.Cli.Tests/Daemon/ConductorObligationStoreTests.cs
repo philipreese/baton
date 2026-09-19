@@ -107,7 +107,7 @@ public sealed class ConductorObligationStoreTests : IDisposable
         await Assert.ThrowsAsync<ConductorObligationConflictException>(() =>
             store.EnqueueAsync(Request() with { TargetExecution = "execution-2" }, Ct));
 
-        var rows = await Log().ReadRetained(Ct);
+        var rows = await Log().ReadRetainedRepairingTornTails(Ct);
         Assert.Single(rows);
         Assert.Equal(FleetEventKind.ConductorObligationPending, rows[0].Kind);
     }
@@ -141,11 +141,11 @@ public sealed class ConductorObligationStoreTests : IDisposable
         Assert.False(called);
         Assert.Equal(
             [FleetEventKind.ConductorObligationPending, FleetEventKind.ConductorObligationUnsupported],
-            (await Log().ReadRetained(Ct)).Select(row => row.Kind).ToArray());
+            (await Log().ReadRetainedRepairingTornTails(Ct)).Select(row => row.Kind).ToArray());
     }
 
     [Fact]
-    public async Task Read_repairs_crash_window_before_rotation_and_terminal_guard_prevents_reopen()
+    public async Task Terminal_projection_survives_supporting_fact_rotation_and_preserves_result()
     {
         var store = Store();
         await store.EnqueueAsync(Request(), Ct);
@@ -153,14 +153,7 @@ public sealed class ConductorObligationStoreTests : IDisposable
             "obligation-1",
             (_, _) => Task.FromResult(new ConductorTransportResult(true, "receipt-1")),
             Ct);
-        var staleProjection = await File.ReadAllTextAsync(_projection, Ct);
-
-        await store.ObserveActionAsync("obligation-1", "execution-1-complete", Ct);
-        await File.WriteAllTextAsync(_projection, staleProjection, Ct);
-
-        Assert.Equal(
-            ConductorObligationStatus.ActionObserved,
-            (await Store().ReadAsync("obligation-1", Ct))!.Status);
+        var observed = await store.ObserveActionAsync("obligation-1", "execution-1-complete", Ct);
 
         var rotatingLog = Log(maxLiveBytes: 1);
         for (var index = 0; index < 3; index++)
@@ -175,14 +168,12 @@ public sealed class ConductorObligationStoreTests : IDisposable
 
         var restarted = Store();
         Assert.Empty(await restarted.ReconcileAsync(Ct));
-        var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(
-            () => restarted.EnqueueAsync(Request(), Ct));
-        Assert.Equal(
-            "Conductor obligation 'obligation-1' is retired and cannot be reopened. "
-            + "Operator recovery: use a new idempotency key only for a genuinely new obligation.",
-            error.Message);
+        var retained = await restarted.ReadAsync("obligation-1", Ct);
+        Assert.NotNull(retained);
+        Assert.Equal(observed, retained);
+        Assert.Equal(observed, await restarted.EnqueueAsync(Request(), Ct));
         Assert.DoesNotContain(
-            await rotatingLog.ReadRetained(Ct),
+            await rotatingLog.ReadRetainedRepairingTornTails(Ct),
             row => row.Kind == FleetEventKind.ConductorObligationActionObserved);
     }
 
@@ -195,7 +186,7 @@ public sealed class ConductorObligationStoreTests : IDisposable
 
         Assert.Single(await Store().ReconcileAsync(Ct));
         Assert.EndsWith("\n", await File.ReadAllTextAsync(_events, Ct), StringComparison.Ordinal);
-        Assert.Single(await Log().ReadRetained(Ct));
+        Assert.Single(await Log().ReadRetainedRepairingTornTails(Ct));
     }
 
     [Fact]
@@ -217,13 +208,15 @@ public sealed class ConductorObligationStoreTests : IDisposable
                 ObligationAdapterSupported: true),
             Ct);
 
+        var valid = Store();
+        await valid.EnqueueAsync(Request("valid"), Ct);
+
+        Assert.Equal("valid", Assert.Single(await valid.ReconcileAsync(Ct)).IdempotencyKey);
         var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(
-            () => Store().ReconcileAsync(Ct));
-        Assert.Equal(
-            "Conductor obligation fact 'conductor-obligation:conductorObligationPending:broken' "
-            + "has an incomplete payload. Operator recovery: restore or remove the identified "
-            + "incomplete conductor-obligation fact, then retry.",
-            error.Message);
+            () => Store().ReadAsync("broken", Ct));
+        Assert.Contains("conductor-obligation:conductorObligationPending:broken", error.Message);
+        Assert.Contains(_events, error.Message, StringComparison.Ordinal);
+        Assert.Contains("line 1", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -234,7 +227,8 @@ public sealed class ConductorObligationStoreTests : IDisposable
         var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(
             () => Store().ReconcileAsync(Ct));
         Assert.Contains(
-            "Operator recovery: restore or remove the identified malformed fleet-event row, then retry.",
+            "Operator recovery: restore or quarantine the identified malformed fleet-event row, then retry; "
+            + "never delete the only surviving authoritative projection.",
             error.Message,
             StringComparison.Ordinal);
         var cause = Assert.IsType<FleetEventLogReadException>(error.InnerException);
@@ -243,7 +237,7 @@ public sealed class ConductorObligationStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Projection_keeps_only_open_rows_and_a_fixed_size_terminal_guard()
+    public async Task Projection_keeps_exact_terminal_rows_with_their_completion_evidence()
     {
         for (var index = 0; index < 12; index++)
         {
@@ -260,11 +254,16 @@ public sealed class ConductorObligationStoreTests : IDisposable
         using var projection = System.Text.Json.JsonDocument.Parse(
             await File.ReadAllTextAsync(_projection, Ct));
         Assert.Empty(projection.RootElement.GetProperty("openObligations").EnumerateArray());
-        Assert.Equal(
-            131_072,
-            Convert.FromBase64String(
-                projection.RootElement.GetProperty("terminalKeyFilter").GetString()!).Length);
-        Assert.InRange(new FileInfo(_projection).Length, 174_000, 176_000);
+        var terminals = projection.RootElement.GetProperty("terminalObligations").EnumerateArray().ToArray();
+        Assert.Equal(12, terminals.Length);
+        Assert.All(terminals, terminal =>
+        {
+            Assert.Equal("actionObserved", terminal.GetProperty("status").GetString());
+            Assert.Equal("receipt-" + terminal.GetProperty("idempotencyKey").GetString()!["obligation-".Length..],
+                terminal.GetProperty("transportReceipt").GetString());
+            Assert.StartsWith("proof-", terminal.GetProperty("actionProof").GetString(), StringComparison.Ordinal);
+            Assert.True(terminal.TryGetProperty("actionObservedAt", out _));
+        });
     }
 
     private FleetEventLog Log(long maxLiveBytes = 100_000) => new(_events, _rollover, maxLiveBytes);
