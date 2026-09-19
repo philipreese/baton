@@ -1661,18 +1661,23 @@ public sealed class WorkItemAdvancer
                 .Where(execution => execution is { Length: > 0 })
                 .Select(execution => execution!)
                 .ToHashSet(StringComparer.Ordinal) ?? [];
-            foreach (var path in Directory.EnumerateFiles(artifactsRoot, "*", SearchOption.AllDirectories))
+            var executionDirectories = executionIds.Count > 0
+                ? executionIds.Select(execution => Path.Combine(artifactsRoot, "execution_" + execution))
+                : Directory.EnumerateDirectories(artifactsRoot, "execution_*", SearchOption.TopDirectoryOnly);
+            foreach (var executionDirectory in executionDirectories)
             {
-                var fileName = Path.GetFileName(path);
-                if (fileName is not (GrantDecisionLog.FileName or ExecutionStreamLogger.StdoutLogFileName)
-                    || !IsTerminalExecutionArtifact(path, artifactsRoot, executionIds))
+                foreach (var fileName in new[] { GrantDecisionLog.FileName, ExecutionStreamLogger.StdoutLogFileName })
                 {
-                    continue;
-                }
+                    var path = Path.Combine(executionDirectory, fileName);
+                    if (!File.Exists(path))
+                    {
+                        continue;
+                    }
 
-                if (FileContainsOwnPullRequestDenial(path))
-                {
-                    return true;
+                    if (FileContainsOwnPullRequestDenial(path))
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -1683,20 +1688,6 @@ public sealed class WorkItemAdvancer
         }
 
         return false;
-    }
-
-    private static bool IsTerminalExecutionArtifact(
-        string path, string artifactsRoot, IReadOnlySet<string> executionIds)
-    {
-        if (executionIds.Count == 0)
-        {
-            return true;
-        }
-
-        var relative = Path.GetRelativePath(artifactsRoot, path);
-        var first = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
-        return first.StartsWith("execution_", StringComparison.Ordinal)
-            && executionIds.Contains(first["execution_".Length..]);
     }
 
     private static bool FileContainsOwnPullRequestDenial(string path)
