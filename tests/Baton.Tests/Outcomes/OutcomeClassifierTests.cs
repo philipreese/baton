@@ -27,6 +27,67 @@ namespace Baton.Tests.Outcomes;
 public class OutcomeClassifierTests
 {
     [Fact]
+    public void Classify_preserves_valid_artifacts_and_a_late_vendor_failure()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            File.WriteAllText(Path.Combine(directory, "report.md"), "complete report");
+            var contract = new WorkerContract(
+                "worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(
+                    1,
+                    CoreExitReason.Natural,
+                    StderrTail: "capacity exhausted",
+                    TerminalResultObserved: true),
+                contract,
+                directory);
+
+            Assert.Equal(OutcomeVerdict.SucceededWithLateFailure, classification.Verdict);
+            Assert.Contains("capacity exhausted", classification.Reason);
+            Assert.True(File.Exists(Path.Combine(directory, "report.md")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_excludes_missing_malformed_and_placeholder_artifacts_from_late_failure_recovery()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var lateFailure = new CoreDispatchResult(
+                1,
+                CoreExitReason.Natural,
+                TerminalResultObserved: true);
+
+            var nonEmptyContract = new WorkerContract(
+                "worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+            var missing = OutcomeClassifier.Classify(lateFailure, nonEmptyContract, directory);
+            Assert.NotEqual(OutcomeVerdict.SucceededWithLateFailure, missing.Verdict);
+
+            File.WriteAllText(Path.Combine(directory, "report.md"), "   ");
+            var placeholder = OutcomeClassifier.Classify(lateFailure, nonEmptyContract, directory);
+            Assert.NotEqual(OutcomeVerdict.SucceededWithLateFailure, placeholder.Verdict);
+
+            File.WriteAllText(Path.Combine(directory, "report.md"), "not a verdict");
+            var malformedContract = new WorkerContract(
+                "worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.ReviewVerdict)], []);
+            var malformed = OutcomeClassifier.Classify(lateFailure, malformedContract, directory);
+            Assert.NotEqual(OutcomeVerdict.SucceededWithLateFailure, malformed.Verdict);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
     public void Classify_returns_Succeeded_for_a_clean_exit_with_all_outputs_present()
     {
         var directory = CreateTempDirectory();

@@ -620,7 +620,8 @@ public static class MutationInterface
             Timeout: null,
             environment,
             UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
-            GrantAuditMode: nonProcess.GrantAuditMode);
+            GrantAuditMode: nonProcess.GrantAuditMode,
+            ProducedOutputs: nonProcess.Contract.ProducedOutputs);
 
 
         // The write-sequence discipline still applies: appended and fsync'd before this method
@@ -917,7 +918,8 @@ public static class MutationInterface
             Model: processBinding.Model,
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
-            DeliversBranch: processBinding.DeliversBranch);
+            DeliversBranch: processBinding.DeliversBranch,
+            ProducedOutputs: processBinding.Contract.ProducedOutputs);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -1243,7 +1245,12 @@ public static class MutationInterface
                             : 0;
                         var classification = OutcomeClassifier.Classify(
                             new CoreDispatchResult(
-                                exit.ExitCode, exit.Reason, exit.StderrTail, EnginePlacedFiles: enginePlacedFiles),
+                                exit.ExitCode,
+                                exit.Reason,
+                                exit.StderrTail,
+                                exit.TerminalSuccessObserved,
+                                TerminalResultObserved: exit.TerminalResultObserved,
+                                EnginePlacedFiles: enginePlacedFiles),
                             contract, outputDirectory,
                             grantAuditMode: grantAuditMode, worktreePath: worktreePath, responseParser: responseParser,
                             usageParser: usageParser, worktreeBaseRef: worktreeBaseRef, changesTree: changesTree,
@@ -2024,7 +2031,8 @@ public static class MutationInterface
             Model: processBindingForRequest?.Model,
             HookCanaryArmed: hookCanaryArmed,
             HookVerdictLedgerFileName: hookVerdictLedgerFileName,
-            DeliversBranch: processBindingForRequest?.DeliversBranch);
+            DeliversBranch: processBindingForRequest?.DeliversBranch,
+            ProducedOutputs: binding.Contract.ProducedOutputs);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -3441,7 +3449,7 @@ public static class MutationInterface
         return new WorkerContract(
             request.Worker,
             RequiredInputs: [],
-            ProducedOutputs: [.. request.Outputs.Select(o => new ProducedOutput(o))],
+            ProducedOutputs: request.ProducedOutputs ?? [.. request.Outputs.Select(o => new ProducedOutput(o))],
             OptionalMetadata: []);
     }
 

@@ -2,11 +2,63 @@ using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
 using Baton.Store;
+using Baton.Artifacts;
 
 namespace Baton.Tests.Mutation;
 
 public sealed class MutationInterfaceRecoveryTests
 {
+    [Fact]
+    public async Task Live_late_failure_settles_once_and_preserves_the_valid_artifact()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"late-failure-{Guid.NewGuid():N}");
+        var artifactsRoot = Path.Combine(roomDirectory, "artifacts");
+        var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+        try
+        {
+            var stepId = new StepId("review");
+            var snapshot = new WorkflowDefinitionSnapshot(
+                new WorkflowDefinitionSnapshotId("late-failure-snapshot"),
+                new WorkflowTemplateId("late-failure"),
+                1,
+                [new WorkflowStepDefinition(stepId, "review", [], ["report.md"], [], new RetryPolicy(1))]);
+            var contract = new WorkerContract(
+                "review", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
+            var binding = new WorkerBinding.Process(contract, new CoreDispatchTarget("unused", []), TimeSpan.FromSeconds(30));
+            var dispatcher = new LiveLateFailureDispatcher(artifactsRoot);
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var state = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("late-failure-workflow"),
+                roomDirectory,
+                snapshot,
+                new Dictionary<string, WorkerBinding> { ["review"] = binding },
+                artifactsRoot,
+                reader,
+                writer,
+                dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            var step = Assert.Single(state.Steps);
+            Assert.Equal(StepStatus.Succeeded, step.Status);
+            Assert.Equal(1, dispatcher.CallCount);
+            Assert.NotNull(step.LateFailureReason);
+            Assert.True(File.Exists(Path.Combine(
+                ArtifactManager.ResolveOutputDirectory(artifactsRoot, step.LatestExecutionId!.Value), "report.md")));
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Single(events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>());
+            Assert.DoesNotContain(events, e => e is FlowEvent.ExecutionFailed);
+            var accepted = Assert.Single(events.OfType<FlowEvent.ExecutionRequestAccepted>());
+            Assert.Equal(contract.ProducedOutputs, accepted.Request.ProducedOutputs);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
     [Fact]
     public async Task Outstanding_tool_recovery_continues_once_in_the_same_workspace_then_stops()
     {
@@ -83,6 +135,27 @@ public sealed class MutationInterfaceRecoveryTests
                 CoreExitReason.Natural,
                 TerminalSuccessObserved: true,
                 OutstandingToolAtTerminalSuccess: fact));
+        }
+    }
+
+    private sealed class LiveLateFailureDispatcher(string artifactsRoot) : ICoreDispatcher
+    {
+        public int CallCount { get; private set; }
+
+        public Task<CoreDispatchResult> DispatchAsync(
+            ExecutionRequest request,
+            CoreDispatchTarget target,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, request.ExecutionId);
+            Directory.CreateDirectory(outputDirectory);
+            File.WriteAllText(Path.Combine(outputDirectory, "report.md"), "complete report");
+            return Task.FromResult(new CoreDispatchResult(
+                1,
+                CoreExitReason.Natural,
+                StderrTail: "late capacity failure",
+                TerminalResultObserved: true));
         }
     }
 }
