@@ -319,20 +319,19 @@ internal static class OriginatingPullRequestVerifier
                 || !root.TryGetProperty("headRefOid", out var headValue)
                 || stateValue.ValueKind != JsonValueKind.String
                 || branchValue.ValueKind != JsonValueKind.String
-                || headValue.ValueKind != JsonValueKind.String)
+                || headValue.ValueKind != JsonValueKind.String
+                || !root.TryGetProperty("isCrossRepository", out var crossRepositoryValue)
+                || crossRepositoryValue.ValueKind != JsonValueKind.False)
             {
                 throw new CliArgumentException(
-                    "The originating pull request returned a malformed response; retry after GitHub is reachable.");
+                    "The originating pull request response must include isCrossRepository as the JSON boolean false.");
             }
 
             var state = stateValue.GetString();
             var branch = branchValue.GetString();
             var head = headValue.GetString();
-            var isCrossRepository = root.TryGetProperty("isCrossRepository", out var crossRepositoryValue)
-                && crossRepositoryValue.ValueKind == JsonValueKind.True;
             var requiredHead = expectedHead ?? launchHead;
             if (!string.Equals(state, "OPEN", StringComparison.OrdinalIgnoreCase)
-                || isCrossRepository
                 || !string.Equals(branch, identity.HeadBranch, StringComparison.Ordinal)
                 || !string.Equals(head, requiredHead, StringComparison.OrdinalIgnoreCase))
             {

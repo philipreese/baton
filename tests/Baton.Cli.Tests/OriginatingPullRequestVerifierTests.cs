@@ -89,6 +89,36 @@ public sealed class OriginatingPullRequestVerifierTests
             "aer-works/baton", 2304, Identity, Head, 1, "not found"));
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("null")]
+    [InlineData("string")]
+    [InlineData("number")]
+    [InlineData("object")]
+    [InlineData("array")]
+    [InlineData("true")]
+    public void An_originating_PR_must_explicitly_report_a_same_repository_response(string crossRepository)
+    {
+        var response = crossRepository == "missing"
+            ? $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head}}"}"""
+            : $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head}}","isCrossRepository":{{CrossRepositoryValue(crossRepository)}}}""";
+
+        var exception = Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
+            "aer-works/baton", 2304, Identity, Head, 0, response));
+
+        Assert.Contains("isCrossRepository", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_originating_PR_accepts_an_explicit_JSON_false_same_repository_response()
+    {
+        var ownership = OriginatingPullRequestVerifier.ValidateResponse(
+            "aer-works/baton", 2304, Identity, Head, 0,
+            $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head}}","isCrossRepository":false}""");
+
+        Assert.Equal(new OriginatingPullRequestOwnership("aer-works/baton", 2304, "2178-lane", Head), ownership);
+    }
+
     [Fact]
     public void A_stale_originating_PR_head_is_refused_before_binding()
     {
@@ -354,6 +384,17 @@ public sealed class OriginatingPullRequestVerifierTests
             DirectoryCleanup.DeleteRecursively(root);
         }
     }
+
+    private static string CrossRepositoryValue(string kind) => kind switch
+    {
+        "null" => "null",
+        "string" => "\"false\"",
+        "number" => "0",
+        "object" => "{}",
+        "array" => "[]",
+        "true" => "true",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
 
     private static void CopyHermeticProbeHost(string destination)
     {
