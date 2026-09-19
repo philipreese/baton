@@ -64,6 +64,17 @@ public static class WorkItemLifecycle
             return WorkItemTransition.None("the room has not settled yet");
         }
 
+        // A policy refusal is a terminal authority fact, not an implementation failure to retry.
+        // Re-dispatching the same follow-on would spend another worker round repeating the exact
+        // denied operation instead of putting the obligation in front of the conductor.
+        if (observation.PolicyRefusalObserved)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane encountered a pull-request policy refusal; "
+                + "the queue will not retry the identical refused operation or spend another worker round; "
+                + Recovery(observation.Stage));
+        }
+
         // A repair without a distinct revision is not a repair. In particular, a cancelled or
         // arrested fix can leave the PR and workspace at the prior review's head; sending that head
         // to re-review spends a reviewer to rediscover the same findings. Keep the terminal attempt
@@ -221,7 +232,8 @@ public static class WorkItemLifecycle
         {
             return WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled succeeded but no pull request is open on "
-                + $"'{observation.Branch}' — the queue will not open a PR; {Recovery(observation.Stage)}");
+                + $"'{observation.Branch}' — the queue will not open a PR; {Recovery(observation.Stage)}",
+                QueueReconciliationKind.AwaitingVerifiedPullRequest);
         }
 
         // A completed fix is reviewed against the prior verdict, not treated as the first review of
@@ -557,7 +569,8 @@ public sealed record WorkItemObservation(
     IndeterminateProducer? IndeterminateProducer = null,
     bool? WorkerStepsRecorded = null,
     string? AttemptBaseRevision = null,
-    IReadOnlyList<string>? DeliveryFailingMembers = null);
+    IReadOnlyList<string>? DeliveryFailingMembers = null,
+    bool PolicyRefusalObserved = false);
 
 /// <summary>What the queue does with a work item next.</summary>
 /// <param name="Kind">Which of the three shapes below.</param>

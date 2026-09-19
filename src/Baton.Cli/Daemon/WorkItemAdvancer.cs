@@ -305,7 +305,7 @@ public sealed class WorkItemAdvancer
             reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
             sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null,
-            item.AttemptBaseRevision, deliveryFailingMembers);
+            item.AttemptBaseRevision, deliveryFailingMembers, HasPolicyRefusal(sentinel));
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
@@ -1630,6 +1630,14 @@ public sealed class WorkItemAdvancer
             .ToArray();
         return members.Length == 0 ? null : members;
     }
+
+    /// <summary>
+    /// Reads the current terminal execution's typed policy-refusal tally. A refusal is authority
+    /// evidence, not a worker result to retry; the pure lifecycle turns this fact into a halted
+    /// conductor obligation before any next-stage dispatch is reserved.
+    /// </summary>
+    private static bool HasPolicyRefusal(WorkflowStatusView? sentinel) =>
+        sentinel?.Steps?.Any(step => step.Usage?.RefusedToolSteps is > 0) == true;
 
     /// <summary>
     /// The verdict, through <see cref="ReviewVerdictSchema.TryParse"/> and no second reader. A file that

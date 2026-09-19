@@ -71,6 +71,42 @@ public sealed class OriginatingPullRequestVerifierTests
     }
 
     [Fact]
+    public void Existing_lineage_PR_is_the_only_PR_the_follow_on_policy_can_read()
+    {
+        var rule = new OwnPullRequestOnlyRule();
+        rule.Observe(new OriginatingPullRequestOwnership(
+            "aer-works/baton", 2304, "2178-lane", Head).ToEvidence());
+
+        Assert.Null(rule.Refuse("gh pr view 2304"));
+        Assert.NotNull(rule.Refuse("gh pr view 2305"));
+        Assert.NotNull(rule.Refuse("gh pr view 2304 --repo other/repo"));
+    }
+
+    [Fact]
+    public void A_missing_originating_PR_is_refused_before_binding()
+    {
+        Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
+            "aer-works/baton", 2304, Identity, Head, 1, "not found"));
+    }
+
+    [Fact]
+    public void A_stale_originating_PR_head_is_refused_before_binding()
+    {
+        Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
+            "aer-works/baton", 2304, Identity, Head,
+            0, $$"""{"state":"OPEN","headRefName":"2178-lane","headRefOid":"{{Head}}"}""",
+            PreservedHead));
+    }
+
+    [Fact]
+    public void An_unrelated_PR_branch_is_refused_before_binding()
+    {
+        Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(
+            "aer-works/baton", 2304, Identity, Head,
+            0, $$"""{"state":"OPEN","headRefName":"unrelated-lane","headRefOid":"{{Head}}"}"""));
+    }
+
+    [Fact]
     public void A_malformed_retained_head_is_refused()
     {
         Assert.Throws<CliArgumentException>(() => OriginatingPullRequestVerifier.ValidateResponse(

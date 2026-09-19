@@ -7715,7 +7715,7 @@ written:
 | implement | succeeded-shaped, PR open | **review** | there is something to review |
 | continue | succeeded-shaped, PR open, readable distinct attempt revision | **review** | the recovered work has a new authoritative revision to review |
 | fix | succeeded-shaped, PR open, readable distinct attempt revision | **re-review** | the prior verdict's findings are being checked against a new authoritative revision |
-| implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
+| implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR; a conductor-supplied exact draft PR is reconciled before another lifecycle round |
 | review / re-review | succeeded-shaped, `decision: approve`, exact full `reviewedRef` = current PR head, required checks passing | **ready** | only current-head approval plus green required checks may clear draft |
 | review / re-review | succeeded-shaped, `decision: approve`, canonical full-SHA `reviewedRef` differs from current PR head | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
 | review / re-review | succeeded-shaped, `decision: approve`, noncanonical `reviewedRef` | **operator** | lifecycle approval requires exactly one full 40-character hexadecimal PR-head SHA; halt rather than spend a re-review |
@@ -7769,6 +7769,10 @@ be readable and differ before a fix can re-review or a continuation can review; 
 baseline, or an unreadable delivered head is an operator halt for every terminal outcome. The terminal
 room, attempt identity, baseline, and last verdict stay on the item for recovery. A prose claim in
 `changes.md` is not revision evidence, and this guard runs before any review round is reserved.
+
+**A policy refusal is terminal for the current lifecycle attempt.** The typed refusal tally in the
+terminal execution is authority evidence, not a transient worker failure: the queue records an
+operator obligation and does not dispatch an identical follow-on round.
 
 **Arrest continuation evidence (#2253).** The dispatcher captures the attempt-start SHA and the
 engine-placed-file list before the worker starts. After the existing grace turn, it records
