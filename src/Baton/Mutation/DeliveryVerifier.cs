@@ -728,7 +728,12 @@ public static class DeliveryVerifier
             };
     }
 
-    private static async Task<DeliveryCheckOutcome?> CheckGeneratedPathsAsync(
+    /// <summary>
+    /// Checks only the generated paths changed by this attempt. Live delivery calls this as one
+    /// necessary condition before remote/PR checks; restart reconciliation uses the same local seam
+    /// when a crash landed after exit but before the live observation was journalled.
+    /// </summary>
+    public static async Task<DeliveryCheckOutcome?> CheckGeneratedPathsAsync(
         string gitProgram, string workingDirectory, string attemptStartHead,
         IReadOnlyList<DeliveryArtifactPath> generatedPaths, IReadOnlyList<string>? authorizedPaths,
         CancellationToken cancellationToken)

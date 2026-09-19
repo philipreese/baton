@@ -692,22 +692,17 @@ public sealed class MutationInterfaceDeliveryVerificationTests
     private sealed class RuntimeDirectProducerDispatcher(
         string workspace, string artifactsRoot, string branch) : ICoreDispatcher
     {
-        public Task<CoreDispatchResult> DispatchAsync(
+        public async Task<CoreDispatchResult> DispatchAsync(
             ExecutionRequest request,
             CoreDispatchTarget target,
             CancellationToken cancellationToken = default)
         {
             var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, request.ExecutionId);
-            Directory.CreateDirectory(outputDirectory);
-            File.WriteAllText(Path.Combine(outputDirectory, "changes.md"), "handoff");
-            DeliveryArtifactLedger.Append(outputDirectory,
-                [new DeliveryArtifactPath(
-                    "pr-body.md", "runtime direct pull-request creation body-file request")]);
-            File.WriteAllText(Path.Combine(workspace, "production.txt"), "product change\n");
-            File.WriteAllText(Path.Combine(workspace, "pr-body.md"), "generated body\n");
+            using var producer = new RuntimeDirectPullRequestProducer(workspace, outputDirectory);
+            await producer.ProduceAsync();
             TempGitRepository.CommitAll(workspace, "deliver product change");
             TempGitRepository.Push(workspace, "origin", branch);
-            return Task.FromResult(new CoreDispatchResult(0, CoreExitReason.Natural));
+            return new CoreDispatchResult(0, CoreExitReason.Natural);
         }
     }
 

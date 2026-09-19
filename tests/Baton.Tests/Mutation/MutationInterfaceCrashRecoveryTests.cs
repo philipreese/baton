@@ -1367,6 +1367,94 @@ public class MutationInterfaceCrashRecoveryTests
     }
 
     [Fact]
+    public async Task Restart_crash_window_consumes_runtime_direct_body_file_provenance()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        var origin = TempGitRepository.InitBareRepository(
+            Path.Combine(Path.GetTempPath(), $"restart-runtime-origin-{Guid.NewGuid():N}"));
+        var workspace = Path.Combine(Path.GetTempPath(), $"restart-runtime-workspace-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            TempGitRepository.InitWithEverythingCommitted(workspace);
+            TempGitRepository.AddRemote(workspace, "origin", origin);
+            TempGitRepository.CreateAndCheckoutBranch(workspace, "restart-runtime-provenance");
+            TempGitRepository.CommitAll(workspace, "lane baseline");
+            TempGitRepository.Push(workspace, "origin", "restart-runtime-provenance");
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-restart-runtime-provenance");
+            var executionId = new ExecutionId(Guid.NewGuid().ToString("n"));
+            var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, executionId);
+            var contract = new WorkerContract(
+                "stub-worker", [], [new ProducedOutput("changes.md", Schema: OutputSchema.NonEmptyText)], []);
+            var request = new ExecutionRequest(
+                executionId,
+                workflowId,
+                A,
+                "stub-worker",
+                Inputs: [],
+                Outputs: ["changes.md"],
+                Timeout,
+                ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot),
+                UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
+                DeliversBranch: true,
+                ProducedOutputs: contract.ProducedOutputs,
+                DeliveryGeneratedPaths: [],
+                DeliveryAuthorizedPaths: []);
+
+            await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(request), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new CoreEvent.ExecutionStarted(executionId, Pid: 4242), TestContext.Current.CancellationToken);
+            var attemptStart = TempGitRepository.Head(workspace);
+            await writer.AppendAsync(new FlowEvent.ExecutionAttemptStarted(executionId, attemptStart), TestContext.Current.CancellationToken);
+            using (var producer = new RuntimeDirectPullRequestProducer(workspace, outputDirectory))
+            {
+                await producer.ProduceAsync();
+            }
+            TempGitRepository.CommitAll(workspace, "deliver product change");
+            TempGitRepository.Push(workspace, "origin", "restart-runtime-provenance");
+            await writer.AppendAsync(
+                new CoreEvent.ExecutionExited(executionId, ExitCode: 0, CoreExitReason.Natural),
+                TestContext.Current.CancellationToken);
+
+            var state = await MutationInterface.StartWorkflowAsync(
+                workflowId,
+                roomDirectory,
+                snapshot,
+                new Dictionary<string, WorkerBinding>
+                {
+                    ["stub-worker"] = new WorkerBinding.Process(
+                        contract,
+                        new CoreDispatchTarget("stub", [], WorkingDirectory: workspace),
+                        Timeout,
+                        DeliversBranch: true),
+                },
+                artifactsRoot,
+                reader,
+                writer,
+                new StubCoreDispatcher(),
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.True(Assert.Single(state.Steps).IndeterminateAwaitingResolution);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            var failure = Assert.Single(events.OfType<FlowEvent.VerifyFailed>());
+            Assert.Equal(VerifyFailedKind.DeliveryFailed, failure.Kind);
+            Assert.Equal(["generated-files-forbidden"], failure.FailingMembers);
+            Assert.Contains("pr-body.md", failure.Tail, StringComparison.Ordinal);
+            Assert.Contains("runtime direct pull-request creation body-file request", failure.Tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(events, e => e is FlowEvent.VerifyFailed { Kind: VerifyFailedKind.EngineRestart });
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(origin);
+        }
+    }
+
+    [Fact]
     public async Task Restart_late_failure_does_not_accept_a_malformed_recorded_artifact()
     {
         var snapshot = MakeSnapshot(Step(A, dependsOn: []));
