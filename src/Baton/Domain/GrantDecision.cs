@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -17,11 +18,10 @@ namespace Baton.Domain;
 /// <see cref="EventType"/> rather than an inference from prose.
 /// </para>
 /// <para>
-/// <b>Where the line lands follows the enforcement point that took the decision</b>, of which
-/// spec/baton.md §9 names three. A broker decision goes into the room's captured stream beside the
-/// <c>item.completed</c> for the same call, since the broker is that stream's own writer; a
-/// <c>PreToolUse</c> hook is a subprocess of the vendor CLI that never touches that file, so it
-/// appends to <see cref="Baton.Dispatch.GrantDecisionLog"/>'s per-execution file instead. One
+/// <b>Every enforcement point writes the authority log</b>, of which spec/baton.md §9 names three.
+/// The broker also mirrors its decision into the captured stream beside the <c>item.completed</c> for
+/// the same call, while a <c>PreToolUse</c> hook is a subprocess of the vendor CLI that never touches
+/// that stream. The authority log is unrolled and is the lifecycle reader's source of truth. One
 /// schema — this record's <see cref="ToJsonNode"/> — and two sinks, never two schemas.
 /// </para>
 /// </summary>
@@ -123,6 +123,74 @@ public sealed record GrantDecision(
     /// <summary>One JSONL record: <see cref="ToJsonNode"/> on one line, no trailing newline.</summary>
     public string ToJsonLine() => ToJsonNode().ToJsonString(SerializerOptions);
 
+    /// <summary>
+    /// Parses the canonical grant-decision line used by every enforcement-point sink. Unknown or
+    /// malformed lines are not grant evidence and are rejected rather than partially interpreted.
+    /// </summary>
+    public static bool TryParseJsonLine(string? json, out GrantDecision? decision)
+    {
+        decision = null;
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !StringProperty(root, "type", out var type)
+                || type != EventType
+                || !StringProperty(root, "vendor", out var vendor)
+                || !StringProperty(root, "tool", out var tool)
+                || !StringProperty(root, "decision", out var decisionText)
+                || !StringProperty(root, "rule", out var ruleId)
+                || !StringProperty(root, "input", out var input)
+                || !StringProperty(root, "at", out var atText)
+                || !GrantRules.TryGet(ruleId, out var rule)
+                || (decisionText != "allow" && decisionText != "deny")
+                || !DateTimeOffset.TryParse(
+                    atText, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at))
+            {
+                return false;
+            }
+
+            string? reason = null;
+            if (root.TryGetProperty("reason", out var reasonProperty))
+            {
+                if (reasonProperty.ValueKind != JsonValueKind.String)
+                {
+                    return false;
+                }
+
+                reason = reasonProperty.GetString();
+            }
+
+            decision = new GrantDecision(
+                vendor, tool, decisionText == "allow", rule, reason, input, at);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool StringProperty(JsonElement root, string name, out string value)
+    {
+        if (root.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && property.GetString() is { } text)
+        {
+            value = text;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
@@ -208,4 +276,26 @@ public static class GrantRules
 
     /// <summary>The gate's own catch-all: a defect in the gate denied the call (#1921).</summary>
     public static readonly GrantRule GateInternalFailure = new("gate-internal-failure");
+
+    /// <summary>Resolves the closed wire vocabulary used by <see cref="GrantDecision.TryParseJsonLine"/>.</summary>
+    public static bool TryGet(string id, out GrantRule rule)
+    {
+        rule = id switch
+        {
+            "allow" => Allowed,
+            "withheld-tool" => WithheldTool,
+            "path-outside-roots" => PathOutsideRoots,
+            "write-outside-bounds" => WriteOutsideBounds,
+            "reparse-point" => ReparsePoint,
+            "shell-pattern" => ShellPattern,
+            "denied-option-token" => DeniedOptionToken,
+            "backgrounding" => Backgrounding,
+            "repeat" => Repeat,
+            "own-pr-only" => OwnPullRequestOnly,
+            "unjudgeable-call" => UnjudgeableCall,
+            "gate-internal-failure" => GateInternalFailure,
+            _ => null!,
+        };
+        return rule is not null;
+    }
 }

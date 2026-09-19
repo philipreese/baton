@@ -7771,8 +7771,10 @@ room, attempt identity, baseline, and last verdict stay on the item for recovery
 `changes.md` is not revision evidence, and this guard runs before any review round is reserved.
 
 **A pull-request authority refusal is typed and narrow.** The advancer reads engine-owned
-`baton.grant` records for the terminal execution (the hook grant log or the broker's captured stream)
-and treats only a denied `rule: own-pr-only` record as originating-PR authority evidence. The
+`baton.grant` records in the terminal execution's unrolled `.baton-grants.ndjson` authority log and
+treats only a denied `rule: own-pr-only` record as originating-PR authority evidence. Codex mirrors
+the same record into its bounded captured stream for diagnostics, but that stream is not lifecycle
+evidence after rollover. The
 aggregate `refusedToolSteps` count is not used: an incidental denied shell command does not change
 lifecycle routing. For a mutating implement/fix/continue lane with no bound PR, that exact refusal
 produces `AwaitingVerifiedPullRequest`; a bound PR, review verdict, or ordinary outcome keeps the

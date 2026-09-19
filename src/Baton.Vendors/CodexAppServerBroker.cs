@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Baton.Domain;
+using Baton.Dispatch;
 using Baton.Status;
 
 namespace Baton.Vendors;
@@ -108,8 +109,8 @@ public static class CodexAppServerBroker
         try
         {
             return await RunProtocolAsync(
-                configuration, prompt, policy, process.StandardInput, process.StandardOutput,
-                output, error, cancellationToken).ConfigureAwait(false);
+                configuration, prompt, policy, outputDirectory, process.StandardInput,
+                process.StandardOutput, output, error, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -480,6 +481,27 @@ public static class CodexAppServerBroker
             prompt,
             CreateDynamicToolPolicy(
                 configuration, outputDirectory, inputPaths, artifactOnlyOutputNames, memoryAddExecutor),
+            outputDirectory,
+            serverInput,
+            serverOutput,
+            batonOutput,
+            error,
+            cancellationToken);
+
+    internal static Task<int> RunProtocolAsync(
+        CodexBrokerConfiguration configuration,
+        string prompt,
+        CodexDynamicToolPolicy policy,
+        TextWriter serverInput,
+        TextReader serverOutput,
+        TextWriter batonOutput,
+        TextWriter error,
+        CancellationToken cancellationToken) =>
+        RunProtocolAsync(
+            configuration,
+            prompt,
+            policy,
+            Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR"),
             serverInput,
             serverOutput,
             batonOutput,
@@ -490,6 +512,7 @@ public static class CodexAppServerBroker
         CodexBrokerConfiguration configuration,
         string prompt,
         CodexDynamicToolPolicy policy,
+        string? grantDecisionOutputDirectory,
         TextWriter serverInput,
         TextReader serverOutput,
         TextWriter batonOutput,
@@ -549,7 +572,8 @@ public static class CodexAppServerBroker
             if (message["id"] is not null && message["method"]?.GetValue<string>() == "item/tool/call")
             {
                 await HandleDynamicToolCallAsync(
-                    message, policy, serverInput, batonOutput, cancellationToken).ConfigureAwait(false);
+                    message, policy, grantDecisionOutputDirectory, serverInput, batonOutput, cancellationToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
@@ -762,6 +786,7 @@ public static class CodexAppServerBroker
     private static async Task HandleDynamicToolCallAsync(
         JsonObject message,
         CodexDynamicToolPolicy policy,
+        string? grantDecisionOutputDirectory,
         TextWriter serverInput,
         TextWriter batonOutput,
         CancellationToken cancellationToken)
@@ -814,10 +839,11 @@ public static class CodexAppServerBroker
         // The digest is the one already emitted on item.started above, from the same function, so the
         // two lines describing one call carry the same identity.
         var allowed = result.Rule == GrantRules.Allowed;
-        await EmitAsync(batonOutput, new GrantDecision(
+        var decision = new GrantDecision(
             VendorTag, tool, allowed, result.Rule, allowed ? null : result.Text,
-            ArgumentsDigest(argumentsDocument.RootElement), DateTimeOffset.UtcNow).ToJsonNode())
-            .ConfigureAwait(false);
+            ArgumentsDigest(argumentsDocument.RootElement), DateTimeOffset.UtcNow);
+        GrantDecisionLog.Append(grantDecisionOutputDirectory, decision);
+        await EmitAsync(batonOutput, decision.ToJsonNode()).ConfigureAwait(false);
     }
 
     /// <summary>

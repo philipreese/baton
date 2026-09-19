@@ -9,6 +9,7 @@ using Baton.Status;
 using Baton.Tests.Shared;
 using Baton.Vendors;
 using System.Text.Json;
+using System.Text;
 using Xunit;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -200,7 +201,7 @@ public sealed class WorkItemAdvancerTests
         return room;
     }
 
-    private static async Task WriteGrantDecisionAsync(
+    private static async Task<GrantDecision> WriteGrantDecisionAsync(
         string room, string execution, GrantRule rule)
     {
         var outputDirectory = Path.Combine(
@@ -210,6 +211,7 @@ public sealed class WorkItemAdvancerTests
             "codex", "run_command", false, rule, "fixture refusal", "input", Now);
         await File.WriteAllTextAsync(
             Path.Combine(outputDirectory, GrantDecisionLog.FileName), decision.ToJsonLine(), Ct);
+        return decision;
     }
 
     private static async Task<string> WriteArrestedRoomAsync(string home, bool? workspaceChanged)
@@ -683,7 +685,8 @@ public sealed class WorkItemAdvancerTests
                 home,
                 WorkflowOutcome.Succeeded,
                 verdictJson: null,
-                steps: [new WorkflowStatusStepView("implement", "Succeeded", execution)]);
+                steps: [new WorkflowStatusStepView(
+                    "implement", "Succeeded", execution, Usage: new ExecutionUsageView(1, RefusedToolSteps: 1))]);
             await WriteGrantDecisionAsync(room, execution, GrantRules.ShellPattern);
             await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Done);
 
@@ -713,7 +716,16 @@ public sealed class WorkItemAdvancerTests
                 WorkflowOutcome.Failed,
                 verdictJson: null,
                 steps: [new WorkflowStatusStepView("continue", "Failed", execution)]);
-            await WriteGrantDecisionAsync(room, execution, GrantRules.OwnPullRequestOnly);
+            var decision = await WriteGrantDecisionAsync(room, execution, GrantRules.OwnPullRequestOnly);
+            var outputDirectory = Path.Combine(
+                room, ArtifactManager.ArtifactsDirectoryName, "execution_" + execution);
+            var logger = new ExecutionStreamLogger(outputDirectory, maxSizeBytes: 64);
+            logger.AppendStdout(Encoding.UTF8.GetBytes(decision.ToJsonLine() + "\n"));
+            for (var i = 0; i < 4; i++)
+            {
+                logger.AppendStdout(Encoding.UTF8.GetBytes(new string((char)('a' + i), 80)));
+            }
+            Assert.True(File.Exists(Path.Combine(outputDirectory, ExecutionStreamLogger.StdoutRolloverFileName)));
             await SeedAsync(home, WorkStage.Continue, room, QueueItemState.Failed);
 
             var facts = await Advancer(

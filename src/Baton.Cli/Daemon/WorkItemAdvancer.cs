@@ -1666,18 +1666,11 @@ public sealed class WorkItemAdvancer
                 : Directory.EnumerateDirectories(artifactsRoot, "execution_*", SearchOption.TopDirectoryOnly);
             foreach (var executionDirectory in executionDirectories)
             {
-                foreach (var fileName in new[] { GrantDecisionLog.FileName, ExecutionStreamLogger.StdoutLogFileName })
+                var path = Path.Combine(executionDirectory, GrantDecisionLog.FileName);
+                if (File.Exists(path)
+                    && GrantDecisionLog.ContainsDenial(path, GrantRules.OwnPullRequestOnly))
                 {
-                    var path = Path.Combine(executionDirectory, fileName);
-                    if (!File.Exists(path))
-                    {
-                        continue;
-                    }
-
-                    if (FileContainsOwnPullRequestDenial(path))
-                    {
-                        return true;
-                    }
+                    return true;
                 }
             }
         }
@@ -1685,42 +1678,6 @@ public sealed class WorkItemAdvancer
         {
             // An unreadable optional observation is not evidence of a refusal. The lifecycle will
             // retain its ordinary settled-row handling and the operator can inspect the room.
-        }
-
-        return false;
-    }
-
-    private static bool FileContainsOwnPullRequestDenial(string path)
-    {
-        foreach (var line in File.ReadLines(path))
-        {
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                continue;
-            }
-
-            try
-            {
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                if (root.ValueKind == JsonValueKind.Object
-                    && root.TryGetProperty("type", out var type)
-                    && type.ValueKind == JsonValueKind.String
-                    && type.GetString() == GrantDecision.EventType
-                    && root.TryGetProperty("decision", out var decision)
-                    && decision.ValueKind == JsonValueKind.String
-                    && decision.GetString() == "deny"
-                    && root.TryGetProperty("rule", out var rule)
-                    && rule.ValueKind == JsonValueKind.String
-                    && rule.GetString() == GrantRules.OwnPullRequestOnly.Id)
-                {
-                    return true;
-                }
-            }
-            catch (JsonException)
-            {
-                // The stream may contain vendor lines beside the typed grant decision; ignore those.
-            }
         }
 
         return false;
