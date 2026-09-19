@@ -53,6 +53,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<CancellationToken, Task>? _afterFailureMutation;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
     private readonly QueueFleetEventOutbox _fleetOutbox;
+    private readonly ConductorObligationStore _conductorObligations;
     private readonly DaemonLoopDriver _loopDriver;
     private readonly DaemonRoomInventory _roomInventory;
 
@@ -93,7 +94,8 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<string, CancellationToken, Task<string?>>? workspaceHead = null,
         Func<string, IReadOnlyList<string>>? workspaceLocks = null,
         DaemonLoopDriver? loopDriver = null,
-        DaemonRoomInventory? roomInventory = null)
+        DaemonRoomInventory? roomInventory = null,
+        ConductorObligationStore? conductorObligations = null)
     {
         _roomInventory = roomInventory ?? new DaemonRoomInventory();
         _launch = launch ?? QueueLauncher.LaunchAsync;
@@ -107,7 +109,13 @@ public sealed class QueueSchedulerService : BackgroundService
         _afterFailureMutation = afterFailureMutation;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
         _fleetOutbox = new QueueFleetEventOutbox(_appendFleetEvent);
-        _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
+        _conductorObligations = conductorObligations
+            ?? new ConductorObligationStore(FleetEventLog.OpenOperational());
+        _advancer = advancer ?? new WorkItemAdvancer(
+            null,
+            null,
+            appendFleetEvent: _appendFleetEvent,
+            conductorObligations: _conductorObligations);
         _loopDriver = loopDriver ?? new DaemonLoopDriver();
     }
 
@@ -198,6 +206,7 @@ public sealed class QueueSchedulerService : BackgroundService
             // moved out of `launched`; before Decide, because an item it queues for its next round is a
             // candidate this same tick rather than one tick later.
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
+            await ReconcileContinuationObligationsAsync(cancellationToken).ConfigureAwait(false);
 
             QueueSnapshot snapshot;
             using (DaemonLoopDriver.EnterPhase("queue-store"))
@@ -735,6 +744,75 @@ public sealed class QueueSchedulerService : BackgroundService
         foreach (var fact in facts)
         {
             await RecordAsync(fact, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Closes only a continuation whose queue mutation is independently visible. The obligation is
+    /// never a launch instruction; the queue and attempt facts remain the action authority.
+    /// </summary>
+    private async Task ReconcileContinuationObligationsAsync(CancellationToken cancellationToken)
+    {
+        var open = await _conductorObligations.ReconcileAsync(cancellationToken).ConfigureAwait(false);
+        if (open.Count == 0)
+        {
+            return;
+        }
+
+        QueueSnapshot snapshot;
+        using (DaemonLoopDriver.EnterPhase("queue-store"))
+        {
+            snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        }
+
+        foreach (var obligation in open)
+        {
+            if (!string.Equals(obligation.RequestedAction, ConductorContinuation.Action, StringComparison.Ordinal)
+                || !ConductorContinuation.TryParseKey(
+                    obligation.IdempotencyKey, out var tag, out var sourceAttemptId, out var nextRound))
+            {
+                await _conductorObligations.BlockAsync(
+                    obligation.IdempotencyKey,
+                    "the open obligation is not a deterministic queue continuation",
+                    cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            var candidates = snapshot.Items
+                .Where(item => item.Stage == WorkStage.Continue
+                    && string.Equals(item.Tag, tag, StringComparison.Ordinal)
+                    && item.ParentAttemptId == sourceAttemptId
+                    && item.Round == nextRound
+                    && string.Equals(item.Repository, obligation.TargetProject, StringComparison.Ordinal))
+                .ToList();
+            if (candidates.Count == 1)
+            {
+                await _conductorObligations.ObserveActionAsync(
+                    obligation.IdempotencyKey,
+                    ConductorContinuation.ActionProof(candidates[0]),
+                    cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (candidates.Count > 1)
+            {
+                await _conductorObligations.BlockAsync(
+                    obligation.IdempotencyKey,
+                    "durable queue evidence contains more than one continuation for the obligation",
+                    cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            // A crash between the obligation fact and the queue CAS leaves the source row eligible for
+            // the advancer to retry. Once that source evidence disappears, recovery cannot prove that
+            // a continuation mutation is still authorized.
+            if (!snapshot.Items.Any(item => item.AttemptId == sourceAttemptId))
+            {
+                await _conductorObligations.BlockAsync(
+                    obligation.IdempotencyKey,
+                    "the source attempt is no longer present and no continuation queue evidence exists",
+                    cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 

@@ -47,6 +47,7 @@ public sealed class WorkItemAdvancer
     private readonly TimeSpan _boardObservationTimeout;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
     private readonly QueueFleetEventOutbox _fleetOutbox;
+    private readonly ConductorObligationStore _conductorObligations;
 
     public WorkItemAdvancer()
         : this(
@@ -64,7 +65,8 @@ public sealed class WorkItemAdvancer
         Func<string, CancellationToken, Task<string?>>? workspaceHead,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null,
         TimeSpan? boardObservationTimeout = null,
-        Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null)
+        Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
+        ConductorObligationStore? conductorObligations = null)
     {
         _gh = gh ?? new GhCliRunner();
         _workspaceHead = workspaceHead ?? ReadWorkspaceHeadAsync;
@@ -72,6 +74,8 @@ public sealed class WorkItemAdvancer
         _boardObservationTimeout = boardObservationTimeout ?? WorkspaceDeliveryProbe.SpawnTimeout;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
         _fleetOutbox = new QueueFleetEventOutbox(_appendFleetEvent);
+        _conductorObligations = conductorObligations
+            ?? new ConductorObligationStore(FleetEventLog.OpenOperational());
     }
 
     /// <summary>
@@ -468,7 +472,8 @@ public sealed class WorkItemAdvancer
             WorkItemTransitionKind.Stop =>
                 await StopAsync(item, stage, transition, pr, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Dispatch =>
-                await QueueNextRoundAsync(item, stage, transition, pr, verdict, verdictPath, now, room)
+                await QueueNextRoundAsync(
+                        item, stage, transition, pr, verdict, verdictPath, now, room, sentinel, cancellationToken)
                     .ConfigureAwait(false),
             _ => null,
         };
@@ -513,7 +518,7 @@ public sealed class WorkItemAdvancer
     /// not leave an item queued against the previous round's brief, which is the failure mode of writing
     /// the state first.
     /// </summary>
-    private static async Task<QueueDecisionEntry?> QueueNextRoundAsync(
+    private async Task<QueueDecisionEntry?> QueueNextRoundAsync(
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
@@ -521,9 +526,44 @@ public sealed class WorkItemAdvancer
         ReviewVerdict? verdict,
         string? verdictPath,
         DateTimeOffset now,
-        string? room)
+        string? room,
+        WorkflowStatusView? sentinel,
+        CancellationToken cancellationToken)
     {
         var next = transition.NextStage!.Value;
+
+        if (next == WorkStage.Continue)
+        {
+            if (string.IsNullOrWhiteSpace(room) || sentinel is null)
+            {
+                return null;
+            }
+
+            var createdAt = item.LaunchedAt ?? item.AddedAt;
+            if (createdAt is not { } stableCreatedAt)
+            {
+                return null;
+            }
+
+            var request = ConductorContinuation.TryRequest(
+                item,
+                room,
+                sentinel,
+                pr.HeadSha,
+                transition,
+                stableCreatedAt);
+            if (request is null)
+            {
+                return null;
+            }
+
+            var obligation = await _conductorObligations.EnqueueAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            if (obligation.Status != ConductorObligationStatus.Pending)
+            {
+                return null;
+            }
+        }
 
         // The findings travel as TEXT, never the verdict's path -- QueueBriefTemplates' own remarks
         // have the mechanism and spec/baton.md §13 the ruling.

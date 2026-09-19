@@ -305,7 +305,8 @@ public sealed class ConductorObligationStore
             return obligation;
         }
 
-        if (obligation.Status is not (ConductorObligationStatus.Submitted
+        if (obligation.Status is not (ConductorObligationStatus.Pending
+            or ConductorObligationStatus.Submitted
             or ConductorObligationStatus.TransportAcknowledged))
         {
             throw new ConductorObligationStoreException(
