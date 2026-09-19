@@ -6,6 +6,7 @@ using Baton.Runway;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Templates;
+using Baton.Workspaces;
 
 namespace Baton.Cli;
 
@@ -160,6 +161,9 @@ public static class DispatchCommand
                     pair.Value,
                     pair.Value.WorkingDirectory ?? pair.Value.Worktree?.Repository ?? workspace),
                 StringComparer.Ordinal);
+
+            bindings = await CaptureExactFileRestoreBaseAsync(bindings, workspace, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         // #1499: stamped onto every entry -- a composed template's bindings.json holds one per phase.
@@ -1136,6 +1140,7 @@ public static class DispatchCommand
             write,
             shell,
             grant.NetworkAccess ? "network" : "no-network")
+            + (grant.ExactFileRestore ? ", exact-file-restore" : string.Empty)
             + (binding.OriginatingPullRequestOwnership is { } origin
                 ? $", originating-pr {origin.Repository}#{origin.Number} "
                     + $"(conductor-verified: {origin.HeadBranch}@{origin.LaunchHead})"
@@ -1713,5 +1718,35 @@ public static class DispatchCommand
                 ? pair.Value with { PromptTemplate = baseRef, WorkingDirectory = workspaceDirectory }
                 : pair.Value,
             StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Captures the exact-file restore base at the same cold-dispatch trust boundary as the other
+    /// launch identities. A worker-supplied revision is never accepted: only a structured grant can
+    /// request this capability, and the value written to bindings is observed before the room or
+    /// worker exists. Continuations deliberately skip this method and inherit their persisted value.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<string, WorkerBindingConfigEntry>> CaptureExactFileRestoreBaseAsync(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        string workspaceDirectory,
+        CancellationToken cancellationToken)
+    {
+        var captured = new Dictionary<string, WorkerBindingConfigEntry>(bindings, StringComparer.Ordinal);
+        foreach (var (workerName, binding) in bindings)
+        {
+            if (binding.PermissionGrant?.ExactFileRestore != true)
+            {
+                captured[workerName] = binding with { ExactFileRestoreBaseSha = null };
+                continue;
+            }
+
+            var baseSha = binding.Worktree is { } worktree
+                ? WorktreeProvisioner.ResolveBaseCommit(worktree.Repository, worktree.Ref)
+                : await WorkspaceHead.CaptureAsync(
+                    binding.WorkingDirectory ?? workspaceDirectory, cancellationToken).ConfigureAwait(false);
+            captured[workerName] = binding with { ExactFileRestoreBaseSha = baseSha };
+        }
+
+        return captured;
     }
 }

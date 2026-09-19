@@ -275,7 +275,10 @@ public static class WorkerBindingResolver
                 && OriginatingPullRequestAuthorityStore.Read(bindingsFileDirectory) == originating
                     ? originating
                     : null,
-            MemoryAddGrant: entry.MemoryAddGrant);
+            MemoryAddGrant: entry.MemoryAddGrant,
+            EnableExactFileRestoreTool: entry.PermissionGrant?.ExactFileRestore == true
+                && entry.ExactFileRestoreBaseSha is { Length: > 0 },
+            ExactFileRestoreBaseSha: entry.ExactFileRestoreBaseSha);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)
