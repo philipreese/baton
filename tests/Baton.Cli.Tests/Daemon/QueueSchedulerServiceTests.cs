@@ -94,6 +94,95 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_persisted_review_row_is_admitted_with_destination_requirements()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceRequirements = new[]
+            {
+                TaskRequirements.FileWrite,
+                TaskRequirements.Network,
+                TaskRequirements.GitHubWrite,
+                TaskRequirements.ArtifactPrefix + "changes.md",
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("persisted-review", role: "review", scope: null) with
+                {
+                    Stage = WorkStage.Review,
+                    Requirements = sourceRequirements,
+                }],
+            }, Ct);
+            QueueLaunchRequest? launch = null;
+            var service = Service((request, _) =>
+            {
+                launch = request;
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            var persisted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.NotNull(launch);
+            Assert.Equal(QueueItemState.Launched, persisted.State);
+            var destinationRequirements = TaskRequirementPreflight.RequirementsFor(WorkerRoleCatalog.For("review"));
+            Assert.Equal(sourceRequirements, persisted.Requirements);
+            Assert.Equal(destinationRequirements, launch!.Item.Requirements);
+            Assert.Equal(destinationRequirements, persisted.LastAdmission!.Requested);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_narrow_implement_declaration_survives_a_restrictive_ceiling_without_inflation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "narrow-implement-workspace");
+            Directory.CreateDirectory(workspace);
+            ProjectCeilingStore.Set(workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: false,
+                    RunShellCommands: false, NetworkAccess: false), ProjectCeilingStore.DefaultPath);
+            var declaredRequirements = new[] { TaskRequirements.RepositoryRead };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("narrow-implement", scope: null) with
+                {
+                    Workspace = workspace,
+                    Stage = WorkStage.Implement,
+                    Requirements = declaredRequirements,
+                }],
+            }, Ct);
+            QueueLaunchRequest? launch = null;
+            var service = Service((request, _) =>
+            {
+                launch = request;
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            var persisted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.NotNull(launch);
+            Assert.Equal(QueueItemState.Launched, persisted.State);
+            Assert.Equal(declaredRequirements, persisted.Requirements);
+            Assert.Equal(declaredRequirements, launch!.Item.Requirements);
+            Assert.Equal(declaredRequirements, persisted.LastAdmission!.Requested);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_legacy_unpinned_claude_item_fails_without_claiming_a_room_or_launching()
     {
         var home = CreateTempHome();

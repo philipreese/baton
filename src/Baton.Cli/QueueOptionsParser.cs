@@ -235,7 +235,11 @@ public static class QueueOptionsParser
                     skills.Add(TakeValue(args, ref i, "--skill"));
                     continue;
                 case "--require":
-                    requirements.Add(TakeValue(args, ref i, "--require"));
+                    SetRequirement(
+                        selectedStage,
+                        stageSelections,
+                        TakeValue(args, ref i, "--require"),
+                        requirements);
                     continue;
                 case "--stage":
                     selectedStage = ParseStage(TakeValue(args, ref i, "--stage"));
@@ -437,15 +441,36 @@ public static class QueueOptionsParser
                 + "which is the whole point of having a tier table to depart from.");
         }
 
-        foreach (var selection in stageSelections.Values)
+        var normalizedStageSelections = stageSelections.Values.Select(selection =>
         {
-            if (selection.Adapter is null && selection.Model is null && selection.Effort is null)
+            if (selection.Requirements is null)
+            {
+                return selection;
+            }
+
+            try
+            {
+                return selection with { Requirements = TaskRequirements.Normalize(selection.Requirements) };
+            }
+            catch (ArgumentException ex)
+            {
+                throw new CliArgumentException(ex.Message, "pass a supported --require value, or remove the flag.");
+            }
+        }).ToList();
+
+        foreach (var selection in normalizedStageSelections)
+        {
+            if (selection.Adapter is null && selection.Model is null && selection.Effort is null
+                && selection.Requirements is null)
             {
                 throw new CliArgumentException(
                     $"'--stage {WorkStages.Token(selection.Stage)}' needs at least one of '--adapter', '--model' or '--effort'.");
             }
 
-            if (scope is not null && string.IsNullOrWhiteSpace(selection.Reason))
+            var selectionOverridesAnAxis = selection.Adapter is not null
+                || selection.Model is not null
+                || selection.Effort is not null;
+            if (scope is not null && selectionOverridesAnAxis && string.IsNullOrWhiteSpace(selection.Reason))
             {
                 throw new CliArgumentException(
                     $"A '{WorkStages.Token(selection.Stage)}' stage selection that overrides its tier needs '--reason <why>'.");
@@ -492,9 +517,28 @@ public static class QueueOptionsParser
         return new QueueOptions(
             QueueVerb.Add, tag, role, spec, issue, workspace, scope, adapter, model, effort,
             timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle,
-            StageSelections: lifecycle ? stageSelections.Values.ToList() : null, LifecyclePin: lifecyclePin,
+            StageSelections: lifecycle ? normalizedStageSelections : null, LifecyclePin: lifecyclePin,
             Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements,
             DeclaredTaskSize: DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale));
+    }
+
+    private static void SetRequirement(
+        WorkStage? stage,
+        IDictionary<WorkStage, QueueStageSelection> selections,
+        string value,
+        ICollection<string> ordinaryRequirements)
+    {
+        if (stage is not { } selected)
+        {
+            ordinaryRequirements.Add(value);
+            return;
+        }
+
+        selections.TryGetValue(selected, out var existing);
+        selections[selected] = (existing ?? new QueueStageSelection { Stage = selected }) with
+        {
+            Requirements = (existing?.Requirements ?? []).Append(value).ToList(),
+        };
     }
 
     private static void SetAdapter(

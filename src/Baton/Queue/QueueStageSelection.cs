@@ -16,6 +16,13 @@ public sealed record QueueStageSelection
 
     public string? Effort { get; init; }
 
+    /// <summary>
+    /// Explicit capabilities required by this stage in addition to the destination role's grant.
+    /// Requirements belong to the stage selection so a completed stage's declaration cannot be
+    /// mistaken for a requirement of a later stage.
+    /// </summary>
+    public IReadOnlyList<string>? Requirements { get; init; }
+
     /// <summary>Why this stage departs from its role/scope tier, when it does.</summary>
     public string? Reason { get; init; }
 }

@@ -1,9 +1,11 @@
+using Baton.Cli;
 using Baton.Cli.Daemon;
 using Baton.Accounting;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Tests.Shared;
+using Baton.Vendors;
 using System.Text.Json;
 using Xunit;
 
@@ -211,7 +213,8 @@ public sealed class WorkItemAdvancerTests
     private static async Task<QueueItem> SeedAsync(
         string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0,
         bool? automaticFixUsed = false, IReadOnlyList<QueueStageSelection>? stageSelections = null,
-        FleetAttemptId? attemptId = null, DateTimeOffset? launchedAt = null)
+        FleetAttemptId? attemptId = null, DateTimeOffset? launchedAt = null,
+        IReadOnlyList<string>? requirements = null)
     {
         var workspace = Path.Combine(home, "w1934");
         Directory.CreateDirectory(workspace);
@@ -238,6 +241,7 @@ public sealed class WorkItemAdvancerTests
             LaunchedAt = launchedAt,
             Instructions = "Build the lifecycle.",
             StageSelections = stageSelections,
+            Requirements = requirements,
         };
 
         await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
@@ -570,7 +574,26 @@ public sealed class WorkItemAdvancerTests
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
-            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            var staleRequirements = new[]
+            {
+                TaskRequirements.FileWrite,
+                TaskRequirements.Network,
+                TaskRequirements.GitHubWrite,
+                TaskRequirements.ArtifactPrefix + "changes.md",
+            };
+            var seeded = await SeedAsync(
+                home,
+                WorkStage.Implement,
+                room,
+                stageSelections:
+                [
+                    new QueueStageSelection
+                    {
+                        Stage = WorkStage.Review,
+                        Requirements = [TaskRequirements.GitHubRead],
+                    },
+                ],
+                requirements: staleRequirements);
             await QueueStore.MutateAsync(
                 BatonPaths.QueueFile,
                 state => state with
@@ -584,6 +607,8 @@ public sealed class WorkItemAdvancerTests
                             WorkerAssignment = new FrozenWorkerAssignment(
                                 "implement-decision", "codex", "gpt-5.6-terra", "high", "pool-hash",
                                 "legacy-single-candidate", "Frozen for implementation.", Now),
+                            LastAdmission = new TaskRequirementAdmission(
+                                staleRequirements, staleRequirements, TaskRequirementAdmission.Admitted),
                         },
                     ],
                 },
@@ -601,6 +626,17 @@ public sealed class WorkItemAdvancerTests
             Assert.Null(item.RoomDirectory);
             Assert.Null(item.WorkerAssignment);
             Assert.Null(item.MemoryAddGrant);
+            Assert.Null(item.LastAdmission);
+            var expectedReviewRequirements = TaskRequirementPreflight.RequirementsFor(
+                WorkerRoleCatalog.For("review"), [TaskRequirements.GitHubRead]);
+            Assert.Equal(expectedReviewRequirements, item.Requirements);
+            Assert.DoesNotContain(TaskRequirements.FileWrite, item.Requirements!);
+            Assert.DoesNotContain(TaskRequirements.Network, item.Requirements!);
+            Assert.DoesNotContain(TaskRequirements.GitHubWrite, item.Requirements!);
+            Assert.DoesNotContain(TaskRequirements.ArtifactPrefix + "changes.md", item.Requirements!);
+            Assert.Equal(
+                TaskRequirementAdmission.Admitted,
+                TaskRequirementPreflight.Evaluate(item, WorkerRoleCatalog.For("review"), false).Result);
             Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
 
             var reviewTier = new QueueTierResolution(
@@ -1508,6 +1544,9 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(WorkStage.Fix, afterBlock.Stage);
             Assert.Equal(Path.Combine(reviewRoom, "verdict.json"), afterBlock.LastVerdict);
             Assert.Equal("gpt-6-astra", afterBlock.StageSelections!.Single(s => s.Stage == WorkStage.Fix).Model);
+            Assert.Equal(
+                TaskRequirementPreflight.RequirementsFor(WorkerRoleCatalog.For("implement")),
+                afterBlock.Requirements);
 
             // That fix lane settles cleanly with its work pushed, and produces no verdict of its own.
             var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
@@ -1529,6 +1568,9 @@ public sealed class WorkItemAdvancerTests
             var item = await ReadBackAsync();
             Assert.Equal(WorkStage.ReReview, item.Stage);
             Assert.Equal("gpt-5.6-sol", item.StageSelections!.Single(s => s.Stage == WorkStage.ReReview).Model);
+            Assert.Equal(
+                TaskRequirementPreflight.RequirementsFor(WorkerRoleCatalog.For("review")),
+                item.Requirements);
 
             var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
             Assert.Contains("Re-review PR #77", brief, StringComparison.Ordinal);

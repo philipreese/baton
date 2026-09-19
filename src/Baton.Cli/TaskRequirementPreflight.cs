@@ -85,6 +85,49 @@ internal static class TaskRequirementPreflight
             : new TaskRequirementAdmission(requested, effectiveGrant, TaskRequirementAdmission.Refused, missing, VendorUsage: 0);
     }
 
+    /// <summary>
+    /// Projects a persisted lifecycle row's declaration for the stage that is about to launch.
+    /// This is intentionally an evaluation-time view: the queue row remains historical, while
+    /// admission, launch options and the current admission status all see the destination stage.
+    /// </summary>
+    internal static QueueItem NormalizeLifecycleRequirements(QueueItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+
+        if (item.Stage is not { } stage || WorkStages.IsTerminal(stage) || item.Requirements is null)
+        {
+            return item;
+        }
+
+        var destinationRole = WorkerRoleCatalog.For(WorkStages.RoleFor(stage));
+        var destinationSelection = QueueTierTable.SelectionForStage(item, stage).Selection;
+        if (stage == WorkStage.Implement && destinationSelection?.Requirements is null)
+        {
+            return item;
+        }
+
+        return item with
+        {
+            Requirements = RequirementsFor(destinationRole, destinationSelection?.Requirements),
+        };
+    }
+
+    /// <summary>
+    /// Materializes the canonical declaration for a lifecycle destination. The role grant and its
+    /// declared outputs are the baseline; only requirements explicitly attached to that stage may
+    /// add to it.
+    /// </summary>
+    internal static IReadOnlyList<string> RequirementsFor(
+        WorkerRole role, IEnumerable<string>? explicitRequirements = null)
+    {
+        ArgumentNullException.ThrowIfNull(role);
+
+        var effectiveGrant = EffectiveGrant(role.Grant, role.Outputs.Select(output => output.Name));
+        return explicitRequirements is null
+            ? effectiveGrant
+            : TaskRequirements.Normalize(effectiveGrant.Concat(explicitRequirements));
+    }
+
     private static IReadOnlyList<string> EffectiveGrant(PermissionGrant grant, IEnumerable<string> declaredOutputs)
     {
         var capabilities = new List<string>();
