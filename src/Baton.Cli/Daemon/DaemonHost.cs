@@ -37,7 +37,7 @@ public static class DaemonHost
     /// arrives in-process, so a test calling this method directly would hang forever.</summary>
     internal static async Task RunDaemonAsync(string[] args, Action<IHost>? onHostBuilt)
     {
-        var noMutex = args.Contains("--no-mutex");
+        var noMutex = DaemonOptionsParser.Parse(args);
         Mutex? mutex = null;
         if (!noMutex)
         {

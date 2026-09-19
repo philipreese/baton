@@ -92,6 +92,71 @@ public sealed class McpCommandTests
         }
     }
 
+    [Fact]
+    public void McpOptionsParser_EmptyArgs_ParsesDefaults()
+    {
+        var options = McpOptionsParser.Parse([]);
+        Assert.Null(options.CaptureFilePath);
+        Assert.False(options.EnableMemoryProposalTool);
+        Assert.False(options.EnableFleetStatusTool);
+        Assert.False(options.EnableRoomDetailTool);
+    }
+
+    [Fact]
+    public void McpOptionsParser_ValidFlags_ParsesCorrectly()
+    {
+        var options = McpOptionsParser.Parse([
+            "--capture-file", "capture.json",
+            "--memory-proposal-tool",
+            "--fleet-status-tool",
+            "--room-detail-tool",
+        ]);
+        Assert.Equal("capture.json", options.CaptureFilePath);
+        Assert.True(options.EnableMemoryProposalTool);
+        Assert.True(options.EnableFleetStatusTool);
+        Assert.True(options.EnableRoomDetailTool);
+    }
+
+    [Fact]
+    public void McpOptionsParser_UnexpectedPositionalArgument_RejectsWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => McpOptionsParser.Parse(["status"]));
+        Assert.Contains("Unexpected argument 'status'", ex.Message);
+        Assert.Contains(McpOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public void McpOptionsParser_UnknownOption_RejectsWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => McpOptionsParser.Parse(["--unknown"]));
+        Assert.Contains("Unknown option '--unknown'", ex.Message);
+        Assert.Contains(McpOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public void McpOptionsParser_MissingCaptureFileValue_RejectsWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => McpOptionsParser.Parse(["--capture-file"]));
+        Assert.Contains("requires a value", ex.Message);
+        Assert.Contains(McpOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public void McpOptionsParser_DuplicateCaptureFile_RejectsWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => McpOptionsParser.Parse(["--capture-file", "a", "--capture-file", "b"]));
+        Assert.Contains("may only be specified once", ex.Message);
+        Assert.Contains(McpOptionsParser.Usage, ex.Message);
+    }
+
+    [Fact]
+    public void McpOptionsParser_DuplicateToolFlag_RejectsWithUsage()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => McpOptionsParser.Parse(["--fleet-status-tool", "--fleet-status-tool"]));
+        Assert.Contains("may only be specified once", ex.Message);
+        Assert.Contains(McpOptionsParser.Usage, ex.Message);
+    }
+
     private static async Task<(int ExitCode, string Stderr)> RunWithOutputDirectory(string outputDirectory)
     {
         using var scope = BatonEnvironmentSnapshot.BeginScope(
