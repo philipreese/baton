@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.54.1](https://github.com/philipreese/baton/compare/v0.54.0...v0.54.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* **cli:** Reject unexpected daemon positional arguments before startup ([#2422](https://github.com/philipreese/baton/issues/2422)) ([be09978](https://github.com/philipreese/baton/commit/be09978e869d98b25f47c072c40b9329e1ffe1d5))
+
 ## [0.54.0](https://github.com/philipreese/baton/compare/v0.53.0...v0.54.0) (2026-09-19)
 
 
