@@ -367,15 +367,21 @@ public sealed class QueueSchedulerService : BackgroundService
                     return interval;
                 }
 
-                // #2142: imported and hand-edited legacy rows bypass queue add, so apply the same
-                // final-tuple policy before claiming a room or spawning a lane.
-                if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+                // Imported and hand-edited legacy rows bypass queue add, so apply the same complete
+                // model/effort admission before claiming a room or spawning a lane. A deterministic
+                // refusal is settled as failed here, which gives it stable evidence and no retry.
+                try
                 {
-                    var remedy = WorkerInvocationModelPolicy.TryInvocation(tier.Adapter) is { } suggestion
-                        ? $" Re-add the item with {suggestion}"
+                    WorkerInvocationValidation.Validate(
+                        tier.Adapter, tier.Model, null, tier.Effort, WorkerAdapterRegistry.Default);
+                }
+                catch (CliArgumentException ex)
+                {
+                    var remedy = ex.TryInvocation is { Length: > 0 } suggestion
+                        ? $" {suggestion}"
                         : string.Empty;
                     await FailAsync(
-                        item, refusal + remedy,
+                        item, ex.Message + remedy,
                         room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
                     return interval;
                 }

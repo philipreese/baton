@@ -191,12 +191,13 @@ public static class QueueCommand
                 "choose a role whose grant supplies the requirement, or amend --require before queueing the task.");
         }
 
-        // #2142: queue admission uses the already-resolved tuple the launcher will forward, not the
-        // raw item fields and not RoleDispatch's display-only stamp. Refuse before the early tag read,
-        // spec copy, worktree provision, or queue mutation so a bad request leaves no queue side effect.
-        if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+        // Admission uses the already-resolved tuple the launcher will forward. Refuse before the
+        // early tag read, spec copy, worktree provision, or queue mutation so a bad request leaves
+        // no queue side effect.
+        if (tier.Adapter is { } resolvedAdapter)
         {
-            throw WorkerInvocationModelPolicy.Refusal(refusal, tier.Adapter);
+            WorkerInvocationValidation.Validate(
+                resolvedAdapter, tier.Model, null, tier.Effort, WorkerAdapterRegistry.Default);
         }
 
         // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
@@ -2076,11 +2077,6 @@ public static class QueueCommand
                 $"--model '{options.Model}' is known by {string.Join(", ", adapters)}, but the resolved {actualAdapter} adapter cannot use it.");
         }
 
-        if (options.Model is not null && options.Adapter is null && tier.Adapter is not null)
-        {
-            ValidateAdapterModel(tier.Adapter, options.Model);
-        }
-
         return (adapter, tier, adapterFromModel, stageSelections);
     }
 
@@ -2130,6 +2126,25 @@ public static class QueueCommand
         return (adapterFromModel ? candidates[0] : adapter, candidates, adapterFromModel);
     }
 
+    private static void ValidateAdapterModel(string adapter, string model)
+    {
+        var worker = WorkerAdapterRegistry.Default
+            .FirstOrDefault(pair => string.Equals(pair.Key, adapter, StringComparison.OrdinalIgnoreCase)).Value;
+        if (worker is null)
+        {
+            throw new CliArgumentException($"Unknown adapter '{adapter}'.");
+        }
+
+        try
+        {
+            worker.ValidateRequestedModel(model);
+        }
+        catch (BatonFlowException ex)
+        {
+            throw WorkerInvocationModelPolicy.Refusal(ex.Message, adapter);
+        }
+    }
+
     /// <summary>
     /// Every explicitly selected lifecycle stage is validated before worktree provisioning, so an
     /// invalid later review/fix choice cannot survive until it spends a worker launch. The resolver
@@ -2150,51 +2165,21 @@ public static class QueueCommand
 
             var tier = QueueTierTable.ResolveForStage(
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
-            if (WorkerInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+            if (tier.Adapter is { } adapter)
             {
-                throw WorkerInvocationModelPolicy.Refusal(
-                    $"The {WorkStages.Token(stage)} selection is invalid: {refusal}", tier.Adapter);
-            }
-
-            if (tier.Adapter is { } adapter && tier.Model is { } model)
-            {
-                var candidates = WorkerModelCatalog.AdaptersFor(model);
-                if (candidates.Count > 0 && !candidates.Contains(adapter, StringComparer.OrdinalIgnoreCase))
-                {
-                    throw new CliArgumentException(
-                        $"The {WorkStages.Token(stage)} selection's resolved model '{model}' is known by "
-                        + $"{string.Join(", ", candidates)}, but the resolved {adapter} adapter cannot use it.");
-                }
-
                 try
                 {
-                    ValidateAdapterModel(adapter, model);
+                    WorkerInvocationValidation.Validate(
+                        adapter, tier.Model, null, tier.Effort, WorkerAdapterRegistry.Default);
                 }
                 catch (CliArgumentException ex)
                 {
-                    throw new CliArgumentException(
-                        $"The {WorkStages.Token(stage)} selection's resolved {adapter}/{model} tuple is invalid: {ex.Message}");
+                    var message = $"The {WorkStages.Token(stage)} selection is invalid: {ex.Message}";
+                    throw ex.TryInvocation is { } tryInvocation
+                        ? new CliArgumentException(message, tryInvocation)
+                        : new CliArgumentException(message);
                 }
             }
-        }
-    }
-
-    private static void ValidateAdapterModel(string adapter, string model)
-    {
-        var worker = WorkerAdapterRegistry.Default
-            .FirstOrDefault(pair => string.Equals(pair.Key, adapter, StringComparison.OrdinalIgnoreCase)).Value;
-        if (worker is null)
-        {
-            throw new CliArgumentException($"Unknown adapter '{adapter}'.");
-        }
-
-        try
-        {
-            worker.ValidateRequestedModel(model);
-        }
-        catch (BatonFlowException ex)
-        {
-            throw new CliArgumentException(ex.Message);
         }
     }
 

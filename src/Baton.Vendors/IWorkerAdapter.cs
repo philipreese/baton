@@ -88,6 +88,27 @@ public interface IWorkerAdapter : Baton.Outcomes.IFailureClassifier, Baton.Statu
     void ValidateRequestedModel(string model) { }
 
     /// <summary>
+    /// Validates the complete model/effort tuple before a room or worker exists. Implementations keep
+    /// their vendor-specific model catalog and effort rules here; callers use this for queue admission
+    /// and direct dispatch parity.
+    /// </summary>
+    void ValidateRequestedInvocation(string? model, string? effort)
+    {
+        if (model is not null)
+        {
+            ValidateRequestedModel(model);
+        }
+
+        if (effort is not null)
+        {
+            ValidateRequestedEffort(model, effort);
+        }
+    }
+
+    /// <summary>Validates an explicit effort against this adapter's model, if it has such rules.</summary>
+    void ValidateRequestedEffort(string? model, string effort) { }
+
+    /// <summary>
     /// Discovers the capabilities (skills, commands, models) this vendor's CLI actually supports
     /// (M24 Phase 2). Implementations that need to shell out to the CLI itself (e.g. Gemini's
     /// <c>agy models</c>) must do so here, not on the caller's thread — this is async precisely so

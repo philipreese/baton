@@ -143,4 +143,28 @@ public class ModelAndEffortValidationTests
             Assert.True(ex is null, $"agy role '{role.Id}' (model={role.Model}, effort={role.Effort}) was refused: {ex?.Message}");
         }
     }
+
+    [Fact]
+    public void Agy_implements_polymorphic_validate_requested_effort()
+    {
+        IWorkerAdapter adapter = new AgyWorkerAdapter();
+        adapter.ValidateRequestedEffort("gemini-3.1-pro-high", "high");
+        adapter.ValidateRequestedEffort("gemini-3.1-pro-high", "careful");
+
+        Assert.Throws<IncoherentVendorEffortException>(
+            () => adapter.ValidateRequestedEffort("gemini-3.6-flash-low", "high"));
+        Assert.Throws<IncoherentVendorEffortException>(
+            () => adapter.ValidateRequestedEffort("gemini-3.7-flash", "xhigh"));
+    }
+
+    [Fact]
+    public void Agy_implements_polymorphic_validate_requested_invocation()
+    {
+        IWorkerAdapter adapter = new AgyWorkerAdapter();
+        adapter.ValidateRequestedInvocation("gemini-3.7-flash", "high");
+
+        var ex = Assert.Throws<IncoherentVendorEffortException>(
+            () => adapter.ValidateRequestedInvocation("gemini-3.7-flash", null));
+        Assert.Contains("requires --effort", ex.Message);
+    }
 }

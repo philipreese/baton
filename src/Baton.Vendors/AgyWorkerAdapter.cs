@@ -640,29 +640,11 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             args.Add(invocation.Model);
         }
 
+        ValidateRequestedInvocation(invocation.Model, invocation.Effort);
         if (invocation.Effort is { } effort)
         {
-            // #1318: resolve 0023's canonical word (quick/standard/careful/exhaustive) to agy's raw
-            // value first -- careful and exhaustive both collapse to high, a disclosed collapse per
-            // docs/vendor-capabilities.md -- then run the EXISTING model-suffix reconciliation (#1090)
-            // against the resolved raw value, exactly as it already ran against a raw Effort before
-            // this field's domain widened.
-            var resolvedEffort = EffortTierMapping.ResolveForAgy(effort);
-            ReconcileAgyEffort(invocation.Model, resolvedEffort);
             args.Add("--effort");
-            args.Add(resolvedEffort);
-        }
-        else if (RequiresAgyEffort(invocation.Model))
-        {
-            // #1596: a suffix-less gemini model (e.g. `gemini-3.7-flash`) reaches agy itself and is
-            // refused there -- paying for a full spawn first. Refuse up-front instead, naming the
-            // model exactly as agy's own refusal does. The available set printed here is the global
-            // one (AgyEffortValues), not enumerated per model: docs/vendor-capabilities.md's "agy
-            // models" section already records that the grid has holes (`gemini-3.1-pro` has no
-            // `medium`), so this message can overstate a narrower model's real set -- see the PR body.
-            throw new IncoherentVendorEffortException(
-                "agy",
-                $"--model {invocation.Model} requires --effort (available: low, medium, high).");
+            args.Add(EffortTierMapping.ResolveForAgy(effort));
         }
 
         if (invocation.Timeout is { } timeout)
@@ -1206,6 +1188,23 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
                 "agy",
                 $"model '{model}' already encodes effort '{suffix}', which conflicts with --effort '{effort}'. "
                 + "On agy, effort is part of the model name; pass one, or make them agree.");
+        }
+    }
+
+    public void ValidateRequestedEffort(string? model, string effort) =>
+        ReconcileAgyEffort(model, EffortTierMapping.ResolveForAgy(effort));
+
+    public void ValidateRequestedInvocation(string? model, string? effort)
+    {
+        if (effort is { } requestedEffort)
+        {
+            ValidateRequestedEffort(model, requestedEffort);
+        }
+        else if (RequiresAgyEffort(model))
+        {
+            throw new IncoherentVendorEffortException(
+                "agy",
+                $"--model {model} requires --effort (available: low, medium, high).");
         }
     }
 

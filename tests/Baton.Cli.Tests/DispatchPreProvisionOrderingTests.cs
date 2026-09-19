@@ -36,6 +36,7 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
             ["fake"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
             ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
             ["codex"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            ["agy"] = new AgyWorkerAdapter(),
         };
 
     private static readonly IReadOnlyList<RunwayCounter> Counters =
@@ -141,6 +142,38 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
 
             Assert.Contains("standing model policy", refusal.Message, StringComparison.Ordinal);
             Assert.Equal("pass --model sonnet, --model opus, or --model haiku.", refusal.TryInvocation);
+            Assert.False(Directory.Exists(options.RoomDirectoryPath));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task An_incompatible_model_effort_pair_refuses_before_room_or_runway()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-agy-effort-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with
+            {
+                Adapter = "agy",
+                Model = "gemini-3.6-flash-low",
+                Effort = "high",
+            };
+            var runwayCalls = 0;
+            RunwayDecision TrackRunway(string vendor)
+            {
+                runwayCalls++;
+                return Admit(vendor);
+            }
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: TrackRunway));
+
+            Assert.Contains("conflicts with --effort 'high'", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(0, runwayCalls);
             Assert.False(Directory.Exists(options.RoomDirectoryPath));
         }
         finally
