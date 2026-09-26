@@ -46,6 +46,13 @@ class CommandResult:
     stderr: str = ""
 
 
+@dataclass(frozen=True)
+class DaemonIdentity:
+    pid: int
+    executable_path: str
+    version: str
+
+
 Runner = Callable[[List[str]], CommandResult]
 
 
@@ -338,9 +345,8 @@ def install_launcher(deps: Deps, dry_run: bool, print_fn: Callable[[str], None])
 
 
 def daemon_process_query_cmd() -> List[str]:
-    """The CIM query used to find live baton.exe daemon processes (#1773) -- reused by both the
-    pre-restart orphan kill and the post-restart verify, so the two checks can never drift about
-    what counts as 'the daemon process'."""
+    """The CIM query used to find live baton.exe daemon processes for identity and replacement
+    checks, so those checks cannot drift about what counts as 'the daemon process'."""
     return [
         "powershell", "-NoProfile", "-Command",
         "Get-CimInstance -ClassName Win32_Process -Filter \"Name='baton.exe'\" | "
@@ -352,14 +358,12 @@ def daemon_process_query_cmd() -> List[str]:
     ]
 
 
-def find_daemon_processes(deps: Deps) -> List[tuple]:
-    """Returns (pid, executable_path) pairs for every live `baton.exe ... daemon` process. The
-    process tree, not the scheduled task's own reported state, is the source of truth for whether a
-    daemon instance is actually running and where its executable lives."""
+def query_daemon_processes(deps: Deps) -> Optional[List[tuple]]:
+    """Returns daemon processes, or None when the process query itself failed."""
     result = deps.run(daemon_process_query_cmd())
-    processes: List[tuple] = []
     if result.returncode != 0:
-        return processes
+        return None
+    processes: List[tuple] = []
     for line in result.stdout.splitlines():
         line = line.strip()
         if "|" not in line:
@@ -372,19 +376,75 @@ def find_daemon_processes(deps: Deps) -> List[tuple]:
     return processes
 
 
-def kill_orphaned_daemon_processes(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> None:
-    """#1773: `Stop-ScheduledTask` only kills the scheduled task's wrapper process (`powershell.exe
-    -Command "& { baton daemon *>> daemon.log }"`); `baton.exe daemon` itself is a grandchild spawned
-    via `baton.cmd` and survives on the OLD sha, still holding the singleton mutex. The restarted
-    task's new instance then refuses (mutex already held) and exits 0 -- which looks like a clean
-    restart but has silently orphaned the daemon on stale code. Kill every live daemon process by
-    command line before the task is (re)started, so the new instance can actually take the mutex."""
-    if dry_run:
-        print_fn("tool-refresh: [dry-run] would find and stop any orphaned baton.exe daemon process")
-        return
-    for pid, path in find_daemon_processes(deps):
-        deps.run(["powershell", "-NoProfile", "-Command", f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"])
-        print_fn(f"tool-refresh: stopped orphaned baton.exe daemon process pid={pid} path={path}")
+def find_daemon_processes(deps: Deps) -> List[tuple]:
+    """Returns a best-effort daemon listing for diagnostics and compatibility callers."""
+    return query_daemon_processes(deps) or []
+
+
+def daemon_version(deps: Deps, executable_path: str) -> Optional[str]:
+    result = deps.run([executable_path, "--version"])
+    if result.returncode != 0:
+        return None
+    version = result.stdout.strip()
+    return version or None
+
+
+def capture_daemon_identities(deps: Deps) -> Optional[List[DaemonIdentity]]:
+    """Captures PID, executable, and reported version before a scheduler stop."""
+    processes = query_daemon_processes(deps)
+    if processes is None:
+        return None
+    identities: List[DaemonIdentity] = []
+    for pid, executable_path in processes:
+        version = daemon_version(deps, executable_path)
+        if version is None:
+            return None
+        identities.append(DaemonIdentity(pid, executable_path, version))
+    return identities
+
+
+DAEMON_OLD_EXIT_RETRIES = 15
+DAEMON_OLD_EXIT_BACKOFF_S = 1.0
+DAEMON_START_ATTEMPTS = 2
+
+
+def wait_for_daemon_exit(deps: Deps, old_pid: int, print_fn: Callable[[str], None]) -> bool:
+    """Proves that the exact pre-restart PID disappeared without force-killing it."""
+    for attempt in range(DAEMON_OLD_EXIT_RETRIES):
+        old_pid_alive = daemon_pid_is_alive(deps, old_pid)
+        if old_pid_alive is False:
+            waited = attempt * DAEMON_OLD_EXIT_BACKOFF_S
+            print_fn(f"tool-refresh: old daemon pid={old_pid} exited after ~{waited:.0f}s")
+            return True
+        if attempt < DAEMON_OLD_EXIT_RETRIES - 1:
+            deps.sleep(DAEMON_OLD_EXIT_BACKOFF_S)
+    return False
+
+
+def daemon_health_probe_cmd(pid: int) -> List[str]:
+    return [
+        "powershell", "-NoProfile", "-Command",
+        f"$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; "
+        f"if ($null -ne $p) {{ $p.Id }}",
+    ]
+
+
+def daemon_pid_is_alive(deps: Deps, pid: int) -> Optional[bool]:
+    result = deps.run(daemon_health_probe_cmd(pid))
+    if result.returncode != 0:
+        return None
+    return any(line.strip() == str(pid) for line in result.stdout.splitlines())
+
+
+def daemon_health_probe(deps: Deps, pid: int) -> bool:
+    """Cheap liveness probe after identity checks; confirms the accepted process stayed alive."""
+    return daemon_pid_is_alive(deps, pid) is True
+
+
+def path_is_under(path: str, directory: str) -> bool:
+    path_norm = os.path.normcase(os.path.normpath(path))
+    directory_norm = os.path.normcase(os.path.normpath(directory))
+    return path_norm.startswith(directory_norm + os.sep)
 
 
 def daemon_task_state(deps: Deps) -> Optional[str]:
@@ -403,34 +463,42 @@ def daemon_task_state(deps: Deps) -> Optional[str]:
     return result.stdout.strip() or None
 
 
-# #1842: the scheduled task's wrapper (`powershell -Command "& { baton daemon ... }"`) reaches
-# `baton.exe daemon` through the dotnet-tools shim; measured at ~21 s on the operator's machine on
-# 2026-09-04, against the previous 5 x 1 s poll, which declared a healthy refresh failed. The ceiling
-# is what the launch latency needs with margin; the elapsed time is printed so it can be re-tuned
-# from evidence rather than guessed again.
 DAEMON_VERIFY_RETRIES = 30
 DAEMON_VERIFY_BACKOFF_S = 2.0
 
 
 def verify_daemon_started_under(deps: Deps, tool_dir: str, print_fn: Callable[[str], None]) -> bool:
-    """Confirms a NEW baton.exe daemon process is running with an executable path under tool_dir --
-    the just-installed tools/<sha> -- rather than assuming Start-ScheduledTask succeeded just because
-    it returned 0. Polls up to DAEMON_VERIFY_RETRIES x DAEMON_VERIFY_BACKOFF_S since the task's
-    process takes a while to actually launch, and reports how long it took when it does."""
-    # A bare startswith would accept a sibling side-path install too -- tools/abc123 is a prefix of
-    # tools/abc123-1 as strings, even though they are different installed directories. Comparing
-    # against the directory PLUS a trailing separator is what makes this a containment check, not a
-    # string-prefix check (review finding on #1773's first pass).
-    tool_dir_norm = os.path.normcase(os.path.normpath(tool_dir)) + os.sep
-    for attempt in range(DAEMON_VERIFY_RETRIES):
-        for _pid, path in find_daemon_processes(deps):
-            if path and os.path.normcase(os.path.normpath(path)).startswith(tool_dir_norm):
-                waited = attempt * DAEMON_VERIFY_BACKOFF_S
-                print_fn(f"tool-refresh: daemon appeared after ~{waited:.0f}s (poll {attempt + 1} of {DAEMON_VERIFY_RETRIES})")
-                return True
-        if attempt < DAEMON_VERIFY_RETRIES - 1:
+    """Compatibility wrapper for callers that only need the replacement acceptance result."""
+    return verify_daemon_replacement(deps, tool_dir, "", None, print_fn) is not None
+
+
+def verify_daemon_replacement(
+    deps: Deps,
+    tool_dir: str,
+    expected_version: str,
+    old_identity: Optional[DaemonIdentity],
+    print_fn: Callable[[str], None],
+    retries: int = DAEMON_VERIFY_RETRIES,
+) -> Optional[DaemonIdentity]:
+    """Accept one singleton daemon with a new PID, intended path, version, and liveness."""
+    for attempt in range(retries):
+        processes = query_daemon_processes(deps)
+        if processes is not None and len(processes) == 1:
+            pid, executable_path = processes[0]
+            if old_identity is None or pid != old_identity.pid:
+                if path_is_under(executable_path, tool_dir):
+                    reported_version = daemon_version(deps, executable_path)
+                    if (not expected_version or reported_version == expected_version) and daemon_health_probe(deps, pid):
+                        identity = DaemonIdentity(pid, executable_path, reported_version or expected_version)
+                        waited = attempt * DAEMON_VERIFY_BACKOFF_S
+                        print_fn(
+                            f"tool-refresh: daemon appeared after ~{waited:.0f}s "
+                            f"(poll {attempt + 1} of {retries})"
+                        )
+                        return identity
+        if attempt < retries - 1:
             deps.sleep(DAEMON_VERIFY_BACKOFF_S)
-    return False
+    return None
 
 
 def scan_live_room_shas(rooms_root: str) -> Set[str]:
@@ -625,53 +693,116 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
     # Restart the daemon task -- it is a long-running process that only picks up a newly flipped
     # `current` pointer by being restarted; it does not re-resolve it on its own mid-run.
     if sys.platform == "win32" or os.name == "nt":
-        # The daemon has no HTTP listener or other external signal to poll for a new tool head.
-        # #1773: kill any orphaned baton.exe daemon process first (see kill_orphaned_daemon_processes),
-        # then confirm after restart that a fresh instance actually came up under the new tool_dir.
-        kill_orphaned_daemon_processes(deps, dry_run, print_fn)
-
-        daemon_restart_cmd = [
+        daemon_stop_cmd = [
             "powershell", "-NoProfile", "-Command",
-            "Stop-ScheduledTask -TaskName baton-daemon -ErrorAction SilentlyContinue; "
+            "Stop-ScheduledTask -TaskName baton-daemon -ErrorAction SilentlyContinue",
+        ]
+        daemon_start_cmd = [
+            "powershell", "-NoProfile", "-Command",
             "Start-ScheduledTask -TaskName baton-daemon -ErrorAction SilentlyContinue",
         ]
 
         if dry_run:
-            run_step(deps, daemon_restart_cmd, dry_run, print_fn)
+            run_step(deps, daemon_stop_cmd, dry_run, print_fn)
+            run_step(deps, daemon_start_cmd, dry_run, print_fn)
         else:
             # #1777 fix round F1: a machine where the task was never registered, or where it is
             # deliberately Disabled, must not fail the whole refresh over a restart it was never
-            # asked to perform. The orphan kill above still runs regardless -- a stray daemon
-            # process is wrong whether or not the task exists.
+            # asked to perform.
             task_state = daemon_task_state(deps)
             if task_state is None or task_state == "Disabled":
                 reason = "absent" if task_state is None else "Disabled"
                 print_fn(
                     f"tool-refresh: baton-daemon scheduled task is {reason} -- skipped restart and "
-                    "post-restart verify (orphan kill above still ran)"
+                    "post-restart verify"
                 )
             else:
-                run_step(deps, daemon_restart_cmd, dry_run, print_fn)
-                print_fn("tool-refresh: restarted baton-daemon scheduled task")
-
-                if not verify_daemon_started_under(deps, tool_dir, print_fn):
-                    ceiling = DAEMON_VERIFY_RETRIES * DAEMON_VERIFY_BACKOFF_S
-                    # #1842: name what WAS found. The query is anchored on the `daemon` verb, so
-                    # anything listed here really is a daemon instance -- a `baton.exe dispatch ...`
-                    # lane on the old sha never appears and must not be mistaken for an orphan.
-                    found = find_daemon_processes(deps)
-                    if found:
-                        listing = ", ".join(f"pid={pid} path={path}" for pid, path in found)
-                        why = f"daemon processes found, none under the new tool_dir: {listing} -- an orphaned instance on the old sha may still be holding the singleton mutex"
-                    else:
-                        why = "no baton.exe daemon process at all -- the task failed to launch, or it took longer than the ceiling"
+                pre_restart = capture_daemon_identities(deps)
+                if pre_restart is None:
                     print_fn(
-                        f"tool-refresh: no baton.exe daemon process came up under {tool_dir} within "
-                        f"~{ceiling:.0f}s of restarting baton-daemon ({why}). Refusing to declare the "
-                        "refresh done."
+                        "tool-refresh: could not capture the pre-restart daemon PID, executable, and "
+                        "version. Refusing to stop the scheduled task; check the process query and re-run."
                     )
                     return 1
-                print_fn(f"tool-refresh: confirmed baton.exe daemon running under {tool_dir}")
+                if len(pre_restart) > 1:
+                    listing = ", ".join(
+                        f"pid={identity.pid} path={identity.executable_path} version={identity.version}"
+                        for identity in pre_restart
+                    )
+                    print_fn(
+                        f"tool-refresh: found multiple pre-restart daemon identities ({listing}); "
+                        "singleton ownership is already violated. Refusing to restart."
+                    )
+                    return 1
+
+                old_identity = pre_restart[0] if pre_restart else None
+                if old_identity is None:
+                    print_fn("tool-refresh: no pre-restart daemon identity was found")
+                else:
+                    print_fn(
+                        f"tool-refresh: captured old daemon pid={old_identity.pid} "
+                        f"path={old_identity.executable_path} version={old_identity.version}"
+                    )
+
+                stop_result = run_step(deps, daemon_stop_cmd, dry_run=False, print_fn=print_fn)
+                if stop_result.returncode != 0:
+                    print_fn(
+                        f"tool-refresh: scheduled-task stop failed (exit {stop_result.returncode}); "
+                        "the daemon was not restarted. Check Task Scheduler and re-run."
+                    )
+                    return 1
+
+                if old_identity is not None and not wait_for_daemon_exit(deps, old_identity.pid, print_fn):
+                    ceiling = DAEMON_OLD_EXIT_RETRIES * DAEMON_OLD_EXIT_BACKOFF_S
+                    print_fn(
+                        f"tool-refresh: old daemon pid={old_identity.pid} did not exit within "
+                        f"~{ceiling:.0f}s after requesting task stop. Refusing to start or accept a "
+                        "replacement; do not force-kill by default. Check daemon.log/Task Scheduler, "
+                        "close any holder, and re-run tool-refresh."
+                    )
+                    return 1
+
+                replacement: Optional[DaemonIdentity] = None
+                polls_per_attempt = max(1, DAEMON_VERIFY_RETRIES // DAEMON_START_ATTEMPTS)
+                for start_attempt in range(DAEMON_START_ATTEMPTS):
+                    start_result = run_step(deps, daemon_start_cmd, dry_run=False, print_fn=print_fn)
+                    if start_result.returncode != 0:
+                        print_fn(
+                            f"tool-refresh: scheduled-task start attempt {start_attempt + 1} failed "
+                            f"(exit {start_result.returncode})"
+                        )
+                    replacement = verify_daemon_replacement(
+                        deps, tool_dir, version, old_identity, print_fn, retries=polls_per_attempt
+                    )
+                    if replacement is not None:
+                        break
+                    if start_attempt + 1 < DAEMON_START_ATTEMPTS:
+                        print_fn(
+                            "tool-refresh: no healthy replacement appeared after the first task start; "
+                            "retrying Start-ScheduledTask once for an overlap-policy/swallowed start"
+                        )
+
+                if replacement is None:
+                    ceiling = DAEMON_VERIFY_RETRIES * DAEMON_VERIFY_BACKOFF_S
+                    found = find_daemon_processes(deps)
+                    listing = ", ".join(f"pid={pid} path={path}" for pid, path in found) if found else "none"
+                    print_fn(
+                        f"tool-refresh: replacement-start/health timeout: no singleton healthy daemon "
+                        f"under {tool_dir} within ~{ceiling:.0f}s ({listing}). Refusing to declare the "
+                        "refresh done. Check daemon.log, Task Scheduler, the installed tool path, and "
+                        "the singleton lock, then re-run tool-refresh."
+                    )
+                    return 1
+
+                old_text = (
+                    f"pid={old_identity.pid} path={old_identity.executable_path} version={old_identity.version}"
+                    if old_identity is not None else "none"
+                )
+                print_fn(
+                    f"tool-refresh: restarted baton-daemon scheduled task; old identity [{old_text}], "
+                    f"new identity [pid={replacement.pid} path={replacement.executable_path} "
+                    f"version={replacement.version}]"
+                )
 
     # Prune old tool installations
     prune_tools(deps, dry_run, print_fn, keep_count=3)
@@ -970,6 +1101,9 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
         repo_root = _fixture_repo(os.path.join(td, "repo"), "2.3.4")
 
         commands_run: List[List[str]] = []
+        daemon_state = {"phase": "old", "start_calls": 0}
+        old_exe = os.path.join(tools_root, "oldsha", "baton.exe")
+        new_exe = os.path.join(tools_root, "c0ffee11", "baton.exe")
 
         def run(cmd: List[str]) -> CommandResult:
             commands_run.append(cmd)
@@ -985,7 +1119,7 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
                 # Create fake target exe
                 tool_dir = os.path.join(tools_root, "c0ffee11")
                 os.makedirs(tool_dir, exist_ok=True)
-                target_exe = os.path.join(tool_dir, "baton.exe" if (sys.platform == "win32" or os.name == "nt") else "baton")
+                target_exe = new_exe
                 open(target_exe, "w").close()
                 return CommandResult(0)
             if len(cmd) == 2 and cmd[1] == "--version":
@@ -996,9 +1130,22 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
                 return CommandResult(0)
             if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
                 return CommandResult(0, "Ready\n")
+            if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+                return CommandResult(0, "4243\n" if daemon_state["phase"] == "new" else "")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
-                exe_path = os.path.join(tools_root, "c0ffee11", "baton.exe")
-                return CommandResult(0, f"4242|{exe_path}\n")
+                if daemon_state["phase"] == "old":
+                    return CommandResult(0, f"4242|{old_exe}\n")
+                if daemon_state["phase"] == "new":
+                    return CommandResult(0, f"4243|{new_exe}\n")
+                return CommandResult(0, "")
+            if cmd[0] == "powershell" and "Stop-ScheduledTask" in cmd[3]:
+                daemon_state["phase"] = "stopped"
+                return CommandResult(0)
+            if cmd[0] == "powershell" and "Start-ScheduledTask" in cmd[3]:
+                daemon_state["start_calls"] += 1
+                if daemon_state["start_calls"] > 1:
+                    daemon_state["phase"] = "new"
+                return CommandResult(0)
             if cmd[0] == "powershell":
                 return CommandResult(0)
             raise AssertionError(f"unexpected command in refresh selftest: {cmd}")
@@ -1074,22 +1221,25 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
             print("  FAILED: retired-task negative assertion did not detect a synthetic reintroduction")
             ok = False
 
-        # #1773: the orphan-kill query must run BEFORE the task is restarted -- killing after would
-        # let a fresh instance race the still-live orphan for the mutex. There are two Win32_Process
-        # queries in the trace (kill_orphaned_daemon_processes, then verify_daemon_started_under);
-        # the first one is what must precede "Start-ScheduledTask -TaskName baton-daemon".
+        # The old identity is observed, the scheduler is stopped, and only then is the new task
+        # started and verified.
         win32_indexes = [i for i, c in enumerate(powershell_cmds) if "Win32_Process" in c]
-        daemon_restart_index = next(
+        daemon_start_index = next(
             i for i, c in enumerate(powershell_cmds) if "Start-ScheduledTask -TaskName baton-daemon" in c)
-        if not win32_indexes or win32_indexes[0] >= daemon_restart_index:
+        daemon_stop_index = next(
+            i for i, c in enumerate(powershell_cmds) if "Stop-ScheduledTask -TaskName baton-daemon" in c)
+        if not win32_indexes or win32_indexes[0] >= daemon_stop_index or daemon_stop_index >= daemon_start_index:
             print(
-                f"  FAILED: orphan-kill Win32_Process query did not run before the baton-daemon restart. "
+                f"  FAILED: old identity/stop/start ordering was wrong. "
                 f"powershell commands: {powershell_cmds}"
             )
             ok = False
 
-        if not any("confirmed baton.exe daemon running under" in m for m in messages):
-            print(f"  FAILED: refresh did not report a confirmed post-restart daemon process. Messages: {messages}")
+        if not any("old identity [pid=4242" in m and "new identity [pid=4243" in m for m in messages):
+            print(f"  FAILED: refresh did not report old and new daemon identities. Messages: {messages}")
+            ok = False
+        if daemon_state["start_calls"] != 2:
+            print(f"  FAILED: swallowed first start was not retried exactly once: {daemon_state}")
             ok = False
 
     return ok
@@ -1150,8 +1300,8 @@ def _selftest_fail_closed_on_daemon_verify_failure() -> bool:
         if code == 0:
             print("  FAILED: refresh exited 0 despite no baton.exe daemon process coming up after restart")
             ok = False
-        if not any("no baton.exe daemon process came up under" in m for m in messages):
-            print(f"  FAILED: refresh did not report the daemon-verify failure loudly. Messages: {messages}")
+        if not any("replacement-start/health timeout" in m for m in messages):
+            print(f"  FAILED: refresh did not report the replacement timeout loudly. Messages: {messages}")
             ok = False
 
     return ok
@@ -1172,8 +1322,8 @@ def _selftest_daemon_verify_waits_for_a_slow_launch() -> bool:
         nuget_root = os.path.join(td, "nuget")
         repo_root = _fixture_repo(os.path.join(td, "repo"), "6.6.6")
         tool_dir = os.path.join(tools_root, "6060606")
-        # First Win32_Process query is the pre-restart orphan kill; the daemon then appears on the
-        # 8th verify poll (well past the old 5-poll ceiling, well inside the new one).
+        # The first query captures the old identity; the replacement appears on a later query,
+        # beyond the old short polling ceiling.
         appear_on_query = 1 + 8
         queries = {"n": 0}
 
@@ -1197,10 +1347,14 @@ def _selftest_daemon_verify_waits_for_a_slow_launch() -> bool:
                 return CommandResult(0)
             if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
                 return CommandResult(0, "Ready\n")
+            if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+                return CommandResult(0, "4243\n" if queries["n"] >= appear_on_query else "")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                 queries["n"] += 1
+                if queries["n"] == 1:
+                    return CommandResult(0, f"4242|{os.path.join(td, 'old', 'baton.exe')}\n")
                 if queries["n"] >= appear_on_query:
-                    return CommandResult(0, f"4242|{os.path.join(tool_dir, 'baton.exe')}\n")
+                    return CommandResult(0, f"4243|{os.path.join(tool_dir, 'baton.exe')}\n")
                 return CommandResult(0, "")
             if cmd[0] == "powershell":
                 return CommandResult(0)
@@ -1425,6 +1579,7 @@ def _selftest_rerefresh_skips_reinstall_when_sha_already_verified() -> bool:
         repo_root = _fixture_repo(os.path.join(td, "repo"), "7.7.7")
 
         install_calls: List[List[str]] = []
+        daemon_state = {"running": True, "pid": 4343}
 
         def run(cmd: List[str]) -> CommandResult:
             if cmd[:3] == ["git", "-C", repo_root] and cmd[3:5] == ["rev-parse", "--short"]:
@@ -1450,7 +1605,16 @@ def _selftest_rerefresh_skips_reinstall_when_sha_already_verified() -> bool:
                 return CommandResult(0, "Ready\n")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                 exe_path = os.path.join(tools_root, "deadbeef", "baton.exe")
-                return CommandResult(0, f"4343|{exe_path}\n")
+                return CommandResult(0, f"{daemon_state['pid']}|{exe_path}\n" if daemon_state["running"] else "")
+            if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+                return CommandResult(0, f"{daemon_state['pid']}\n" if daemon_state["running"] else "")
+            if cmd[0] == "powershell" and "Stop-ScheduledTask" in cmd[3]:
+                daemon_state["running"] = False
+                return CommandResult(0)
+            if cmd[0] == "powershell" and "Start-ScheduledTask" in cmd[3]:
+                daemon_state["pid"] += 1
+                daemon_state["running"] = True
+                return CommandResult(0)
             if cmd[0] == "powershell":
                 return CommandResult(0)
             raise AssertionError(f"unexpected command in re-refresh selftest: {cmd}")
@@ -1522,6 +1686,7 @@ def _selftest_rerefresh_sidepaths_when_live_and_broken() -> bool:
 
         install_calls: List[List[str]] = []
         installed_dirs: List[str] = []
+        daemon_state = {"running": False, "pid": 4444}
 
         def run(cmd: List[str]) -> CommandResult:
             if cmd[:3] == ["git", "-C", repo_root] and cmd[3:5] == ["rev-parse", "--short"]:
@@ -1552,7 +1717,16 @@ def _selftest_rerefresh_sidepaths_when_live_and_broken() -> bool:
                 return CommandResult(0, "Ready\n")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                 exe_path = os.path.join(installed_dirs[-1], "baton.exe") if installed_dirs else ""
-                return CommandResult(0, f"4444|{exe_path}\n" if exe_path else "")
+                return CommandResult(0, f"{daemon_state['pid']}|{exe_path}\n" if exe_path and daemon_state["running"] else "")
+            if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+                return CommandResult(0, f"{daemon_state['pid']}\n" if daemon_state["running"] else "")
+            if cmd[0] == "powershell" and "Stop-ScheduledTask" in cmd[3]:
+                daemon_state["running"] = False
+                return CommandResult(0)
+            if cmd[0] == "powershell" and "Start-ScheduledTask" in cmd[3]:
+                daemon_state["pid"] += 1
+                daemon_state["running"] = True
+                return CommandResult(0)
             if cmd[0] == "powershell":
                 return CommandResult(0)
             raise AssertionError(f"unexpected command in side-path selftest: {cmd}")
@@ -1650,43 +1824,42 @@ def _selftest_install_launcher_fails_closed_on_stale_exe() -> bool:
     return ok
 
 
-def _selftest_daemon_orphan_kill_and_verify() -> bool:
-    """#1773: `Stop-ScheduledTask` only kills the scheduled task's wrapper, not the `baton.exe daemon`
-    grandchild -- an orphan on the old sha keeps holding the singleton mutex, so the restarted task's
-    new instance silently refuses. Proves kill_orphaned_daemon_processes stops whatever the CIM query
-    reports (and does nothing under --dry-run), and that verify_daemon_started_under only accepts a
-    process whose path is actually under the just-installed tool_dir."""
+def _selftest_daemon_identity_and_verify() -> bool:
+    """Identity capture, delayed old exit, and replacement path/version/health acceptance."""
     ok = True
 
-    stop_calls: List[List[str]] = []
+    query_count = {"n": 0}
 
-    def run_with_orphan(cmd: List[str]) -> CommandResult:
+    def run_delayed_exit(cmd: List[str]) -> CommandResult:
         if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
-            return CommandResult(0, "4321|C:\\baton\\tools\\oldsha\\baton.exe\n")
-        if cmd[0] == "powershell" and "Stop-Process" in cmd[3]:
-            stop_calls.append(cmd)
-            return CommandResult(0)
+            query_count["n"] += 1
+            if query_count["n"] < 3:
+                return CommandResult(0, "4321|C:\\baton\\tools\\oldsha\\baton.exe\n")
+            return CommandResult(0, "")
+        if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+            query_count["n"] += 1
+            return CommandResult(0, "4321\n" if query_count["n"] < 3 else "")
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return CommandResult(0, "1.0.0\n")
         raise AssertionError(f"unexpected command: {cmd}")
 
-    deps = Deps(run=run_with_orphan)
+    deps = Deps(run=run_delayed_exit, sleep=lambda _seconds: None)
     messages: List[str] = []
-    kill_orphaned_daemon_processes(deps, dry_run=False, print_fn=messages.append)
-    if not any("Stop-Process -Id 4321" in " ".join(c) for c in stop_calls):
-        print(f"  FAILED: kill_orphaned_daemon_processes did not stop the orphaned pid. calls: {stop_calls}")
+    identities = capture_daemon_identities(deps)
+    if identities != [DaemonIdentity(4321, "C:\\baton\\tools\\oldsha\\baton.exe", "1.0.0")]:
+        print(f"  FAILED: pre-restart identity capture returned {identities!r}")
         ok = False
-    if not any("4321" in m for m in messages):
-        print(f"  FAILED: kill_orphaned_daemon_processes did not log the stopped pid. messages: {messages}")
+    if not wait_for_daemon_exit(deps, 4321, messages.append):
+        print("  FAILED: delayed old daemon exit was not observed")
         ok = False
-
-    def run_should_not_be_called(cmd: List[str]) -> CommandResult:
-        raise AssertionError(f"--dry-run must not run commands, got: {cmd}")
-
-    deps_dry = Deps(run=run_should_not_be_called)
-    kill_orphaned_daemon_processes(deps_dry, dry_run=True, print_fn=lambda m: None)
 
     def run_wrong_dir(cmd: List[str]) -> CommandResult:
         if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
             return CommandResult(0, "9999|C:\\baton\\tools\\othersha\\baton.exe\n")
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return CommandResult(0, "2.0.0\n")
+        if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+            return CommandResult(0, "9999\n")
         raise AssertionError(f"unexpected command: {cmd}")
 
     deps2 = Deps(run=run_wrong_dir, sleep=lambda s: None)
@@ -1697,6 +1870,10 @@ def _selftest_daemon_orphan_kill_and_verify() -> bool:
     def run_right_dir(cmd: List[str]) -> CommandResult:
         if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
             return CommandResult(0, "8888|C:\\baton\\tools\\newsha\\baton.exe\n")
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return CommandResult(0, "2.0.0\n")
+        if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+            return CommandResult(0, "8888\n")
         raise AssertionError(f"unexpected command: {cmd}")
 
     deps3 = Deps(run=run_right_dir, sleep=lambda s: None)
@@ -1773,19 +1950,72 @@ def _selftest_daemon_task_absent_or_disabled_skips_restart_and_verify() -> bool:
             if not any(f"baton-daemon scheduled task is {label}" in m for m in messages):
                 print(f"  FAILED ({label}): no skip message naming the task state was printed. Messages: {messages}")
                 ok = False
-            # Orphan-kill is unconditional: an orphan on the old sha is wrong whether or not the task
-            # is registered, so the Win32_Process query must run even on the skip paths.
-            if not any("Win32_Process" in c for c in powershell_cmds):
-                print(f"  FAILED ({label}): orphan-kill Win32_Process query did not run on the skip path. powershell commands: {powershell_cmds}")
+            if any("Win32_Process" in c for c in powershell_cmds):
+                print(f"  FAILED ({label}): daemon identity query ran despite the task being skipped. powershell commands: {powershell_cmds}")
                 ok = False
+
+    return ok
+
+
+def _selftest_daemon_restart_failure_modes() -> bool:
+    """Covers bounded old-exit timeout and rejection of same-PID, wrong-path, and unhealthy replacements."""
+    ok = True
+    old_path = "C:\\baton\\tools\\oldsha\\baton.exe"
+    new_path = "C:\\baton\\tools\\newsha\\baton.exe"
+    old_identity = DaemonIdentity(7001, old_path, "1.0.0")
+
+    def run_old_stuck(cmd: List[str]) -> CommandResult:
+        if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
+            return CommandResult(0, f"7001|{old_path}\n")
+        if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+            return CommandResult(0, "7001\n")
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return CommandResult(0, "1.0.0\n")
+        raise AssertionError(f"unexpected command in old-exit-timeout selftest: {cmd}")
+
+    if wait_for_daemon_exit(Deps(run=run_old_stuck, sleep=lambda _seconds: None), 7001, lambda _m: None):
+        print("  FAILED: old-exit timeout accepted a still-live old PID")
+        ok = False
+
+    def run_replacement(cmd: List[str], health: bool = True, pid: int = 7002, path: str = new_path) -> CommandResult:
+        if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
+            return CommandResult(0, f"{pid}|{path}\n")
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return CommandResult(0, "2.0.0\n")
+        if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
+            return CommandResult(0, f"{pid}\n" if health else "")
+        raise AssertionError(f"unexpected command in replacement selftest: {cmd}")
+
+    replacement_deps = Deps(run=run_replacement, sleep=lambda _seconds: None)
+    if verify_daemon_replacement(replacement_deps, "C:\\baton\\tools\\newsha", "2.0.0", old_identity, lambda _m: None, retries=1) is None:
+        print("  FAILED: healthy replacement was rejected in failure-mode selftest")
+        ok = False
+    if verify_daemon_replacement(
+        Deps(run=lambda cmd: run_replacement(cmd, pid=7001), sleep=lambda _seconds: None),
+        "C:\\baton\\tools\\newsha", "2.0.0", old_identity, lambda _m: None, retries=1
+    ) is not None:
+        print("  FAILED: same-PID replacement was accepted")
+        ok = False
+    if verify_daemon_replacement(
+        Deps(run=lambda cmd: run_replacement(cmd, health=False), sleep=lambda _seconds: None),
+        "C:\\baton\\tools\\newsha", "2.0.0", old_identity, lambda _m: None, retries=1
+    ) is not None:
+        print("  FAILED: unhealthy replacement was accepted")
+        ok = False
+    if verify_daemon_replacement(
+        Deps(run=lambda cmd: run_replacement(cmd, path="C:\\baton\\tools\\othersha\\baton.exe"), sleep=lambda _seconds: None),
+        "C:\\baton\\tools\\newsha", "2.0.0", old_identity, lambda _m: None, retries=1
+    ) is not None:
+        print("  FAILED: wrong-path replacement was accepted")
+        ok = False
 
     return ok
 
 
 def _selftest_daemon_query_matches_verb_position_not_anywhere() -> bool:
     """#1777 fix round F2: `-like '*daemon*'` matched the substring anywhere on the command line, so
-    a `baton dispatch --spec-text "... daemon ..."` process would be wrongly Stop-Process'd on every
-    refresh. The query must anchor on the verb position (first arg after the executable)."""
+    a `baton dispatch --spec-text "... daemon ..."` process would be mistaken for a daemon during
+    refresh identity checks. The query must anchor on the verb position (first arg after the executable)."""
     ok = True
     query = daemon_process_query_cmd()[-1]
     if "*daemon*" in query:
@@ -1811,10 +2041,11 @@ def selftest() -> int:
         ("re-refresh skips reinstall when the SHA is already verified", _selftest_rerefresh_skips_reinstall_when_sha_already_verified),
         ("re-refresh side-paths when live and broken", _selftest_rerefresh_sidepaths_when_live_and_broken),
         ("install_launcher fails closed on a stale exe", _selftest_install_launcher_fails_closed_on_stale_exe),
-        ("daemon orphan-kill stops the reported pid, and verify only accepts the right tool_dir", _selftest_daemon_orphan_kill_and_verify),
+        ("daemon identity capture, delayed exit, and replacement verification", _selftest_daemon_identity_and_verify),
         ("fail closed when no daemon process comes up under the new tool_dir after restart", _selftest_fail_closed_on_daemon_verify_failure),
         ("keep polling for a slow daemon launch and report how long it took", _selftest_daemon_verify_waits_for_a_slow_launch),
         ("daemon task absent/disabled skips restart and verify, refresh still exits 0", _selftest_daemon_task_absent_or_disabled_skips_restart_and_verify),
+        ("daemon restart failure modes are bounded and fail closed", _selftest_daemon_restart_failure_modes),
         ("daemon process query anchors on the verb position, not '*daemon*' anywhere", _selftest_daemon_query_matches_verb_position_not_anywhere),
     ]
     ok = True
