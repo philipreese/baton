@@ -221,6 +221,9 @@ public static class RedispatchCommand
                 Workstream = (options.WorkstreamSpecified || options.Workstream is not null) ? options.Workstream : parentEntry.Workstream,
                 ToolSha = BatonPaths.TryResolveCurrentToolSha() ?? parentEntry.ToolSha,
                 DeclaredTaskSize = parentEntry.DeclaredTaskSize,
+                // The exact-file grant is bound to the conductor-captured parent base. Materializing
+                // an amended brief must not recapture it from the child workspace.
+                ExactFileRestoreBaseSha = parentEntry.ExactFileRestoreBaseSha,
                 // #1151 is deliberately NOT restated here: RebuildFromAmendedSpecAsync hands the same
                 // ResolveSkills list to RoleSpecMaterializer, and RoleDispatch.ToBinding sets Skills from
                 // it (including the --skill "" clear, which resolves to an empty list and lands as null).
