@@ -57,6 +57,8 @@ public static class WorkerBindingConfigParser
                 throw new WorkerBindingConfigException($"Worker-binding config entry for '{workerName}'{location} is missing 'Adapter'.");
             }
 
+            AttachmentReadInputs.ValidateNames(entry.AttachmentNames);
+
             if (entry.Contract is null)
             {
                 throw new WorkerBindingConfigException($"Worker-binding config entry for '{workerName}'{location} is missing 'Contract'.");

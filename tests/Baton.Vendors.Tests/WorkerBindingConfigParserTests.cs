@@ -21,6 +21,46 @@ public class WorkerBindingConfigParserTests
         """;
 
     [Fact]
+    public void Attachment_names_round_trip_and_legacy_bindings_grant_none()
+    {
+        Assert.Null(WorkerBindingConfigParser.Parse(ValidJson)["architect"].AttachmentNames);
+        var json = ValidJson.Replace("\"PermissionScope\": \"write-only\"",
+            "\"PermissionScope\": \"write-only\", \"AttachmentNames\": [\"one.txt\", \"two.json\"]",
+            StringComparison.Ordinal);
+        var entry = WorkerBindingConfigParser.Parse(json)["architect"];
+        Assert.Equal(["one.txt", "two.json"], entry.AttachmentNames);
+        Assert.Equal(entry.AttachmentNames,
+            WorkerBindingConfigParser.Parse(System.Text.Json.JsonSerializer.Serialize(
+                new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry }))["architect"].AttachmentNames);
+    }
+
+    [Theory]
+    [InlineData("../other.txt")]
+    [InlineData("sub/file.txt")]
+    [InlineData("sub\\file.txt")]
+    [InlineData(".secret")]
+    [InlineData("CON.txt")]
+    [InlineData("report.")]
+    [InlineData("report ")]
+    [InlineData(" ")]
+    public void Attachment_names_refuse_noncanonical_basename(string name)
+    {
+        var json = ValidJson.Replace("\"PermissionScope\": \"write-only\"",
+            $"\"PermissionScope\": \"write-only\", \"AttachmentNames\": {System.Text.Json.JsonSerializer.Serialize(new[] { name })}",
+            StringComparison.Ordinal);
+        Assert.Throws<WorkerBindingConfigException>(() => WorkerBindingConfigParser.Parse(json));
+    }
+
+    [Fact]
+    public void Attachment_names_refuse_duplicates()
+    {
+        var json = ValidJson.Replace("\"PermissionScope\": \"write-only\"",
+            "\"PermissionScope\": \"write-only\", \"AttachmentNames\": [\"same.txt\", \"same.txt\"]",
+            StringComparison.Ordinal);
+        Assert.Throws<WorkerBindingConfigException>(() => WorkerBindingConfigParser.Parse(json));
+    }
+
+    [Fact]
     public void A_valid_config_parses_into_one_entry_per_worker_name()
     {
         var config = WorkerBindingConfigParser.Parse(ValidJson);

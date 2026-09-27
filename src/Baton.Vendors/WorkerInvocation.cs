@@ -143,6 +143,7 @@ namespace Baton.Vendors;
 /// also get whichever ones happen to be checked into the repository it was pointed at.
 /// </para>
 /// </param>
+/// <param name="AttachmentPaths">Exact current-room harness input files resolved from the binding; see spec/baton.md §2.</param>
 public sealed record WorkerInvocation(
     string PromptTemplate,
     string? Model = null,
@@ -167,5 +168,6 @@ public sealed record WorkerInvocation(
     OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null,
     Baton.Queue.MemoryAddDispatchGrant? MemoryAddGrant = null,
     bool EnableExactFileRestoreTool = false,
-    string? ExactFileRestoreBaseSha = null);
+    string? ExactFileRestoreBaseSha = null,
+    IReadOnlyList<string>? AttachmentPaths = null);
 

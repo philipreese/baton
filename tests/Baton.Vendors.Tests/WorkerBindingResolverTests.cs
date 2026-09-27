@@ -13,6 +13,89 @@ namespace Baton.Vendors.Tests;
 [Collection(LaunchConfigCollection.Name)]
 public class WorkerBindingResolverTests
 {
+    [Fact]
+    public void Attachment_resolution_uses_only_the_current_rooms_regular_files()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-binding-attachments-{Guid.NewGuid():N}");
+        var room = Path.Combine(root, "current");
+        var attachments = Path.Combine(room, "artifacts", "attachments");
+        Directory.CreateDirectory(attachments);
+        try
+        {
+            var input = Path.Combine(attachments, "evidence.txt");
+            File.WriteAllText(input, "fixture 2442");
+            Assert.Equal([input], AttachmentReadInputs.Resolve(["evidence.txt"], room));
+            Assert.Empty(AttachmentReadInputs.Resolve(null, room));
+            Assert.Throws<WorkerBindingConfigException>(() => AttachmentReadInputs.Resolve(["missing.txt"], room));
+            Directory.CreateDirectory(Path.Combine(attachments, "directory.txt"));
+            Assert.Throws<WorkerBindingConfigException>(() => AttachmentReadInputs.Resolve(["directory.txt"], room));
+            var other = Path.Combine(root, "other", "artifacts", "attachments");
+            Directory.CreateDirectory(other);
+            File.WriteAllText(Path.Combine(other, "other.txt"), "other room");
+            Assert.Throws<WorkerBindingConfigException>(() => AttachmentReadInputs.Resolve(["other.txt"], room));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public void Attachment_resolution_refuses_a_link_out_of_the_room()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-binding-link-{Guid.NewGuid():N}");
+        var room = Path.Combine(root, "current");
+        var attachments = Path.Combine(room, "artifacts", "attachments");
+        Directory.CreateDirectory(attachments);
+        try
+        {
+            var outside = Path.Combine(root, "outside.txt");
+            File.WriteAllText(outside, "outside bytes");
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(attachments, "linked.txt"), outside);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                Assert.Skip("this host cannot create a file symbolic link");
+                return;
+            }
+            Assert.Throws<WorkerBindingConfigException>(() => AttachmentReadInputs.Resolve(["linked.txt"], room));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public void Resolver_uses_execution_room_not_bindings_file_directory_for_attachments()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-binding-room-{Guid.NewGuid():N}");
+        var room = Path.Combine(root, "current");
+        var attachmentDirectory = Path.Combine(room, "artifacts", "attachments");
+        Directory.CreateDirectory(attachmentDirectory);
+        try
+        {
+            var attached = Path.Combine(attachmentDirectory, "evidence.txt");
+            File.WriteAllText(attached, "current bytes");
+            var adapter = new InvocationCaptureAdapter();
+            WorkerBindingResolver.Resolve(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["worker"] = new("capture", new WorkerContract("worker", [], [], []),
+                        "Read evidence.", TimeSpan.FromMinutes(5), AttachmentNames: ["evidence.txt"]),
+                },
+                new Dictionary<string, IWorkerAdapter> { ["capture"] = adapter },
+                bindingsFileDirectory: Path.Combine(root, "bindings-elsewhere"), roomDirectory: room);
+            Assert.Equal([attached], adapter.Invocation!.AttachmentPaths);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     private static readonly WorkerContract ArchitectContract = new(
         "architect", ["goal"], [new ProducedOutput("plan")], []);
 
