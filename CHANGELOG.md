@@ -9,6 +9,19 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.55.0](https://github.com/philipreese/baton/compare/v0.54.6...v0.55.0) (2026-09-27)
+
+
+### Features
+
+* **queue:** Support an explicit lifecycle-wide routing rationale ([#2435](https://github.com/philipreese/baton/issues/2435)) ([dea66bd](https://github.com/philipreese/baton/commit/dea66bd4245cd05d9e6ecd1e35e5145a4e44f2d5))
+* **workers:** Add a safe exact-file restore primitive ([#2433](https://github.com/philipreese/baton/issues/2433)) ([74f8aaf](https://github.com/philipreese/baton/commit/74f8aaf63d822f6ec651834a688973ae21c88c1c))
+
+
+### Bug Fixes
+
+* **tool-refresh:** Verify daemon replacement identity ([#2434](https://github.com/philipreese/baton/issues/2434)) ([3b4b352](https://github.com/philipreese/baton/commit/3b4b352c44179a2bab740a024d07883be79fd7d4))
+
 ## [0.54.6](https://github.com/philipreese/baton/compare/v0.54.5...v0.54.6) (2026-09-19)
 
 
