@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.58.0](https://github.com/philipreese/baton/compare/v0.57.1...v0.58.0) (2026-09-27)
+
+
+### Features
+
+* **dispatch:** Select role execution limits from exact model profiles ([#2443](https://github.com/philipreese/baton/issues/2443)) ([8ed4bf8](https://github.com/philipreese/baton/commit/8ed4bf815324216a1e52b1d36f9314d12468f211))
+
 ## [0.57.1](https://github.com/philipreese/baton/compare/v0.57.0...v0.57.1) (2026-09-27)
 
 
