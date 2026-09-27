@@ -116,6 +116,120 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
     }
 
     [Fact]
+    public async Task Continued_implement_dispatch_carries_authorized_base_and_exposes_restore_tool()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-restore-continue-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var workspace = Path.Combine(testRoot, "workspace");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "captured-base\n",
+                TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
+            var capturedHead = await ReadGitAsync(workspace, "rev-parse", "HEAD");
+            var parentRoom = Path.Combine(testRoot, "parent");
+            var parentAdapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+            var parentResult = await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", await WriteSpecAsync(testRoot, "Start the bounded repair."), parentRoom,
+                    Adapter: "codex", ExpectPr: false),
+                new Dictionary<string, IWorkerAdapter> { ["codex"] = parentAdapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit);
+            await TerminalSentinelWriter.WriteAsync(
+                parentRoom,
+                WorkflowStatusProjector.Project(parentResult.State, parentResult.Snapshot, parentRoom),
+                TestContext.Current.CancellationToken);
+
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = parentBindings["implement"] with { SessionId = "codex-thread-restore" },
+                },
+                parentBindingsPath,
+                TestContext.Current.CancellationToken);
+
+            var childRoom = Path.Combine(testRoot, "child");
+            var childAdapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", await WriteSpecAsync(testRoot, "Continue the bounded repair."), childRoom,
+                    Adapter: "codex", ExpectPr: false, ContinueFromRoomDirectoryPath: parentRoom),
+                new Dictionary<string, IWorkerAdapter> { ["codex"] = childAdapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit);
+
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var childBinding = childBindings["implement"];
+            Assert.Equal(capturedHead, childBinding.ExactFileRestoreBaseSha);
+            Assert.Equal(capturedHead, ExactFileRestoreAuthorityStore.Read(childRoom, "implement"));
+            Assert.True(childAdapter.LastInvocation!.EnableExactFileRestoreTool);
+            Assert.Equal(capturedHead, childAdapter.LastInvocation.ExactFileRestoreBaseSha);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "damaged\n",
+                TestContext.Current.CancellationToken);
+            var restore = await new ExactFileRestoreTool(
+                    workspace, childBinding.ExactFileRestoreBaseSha!, "continued-dispatch", childRoom)
+                .CallAsync(
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        path = "tracked.txt",
+                        acknowledgeDirtyFile = true,
+                    }),
+                    TestContext.Current.CancellationToken);
+            Assert.False(restore.IsError, restore.Text);
+            Assert.Equal(
+                "captured-base\n",
+                await File.ReadAllTextAsync(
+                    Path.Combine(workspace, "tracked.txt"), TestContext.Current.CancellationToken));
+
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = parentBindings["implement"] with
+                    {
+                        SessionId = "codex-thread-restore",
+                        ExactFileRestoreBaseSha = new string('f', 40),
+                    },
+                },
+                parentBindingsPath,
+                TestContext.Current.CancellationToken);
+            var refusedChildRoom = Path.Combine(testRoot, "child-with-tampered-parent");
+            var refusedAdapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", await WriteSpecAsync(testRoot, "Continue without forged authority."),
+                    refusedChildRoom, Adapter: "codex", ExpectPr: false,
+                    ContinueFromRoomDirectoryPath: parentRoom),
+                new Dictionary<string, IWorkerAdapter> { ["codex"] = refusedAdapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit);
+            var refusedBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(refusedChildRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Null(refusedBindings["implement"].ExactFileRestoreBaseSha);
+            Assert.Null(ExactFileRestoreAuthorityStore.Read(refusedChildRoom, "implement"));
+            Assert.False(refusedAdapter.LastInvocation!.EnableExactFileRestoreTool);
+            Assert.Null(refusedAdapter.LastInvocation.ExactFileRestoreBaseSha);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task Dispatching_a_role_whose_worker_writes_its_declared_output_succeeds()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-e2e-{Guid.NewGuid():N}");

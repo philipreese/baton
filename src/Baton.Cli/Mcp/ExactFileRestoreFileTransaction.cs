@@ -6,7 +6,8 @@ namespace Baton.Cli.Mcp;
 
 /// <summary>
 /// A single-use, repository-root-anchored transaction for replacing one leaf. Traversal never
-/// follows a link/reparse point and the final parent handle remains open through commit.
+/// follows a link/reparse point and the final parent handle remains open through commit. Mutation
+/// proceeds only where retained file handles can anchor rename and deletion.
 /// </summary>
 internal sealed class ExactFileRestoreFileTransaction : IDisposable
 {
@@ -158,6 +159,7 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         ReadOnlySpan<byte> replacement,
         Action<ExactFileRecoveryNames> writePrepared,
         Action writeCommitted,
+        Action writeCleanupCompleted,
         Action writeRolledBack,
         Action<string, string?> writeRecoveryRequired,
         Action? beforeCompareAndSwap = null,
@@ -165,6 +167,13 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         Action? beforeDurableCommit = null,
         Action? beforeDelete = null)
     {
+        if (!_windows)
+        {
+            throw new PlatformNotSupportedException(
+                "Unix exact-file restore mutation is refused because this runtime has no "
+                + "identity-anchored rename and delete primitive for retained file handles");
+        }
+
         _temporaryLeaf = $".{_leaf}.baton-restore-{Guid.NewGuid():N}.tmp";
         _quarantineLeaf = expected.Exists
             ? $".{_leaf}.baton-quarantine-{Guid.NewGuid():N}"
@@ -218,6 +227,7 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
                         "the installed replacement changed before durable commit", null);
                 }
                 writeCommitted();
+                writeCleanupCompleted();
                 return ExactFileCommitResult.Committed;
             }
             catch (Exception commitEvidenceFailure) when (IsRecoverable(commitEvidenceFailure))
@@ -312,19 +322,38 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
                 beforeRollbackRestore);
         }
 
-        beforeDelete?.Invoke();
-        if (!InstalledMatches()
-            || !NamedMatches(_quarantineLeaf!, _capturedLeaf!, expected))
+        try
         {
-            TryWriteRecovery(writeRecoveryRequired,
-                "terminal revalidation failed before deleting the quarantined original", _quarantineLeaf);
-            return ExactFileCommitResult.Recovery(
-                "terminal revalidation failed before deleting the quarantined original", _quarantineLeaf);
+            beforeDelete?.Invoke();
+            if (!InstalledMatches()
+                || !NamedMatches(_quarantineLeaf!, _capturedLeaf!, expected))
+            {
+                const string reason =
+                    "terminal revalidation failed before deleting the quarantined original";
+                TryWriteRecovery(writeRecoveryRequired, reason, _quarantineLeaf);
+                return ExactFileCommitResult.Recovery(reason, _quarantineLeaf);
+            }
+            DeleteRetainedLeaf(_quarantineLeaf, _capturedLeaf!);
+            FlushParent();
+            _quarantineLeaf = null;
+            writeCleanupCompleted();
+            return ExactFileCommitResult.Committed;
         }
-        DeleteRetainedLeaf(_quarantineLeaf, _capturedLeaf!);
-        FlushParent();
-        _quarantineLeaf = null;
-        return ExactFileCommitResult.Committed;
+        catch (Exception cleanupFailure) when (IsRecoverable(cleanupFailure))
+        {
+            var recoverableQuarantine = _quarantineLeaf is not null
+                && NamedMatches(_quarantineLeaf, _capturedLeaf!, expected)
+                    ? _quarantineLeaf
+                    : null;
+            const string prefix = "post-commit cleanup failed";
+            TryWriteRecovery(
+                writeRecoveryRequired,
+                $"{prefix}: {cleanupFailure.Message}",
+                recoverableQuarantine);
+            return ExactFileCommitResult.Recovery(
+                $"{prefix}: {cleanupFailure.Message}",
+                recoverableQuarantine);
+        }
     }
 
     private ExactFileCommitResult RollBackNewTargetWithoutOld(

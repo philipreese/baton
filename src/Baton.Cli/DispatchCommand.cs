@@ -208,15 +208,6 @@ public static class DispatchCommand
             WorkerBindingConfigEntry resumedEntry;
             (resumedEntry, continuation) = await ResolveContinuationAsync(
                 options.ContinueFromRoomDirectoryPath, continuedEntry, cancellationToken).ConfigureAwait(false);
-            var continuedCapturedBase = resumedEntry.ExactFileRestoreBaseSha is { Length: > 0 } continuedBase
-                && string.Equals(
-                    ExactFileRestoreAuthorityStore.Read(
-                        options.ContinueFromRoomDirectoryPath, continuedWorkerName),
-                    continuedBase,
-                    StringComparison.Ordinal)
-                    ? continuedBase
-                    : null;
-            resumedEntry = resumedEntry with { ExactFileRestoreBaseSha = continuedCapturedBase };
             if (options.DeclaredTaskSize is not null && resumedEntry.DeclaredTaskSize is not null
                 && options.DeclaredTaskSize != resumedEntry.DeclaredTaskSize)
             {
@@ -1680,10 +1671,20 @@ public static class DispatchCommand
         }
 
         var parentExecutionId = parentTerminal.Steps.FirstOrDefault()?.Execution;
+        var authorizedRestoreBase = parentEntry.ExactFileRestoreBaseSha is { Length: > 0 } parentBase
+            && string.Equals(
+                ExactFileRestoreAuthorityStore.Read(continueFromRoomDirectoryPath, parentWorkerName),
+                parentBase,
+                StringComparison.Ordinal)
+                ? parentBase
+                : null;
         var resumedEntry = entry with
         {
             SessionId = parentEntry.SessionId,
             ResumeSession = true,
+            // The binding is a worker-readable projection, not authority. Carry its captured base
+            // only when the parent room's Baton-owned, worker-keyed record still agrees with it.
+            ExactFileRestoreBaseSha = authorizedRestoreBase,
             // #2190: continuing a worker-controlled workspace must never re-probe its mutable remote.
             PullRequestCreateIdentity = parentEntry.PullRequestCreateIdentity,
             OriginatingPullRequestOwnership =

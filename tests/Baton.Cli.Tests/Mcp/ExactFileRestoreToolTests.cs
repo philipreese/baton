@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Baton.Cli.Mcp;
 using Baton.CrashTestHost;
 using Baton.Tests.Shared;
@@ -44,7 +45,9 @@ public sealed class ExactFileRestoreToolTests
             var records = audit.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => JsonSerializer.Deserialize<ExactFileRestoreAudit>(line)!)
                 .ToArray();
-            Assert.Equal(["Prepared", "Committed"], records.Select(record => record.State).ToArray());
+            Assert.Equal(
+                ["Prepared", "Committed", "CleanupCompleted"],
+                records.Select(record => record.State).ToArray());
             Assert.All(records, record => Assert.Equal(3, record.Version));
             Assert.All(records, record => Assert.False(string.IsNullOrWhiteSpace(record.TransactionId)));
             Assert.False(string.IsNullOrWhiteSpace(records[0].Temporary));
@@ -431,6 +434,42 @@ public sealed class ExactFileRestoreToolTests
     }
 
     [Fact]
+    public async Task Post_commit_cleanup_failure_preserves_original_and_blocks_restart()
+    {
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            await File.WriteAllTextAsync(target, "damaged\n", Ct);
+            var tool = await NewToolAsync(
+                root,
+                new ExactFileRestoreTestHooks(
+                    BeforeDelete: () => throw new IOException("cleanup fault")));
+
+            var result = await tool.CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Equal("base\n", await File.ReadAllTextAsync(target, Ct));
+            var quarantine = Assert.Single(Directory.GetFiles(root, ".target.txt.baton-quarantine-*"));
+            Assert.Equal("damaged\n", await File.ReadAllTextAsync(quarantine, Ct));
+            var audit = await File.ReadAllTextAsync(AuditPath(root), Ct);
+            Assert.Contains("\"State\":\"Committed\"", audit);
+            Assert.Contains("\"State\":\"RecoveryRequired\"", audit);
+
+            var restart = await (await NewToolAsync(root))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+            Assert.True(restart.IsError);
+            Assert.Contains("unresolved", restart.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("base\n", await File.ReadAllTextAsync(target, Ct));
+            Assert.Equal("damaged\n", await File.ReadAllTextAsync(quarantine, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
     public async Task Failed_rollback_preserves_quarantine_and_records_RecoveryRequired()
     {
         var root = await CreateRepositoryAsync();
@@ -533,6 +572,103 @@ public sealed class ExactFileRestoreToolTests
     }
 
     [Fact]
+    public async Task Committed_without_cleanup_completion_blocks_restart()
+    {
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            await File.WriteAllTextAsync(target, "damaged\n", Ct);
+            var auditPath = AuditPath(root);
+            Directory.CreateDirectory(Path.GetDirectoryName(auditPath)!);
+            var record = ValidAudit(root) with { State = nameof(ExactFileRestoreAuditState.Committed) };
+            await File.WriteAllTextAsync(
+                auditPath, JsonSerializer.Serialize(record) + Environment.NewLine, Ct);
+
+            var result = await (await NewToolAsync(root))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Contains("Committed", result.Text, StringComparison.Ordinal);
+            Assert.Contains("unresolved", result.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("damaged\n", await File.ReadAllTextAsync(target, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Theory]
+    [InlineData("Version")]
+    [InlineData("State")]
+    [InlineData("ExecutionId")]
+    [InlineData("Path")]
+    [InlineData("SourceRevision")]
+    [InlineData("SourceBlob")]
+    [InlineData("RestoredBlob")]
+    [InlineData("RecordedAtUtc")]
+    [InlineData("Quarantine")]
+    [InlineData("TransactionId")]
+    [InlineData("RepositoryRoot")]
+    [InlineData("Temporary")]
+    [InlineData("Uncommitted")]
+    public async Task Missing_required_journal_field_fails_closed_before_path_filtering(string field)
+    {
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            await File.WriteAllTextAsync(target, "damaged\n", Ct);
+            var record = JsonSerializer.SerializeToNode(ValidAudit(root) with { Path = "other.txt" })!.AsObject();
+            Assert.True(record.Remove(field));
+            var auditPath = AuditPath(root);
+            Directory.CreateDirectory(Path.GetDirectoryName(auditPath)!);
+            await File.WriteAllTextAsync(auditPath, record.ToJsonString() + Environment.NewLine, Ct);
+
+            var result = await (await NewToolAsync(root))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Contains(field, result.Text, StringComparison.Ordinal);
+            Assert.Equal("damaged\n", await File.ReadAllTextAsync(target, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Theory]
+    [InlineData("Path", "../outside.txt")]
+    [InlineData("RepositoryRoot", "relative-root")]
+    public async Task Malformed_journal_path_or_root_fails_closed(string field, string value)
+    {
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            await File.WriteAllTextAsync(target, "damaged\n", Ct);
+            var record = JsonSerializer.SerializeToNode(ValidAudit(root))!.AsObject();
+            record[field] = value;
+            var auditPath = AuditPath(root);
+            Directory.CreateDirectory(Path.GetDirectoryName(auditPath)!);
+            await File.WriteAllTextAsync(auditPath, record.ToJsonString() + Environment.NewLine, Ct);
+
+            var result = await (await NewToolAsync(root))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Contains(field, result.Text, StringComparison.Ordinal);
+            Assert.Equal("damaged\n", await File.ReadAllTextAsync(target, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
     public async Task Windows_retained_replacement_handle_excludes_post_hash_writer()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows share-mode exclusion is required");
@@ -568,8 +704,43 @@ public sealed class ExactFileRestoreToolTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Unix_refuses_existing_and_missing_target_transitions_before_mutation(bool targetExists)
+    {
+        Assert.SkipUnless(!OperatingSystem.IsWindows(), "Unix transaction semantics are required");
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            if (!targetExists)
+            {
+                FileCleanup.EnsureDeleted(target);
+            }
+            var compareAndSwapReached = false;
+            var tool = await NewToolAsync(
+                root,
+                new ExactFileRestoreTestHooks(
+                    BeforeCompareAndSwap: () => compareAndSwapReached = true));
+
+            var result = await tool.CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Contains("identity-anchored", result.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.False(compareAndSwapReached);
+            Assert.Equal(targetExists, File.Exists(target));
+            Assert.Empty(Directory.GetFiles(root, ".target.txt.baton-*"));
+            Assert.False(File.Exists(AuditPath(root)));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     [Fact]
-    public async Task Unix_restores_exact_colon_and_backslash_names()
+    public async Task Unix_accepts_literal_colon_and_backslash_names_but_refuses_mutation()
     {
         Assert.SkipUnless(!OperatingSystem.IsWindows(), "Unix filename semantics are required");
         var root = TempDir();
@@ -592,8 +763,9 @@ public sealed class ExactFileRestoreToolTests
                 FileCleanup.EnsureDeleted(Path.Combine(root, name));
                 var result = await (await NewToolAsync(root))
                     .CallAsync(Args(name, acknowledgeDirtyFile: true), Ct);
-                Assert.False(result.IsError, result.Text);
-                Assert.Equal($"base-{name}\n", await File.ReadAllTextAsync(Path.Combine(root, name), Ct));
+                Assert.True(result.IsError);
+                Assert.Contains("identity-anchored", result.Text, StringComparison.OrdinalIgnoreCase);
+                Assert.False(File.Exists(Path.Combine(root, name)));
             }
         }
         finally
@@ -626,25 +798,39 @@ public sealed class ExactFileRestoreToolTests
     }
 
     [Fact]
-    public async Task Repository_configured_fsmonitor_helper_is_disabled_for_every_git_query()
+    public async Task Hardened_git_queries_never_launch_the_repository_fsmonitor_helper()
     {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows helper fixture is required");
         var root = await CreateRepositoryAsync();
         try
         {
             var marker = Path.Combine(root, "helper-escaped.txt");
-            var helper = Path.Combine(root, "fsmonitor-helper.cmd");
-            await File.WriteAllTextAsync(
-                helper,
-                $"@echo off{Environment.NewLine}echo escaped>\"{marker}\"{Environment.NewLine}exit /b 0{Environment.NewLine}",
-                Ct);
+            var helper = Path.Combine(root, OperatingSystem.IsWindows()
+                ? "fsmonitor-helper.cmd"
+                : "fsmonitor-helper.sh");
+            var helperBody = OperatingSystem.IsWindows()
+                ? $"@echo off{Environment.NewLine}echo escaped>\"{marker}\"{Environment.NewLine}exit /b 0{Environment.NewLine}"
+                : $"#!/bin/sh{Environment.NewLine}printf escaped > '{marker}'{Environment.NewLine}exit 0{Environment.NewLine}";
+            await File.WriteAllTextAsync(helper, helperBody, Ct);
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(
+                    helper,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
             await GitAsync(root, "config", "core.fsmonitor", helper);
             await File.WriteAllTextAsync(Path.Combine(root, "target.txt"), "damaged\n", Ct);
 
             var result = await (await NewToolAsync(root))
                 .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
 
-            Assert.False(result.IsError, result.Text);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.False(result.IsError, result.Text);
+            }
+            else
+            {
+                Assert.Contains("identity-anchored", result.Text, StringComparison.OrdinalIgnoreCase);
+            }
             Assert.False(File.Exists(marker));
         }
         finally
@@ -783,6 +969,24 @@ public sealed class ExactFileRestoreToolTests
 
     private static string AuditPath(string root) =>
         Path.Combine(root, "room", ".baton", ExactFileRestoreTool.AuditFileName);
+
+    private static ExactFileRestoreAudit ValidAudit(string root) =>
+        new(
+            3,
+            nameof(ExactFileRestoreAuditState.Prepared),
+            "old-execution",
+            "target.txt",
+            new string('a', 40),
+            new string('b', 40),
+            new string('c', 40),
+            new string('c', 40),
+            DateTimeOffset.UtcNow,
+            ".target.txt.baton-quarantine-old",
+            null,
+            "old-transaction",
+            Path.GetFullPath(root),
+            ".target.txt.baton-restore-old.tmp",
+            ".target.txt.baton-uncommitted-old");
 
     private static string CrashHostExecutable()
     {

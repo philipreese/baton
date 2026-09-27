@@ -12,7 +12,8 @@ namespace Baton.Cli.Mcp;
 
 /// <summary>
 /// Baton's one-file restore primitive. The source revision is supplied by the dispatch-captured
-/// binding, never by the worker call. The final write is a handle-anchored compare-and-swap.
+/// binding, never by the worker call. The final write is a handle-anchored compare-and-swap on
+/// Windows; platforms without the required identity-anchored mutation primitives fail closed.
 /// </summary>
 public sealed class ExactFileRestoreTool : IMcpTool
 {
@@ -266,6 +267,13 @@ public sealed class ExactFileRestoreTool : IMcpTool
                         () => AppendAudit(
                             auditPath,
                             CreateAudit(
+                                ExactFileRestoreAuditState.CleanupCompleted, transactionId, repositoryRoot,
+                                relativePath, before.Blob, baseRevision, sourceBlobId, restoredBlob,
+                                recoveryNames,
+                                null)),
+                        () => AppendAudit(
+                            auditPath,
+                            CreateAudit(
                                 ExactFileRestoreAuditState.RolledBack, transactionId, repositoryRoot,
                                 relativePath, before.Blob, baseRevision, sourceBlobId, restoredBlob,
                                 recoveryNames,
@@ -400,15 +408,12 @@ public sealed class ExactFileRestoreTool : IMcpTool
 
                 var audit = ReadAudit(line, "journal");
                 if (!string.Equals(audit.Path, relativePath, StringComparison.Ordinal)
-                    || audit.RepositoryRoot is not null
-                        && !comparer.Equals(Path.GetFullPath(audit.RepositoryRoot), repositoryRoot))
+                    || !comparer.Equals(Path.GetFullPath(audit.RepositoryRoot!), repositoryRoot))
                 {
                     continue;
                 }
 
-                var key = audit.TransactionId
-                    ?? $"legacy:{audit.ExecutionId}:{audit.Path}";
-                states[key] = audit;
+                states[audit.TransactionId!] = audit;
             }
         }
 
@@ -418,22 +423,22 @@ public sealed class ExactFileRestoreTool : IMcpTool
         {
             var audit = ReadAudit(File.ReadAllText(marker), "recovery marker");
             if (string.Equals(audit.Path, relativePath, StringComparison.Ordinal)
-                && (audit.RepositoryRoot is null
-                    || comparer.Equals(Path.GetFullPath(audit.RepositoryRoot), repositoryRoot)))
+                && comparer.Equals(Path.GetFullPath(audit.RepositoryRoot!), repositoryRoot))
             {
                 throw new IOException(
-                    $"unresolved exact-file restore transaction '{audit.TransactionId ?? audit.ExecutionId}' "
+                    $"unresolved exact-file restore transaction '{audit.TransactionId}' "
                     + "requires recovery before this path can be restored again");
             }
         }
 
         var unresolved = states.Values.FirstOrDefault(audit =>
             audit.State is nameof(ExactFileRestoreAuditState.Prepared)
+                or nameof(ExactFileRestoreAuditState.Committed)
                 or nameof(ExactFileRestoreAuditState.RecoveryRequired));
         if (unresolved is not null)
         {
             throw new IOException(
-                $"unresolved exact-file restore transaction '{unresolved.TransactionId ?? unresolved.ExecutionId}' "
+                $"unresolved exact-file restore transaction '{unresolved.TransactionId}' "
                 + $"is {unresolved.State} and requires recovery before this path can be restored again");
         }
     }
@@ -444,11 +449,7 @@ public sealed class ExactFileRestoreTool : IMcpTool
         {
             var audit = JsonSerializer.Deserialize<ExactFileRestoreAudit>(json)
                 ?? throw new IOException($"the exact-file restore {source} contains a null record");
-            if (!Enum.TryParse<ExactFileRestoreAuditState>(audit.State, ignoreCase: false, out _))
-            {
-                throw new IOException(
-                    $"the exact-file restore {source} contains unknown state '{audit.State}'");
-            }
+            ValidateAudit(audit, source);
             return audit;
         }
         catch (JsonException ex)
@@ -456,6 +457,58 @@ public sealed class ExactFileRestoreTool : IMcpTool
             throw new IOException($"the exact-file restore {source} is malformed", ex);
         }
     }
+
+    private static void ValidateAudit(ExactFileRestoreAudit audit, string source)
+    {
+        static bool Missing(string? value) => string.IsNullOrWhiteSpace(value);
+        void Malformed(string field) =>
+            throw new IOException($"the exact-file restore {source} has malformed required field '{field}'");
+
+        if (audit.Version != 3) Malformed(nameof(audit.Version));
+        if (Missing(audit.State)
+            || !Enum.TryParse<ExactFileRestoreAuditState>(audit.State, ignoreCase: false, out var state)
+            || !Enum.IsDefined(state)) Malformed(nameof(audit.State));
+        if (Missing(audit.ExecutionId)) Malformed(nameof(audit.ExecutionId));
+        if (Missing(audit.Path)
+            || !TryNormalizeLiteralPath(audit.Path, out var normalizedPath, out _, out _)
+            || !string.Equals(audit.Path, normalizedPath, StringComparison.Ordinal)) Malformed(nameof(audit.Path));
+        if (Missing(audit.TransactionId)) Malformed(nameof(audit.TransactionId));
+        if (audit.RepositoryRoot is not { } repositoryRoot || !IsValidAbsolutePath(repositoryRoot))
+            Malformed(nameof(audit.RepositoryRoot));
+        if (!IsCanonicalRevision(audit.SourceRevision)) Malformed(nameof(audit.SourceRevision));
+        if (!IsCanonicalRevision(audit.SourceBlob)) Malformed(nameof(audit.SourceBlob));
+        if (!IsCanonicalRevision(audit.RestoredBlob)) Malformed(nameof(audit.RestoredBlob));
+        if (audit.BeforeBlob is not null && !IsCanonicalRevision(audit.BeforeBlob))
+            Malformed(nameof(audit.BeforeBlob));
+        if (audit.RecordedAtUtc == default) Malformed(nameof(audit.RecordedAtUtc));
+        if (!IsValidRecoveryLeaf(audit.Temporary)) Malformed(nameof(audit.Temporary));
+        if (!IsValidRecoveryLeaf(audit.Uncommitted)) Malformed(nameof(audit.Uncommitted));
+        if (audit.BeforeBlob is not null && !IsValidRecoveryLeaf(audit.Quarantine))
+            Malformed(nameof(audit.Quarantine));
+        if (state == ExactFileRestoreAuditState.RecoveryRequired && Missing(audit.Reason))
+            Malformed(nameof(audit.Reason));
+    }
+
+    private static bool IsValidAbsolutePath(string path)
+    {
+        try
+        {
+            return Path.IsPathFullyQualified(path) && string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)), path, OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsValidRecoveryLeaf(string? value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value is not "." and not ".."
+        && value.IndexOf('/') < 0
+        && (!OperatingSystem.IsWindows() || value.IndexOf('\\') < 0);
 
     private async Task<GitResult> RunGitAsync(
         IReadOnlyList<string> arguments,
@@ -615,8 +668,8 @@ public sealed class ExactFileRestoreTool : IMcpTool
         return true;
     }
 
-    private static bool IsCanonicalRevision(string value) =>
-        value.Length == 40 && value.All(char.IsAsciiHexDigit);
+    private static bool IsCanonicalRevision(string? value) =>
+        value is { Length: 40 } && value.All(char.IsAsciiHexDigit);
 
     private static string GitBlobId(byte[] content)
     {
@@ -727,6 +780,7 @@ internal enum ExactFileRestoreAuditState
 {
     Prepared,
     Committed,
+    CleanupCompleted,
     RolledBack,
     RecoveryRequired,
 }
