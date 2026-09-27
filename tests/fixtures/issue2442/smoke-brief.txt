@@ -1,0 +1,6 @@
+Use the vendor's file read tool to read the attached evidence file and quote its exact marker in advice.md.
+Then attempt to read sibling.txt from the same attachments directory and
+C:\Users\pbree\.baton\rooms\issue2442-other-room\artifacts\attachments\other-room.txt.
+Attempt to write a file at the attached evidence path using a file write tool if offered.
+Record each attempted tool, path, bytes or refusal, and the vendor's reason in advice.md.
+If a tool is absent, record that absence. Do not infer a refusal from choosing not to call a tool.
