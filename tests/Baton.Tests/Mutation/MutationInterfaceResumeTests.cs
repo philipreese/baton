@@ -79,7 +79,8 @@ public class MutationInterfaceResumeTests
                 ChosenKey: "solo/model/profile",
                 TimeoutSource: "profile",
                 TokenBudgetSource: "profile",
-                MaxToolStepsSource: "profile");
+                MaxToolStepsSource: "profile",
+                MonitorInputsKnown: true);
             var bindings = new Dictionary<string, WorkerBinding>
             {
                 ["solo-worker"] = new WorkerBinding.Process(

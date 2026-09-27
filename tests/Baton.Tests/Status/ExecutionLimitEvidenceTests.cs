@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Baton.Accounting;
 using Baton.Domain;
 using Baton.Status;
 using Baton.Store;
@@ -23,7 +25,8 @@ public sealed class ExecutionLimitEvidenceTests
             ChosenKey: "claude/sonnet/review/medium",
             TimeoutSource: "profile",
             TokenBudgetSource: "role-default",
-            MaxToolStepsSource: "role-default");
+            MaxToolStepsSource: "role-default",
+            MonitorInputsKnown: true);
         var original = new FlowEvent.ExecutionRequestAccepted(Request(evidence));
 
         var json = JsonSerializer.Serialize<FlowEvent>(original, FlowEventLogJson.Options);
@@ -34,6 +37,54 @@ public sealed class ExecutionLimitEvidenceTests
         Assert.Contains("TokenBudget", json, StringComparison.Ordinal);
         Assert.Contains("MaxToolSteps", json, StringComparison.Ordinal);
         Assert.Contains("MonitorInputsKnown", json, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task Monitor_availability_survives_wire_status_and_ledger(bool? wireValue, bool expectedKnown)
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"limit-wire-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var original = new FlowEvent.ExecutionRequestAccepted(Request(
+                new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: true)));
+            var node = JsonNode.Parse(JsonSerializer.Serialize<FlowEvent>(original, FlowEventLogJson.Options))!;
+            var limits = node["Request"]!["Limits"]!.AsObject();
+            if (wireValue is { } explicitValue)
+                limits["MonitorInputsKnown"] = explicitValue;
+            else
+                limits.Remove("MonitorInputsKnown");
+
+            var accepted = Assert.IsType<FlowEvent.ExecutionRequestAccepted>(
+                JsonSerializer.Deserialize<FlowEvent>(node.ToJsonString(), FlowEventLogJson.Options));
+            Assert.Equal(expectedKnown, accepted.Request.Limits!.MonitorInputsKnown);
+            Assert.Equal(TimeSpan.FromMinutes(5), accepted.Request.Limits.Timeout);
+
+            var now = DateTime.UtcNow;
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(accepted),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(ExecutionId, 1), now),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(ExecutionId, 0, CoreExitReason.Natural), now.AddSeconds(1)),
+            };
+            Assert.Equal(expectedKnown,
+                ExecutionUsageProjector.BuildByExecutionId(entries, room)[ExecutionId.Value].Limits!.MonitorInputsKnown);
+            var repository = RepositoryIdentity.From("https://github.com/example/limits.git", null)!;
+            var row = Assert.Single(CostLedgerStore.BuildEntries(entries, room, repository));
+            Assert.Equal(expectedKnown, row.Limits!.MonitorInputsKnown);
+            var ledgerPath = Path.Combine(room, "ledger.jsonl");
+            await CostLedgerStore.AppendAsync([row], ledgerPath, TestContext.Current.CancellationToken);
+            Assert.Equal(expectedKnown,
+                Assert.Single(await CostLedgerStore.ReadAllAsync(ledgerPath, TestContext.Current.CancellationToken))
+                    .Limits!.MonitorInputsKnown);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
     }
 
     [Fact]
@@ -49,7 +100,7 @@ public sealed class ExecutionLimitEvidenceTests
         Assert.Equal(unavailable, accepted.Request.Limits);
         Assert.False(accepted.Request.Limits!.MonitorInputsKnown);
         Assert.NotEqual(
-            new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), null, null, null),
+            new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: true),
             accepted.Request.Limits);
     }
 
@@ -67,7 +118,7 @@ public sealed class ExecutionLimitEvidenceTests
     [Fact]
     public void Rebound_resolution_projects_latest_limits_without_borrowing_another_execution()
     {
-        var first = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null);
+        var first = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null, MonitorInputsKnown: true);
         var latest = first with { TokenBudget = 2000 };
         var other = new ExecutionId("execution-2");
         var entries = new List<LogEntry>
@@ -91,7 +142,7 @@ public sealed class ExecutionLimitEvidenceTests
         var tempDir = Path.Combine(Path.GetTempPath(), $"limit-status-{Guid.NewGuid():N}");
         try
         {
-            var first = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null);
+            var first = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null, MonitorInputsKnown: true);
             var latest = first with { TokenBudget = 2000 };
             var legacyId = new ExecutionId("legacy-1");
             var start = DateTime.UtcNow;
@@ -128,7 +179,7 @@ public sealed class ExecutionLimitEvidenceTests
         var tempDir = Path.Combine(Path.GetTempPath(), $"limit-chk-{Guid.NewGuid():N}");
         try
         {
-            var parentLimits = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null);
+            var parentLimits = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null, MonitorInputsKnown: true);
             var checkpointId = new ExecutionId("checkpoint-1");
             var start = DateTime.UtcNow;
 

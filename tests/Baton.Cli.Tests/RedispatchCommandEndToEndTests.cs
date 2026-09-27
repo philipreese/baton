@@ -75,23 +75,30 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         }
     }
 
-    [Fact]
-    public async Task Redispatch_limit_overrides_reach_child_binding_accepted_status_and_ledger_evidence()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Redispatch_limit_overrides_reach_child_binding_accepted_status_and_ledger_evidence(bool parserBacked)
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-limits-{Guid.NewGuid():N}");
         try
         {
+            var adapterName = parserBacked ? "claude" : "fake";
             var parentRoom = await DispatchTerminalParentAsync(testRoot, "Continue the limit-evidence repair.");
             var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
             var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
                 parentBindingsPath, TestContext.Current.CancellationToken);
             var parent = parentBindings["advise"] with
             {
+                Adapter = adapterName,
+                Model = "parent-model",
+                ModelResolved = "parent-model",
+                DeclaredTaskSize = new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
                 Timeout = TimeSpan.FromMinutes(30),
                 TokenBudget = 1000,
                 MaxToolSteps = 10,
                 ExecutionLimitResolution = new ExecutionLimitResolution(
-                    "fake/parent-model/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                    $"{adapterName}/parent-model/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
                     ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10),
             };
             await WorkerBindingConfigWriter.SaveToFileAsync(
@@ -103,7 +110,13 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
                 new RedispatchOptions(
                     parentRoom, childRoom, Timeout: TimeSpan.FromMinutes(60), TokenBudget: 2000,
                     MaxToolSteps: 20),
-                Adapters, TestContext.Current.CancellationToken);
+                parserBacked
+                    ? new Dictionary<string, IWorkerAdapter>
+                    {
+                        ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+                    }
+                    : Adapters,
+                TestContext.Current.CancellationToken);
             var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
                 Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
             var child = childBindings["advise"];
@@ -113,6 +126,7 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TimeoutSource);
             Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
             Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.MaxToolStepsSource);
+            Assert.Null(child.ExecutionLimitResolution?.ChosenKey);
 
             var entries = await new FlowEventLogReader(
                 Path.Combine(childRoom, BatonPaths.FlowLogFileName)).ReadAllEntriesWithTimestampsAsync(
@@ -121,12 +135,12 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
                 .Select(entry => entry.Event)
                 .OfType<FlowEvent.ExecutionRequestAccepted>());
             var expectedLimits = new ExecutionLimitEvidence(
-                TimeSpan.FromMinutes(60), null, null, null,
+                TimeSpan.FromMinutes(60), parserBacked ? 2000 : null, parserBacked ? 20 : null, null,
                 ChosenKey: null,
                 TimeoutSource: child.ExecutionLimitResolution?.TimeoutSource,
-                TokenBudgetSource: null,
-                MaxToolStepsSource: null,
-                MonitorInputsKnown: false);
+                TokenBudgetSource: parserBacked ? ExecutionLimitSource.DispatchOverride : null,
+                MaxToolStepsSource: parserBacked ? ExecutionLimitSource.DispatchOverride : null,
+                MonitorInputsKnown: parserBacked);
             Assert.Equal(expectedLimits, accepted.Request.Limits);
 
             var status = WorkflowStatusProjector.Project(
@@ -201,7 +215,8 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
                 ChosenKey: null,
                 TimeoutSource: ExecutionLimitSource.Profile,
                 TokenBudgetSource: ExecutionLimitSource.DispatchOverride,
-                MaxToolStepsSource: ExecutionLimitSource.Profile);
+                MaxToolStepsSource: ExecutionLimitSource.Profile,
+                MonitorInputsKnown: true);
             Assert.Equal(expectedLimits, accepted.Request.Limits);
 
             var status = WorkflowStatusProjector.Project(

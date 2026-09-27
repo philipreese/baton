@@ -201,7 +201,7 @@ public class RedispatchBindingTests
         Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TimeoutSource);
         Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
         Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.MaxToolStepsSource);
-        Assert.Equal("claude/opus/advise/small", child.ExecutionLimitResolution?.ChosenKey);
+        Assert.Null(child.ExecutionLimitResolution?.ChosenKey);
     }
 
     [Fact]

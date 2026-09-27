@@ -119,7 +119,7 @@ public abstract record WorkerBinding(WorkerContract Contract, GrantAuditMode Gra
     {
         public ExecutionLimitEvidence EffectiveLimitEvidence =>
             LimitEvidence ?? new ExecutionLimitEvidence(
-                Timeout, TokenBudget, MaxToolSteps, BilledRateLimit);
+                Timeout, TokenBudget, MaxToolSteps, BilledRateLimit, MonitorInputsKnown: true);
     }
 
     /// <summary>

@@ -166,6 +166,76 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void Default_model_profile_uses_the_recorded_resolved_identity()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30),
+            Model: null, ModelResolved: "model", TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                "echo/model/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Equal("echo/model/architect/small", binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.True(binding.EffectiveLimitEvidence.MonitorInputsKnown);
+    }
+
+    [Theory]
+    [InlineData("echo/other/architect/small", 1000L, 10, true, false, null, null)]
+    [InlineData("echo/other/architect/small", 1000L, 10, false, true, "dispatch-override", null)]
+    [InlineData("echo/model/architect/small", 2000L, 10, false, true, null, "profile")]
+    public void Override_sources_survive_identity_drift_only_on_unchanged_axes(
+        string chosenKey, long tokenBudget, int maxToolSteps, bool timeoutOverride, bool tokenOverride,
+        string? expectedTokenSource, string? expectedStepsSource)
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30),
+            ModelResolved: "model", TokenBudget: tokenBudget, MaxToolSteps: maxToolSteps,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                chosenKey,
+                timeoutOverride ? ExecutionLimitSource.DispatchOverride : ExecutionLimitSource.Profile,
+                tokenOverride ? ExecutionLimitSource.DispatchOverride : ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+        var evidence = binding.EffectiveLimitEvidence;
+
+        Assert.Null(evidence.ChosenKey);
+        Assert.Equal(timeoutOverride ? ExecutionLimitSource.DispatchOverride : chosenKey.Contains("other") ? null : ExecutionLimitSource.Profile,
+            evidence.TimeoutSource);
+        Assert.Equal(expectedTokenSource, evidence.TokenBudgetSource);
+        Assert.Equal(expectedStepsSource, evidence.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Mismatched_resolved_identity_clears_profile_sources_even_with_matching_numbers()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30),
+            Model: "model", ModelResolved: "other", TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                "echo/model/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var evidence = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]).EffectiveLimitEvidence;
+        Assert.Null(evidence.ChosenKey);
+        Assert.Null(evidence.TimeoutSource);
+        Assert.Null(evidence.TokenBudgetSource);
+        Assert.Null(evidence.MaxToolStepsSource);
+    }
+
+    [Fact]
     public void Equal_values_do_not_preserve_a_profile_selected_for_another_model()
     {
         var resolution = new ExecutionLimitResolution(

@@ -320,7 +320,7 @@ public static class WorkerBindingResolver
     {
         var selectionMatches = resolution.ChosenKey is null
             || ExecutionLimitProfileResolver.ChosenKeyMatchesSelection(
-                resolution.ChosenKey, entry.Adapter, entry.Model,
+                resolution.ChosenKey, entry.Adapter, entry.ModelResolved ?? entry.Model,
                 entry.Contract.WorkerName, entry.DeclaredTaskSize?.Size ?? DeclaredTaskSize.Unknown);
         var timeoutMatches = entry.Timeout == resolution.Timeout;
         var tokenBudgetMatches = entry.TokenBudget == resolution.TokenBudget;
@@ -333,9 +333,13 @@ public static class WorkerBindingResolver
             entry.MaxToolSteps,
             entry.BilledRateLimit,
             aggregateMatches ? resolution.ChosenKey : null,
-            selectionMatches && timeoutMatches ? resolution.TimeoutSource : null,
-            selectionMatches && tokenBudgetMatches ? resolution.TokenBudgetSource : null,
-            selectionMatches && maxToolStepsMatches ? resolution.MaxToolStepsSource : null);
+            timeoutMatches && (selectionMatches || resolution.TimeoutSource == ExecutionLimitSource.DispatchOverride)
+                ? resolution.TimeoutSource : null,
+            tokenBudgetMatches && (selectionMatches || resolution.TokenBudgetSource == ExecutionLimitSource.DispatchOverride)
+                ? resolution.TokenBudgetSource : null,
+            maxToolStepsMatches && (selectionMatches || resolution.MaxToolStepsSource == ExecutionLimitSource.DispatchOverride)
+                ? resolution.MaxToolStepsSource : null,
+            MonitorInputsKnown: true);
     }
 
 

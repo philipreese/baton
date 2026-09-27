@@ -114,5 +114,5 @@ public sealed record ExecutionRequest(
     IReadOnlyList<DeliveryArtifactPath>? DeliveryGeneratedPaths = null,
     IReadOnlyList<string>? DeliveryAuthorizedPaths = null,
     // #2449: immutable ordinary-execution enforcement inputs. Null is explicit legacy/supplementary
-    // unknown evidence; a non-null value preserves null brakes as known unlimited inputs.
+    // unknown evidence; null monitor brakes are known unlimited only when MonitorInputsKnown is true.
     ExecutionLimitEvidence? Limits = null);

@@ -806,7 +806,8 @@ public class MutationInterfaceCrashRecoveryTests
                 BilledRateLimit: 100,
                 TimeoutSource: "dispatch-override",
                 TokenBudgetSource: "role-default",
-                MaxToolStepsSource: "role-default");
+                MaxToolStepsSource: "role-default",
+                MonitorInputsKnown: true);
 
             // Resubmission binding has a new timeout (e.g. 60s) AND changed monitor inputs (2000, 20, 200).
             var newTimeout = TimeSpan.FromSeconds(60);
@@ -821,7 +822,8 @@ public class MutationInterfaceCrashRecoveryTests
                     newTimeout, 2000, 20, 200,
                     TimeoutSource: "role-default",
                     TokenBudgetSource: "profile",
-                    MaxToolStepsSource: "profile"));
+                    MaxToolStepsSource: "profile",
+                    MonitorInputsKnown: true));
             var workflowId = new WorkflowId("wf");
 
             var executionId = await AcceptRequestAsync(
@@ -858,7 +860,8 @@ public class MutationInterfaceCrashRecoveryTests
                 BilledRateLimit: 200,
                 TimeoutSource: "dispatch-override",
                 TokenBudgetSource: "profile",
-                MaxToolStepsSource: "profile");
+                MaxToolStepsSource: "profile",
+                MonitorInputsKnown: true);
             Assert.Equal(expectedAppliedLimits, rebound.NewLimits);
 
             // Verify the actual dispatched request to CoreDispatcher preserved the accepted Timeout and carried new limits
@@ -899,7 +902,8 @@ public class MutationInterfaceCrashRecoveryTests
                 BilledRateLimit: 100,
                 TimeoutSource: "profile",
                 TokenBudgetSource: "profile",
-                MaxToolStepsSource: "profile");
+                MaxToolStepsSource: "profile",
+                MonitorInputsKnown: true);
 
             var bindings = MakeBindings(
                 adapter: "claude",

@@ -218,7 +218,7 @@ public sealed class CostLedgerStoreTests
                 TokenBudget: 2000,
                 MaxToolSteps: 10,
                 BilledRateLimit: 500,
-                ChosenKey: "review/profile");
+                ChosenKey: "review/profile", MonitorInputsKnown: true);
             var checkpointRequest = AcceptedRequest(checkpoint, "review", "claude", "claude-opus-5", limits: null);
             var entries = SettledExecution(original, "claude", "claude-opus-5", Start, "review", limits: originalLimits);
             entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
@@ -266,7 +266,8 @@ public sealed class CostLedgerStoreTests
                 ChosenKey: "claude/opus/review",
                 TimeoutSource: "profile",
                 TokenBudgetSource: "profile",
-                MaxToolStepsSource: "profile");
+                MaxToolStepsSource: "profile",
+                MonitorInputsKnown: true);
             WriteCapturedStream(room, executionId, ClaudeTerminalLine);
             var entries = SettledExecution(executionId, "claude", "claude-opus-5", Start, limits: expectedLimits);
             var rows = CostLedgerStore.BuildEntries(entries, room, Repository);

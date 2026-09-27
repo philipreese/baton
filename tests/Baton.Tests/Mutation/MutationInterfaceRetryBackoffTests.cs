@@ -85,7 +85,7 @@ public class MutationInterfaceRetryBackoffTests
         var fakeTime = new FakeTimeProvider(new DateTimeOffset(2026, 7, 29, 12, 0, 0, TimeSpan.Zero));
         var expectedLimits = new ExecutionLimitEvidence(
             TimeSpan.FromSeconds(30), TokenBudget: 5000, MaxToolSteps: 25, BilledRateLimit: 1200,
-            ChosenKey: "template-retry-1/worker-a");
+            ChosenKey: "template-retry-1/worker-a", MonitorInputsKnown: true);
 
         try
         {

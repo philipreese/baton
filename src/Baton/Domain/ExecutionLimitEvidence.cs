@@ -17,7 +17,7 @@ public sealed record ExecutionLimitEvidence(
     string? TimeoutSource = null,
     string? TokenBudgetSource = null,
     string? MaxToolStepsSource = null,
-    bool MonitorInputsKnown = true)
+    bool MonitorInputsKnown = false)
 {
     /// <summary>Whether the enforcement inputs, rather than legacy absence, are recorded.</summary>
     [JsonIgnore]

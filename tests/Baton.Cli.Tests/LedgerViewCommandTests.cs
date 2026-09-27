@@ -243,7 +243,7 @@ public sealed class LedgerViewCommandTests : IDisposable
     public async Task Csv_serializes_populated_limits_as_one_quoted_cell_and_leaves_legacy_limits_empty()
     {
         var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "limits.jsonl");
-        var limits = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 4321, 17, 900);
+        var limits = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 4321, 17, 900, MonitorInputsKnown: true);
         await CostLedgerStore.AppendAsync(
             [
                 new CostLedgerEntry(
@@ -267,6 +267,14 @@ public sealed class LedgerViewCommandTests : IDisposable
                     EndedAt: Sep4.AddHours(12),
                     Limits: new ExecutionLimitEvidence(
                         TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: false)),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "older-monitor-wire",
+                    Adapter: "fake",
+                    EndedAt: Sep4.AddHours(13),
+                    Limits: JsonSerializer.Deserialize<ExecutionLimitEvidence>(
+                        "{\"Timeout\":\"00:05:00\",\"TokenBudget\":null,\"MaxToolSteps\":null,\"BilledRateLimit\":null}")),
             ],
             ledgerPath,
             TestContext.Current.CancellationToken);
@@ -277,6 +285,7 @@ public sealed class LedgerViewCommandTests : IDisposable
         var populated = ParseCsvLine(lines[1]);
         var legacy = ParseCsvLine(lines[2]);
         var unavailable = ParseCsvLine(lines[3]);
+        var olderWire = ParseCsvLine(lines[4]);
 
         Assert.Equal(LedgerCsv.Columns.Count, populated.Count);
         Assert.Equal(LedgerCsv.Columns.Count, legacy.Count);
@@ -288,6 +297,9 @@ public sealed class LedgerViewCommandTests : IDisposable
         Assert.Equal(string.Empty, legacy[limitsColumn]);
         using var unavailableJson = JsonDocument.Parse(unavailable[limitsColumn]);
         Assert.False(unavailableJson.RootElement.GetProperty("MonitorInputsKnown").GetBoolean());
+        using var olderWireJson = JsonDocument.Parse(olderWire[limitsColumn]);
+        Assert.False(olderWireJson.RootElement.GetProperty("MonitorInputsKnown").GetBoolean());
+        Assert.Equal("00:05:00", olderWireJson.RootElement.GetProperty("Timeout").GetString());
     }
 
     [Fact]

@@ -193,7 +193,7 @@ public sealed record ExecutionUsageView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     ArrestReason? ArrestReason = null,
     // #2449: the same immutable enforcement snapshot exposed by the cost ledger. Null is legacy or
-    // supplementary unknown evidence; null brakes inside a snapshot mean known unlimited.
+    // supplementary unknown evidence; null monitor brakes are unlimited only when monitor inputs are known.
     [property: JsonPropertyName("limits")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     ExecutionLimitEvidence? Limits = null)
