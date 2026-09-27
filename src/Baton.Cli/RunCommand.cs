@@ -160,12 +160,14 @@ public static class RunCommand
 
         var profiles = await BatonProfileStore.LoadAsync(BatonProfileStore.DefaultPath, cancellationToken).ConfigureAwait(false);
         var workerBindings = WorkerBindingResolver.Resolve(
-            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath), effectiveOnWorkerStdoutLine);
+            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath), effectiveOnWorkerStdoutLine,
+            options.RoomDirectoryPath);
         // #802: resolved eagerly alongside workerBindings, same refusal semantics — a role's
         // FallbackOnExhaustion naming an unregistered adapter (or an otherwise-refused entry) fails
         // this dispatch before it starts rather than mid-park.
         var fallbackWorkerBindings = WorkerBindingResolver.ResolveFallbacks(
-            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath), effectiveOnWorkerStdoutLine);
+            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath), effectiveOnWorkerStdoutLine,
+            options.RoomDirectoryPath);
 
         var workflowId = new WorkflowId(options.WorkflowId ?? snapshot.WorkflowTemplateId.Value);
 

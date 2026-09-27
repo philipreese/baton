@@ -15,6 +15,21 @@ namespace Baton.Vendors.Tests;
 [Collection(LaunchConfigCollection.Name)]
 public class AgyWorkerAdapterTests
 {
+    [Fact]
+    public void Attached_file_disclosure_keeps_existing_artifacts_directory_and_read_hook_boundary()
+    {
+        const string path = "C:\\room\\artifacts\\attachments\\evidence.txt";
+        var grant = new PermissionGrant(ReadFiles: true);
+        var target = new AgyWorkerAdapter().Resolve(
+            new WorkerInvocation("Attached files (in C:\\room\\artifacts\\attachments): evidence.txt",
+                PermissionGrant: grant, AttachmentPaths: [path]), ArchitectContract);
+
+        Assert.Contains("evidence.txt", GetPrompt(target));
+        Assert.Contains("%BATON_ARTIFACTS_ROOT%", target.Args);
+        Assert.DoesNotContain("view_file", AgyWorkerAdapter.BuildDeniedTools(grant));
+        Assert.Contains("view_file", AgyWorkerAdapter.BuildDeniedTools(new PermissionGrant()));
+    }
+
     private static readonly WorkerContract ArchitectContract = new(
         "architect", ["goal"], [new ProducedOutput("plan.md")], []);
 

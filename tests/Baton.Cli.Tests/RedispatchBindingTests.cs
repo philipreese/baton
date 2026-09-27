@@ -12,6 +12,23 @@ namespace Baton.Cli.Tests;
 /// </summary>
 public class RedispatchBindingTests
 {
+    [Fact]
+    public void Legacy_parent_attachment_prompt_does_not_disclose_stale_parent_path()
+    {
+        var parentRoom = Path.Combine("root", "parent");
+        var childRoom = Path.Combine("root", "child");
+        var oldDirectory = Path.Combine(parentRoom, "artifacts", "attachments");
+        var parent = ParentEntry() with
+        {
+            PromptTemplate = $"Weigh the options.\n\nAttached files (in {oldDirectory}): old.txt\n\nRequired outputs: advice.md",
+        };
+
+        var child = RedispatchCommand.InheritBinding(parent, new RedispatchOptions(parentRoom, childRoom));
+
+        Assert.DoesNotContain(oldDirectory, child.PromptTemplate);
+        Assert.Null(child.AttachmentNames);
+    }
+
     private static WorkerBindingConfigEntry ParentEntry(
         string adapter = "claude", string? model = "opus", string? effort = "careful",
         string? workingDirectory = "/repo", WorktreeWorkspace? worktree = null,

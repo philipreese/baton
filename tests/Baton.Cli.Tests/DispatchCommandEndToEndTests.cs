@@ -1717,6 +1717,8 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
             var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
                 Path.Combine(roomDirectory, "bindings.json"), TestContext.Current.CancellationToken);
             Assert.Contains($"Attached files (in {attachmentsDir}): doc.txt, notes.md", bindings["advise"].PromptTemplate);
+            Assert.Equal(["doc.txt", "notes.md"], bindings["advise"].AttachmentNames);
+            Assert.Empty(bindings["advise"].Contract.RequiredInputs);
         }
         finally
         {

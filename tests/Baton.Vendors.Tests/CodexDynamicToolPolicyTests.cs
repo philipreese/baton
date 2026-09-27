@@ -10,6 +10,94 @@ namespace Baton.Vendors.Tests;
 public sealed class CodexDynamicToolPolicyTests
 {
     [Fact]
+    public async Task Declared_attachment_is_an_exact_readable_file_even_after_it_vanishes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-attachment-policy-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var attachments = Path.Combine(root, "artifacts", "attachments");
+            Directory.CreateDirectory(attachments);
+            var attached = Path.Combine(attachments, "evidence.txt");
+            var sibling = Path.Combine(attachments, "sibling.txt");
+            File.WriteAllText(attached, "unique attachment bytes 2442");
+            File.WriteAllText(sibling, "sibling bytes");
+            var policy = new CodexDynamicToolPolicy(
+                new PermissionGrant(ReadFiles: true, WriteFiles: true), Path.Combine(root, "workspace"),
+                Path.Combine(root, "output"), [], [], attachmentPaths: [attached]);
+
+            async Task<CodexDynamicToolResult> Read(string path) => await policy.ExecuteAsync(
+                CodexDynamicToolPolicy.ReadTextTool,
+                JsonSerializer.SerializeToElement(new { path }), TestContext.Current.CancellationToken);
+
+            Assert.Contains("unique attachment bytes 2442", (await Read(attached)).Text);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await Read(sibling)).Rule);
+            var otherRoom = Path.Combine(root, "other-room", "artifacts", "attachments");
+            Directory.CreateDirectory(otherRoom);
+            var other = Path.Combine(otherRoom, "evidence.txt");
+            File.WriteAllText(other, "other room bytes");
+            Assert.Equal(GrantRules.PathOutsideRoots, (await Read(other)).Rule);
+            Assert.Equal(GrantRules.PathOutsideRoots,
+                (await Read(Path.Combine(attachments, "..", "attachments", "sibling.txt"))).Rule);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await policy.ExecuteAsync(
+                CodexDynamicToolPolicy.ListFilesTool,
+                JsonSerializer.SerializeToElement(new { path = attachments }),
+                TestContext.Current.CancellationToken)).Rule);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await policy.ExecuteAsync(
+                CodexDynamicToolPolicy.WriteTextTool,
+                JsonSerializer.SerializeToElement(new { path = attached, content = "overwrite" }),
+                TestContext.Current.CancellationToken)).Rule);
+            Assert.Equal("unique attachment bytes 2442", File.ReadAllText(attached));
+            FileCleanup.Delete(attached);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await Read(attached)).Rule);
+            Directory.CreateDirectory(attached);
+            File.WriteAllText(Path.Combine(attached, "child.txt"), "child bytes");
+            Assert.Equal(GrantRules.PathOutsideRoots, (await Read(Path.Combine(attached, "child.txt"))).Rule);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public void Attachment_path_does_not_enable_a_withheld_read_tool()
+    {
+        var policy = new CodexDynamicToolPolicy(
+            new PermissionGrant(), null, Path.Combine(Path.GetTempPath(), "baton-output-2442"),
+            [], [], attachmentPaths: [Path.Combine(Path.GetTempPath(), "evidence.txt")]);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.ReadTextTool, ToolNames(policy));
+        Assert.DoesNotContain(CodexDynamicToolPolicy.ListFilesTool, ToolNames(policy));
+        Assert.DoesNotContain(CodexDynamicToolPolicy.SearchTextTool, ToolNames(policy));
+    }
+
+    [Fact]
+    public async Task Dag_input_read_tool_does_not_expose_attachment_under_a_withheld_read_grant()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-withheld-attachment-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var dag = Path.Combine(root, "dag.txt");
+            var attached = Path.Combine(root, "attached.txt");
+            File.WriteAllText(dag, "dag input bytes");
+            File.WriteAllText(attached, "attachment bytes");
+            var policy = new CodexDynamicToolPolicy(
+                new PermissionGrant(), null, Path.Combine(root, "output"), [dag], [],
+                attachmentPaths: [attached]);
+            Assert.Contains(CodexDynamicToolPolicy.ReadTextTool, ToolNames(policy));
+            var result = await policy.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool,
+                JsonSerializer.SerializeToElement(new { path = attached }),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(GrantRules.PathOutsideRoots, result.Rule);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
     public async Task Exact_file_restore_grant_declares_and_executes_the_host_bound_tool()
     {
         var root = Path.Combine(Path.GetTempPath(), $"baton-codex-restore-{Guid.NewGuid():N}");

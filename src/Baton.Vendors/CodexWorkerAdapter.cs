@@ -108,6 +108,12 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
             return ResolveBroker(invocation, contract, grant);
         }
 
+        if (invocation.AttachmentPaths is { Count: > 0 })
+        {
+            throw new PermissionGrantUnsupportedException(
+                "codex", "attachment reads require a structured PermissionGrant and the app-server broker.");
+        }
+
         var permissionMode = ResolvePermissionMode(invocation);
         var isWindows = OperatingSystem.IsWindows();
         var prompt = BuildPrompt(
@@ -767,7 +773,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
                 && invocation.WorkingDirectory is { Length: > 0 } restoreWorkspace
                     ? new CodexExactFileRestoreHostAuthority(
                         restoreWorkspace, restoreBase, "%BATON_OUTPUT_DIR%")
-                    : null);
+                    : null,
+            invocation.AttachmentPaths);
         CoreDispatchTarget BuildBrokerTarget(CodexBrokerConfiguration brokerConfiguration, string brokerPrompt) => new(
             "dotnet",
             [hostDllPath, "codex-broker", "--config", configPath, brokerPrompt],

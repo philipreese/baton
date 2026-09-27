@@ -390,23 +390,41 @@ passing `--workstream ""`. `RedispatchCommand` also (re-)creates that redispatch
 by-workstream junction against whichever slug `InheritBinding` just resolved — inherited, cleared, or
 overridden — never the raw `--workstream` flag alone, since a bare `baton redispatch` with no
 `--workstream` flag at all must still link into the parent's workstream directory. `--spec`
-omitted reuses the parent's already-built prompt verbatim — but for #1882's verify-results paragraph,
+omitted reuses the parent's already-built prompt except for #1882's verify-results paragraph,
 stripped (#1895) because it names the parent room's results file for a step that did not run in the
-child room, the one exception and the reason §9 states; given, the amended brief is rebuilt through
+child room, and the generated attachment disclosure, rebased to the child room; given, the amended brief is rebuilt through
 the same `RoleSpecMaterializer` seam a fresh dispatch uses, with the parent's recorded axes as defaults
 — including the inherited-unless-overridden label, applied after that rebuild since
 `RoleDispatch.Materialize` itself knows nothing of it (`RedispatchCommand.ExecuteAsync`). That seam is
 what makes the spec/grant mismatch lint and `--attach` (#1500, `docs/dispatch.md`) apply identically on
-this `--spec` path (#1576) — `--attach` is refused outright when `--spec` is omitted, since a verbatim
-prompt has nothing left to append an attachment listing to.
+this `--spec` path (#1576) — `--attach` is refused outright when `--spec` is omitted, since a bare
+redispatch inherits only the parent's declared attachment list.
 The parent must be Terminal (`terminal.json` present) — a still-running or never-dispatched parent is
 refused with a typed `CliArgumentException` naming `baton status` as the retry (no interactive
 confirmation exists for a non-interactive CLI, the same doctrine `--timeout`'s ceiling above rests on);
 a Terminal-but-not-`Succeeded` parent is redispatched anyway, with a stderr note rather than a silent
 rerun of a failed or cancelled lane. A parent whose `bindings.json` binds more than one worker (a
 composed template, never a single role) is refused — redispatch supports a single-role dispatch only.
-The parent's own artifacts are never copied into the child room — the child's `--spec` can cite paths
-under the parent room if it needs to, but copying would blur which run produced what. Lineage is
+The parent's worker-produced artifacts are never copied into the child room. A bare redispatch copies
+only the harness-supplied files named by the parent's ordered `AttachmentNames` binding field into
+the child's `artifacts/attachments/`; an amended-spec redispatch replaces that list, including with
+none. Fresh dispatch and `--continue` likewise use only the new request's `--attach` list. Each
+binding name is a canonical basename and resolves only to an existing regular file in the current
+room, with traversal, duplicates, reserved names and escaping links refused. Legacy bindings without
+the field grant no attachment-specific reads. The prompt names the current room's attachment path,
+while the binding, never the prompt or directory contents, carries read authority. Attachments do not
+change DAG `RequiredInputs` or their numbering. Codex's broker admits these as exact files for
+`baton_read_text` only; disappearance, directory substitution and links do not turn a file into a
+directory grant. Codex attachment reads require `ReadFiles`; an independently available DAG input
+read tool does not open attachments on a read-withheld role, and an artifact-only checkpoint exposes
+only its output tools. Codex's legacy raw `PermissionScope` direct CLI path cannot carry exact
+attachment reads and refuses a binding that declares them; the structured-grant broker is the
+supported Codex path. The attachment list does not enable a role-withheld read tool and adds no search,
+directory, shell or write authority. Claude and AGY already add `BATON_ARTIFACTS_ROOT` to their vendor
+directory list and their read-category hooks permit read tools when `ReadFiles` is granted; they do
+not have Codex's workspace-only read-root policy, so independently granted sibling reads may remain
+possible. Their role-withheld read tools stay denied. These are adapter and hook guarantees; live
+vendor positive and negative probes remain necessary before claiming end-to-end parity. Lineage is
 recorded on the new room's own `.baton/room.json` marker (`RoomMetadataFileName`, `BatonPaths.cs`) — the
 parent room directory, and the parent's own execution id when cheaply known from its terminal
 sentinel — rather than a new parallel file, since that marker is already this room's metadata home.

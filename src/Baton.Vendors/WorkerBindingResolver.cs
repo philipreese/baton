@@ -61,7 +61,8 @@ public static class WorkerBindingResolver
         IReadOnlyDictionary<string, IWorkerAdapter> adapters,
         IReadOnlyDictionary<string, string>? profiles = null,
         string? bindingsFileDirectory = null,
-        Action<string, string>? onWorkerStdoutLine = null)
+        Action<string, string>? onWorkerStdoutLine = null,
+        string? roomDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(adapters);
@@ -69,7 +70,7 @@ public static class WorkerBindingResolver
         var bindings = new Dictionary<string, WorkerBinding>(config.Count);
         foreach (var (workerName, entry) in config)
         {
-            bindings[workerName] = ResolveEntry(workerName, entry, adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine);
+            bindings[workerName] = ResolveEntry(workerName, entry, adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine, roomDirectory);
         }
 
         return bindings;
@@ -108,14 +109,15 @@ public static class WorkerBindingResolver
         IReadOnlyDictionary<string, IWorkerAdapter> adapters,
         IReadOnlyDictionary<string, string>? profiles = null,
         string? bindingsFileDirectory = null,
-        Action<string, string>? onWorkerStdoutLine = null)
+        Action<string, string>? onWorkerStdoutLine = null,
+        string? roomDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(adapters);
 
         return new LazyWorkerBindings(
             config,
-            (workerName, entry) => ResolveEntry(workerName, entry, adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine));
+            (workerName, entry) => ResolveEntry(workerName, entry, adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine, roomDirectory));
     }
 
     /// <summary>
@@ -131,7 +133,8 @@ public static class WorkerBindingResolver
         IReadOnlyDictionary<string, IWorkerAdapter> adapters,
         IReadOnlyDictionary<string, string>? profiles = null,
         string? bindingsFileDirectory = null,
-        Action<string, string>? onWorkerStdoutLine = null)
+        Action<string, string>? onWorkerStdoutLine = null,
+        string? roomDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(adapters);
@@ -145,7 +148,7 @@ public static class WorkerBindingResolver
             }
 
             bindings[workerName] = ResolveEntry(
-                workerName, ToFallbackEntry(entry, fallback), adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine);
+                workerName, ToFallbackEntry(entry, fallback), adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine, roomDirectory);
         }
 
         return bindings;
@@ -214,7 +217,8 @@ public static class WorkerBindingResolver
         IReadOnlyDictionary<string, IWorkerAdapter> adapters,
         IReadOnlyDictionary<string, string>? profiles,
         string? bindingsFileDirectory,
-        Action<string, string>? onWorkerStdoutLine)
+        Action<string, string>? onWorkerStdoutLine,
+        string? roomDirectory)
     {
         if (!adapters.TryGetValue(entry.Adapter, out var adapter))
         {
@@ -285,7 +289,8 @@ public static class WorkerBindingResolver
                     : null,
             MemoryAddGrant: entry.MemoryAddGrant,
             EnableExactFileRestoreTool: capturedRestoreBase is not null,
-            ExactFileRestoreBaseSha: capturedRestoreBase);
+            ExactFileRestoreBaseSha: capturedRestoreBase,
+            AttachmentPaths: AttachmentReadInputs.Resolve(entry.AttachmentNames, roomDirectory ?? bindingsFileDirectory));
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)

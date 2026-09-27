@@ -95,7 +95,8 @@ public static class SupplyCommand
         // every other entry in the file, reintroducing the defect for a bindings file naming a worker
         // 'baton supply' never touches.
         var workerBindings = WorkerBindingResolver.ResolveLazily(
-            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath));
+            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath),
+            roomDirectory: options.RoomDirectoryPath);
 
         var contract = new WorkerContract(options.Worker, RequiredInputs: [], [new ProducedOutput(options.OutputName)], OptionalMetadata: []);
         workerBindings = new WorkerBindingOverride(workerBindings, options.Worker, new WorkerBinding.NonProcess(contract));

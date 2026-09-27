@@ -228,6 +228,7 @@ namespace Baton.Vendors;
 /// it forward unchanged. Hand-authored values are not admitted by the restore tool without the same
 /// binding capability and the tool's ancestry checks.
 /// </param>
+/// <param name="AttachmentNames">Ordered current-room harness input basenames; see spec/baton.md §2. Null grants none.</param>
 public sealed record WorkerBindingConfigEntry(
     string Adapter,
     WorkerContract Contract,
@@ -299,7 +300,8 @@ public sealed record WorkerBindingConfigEntry(
     // #2100: present only on a queue-materialized room; absent is no authority.
     MemoryAddDispatchGrant? MemoryAddGrant = null,
     string? ExactFileRestoreBaseSha = null,
-    ExecutionLimitResolution? ExecutionLimitResolution = null);
+    ExecutionLimitResolution? ExecutionLimitResolution = null,
+    IReadOnlyList<string>? AttachmentNames = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

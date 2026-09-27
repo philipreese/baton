@@ -20,7 +20,8 @@ public sealed record CodexBrokerConfiguration(
     GhPullRequestCreateProvenance? PullRequestCreateProvenance = null,
     OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null,
     CodexMemoryAddHostAuthority? MemoryAddAuthority = null,
-    CodexExactFileRestoreHostAuthority? ExactFileRestoreAuthority = null);
+    CodexExactFileRestoreHostAuthority? ExactFileRestoreAuthority = null,
+    IReadOnlyList<string>? AttachmentPaths = null);
 
 /// <summary>Host-materialized identity for the one brokered worker memory write.</summary>
 public sealed record CodexMemoryAddHostAuthority(
