@@ -68,6 +68,8 @@ can settle a `needs-design` item, settle and route it. Neither situation permits
 
 ## Brief shaping
 
+For model/effort selection, consult the [benchmark reading guidance](../../../../benchmarks/README.md#choosing-a-worker-from-benchmark-evidence).
+
 Translate settled issue scope into the smallest prompt that lets this worker execute without
 rediscovering the plan. Include the exact deliverable and known seam, files or surfaces expected to
 change, acceptance that belongs to this lane, explicit non-goals, and proportionate verification.
