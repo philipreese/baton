@@ -2334,24 +2334,86 @@ def _selftest_daemon_restart_failure_modes() -> bool:
 
 def _selftest_full_refresh_daemon_outcomes() -> bool:
     """Exercise full-refresh command order, bounded starts, messaging, and pointer state."""
+    from collections import Counter
     import tempfile
 
+    task_and_identity = [
+        "task-query",
+        "identity-process", "identity-version", "identity-process", "identity-version",
+    ]
+    stop_and_old_exit = ["stop", "old-exit-process"]
+    healthy_replacement = [
+        "replacement-process", "replacement-version",
+        "replacement-process", "replacement-version",
+        "replacement-version", "replacement-process", "replacement-version",
+    ]
+    active_prefix = task_and_identity + stop_and_old_exit
+
+    def trace_matches(actual: List[str], expected: List[str]) -> bool:
+        return actual == expected
+
     cases = [
-        ("normal restart", "normal", 1, True, "active"),
-        ("swallowed first start", "swallowed", 2, True, "active"),
-        ("PID reuse between probes", "pid-reuse", 1, False, "identity-unstable"),
-        ("duplicate daemon rows", "duplicate", 1, False, "duplicate"),
-        ("version mismatch", "version-mismatch", 1, False, "version-mismatch"),
-        ("wrong path", "wrong-path", 1, False, "wrong-path"),
-        ("unhealthy candidate", "unhealthy", 1, False, "unhealthy"),
-        ("nonzero start", "nonzero-start", 1, False, "start attempt 1 failed"),
-        ("query failure", "query-failure", 0, False, "could not query the baton-daemon"),
-        ("absent task", "absent", 0, True, "installation-only success"),
-        ("disabled task", "disabled", 0, True, "installation-only success"),
-        ("old-exit timeout", "old-exit-timeout", 0, False, "Refusing to start or accept"),
+        (
+            "normal restart", "normal", 1, True, "active",
+            active_prefix + ["start"] + healthy_replacement,
+        ),
+        (
+            "swallowed first start", "swallowed", 2, True, "active",
+            active_prefix + ["start"] + ["replacement-process"] * 15
+            + ["start"] + healthy_replacement,
+        ),
+        (
+            "PID reuse between probes", "pid-reuse", 1, False, "identity-unstable",
+            active_prefix + [
+                "start", "replacement-process", "replacement-version",
+                "replacement-process", "replacement-version",
+            ],
+        ),
+        (
+            "duplicate daemon rows", "duplicate", 1, False, "duplicate",
+            active_prefix + ["start", "replacement-process"],
+        ),
+        (
+            "version mismatch", "version-mismatch", 1, False, "version-mismatch",
+            active_prefix + [
+                "start", "replacement-process", "replacement-version",
+                "replacement-version",
+            ],
+        ),
+        (
+            "wrong path", "wrong-path", 1, False, "wrong-path",
+            active_prefix + ["start", "replacement-process"],
+        ),
+        (
+            "unhealthy candidate", "unhealthy", 1, False, "unhealthy",
+            active_prefix + ["start"] + [
+                "replacement-process", "replacement-version",
+                "replacement-process", "replacement-version",
+            ] * 15,
+        ),
+        (
+            "nonzero start", "nonzero-start", 1, False, "start attempt 1 failed",
+            active_prefix + ["start"],
+        ),
+        (
+            "query failure", "query-failure", 0, False, "could not query the baton-daemon",
+            ["task-query"],
+        ),
+        (
+            "absent task", "absent", 0, True, "installation-only success",
+            ["task-query"],
+        ),
+        (
+            "disabled task", "disabled", 0, True, "installation-only success",
+            ["task-query"],
+        ),
+        (
+            "old-exit timeout", "old-exit-timeout", 0, False, "Refusing to start or accept",
+            task_and_identity + ["stop"] + ["old-exit-process", "old-exit-version"] * 15,
+        ),
     ]
     ok = True
-    for label, outcome, expected_starts, expected_success, expected_text in cases:
+    for label, outcome, expected_starts, expected_success, expected_text, expected_trace in cases:
         with tempfile.TemporaryDirectory() as td:
             baton_home = os.path.join(td, "baton")
             tools_root = os.path.join(baton_home, "tools")
@@ -2365,6 +2427,8 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
             new_creation = "2026-01-01T00:01:00+00:00"
             state = {"phase": "old", "starts": 0, "process_queries": 0, "new_version_calls": 0}
             commands: List[List[str]] = []
+            daemon_trace: List[str] = []
+            stop_requested = False
 
             def process_rows() -> str:
                 if state["phase"] == "old":
@@ -2382,6 +2446,7 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
                 return f"200|{new_creation}|{new_path}\n"
 
             def run(cmd: List[str]) -> CommandResult:
+                nonlocal stop_requested
                 commands.append(cmd)
                 if cmd[:3] == ["git", "-C", repo_root] and cmd[3:5] == ["rev-parse", "--short"]:
                     return CommandResult(0, "newsha1\n")
@@ -2395,6 +2460,13 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
                     open(os.path.join(install_dir, "baton.exe"), "w").close()
                     return CommandResult(0)
                 if len(cmd) == 2 and cmd[1] == "--version":
+                    normalized_executable = os.path.normcase(cmd[0])
+                    if normalized_executable == os.path.normcase(old_path):
+                        daemon_trace.append(
+                            "old-exit-version" if stop_requested else "identity-version"
+                        )
+                    elif state["starts"] and normalized_executable == os.path.normcase(new_path):
+                        daemon_trace.append("replacement-version")
                     if os.path.normcase(cmd[0]) == os.path.normcase(new_path):
                         state["new_version_calls"] += 1
                     if (os.path.normcase(cmd[0]) == os.path.normcase(new_path)
@@ -2404,6 +2476,7 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
                 if len(cmd) == 3 and cmd[1:] == ["templates", "--json"]:
                     return CommandResult(0, "[]\n")
                 if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
+                    daemon_trace.append("task-query")
                     if outcome == "query-failure":
                         return CommandResult(1, "", "query failed")
                     task_state = {
@@ -2412,13 +2485,21 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
                     }.get(outcome, "BATON_TASK_STATE=Ready\n")
                     return CommandResult(0, task_state)
                 if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
+                    daemon_trace.append(
+                        "replacement-process" if state["starts"] else (
+                            "old-exit-process" if stop_requested else "identity-process"
+                        )
+                    )
                     state["process_queries"] += 1
                     return CommandResult(0, process_rows())
                 if cmd[0] == "powershell" and "Stop-ScheduledTask" in cmd[3]:
+                    daemon_trace.append("stop")
+                    stop_requested = True
                     if outcome != "old-exit-timeout":
                         state["phase"] = "stopped"
                     return CommandResult(0)
                 if cmd[0] == "powershell" and "Start-ScheduledTask" in cmd[3]:
+                    daemon_trace.append("start")
                     state["starts"] += 1
                     if outcome == "nonzero-start":
                         return CommandResult(5, "", "start failed")
@@ -2449,14 +2530,6 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
             joined = "\n".join(messages)
             pointer_path = os.path.join(tools_root, "current")
             pointer = open(pointer_path, encoding="utf-8").read().strip() if os.path.isfile(pointer_path) else None
-            start_indexes = [
-                i for i, command in enumerate(commands)
-                if command and command[0] == "powershell" and "Start-ScheduledTask -TaskName baton-daemon" in command[3]
-            ]
-            stop_indexes = [
-                i for i, command in enumerate(commands)
-                if command and command[0] == "powershell" and "Stop-ScheduledTask -TaskName baton-daemon" in command[3]
-            ]
             if (code == 0) != expected_success:
                 print(f"  FAILED ({label}): expected failure, got success. Messages: {messages}")
                 ok = False
@@ -2475,23 +2548,35 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
             if expected_text.casefold() not in joined.casefold():
                 print(f"  FAILED ({label}): missing final classification {expected_text!r}. Messages: {messages}")
                 ok = False
-            if start_indexes and stop_indexes and stop_indexes[0] > start_indexes[0]:
-                pass
-            elif expected_starts and not stop_indexes:
-                print(f"  FAILED ({label}): start ran without the preceding stop")
+            if not trace_matches(daemon_trace, expected_trace):
+                print(f"  FAILED ({label}): daemon command trace {daemon_trace!r}, want {expected_trace!r}")
                 ok = False
-            if outcome in {"absent", "disabled", "query-failure"} and start_indexes:
-                print(f"  FAILED ({label}): task was not allowed to start: {start_indexes}")
+            if Counter(daemon_trace) != Counter(expected_trace):
+                print(
+                    f"  FAILED ({label}): daemon command counts {Counter(daemon_trace)!r}, "
+                    f"want {Counter(expected_trace)!r}"
+                )
                 ok = False
-            if outcome in {"absent", "disabled", "query-failure"} and stop_indexes:
-                print(f"  FAILED ({label}): task was not allowed to stop: {stop_indexes}")
+            if outcome in {"absent", "disabled", "query-failure"} and any(
+                event in daemon_trace for event in ("start", "stop")
+            ):
+                print(f"  FAILED ({label}): installation-only/refusal path ran start or stop: {daemon_trace!r}")
                 ok = False
-            if outcome == "old-exit-timeout" and start_indexes:
-                print(f"  FAILED ({label}): old-exit timeout still ran a start")
+            if outcome == "old-exit-timeout" and "start" in daemon_trace:
+                print(f"  FAILED ({label}): old-exit timeout still ran a start: {daemon_trace!r}")
                 ok = False
             if outcome == "nonzero-start" and state["process_queries"] != 3:
                 print(f"  FAILED ({label}): nonzero start ran replacement probes: {state}")
                 ok = False
+
+    normal_trace = cases[0][-1]
+    swapped_trace = normal_trace.copy()
+    stop_index = swapped_trace.index("stop")
+    start_index = swapped_trace.index("start")
+    swapped_trace[stop_index], swapped_trace[start_index] = swapped_trace[start_index], swapped_trace[stop_index]
+    if trace_matches(swapped_trace, normal_trace):
+        print("  FAILED: exact command trace accepted a swapped start/stop trace")
+        ok = False
     return ok
 
 
