@@ -246,7 +246,7 @@ public sealed class ConductorObligationStoreTests : IDisposable
     public async Task Inspection_reconstructs_fact_only_state_without_writing_projection()
     {
         await Store().EnqueueAsync(Request(), Ct);
-        File.Delete(_projection);
+        FileCleanup.EnsureDeleted(_projection);
 
         var inspection = await Store().InspectAsync(Ct);
 
@@ -425,7 +425,7 @@ public sealed class ConductorObligationStoreTests : IDisposable
 
         var rewrittenFacts = string.Join('\n', rows.Select(row => row.ToJsonString())) + "\n";
         await File.WriteAllTextAsync(_events, rewrittenFacts, Ct);
-        File.Delete(_projection);
+        FileCleanup.EnsureDeleted(_projection);
         var eventBytes = await File.ReadAllBytesAsync(_events, Ct);
         var rolloverExisted = File.Exists(_rollover);
         var rolloverBytes = rolloverExisted ? await File.ReadAllBytesAsync(_rollover, Ct) : [];
