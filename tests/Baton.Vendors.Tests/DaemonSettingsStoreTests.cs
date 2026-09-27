@@ -222,4 +222,27 @@ public class DaemonSettingsStoreTests
             FileCleanup.Delete(path);
         }
     }
+
+    [Fact]
+    public async Task Execution_limit_profiles_with_json_syntax_error_throws_configuration_exception()
+    {
+        var path = TempPath();
+        try
+        {
+            await File.WriteAllTextAsync(
+                path,
+                "{\"ExecutionLimitProfiles\": [ { \"Adapter\": \"claude\", ",
+                TestContext.Current.CancellationToken);
+
+            var ex = await Assert.ThrowsAsync<ExecutionLimitProfileConfigurationException>(
+                () => DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken));
+
+            Assert.IsAssignableFrom<BatonFlowException>(ex);
+            Assert.Contains("ExecutionLimitProfiles is malformed", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
 }

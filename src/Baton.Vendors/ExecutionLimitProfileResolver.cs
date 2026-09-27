@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton;
 using Baton.Domain;
 
 namespace Baton.Vendors;
@@ -30,9 +31,10 @@ public static class ExecutionLimitSource
     public const string RoleDefault = "role-default";
 }
 
-public sealed class ExecutionLimitProfileConfigurationException : Exception
+public sealed class ExecutionLimitProfileConfigurationException : BatonFlowException
 {
     public ExecutionLimitProfileConfigurationException(string message) : base(message) { }
+    public ExecutionLimitProfileConfigurationException(string message, Exception innerException) : base(message, innerException) { }
 }
 
 public static class ExecutionLimitProfileResolver
@@ -93,10 +95,31 @@ public static class ExecutionLimitProfileResolver
 
     internal static void ValidateJson(JsonElement root)
     {
-        if (root.TryGetProperty("ExecutionLimitProfiles", out var profiles)
+        if (TryGetProfilesProperty(root, out var profiles)
             && profiles.ValueKind is not (JsonValueKind.Array or JsonValueKind.Null))
             throw new ExecutionLimitProfileConfigurationException(
                 "ExecutionLimitProfiles must be an array of complete profile rows.");
+    }
+
+    internal static bool TryGetProfilesProperty(JsonElement root, out JsonElement profiles)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            profiles = default;
+            return false;
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (string.Equals(property.Name, "ExecutionLimitProfiles", StringComparison.OrdinalIgnoreCase))
+            {
+                profiles = property.Value;
+                return true;
+            }
+        }
+
+        profiles = default;
+        return false;
     }
 
     private static DeclaredTaskSize ParseSize(string? value, int index)

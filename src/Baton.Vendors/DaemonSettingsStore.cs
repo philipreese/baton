@@ -260,17 +260,21 @@ public sealed record RunwayVendorHoldSettings
 }
 
 /// <summary>
-/// Reads and writes <see cref="BatonPaths.SettingsFile"/>. Unlike <see cref="BatonProfileStore"/>, a
-/// malformed file here is never fatal: a bad concurrency cap should not stop the daemon from starting
-/// at all, so both an absent and a malformed file resolve to <see cref="DaemonSettings"/>'s defaults —
-/// the latter after logging a warning so the operator can see it silently reset rather than wonder why
-/// a cap they set stopped applying.
+/// Reads and writes <see cref="BatonPaths.SettingsFile"/>. Unlike <see cref="BatonProfileStore"/>,
+/// general malformed settings here resolve to <see cref="DaemonSettings"/>'s defaults (after logging
+/// a warning so the operator can see it silently reset rather than wonder why a cap they set stopped
+/// applying). When <see cref="DaemonSettings.ExecutionLimitProfiles"/> is present but malformed or
+/// contains syntax errors, <see cref="ExecutionLimitProfileConfigurationException"/> is thrown rather
+/// than launching workers under unintended defaults.
 /// </summary>
 public static class DaemonSettingsStore
 {
-    /// <summary>Loads settings from <paramref name="path"/>. Never throws: an absent file, an unreadable
-    /// file, or one that fails to parse all resolve to <see cref="DaemonSettings"/>'s defaults, the last
-    /// two after writing a warning to <see cref="Console.Error"/>.</summary>
+    /// <summary>Loads settings from <paramref name="path"/>. An absent file, an unreadable file, or
+    /// general settings that fail to parse resolve to <see cref="DaemonSettings"/>'s defaults, the last
+    /// two after writing a warning to <see cref="Console.Error"/>. Throws
+    /// <see cref="ExecutionLimitProfileConfigurationException"/> when <see cref="DaemonSettings.ExecutionLimitProfiles"/>
+    /// is present but malformed or contains syntax errors.</summary>
+    /// <exception cref="ExecutionLimitProfileConfigurationException">Thrown when execution-limit profiles are malformed or invalid.</exception>
     public static async Task<DaemonSettings> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
@@ -280,12 +284,13 @@ public static class DaemonSettingsStore
             return new DaemonSettings();
         }
 
-        var hasExecutionLimitProfiles = false;
+        var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+        var hasExecutionLimitProfiles = json.Contains("ExecutionLimitProfiles", StringComparison.OrdinalIgnoreCase);
         try
         {
-            var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
             using var document = JsonDocument.Parse(json);
-            hasExecutionLimitProfiles = document.RootElement.TryGetProperty("ExecutionLimitProfiles", out _);
+            hasExecutionLimitProfiles = ExecutionLimitProfileResolver.TryGetProfilesProperty(document.RootElement, out var profilesProp)
+                && profilesProp.ValueKind != JsonValueKind.Null;
             ExecutionLimitProfileResolver.ValidateJson(document.RootElement);
             await using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json));
             var settings = await JsonSerializer.DeserializeAsync<DaemonSettings>(stream, cancellationToken: cancellationToken)
@@ -301,7 +306,7 @@ public static class DaemonSettingsStore
         catch (JsonException ex) when (hasExecutionLimitProfiles)
         {
             throw new ExecutionLimitProfileConfigurationException(
-                $"ExecutionLimitProfiles is malformed and must contain complete profile rows: {ex.Message}");
+                $"ExecutionLimitProfiles is malformed and must contain complete profile rows: {ex.Message}", ex);
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {

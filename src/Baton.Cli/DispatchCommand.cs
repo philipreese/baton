@@ -1483,7 +1483,6 @@ public static class DispatchCommand
 
         return binding with
         {
-            DeclaredTaskSize = declaredSize,
             Timeout = resolution.Timeout,
             TokenBudget = resolution.TokenBudget,
             MaxToolSteps = resolution.MaxToolSteps,
@@ -1736,7 +1735,7 @@ public static class DispatchCommand
             Timeout = parentEntry.Timeout,
             TokenBudget = parentEntry.TokenBudget,
             MaxToolSteps = parentEntry.MaxToolSteps,
-            DeclaredTaskSize = parentEntry.DeclaredTaskSize,
+            DeclaredTaskSize = parentEntry.DeclaredTaskSize ?? entry.DeclaredTaskSize,
             ExecutionLimitResolution = parentEntry.ExecutionLimitResolution,
             SessionId = parentEntry.SessionId,
             ResumeSession = true,
