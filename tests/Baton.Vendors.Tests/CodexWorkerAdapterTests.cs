@@ -470,13 +470,13 @@ public sealed class CodexWorkerAdapterTests
     }
 
     [Fact]
-    public void Ultra_is_refused_for_codex_spark_which_only_advertises_through_xhigh()
+    public void Ultra_is_refused_for_gpt_5_5_which_only_advertises_through_xhigh()
     {
         var exception = Assert.Throws<IncoherentVendorEffortException>(
             () => new CodexWorkerAdapter().Resolve(
                 new WorkerInvocation(
                     "Conduct.",
-                    Model: "gpt-5.3-codex-spark",
+                    Model: "gpt-5.5",
                     Effort: "ultra",
                     AllowsSubagents: true),
                 NoOutputContract));
@@ -502,11 +502,11 @@ public sealed class CodexWorkerAdapterTests
                 NoOutputContract));
 
         Assert.Contains("absent from the recorded Codex capability snapshot", exception.Message);
-        Assert.Contains("codex-model-list-2026-09-08.jsonl", exception.Message);
+        Assert.Contains("codex-model-list-2026-09-27.jsonl", exception.Message);
 
         // #1880: the refusal names which CLI's catalog said so, read from the recording's own
         // initialize line rather than restated here — the file's name already carries the date.
-        Assert.Contains("codex-cli 0.153.2", exception.Message);
+        Assert.Contains("codex-cli 0.158.0-alpha.2.1", exception.Message);
     }
 
     /// <summary>
@@ -531,6 +531,30 @@ public sealed class CodexWorkerAdapterTests
         var exception = Assert.Throws<IncoherentVendorEffortException>(
             () => new CodexWorkerAdapter().Resolve(
                 new WorkerInvocation("Conduct.", Model: "gpt-5.6-luna", Effort: "ultra"),
+                NoOutputContract));
+
+        Assert.Contains("(available: low, medium, high, xhigh, max)", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("gpt-6-sol", "ultra")]
+    [InlineData("gpt-6-luna", "max")]
+    public void Newly_recorded_codex_models_accept_the_measured_effort_ceiling(string model, string effort)
+    {
+        var target = new CodexWorkerAdapter().Resolve(
+            new WorkerInvocation("Inspect.", Model: model, Effort: effort),
+            NoOutputContract);
+
+        Assert.Equal(model, ArgValue(target, "--model"));
+        Assert.Contains($"model_reasoning_effort=\"{effort}\"", ArgValues(target, "--config"));
+    }
+
+    [Fact]
+    public void Newly_recorded_luna_rejects_ultra()
+    {
+        var exception = Assert.Throws<IncoherentVendorEffortException>(
+            () => new CodexWorkerAdapter().Resolve(
+                new WorkerInvocation("Inspect.", Model: "gpt-6-luna", Effort: "ultra"),
                 NoOutputContract));
 
         Assert.Contains("(available: low, medium, high, xhigh, max)", exception.Message);
@@ -599,7 +623,7 @@ public sealed class CodexWorkerAdapterTests
         Assert.Equal(["low", "medium", "high", "xhigh", "max", "ultra"], recorded.EffortsByModel["gpt-6-astra"]);
         Assert.Equal(["low", "medium", "high", "xhigh", "max"], recorded.EffortsByModel["gpt-5.6-luna"]);
         Assert.False(recorded.EffortsByModel.ContainsKey("gpt-5.4"));
-        Assert.Equal("0.153.2", recorded.CliVersion);
+        Assert.Equal("0.158.0-alpha.2.1", recorded.CliVersion);
     }
 
     /// <summary>
@@ -928,12 +952,14 @@ public sealed class CodexWorkerAdapterTests
         Assert.Equal("codex", capabilities.Vendor);
         Assert.Equal(
             [
-                "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-                "gpt-5.5", "gpt-5.3-codex-spark",
+                "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+                "gpt-5.6-luna", "gpt-5.5",
             ],
             capabilities.Models);
-        Assert.Equal(31, capabilities.Items.Count);
+        Assert.Equal(38, capabilities.Items.Count);
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-astra[ultra]" && item.Kind == "mode");
+        Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-sol[ultra]" && item.Kind == "mode");
+        Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-luna[max]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-5.6-sol[high]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-5.6-terra[max]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-5.6-luna[max]" && item.Kind == "mode");
