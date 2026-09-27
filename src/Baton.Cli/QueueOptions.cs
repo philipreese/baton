@@ -51,6 +51,7 @@ public enum QueueWorktreesOutputFormat
 /// <param name="TokenBudget">Forwarded as <c>baton dispatch --token-budget</c>.</param>
 /// <param name="OverrideRunwayReason">Forwarded as <c>baton dispatch --override-runway</c>; the reason is mandatory when the flag is used.</param>
 /// <param name="Reason">Why the item's axes differ from its tier. Mandatory when any of adapter/model/effort is set alongside a scope class.</param>
+/// <param name="LifecycleReason">The CLI value forwarded to <see cref="QueueItem.LifecycleReason"/>; a named stage's <c>Reason</c> takes precedence.</param>
 /// <param name="MergedPullRequest">The explicitly supplied merged PR used as retirement evidence, for <c>queue retire</c>.</param>
 /// <param name="Skills">Normalized explicit skill package names forwarded as repeatable <c>baton dispatch --skill</c> arguments.</param>
 /// <param name="ImportFilePath">The scratchpad <c>queue.json</c> to import, for <see cref="QueueVerb.Import"/>.</param>
@@ -88,6 +89,7 @@ public sealed record QueueOptions(
     long? TokenBudget = null,
     string? OverrideRunwayReason = null,
     string? Reason = null,
+    string? LifecycleReason = null,
     string? ImportFilePath = null,
     bool Lifecycle = false,
     IReadOnlyList<QueueStageSelection>? StageSelections = null,

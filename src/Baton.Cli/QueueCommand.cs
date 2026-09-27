@@ -294,6 +294,7 @@ public static class QueueCommand
             LastAdmission = admission,
             StageSelections = stageSelections,
             LifecyclePin = options.LifecyclePin,
+            LifecycleReason = options.LifecycleReason,
             TimeoutMinutes = options.TimeoutMinutes,
             MaxToolSteps = options.MaxToolSteps,
             TokenBudget = options.TokenBudget,
@@ -2060,6 +2061,7 @@ public static class QueueCommand
                 Reason = options.Reason,
                 StageSelections = stageSelections,
                 LifecyclePin = options.LifecyclePin,
+                LifecycleReason = options.LifecycleReason,
                 Stage = WorkStage.Implement,
             };
 
@@ -2152,6 +2154,7 @@ public static class QueueCommand
     /// </summary>
     private static void ValidateLifecycleSelections(QueueItem item, QueueSettings settings)
     {
+        var missingReasons = new List<WorkStage>();
         foreach (var stage in new[]
                  {
                      WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview, WorkStage.Continue,
@@ -2165,6 +2168,11 @@ public static class QueueCommand
 
             var tier = QueueTierTable.ResolveForStage(
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            if (tier.IsOverride && string.IsNullOrWhiteSpace(tier.OverrideReason))
+            {
+                missingReasons.Add(stage);
+            }
+
             if (tier.Adapter is { } adapter)
             {
                 try
@@ -2180,6 +2188,14 @@ public static class QueueCommand
                         : new CliArgumentException(message);
                 }
             }
+        }
+
+        if (missingReasons.Count > 0)
+        {
+            var stages = string.Join(", ", missingReasons.Select(WorkStages.Token));
+            throw new CliArgumentException(
+                $"Explicit lifecycle routing for stage(s) {stages} needs a rationale. "
+                + "Pass '--lifecycle-reason <why>' once, or pass '--reason <why>' while naming each stage with '--stage'.");
         }
     }
 

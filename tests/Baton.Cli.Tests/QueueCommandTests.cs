@@ -801,6 +801,93 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_lifecycle_persists_one_reason_and_round_trips_stage_precedence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceRepository = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2418");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(sourceRepository);
+            await File.WriteAllTextAsync(brief, "routing reason coverage", Ct);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2418-lane", Role: "implement", SpecFilePath: brief, Issue: 2418,
+                    ScopeClass: "engine", Lifecycle: true,
+                    LifecycleReason: "one rationale for selected lifecycle routing",
+                    StageSelections:
+                    [
+                        new() { Stage = WorkStage.Review, Adapter = "codex", Model = "gpt-5.6-sol", Reason = "review-only rationale" },
+                        new() { Stage = WorkStage.Fix, Adapter = "claude", Model = "sonnet" },
+                    ],
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Medium, "one routing seam")),
+                TextWriter.Null,
+                Ct,
+                sourceRepository,
+                (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo", null)),
+                (_, _, _, _, _, _, _) =>
+                {
+                    Directory.CreateDirectory(workspace);
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2418-lane"));
+                });
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("one rationale for selected lifecycle routing", item.LifecycleReason);
+            Assert.Equal("review-only rationale", item.StageSelections!.Single(s => s.Stage == WorkStage.Review).Reason);
+            Assert.Null(item.StageSelections!.Single(s => s.Stage == WorkStage.Fix).Reason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_lifecycle_refuses_all_selected_stages_missing_a_reason_before_provisioning()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "missing routing rationale", Ct);
+            var provisioned = false;
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2418-missing", Role: "implement", SpecFilePath: brief, Issue: 2418,
+                    ScopeClass: "engine", Lifecycle: true,
+                    StageSelections:
+                    [
+                        new() { Stage = WorkStage.Review, Adapter = "codex", Model = "gpt-5.6-sol" },
+                        new() { Stage = WorkStage.Fix, Adapter = "claude", Model = "sonnet" },
+                    ],
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Medium, "one routing seam")),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(null),
+                (_, _, _, _, _, _, _) =>
+                {
+                    provisioned = true;
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree("never", "never"));
+                }));
+
+            Assert.Contains("review", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("fix", refusal.Message, StringComparison.Ordinal);
+            Assert.False(provisioned);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_explicit_workspace_does_not_resolve_or_record_repository_provenance()
     {
         var home = CreateTempHome();

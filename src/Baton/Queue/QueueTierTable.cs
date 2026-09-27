@@ -177,13 +177,14 @@ public static class QueueTierTable
         }
 
         var (selection, source) = SelectionForStage(item, stage);
+        var effectiveReason = selection?.Reason ?? item.LifecycleReason;
         var resolved = Resolve(item with
         {
             Role = WorkStages.RoleFor(stage),
             Adapter = selection?.Adapter,
             Model = selection?.Model,
             Effort = selection?.Effort,
-            Reason = selection?.Reason,
+            Reason = effectiveReason,
         }, settings, namedTiers, roleTiers);
 
         return resolved with { SelectionSource = source };

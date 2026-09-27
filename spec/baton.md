@@ -7300,7 +7300,8 @@ observation are retained on the queue row, and the disposition uses the existing
 
 `baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
 engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeout <minutes>] [--max-tool-steps]
-[--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`,
+[--token-budget] [--override-runway <reason>] [--reason <why>] [--lifecycle-reason <why>] [--lifecycle
+| --lifecycle-pin] [--stage <stage>]`, plus `list`, `hold`, `resume`, `cancel <tag>`,
 `retire <tag> --reason <text> [--merged-pr <n>]`, `restore <tag> --reason <text>`, `import <file>`, and
 `worktrees [--format text|json]`.
 
@@ -7696,7 +7697,13 @@ combined with `--stage`, so unset, stage override and whole-lifecycle pin are th
 states rather than inferred intent. `baton queue list` prints the effective plan and its source for
 every dispatchable stage; launch facts record the selected adapter/model/effort and `selectionSource`.
 Stage choices never alter timeout, tool-step or token budgets, and no stage advance escalates a
-vendor or model.
+vendor or model. Every explicit stage routing departure from its scope tier must carry a rationale
+before queue mutation. `--lifecycle-reason <why>` supplies one persisted fallback rationale for all
+explicit lifecycle-stage routing; a stage's named/current `--reason <why>` takes precedence only for
+that stage. The fallback is stored once on the queue item and projected into the effective launch
+reason at resolution time; it is not copied into every stage selection. `--lifecycle-reason` is
+refused outside lifecycle admission, and admission names every selected stage still missing a
+rationale before provisioning, spec copy, or queue mutation.
 
 **Persisted-item compatibility is explicit.** A lifecycle row written before this rule has no
 `stageSelections` field. If it also carries an adapter, model or effort, those stored axes retain
