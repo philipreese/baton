@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.57.1](https://github.com/philipreese/baton/compare/v0.57.0...v0.57.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **accounting:** Preserve ordinary execution arrest reasons in cost ledger ([#2446](https://github.com/philipreese/baton/issues/2446)) ([3997d15](https://github.com/philipreese/baton/commit/3997d1578e1ee4c39b88c81bd68340ef21817766))
+
 ## [0.57.0](https://github.com/philipreese/baton/compare/v0.56.0...v0.57.0) (2026-09-27)
 
 
