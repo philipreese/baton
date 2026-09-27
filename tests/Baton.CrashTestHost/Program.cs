@@ -27,6 +27,32 @@ using Baton.Store;
 // file named by BATON_CRASH_TEST_SLEEPER_PID_FILE lets the E2E prove the descendant is gone. No shell
 // or callback seam is involved: production starts the copied apphost directly.
 const string HermeticHead = "0123456789abcdef0123456789abcdef01234567";
+if (args is ["filter-descendant", var descendantMarker])
+{
+    await File.WriteAllTextAsync(descendantMarker, "descendant\n");
+    return 0;
+}
+if (args is ["filter-helper"]
+    && Environment.GetEnvironmentVariable("BATON_EXACT_RESTORE_FILTER_HELPER_MARKER")
+        is { Length: > 0 } filterMarker)
+{
+    await File.WriteAllTextAsync(filterMarker, "helper\n");
+    if (Environment.GetEnvironmentVariable("BATON_EXACT_RESTORE_FILTER_DESCENDANT_MARKER")
+        is { Length: > 0 } childMarker)
+    {
+        var childStart = new ProcessStartInfo(Environment.ProcessPath!)
+        {
+            UseShellExecute = false,
+        };
+        childStart.ArgumentList.Add("filter-descendant");
+        childStart.ArgumentList.Add(childMarker);
+        using var child = Process.Start(childStart)
+            ?? throw new InvalidOperationException("Could not start the controlled filter descendant.");
+        await child.WaitForExitAsync();
+    }
+
+    return 0;
+}
 if (Environment.GetEnvironmentVariable("BATON_EXACT_RESTORE_GIT_MODE") == "noisy")
 {
     var pidFile = Environment.GetEnvironmentVariable("BATON_EXACT_RESTORE_GIT_PID_FILE")!;

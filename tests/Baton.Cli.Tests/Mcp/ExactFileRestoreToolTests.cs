@@ -840,6 +840,73 @@ public sealed class ExactFileRestoreToolTests
     }
 
     [Theory]
+    [InlineData("clean", "worktree")]
+    [InlineData("clean", "index")]
+    [InlineData("clean", "info")]
+    [InlineData("clean", "global")]
+    [InlineData("process", "worktree")]
+    [InlineData("process", "index")]
+    [InlineData("process", "info")]
+    [InlineData("process", "global")]
+    public async Task Configured_filters_are_refused_before_a_marker_helper_can_spawn(
+        string filterKind,
+        string attributeSource)
+    {
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var helper = CrashHostExecutable();
+            var marker = Path.Combine(root, "filter-helper-launched.txt");
+            var descendantMarker = Path.Combine(root, "filter-descendant-launched.txt");
+            var attributeFile = attributeSource switch
+            {
+                "worktree" => Path.Combine(root, ".gitattributes"),
+                "index" => Path.Combine(root, ".gitattributes"),
+                "info" => Path.Combine(root, ".git", "info", "attributes"),
+                "global" => Path.Combine(root, "global.attributes"),
+                _ => throw new ArgumentOutOfRangeException(nameof(attributeSource)),
+            };
+            Directory.CreateDirectory(Path.GetDirectoryName(attributeFile)!);
+            await File.WriteAllTextAsync(
+                attributeFile,
+                "target.txt filter=restore-check\n",
+                Ct);
+            if (attributeSource == "index")
+            {
+                await GitAsync(root, "add", ".gitattributes");
+            }
+            else if (attributeSource == "global")
+            {
+                await GitAsync(root, "config", "core.attributesFile", attributeFile);
+            }
+
+            var filterCommand = $"\"{helper}\" filter-helper";
+            await GitAsync(root, "config", $"filter.restore-check.{filterKind}", filterCommand);
+            await File.WriteAllTextAsync(Path.Combine(root, "target.txt"), "damaged\n", Ct);
+
+            var result = await (await NewToolAsync(
+                    root,
+                    new ExactFileRestoreTestHooks(
+                        GitEnvironment: new Dictionary<string, string?>
+                        {
+                            ["BATON_EXACT_RESTORE_FILTER_HELPER_MARKER"] = marker,
+                            ["BATON_EXACT_RESTORE_FILTER_DESCENDANT_MARKER"] = descendantMarker,
+                        })))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Contains("filter", result.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(marker));
+            Assert.False(File.Exists(descendantMarker));
+            Assert.Equal("damaged\n", await File.ReadAllTextAsync(Path.Combine(root, "target.txt"), Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Noisy_git_timeout_and_cancellation_are_bounded_and_kill_the_child(

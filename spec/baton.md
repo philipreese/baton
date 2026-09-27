@@ -5241,10 +5241,13 @@ through Baton's contained-child seam. Query-local `-c` overrides disable reposit
 untracked-cache and hooks, while `GIT_NO_LAZY_FETCH=1`, `GIT_OPTIONAL_LOCKS=0`, prompt denial and
 literal pathspec mode prevent configured helper/network escape for this command set. Start, nonzero,
 timeout, cancellation and bounded teardown failures all become tool refusals. The admitted command
-set is `rev-parse`, `merge-base`, `ls-files`, `status`, and `cat-file`; with those overrides it has no
-repository-configured executable edge, so the shared Unix process seam's lack of descendant-tree
-containment is not reachable from this restore path. No Git failure grants filesystem mutation
-authority.
+set is `rev-parse`, `merge-base`, `ls-files`, `check-attr`, `status`, and `cat-file`. Before `status`,
+the restore path checks the target's ordinary and cached `filter` attributes, covering worktree,
+index, info, and configured attribute-file sources, and refuses any configured filter. This
+filter-free preflight prevents `status` from reaching a repository-configured clean or process
+filter, so with those overrides it has no repository-configured executable edge; the shared Unix
+process seam's lack of descendant-tree containment is not reachable from this restore path. No Git
+failure grants filesystem mutation authority.
 
 **`PullRequestCreateIdentity` is serialized repository/head authority, not ordinary harness
 configuration (#2190).** Its JSON value is `{Repository, HeadBranch}`. A cold `baton dispatch`

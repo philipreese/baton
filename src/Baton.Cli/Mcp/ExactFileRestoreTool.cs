@@ -193,6 +193,21 @@ public sealed class ExactFileRestoreTool : IMcpTool
                     sourceBlob);
             }
 
+            var configuredFilter = await FindConfiguredFilterAsync(relativePath, cancellationToken)
+                .ConfigureAwait(false);
+            if (!configuredFilter.Succeeded)
+            {
+                return Refusal(
+                    configuredFilter.Failure
+                    ?? "could not determine whether the named file has a configured filter");
+            }
+
+            if (configuredFilter.FilterName is { } filterName)
+            {
+                return Refusal(
+                    $"the named file uses the configured Git filter '{filterName}', which is not supported");
+            }
+
             var status = await RunGitAsync(
                 ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", relativePath],
                 cancellationToken).ConfigureAwait(false);
@@ -510,6 +525,42 @@ public sealed class ExactFileRestoreTool : IMcpTool
         && value.IndexOf('/') < 0
         && (!OperatingSystem.IsWindows() || value.IndexOf('\\') < 0);
 
+    private async Task<ConfiguredFilterResult> FindConfiguredFilterAsync(
+        string relativePath,
+        CancellationToken cancellationToken)
+    {
+        // check-attr reads attribute sources without asking Git to normalize the worktree file.
+        // Check both views: the ordinary view includes worktree/info/global attributes, while the
+        // cached view covers the index's .gitattributes state. A configured filter is refused before
+        // status can refresh the index and invoke its clean or process command.
+        foreach (var arguments in new[]
+        {
+            new[] { "check-attr", "-z", "filter", "--", relativePath },
+            new[] { "check-attr", "--cached", "-z", "filter", "--", relativePath },
+        })
+        {
+            var result = await RunGitAsync(arguments, cancellationToken).ConfigureAwait(false);
+            if (!result.Succeeded)
+            {
+                return new(
+                    Succeeded: false,
+                    FilterName: null,
+                    Failure: $"could not inspect Git attributes: {result.Failure}");
+            }
+
+            var fields = Encoding.UTF8.GetString(result.RawStdout)
+                .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length >= 3
+                && string.Equals(fields[1], "filter", StringComparison.Ordinal)
+                && fields[2] is not "unspecified" and not "unset")
+            {
+                return new(true, fields[2], null);
+            }
+        }
+
+        return new(true, null, null);
+    }
+
     private async Task<GitResult> RunGitAsync(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
@@ -710,6 +761,11 @@ public sealed class ExactFileRestoreTool : IMcpTool
                 stderr,
                 $"git exited with code {exitCode}: {Encoding.UTF8.GetString(stderr).Trim()}");
     }
+
+    private sealed record ConfiguredFilterResult(
+        bool Succeeded,
+        string? FilterName,
+        string? Failure);
 
     private static class DurableDirectory
     {
