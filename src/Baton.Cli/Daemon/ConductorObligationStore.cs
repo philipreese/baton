@@ -57,6 +57,11 @@ public sealed record ConductorObligation(
     string? Reason = null,
     string? ActionProof = null);
 
+/// <summary>Read-only retained obligation evidence and keyed quarantine diagnostics.</summary>
+internal sealed record ConductorObligationInspection(
+    IReadOnlyList<ConductorObligation> Obligations,
+    IReadOnlyDictionary<string, string> Quarantined);
+
 /// <summary>The result returned by a transport boundary. Accepted means receipt only.</summary>
 public sealed record ConductorTransportResult(bool Accepted, string? Receipt = null);
 
@@ -214,6 +219,28 @@ public sealed class ConductorObligationStore
                 or ConductorObligationStatus.TransportAcknowledged)
             .OrderBy(item => item.CreatedAt)
             .ToList();
+    }
+
+    /// <summary>
+    /// Reads retained obligations and keyed quarantine diagnostics without repairing the projection
+    /// or changing either retained event segment. Inspection never performs lifecycle writes.
+    /// </summary>
+    internal async Task<ConductorObligationInspection> InspectAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var read = await ReadProjectedAsync(cancellationToken, repairProjection: false).ConfigureAwait(false);
+            return new(read.Obligations, read.Quarantined);
+        }
+        catch (ConductorObligationStoreException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new ConductorObligationStoreException(
+                $"Conductor-obligation inspection could not read retained evidence: {ex.Message}", ex);
+        }
     }
 
     /// <summary>
@@ -403,13 +430,18 @@ public sealed class ConductorObligationStore
         return await _eventLog.Append(draft, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<ProjectionReadResult> ReadProjectedAsync(CancellationToken cancellationToken)
+    private async Task<ConductorObligationInspection> ReadProjectedAsync(
+        CancellationToken cancellationToken,
+        bool repairProjection = true)
     {
-        var snapshot = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        var snapshot = await ReadSnapshotAsync(cancellationToken, strictMissing: !repairProjection).ConfigureAwait(false);
+        if (!repairProjection) ValidateInspectionSnapshot(snapshot);
         IReadOnlyList<FleetEvent> rows;
         try
         {
-            rows = await _eventLog.ReadRetainedRepairingTornTails(cancellationToken).ConfigureAwait(false);
+            rows = repairProjection
+                ? await _eventLog.ReadRetainedRepairingTornTails(cancellationToken).ConfigureAwait(false)
+                : await _eventLog.ReadRetainedForInspection(cancellationToken).ConfigureAwait(false);
         }
         catch (FleetEventLogReadException ex)
         {
@@ -434,11 +466,13 @@ public sealed class ConductorObligationStore
                 }
 
                 var retained = Project(group.OrderBy(row => row.Id).ToList());
+                if (!repairProjection) ValidateInspectionObligation(retained);
                 projected[group.Key] = projected.TryGetValue(group.Key, out var materialized)
                     ? MergeLifecycle(materialized, retained)
                     : retained;
             }
-            catch (ConductorObligationStoreException ex)
+            catch (Exception ex) when (ex is ConductorObligationStoreException
+                || !repairProjection && ex is ConductorObligationConflictException or ArgumentException or InvalidDataException)
             {
                 if (!string.IsNullOrEmpty(group.Key))
                 {
@@ -447,11 +481,19 @@ public sealed class ConductorObligationStore
                         $"Conductor obligation '{group.Key}' is quarantined because its retained evidence "
                         + $"is malformed: {ex.Message}{EvidenceLocation(evidence)}";
                 }
+                else if (!repairProjection)
+                {
+                    var evidence = group.First();
+                    throw new ConductorObligationStoreException(
+                        $"A retained conductor-obligation fact has no idempotency key and cannot be inspected safely."
+                        + EvidenceLocation(evidence),
+                        ex);
+                }
             }
         }
 
         var result = projected.Values.ToList();
-        if (!SameProjection(snapshot, result))
+        if (repairProjection && !SameProjection(snapshot, result))
         {
             await SaveProjectionAsync(result, cancellationToken).ConfigureAwait(false);
         }
@@ -621,18 +663,18 @@ public sealed class ConductorObligationStore
             .ConfigureAwait(false);
     }
 
-    private Task<ProjectionFile> ReadSnapshotAsync(CancellationToken cancellationToken) =>
+    private Task<ProjectionFile> ReadSnapshotAsync(CancellationToken cancellationToken, bool strictMissing = false) =>
         Task.Run(
             () => MutexGuardedFileLock.RunUnderLock(
                 _snapshotPath,
                 LockNamePrefix,
                 LockTimeout,
-                ReadSnapshotUnlocked),
+                () => ReadSnapshotUnlocked(strictMissing)),
             cancellationToken);
 
-    private ProjectionFile ReadSnapshotUnlocked()
+    private ProjectionFile ReadSnapshotUnlocked(bool strictMissing = false)
     {
-        if (!File.Exists(_snapshotPath))
+        if (!strictMissing && !File.Exists(_snapshotPath))
         {
             return new(ProjectionVersion, [], []);
         }
@@ -652,6 +694,10 @@ public sealed class ConductorObligationStore
 
             return projection;
         }
+        catch (Exception ex) when (strictMissing && ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new(ProjectionVersion, [], []);
+        }
         catch (Exception ex) when (ex is JsonException
             or InvalidDataException
             or InvalidOperationException
@@ -661,6 +707,56 @@ public sealed class ConductorObligationStore
                 $"Conductor-obligation projection '{_snapshotPath}' is malformed. "
                 + "Operator recovery: restore a valid projection or quarantine it for repair; never delete the only surviving authoritative state.",
                 ex);
+        }
+    }
+
+    private void ValidateInspectionSnapshot(ProjectionFile projection)
+    {
+        // Inspection must refuse malformed retained state before it can look like authoritative
+        // recovery evidence. Keep this guard out of the existing repair/reconciliation path.
+        try
+        {
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (items, terminal) in new[]
+            {
+                (projection.OpenObligations, false),
+                (projection.TerminalObligations, true),
+            })
+            {
+                foreach (var item in items)
+                {
+                    if (item is null) throw new InvalidDataException("A retained obligation is null.");
+                    ValidateInspectionObligation(item);
+                    if (IsTerminal(item.Status) != terminal
+                        || !keys.Add(item.IdempotencyKey))
+                    {
+                        throw new InvalidDataException("A retained obligation has an invalid partition or a duplicate key.");
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidDataException)
+        {
+            throw new ConductorObligationStoreException(
+                $"Conductor-obligation projection '{_snapshotPath}' is malformed: {ex.Message} "
+                + "Operator recovery: restore a valid projection or quarantine it for repair; never delete the only surviving authoritative state.",
+                ex);
+        }
+    }
+
+    private static void ValidateInspectionObligation(ConductorObligation item)
+    {
+        ValidateRequest(new(item.IdempotencyKey, item.TargetProject, item.TargetRoom,
+            item.TargetExecution, item.PullRequestHead, item.RequestedAction, item.Owner,
+            item.CreatedAt, item.Adapter, item.AdapterCapability, item.AdapterSupported, item.Reason));
+        if (string.IsNullOrWhiteSpace(item.ObligationId) || item.CreatedAt == default || !Enum.IsDefined(item.Status))
+        {
+            throw new InvalidDataException("A retained obligation has invalid identity, age or status.");
+        }
+        if (item.Status == ConductorObligationStatus.ActionObserved
+            && (item.ActionObservedAt is null || string.IsNullOrWhiteSpace(item.ActionProof)))
+        {
+            throw new InvalidDataException("An action-observed obligation is missing independent action evidence.");
         }
     }
 
@@ -757,10 +853,6 @@ public sealed class ConductorObligationStore
         int Version,
         List<ConductorObligation> OpenObligations,
         List<ConductorObligation> TerminalObligations);
-
-    private sealed record ProjectionReadResult(
-        IReadOnlyList<ConductorObligation> Obligations,
-        IReadOnlyDictionary<string, string> Quarantined);
 
     private static ConductorObligation NewObligation(ConductorObligationRequest request) => new(
         Guid.NewGuid().ToString("N"),

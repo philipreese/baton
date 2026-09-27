@@ -463,6 +463,27 @@ public sealed class FleetEventLog
     }
 
     /// <summary>
+    /// Reads both retained segments without repairing them. An incomplete final row is an explicit
+    /// refusal because omitting it could make retained recovery evidence appear absent.
+    /// </summary>
+    internal Task<IReadOnlyList<FleetEvent>> ReadRetainedForInspection(
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+            _livePath,
+            LockNamePrefix,
+            LockTimeout,
+            () =>
+            {
+                var rollover = Read(_rolloverPath, strictMissing: true);
+                var live = Read(_livePath, strictMissing: true);
+                ThrowIfTornTail(_rolloverPath, rollover.TornTailOffset);
+                ThrowIfTornTail(_livePath, live.TornTailOffset);
+                return (IReadOnlyList<FleetEvent>)rollover.Events.Concat(live.Events).ToList();
+            }), cancellationToken);
+    }
+
+    /// <summary>
     /// A strict, read-deny-write snapshot of both retained segments for an operator proof. Unlike
     /// display replay, a torn tail or unreadable segment cannot be treated as absence. The caller
     /// holds the streams through its queue commit so append/rotation cannot invalidate the proof.
@@ -566,15 +587,25 @@ public sealed class FleetEventLog
         return entry;
     }
 
-    private static FleetEventReadResult Read(string path)
+    private static FleetEventReadResult Read(string path, bool strictMissing = false)
     {
-        if (!File.Exists(path))
+        if (!strictMissing && !File.Exists(path))
         {
             return new([], null);
         }
 
         var result = new List<FleetEvent>();
-        var bytes = File.ReadAllBytes(path);
+        byte[] bytes;
+        try
+        {
+            // File.Exists can hide access errors as absence. Inspection opens the evidence and
+            // treats only explicit missing-file/directory errors as an empty segment.
+            bytes = File.ReadAllBytes(path);
+        }
+        catch (Exception ex) when (strictMissing && ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new([], null);
+        }
         var offset = 0;
         var lineNumber = 0;
         while (offset < bytes.Length)
@@ -686,6 +717,14 @@ public sealed class FleetEventLog
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
         stream.SetLength(truncateAt);
         stream.Flush(flushToDisk: true);
+    }
+
+    private static void ThrowIfTornTail(string path, long? offset)
+    {
+        if (offset is { } byteOffset)
+        {
+            throw new IOException($"Fleet-event segment '{path}' has an incomplete final row at byte offset {byteOffset}.");
+        }
     }
 
     private sealed record FleetEventReadResult(IReadOnlyList<FleetEvent> Events, long? TornTailOffset);

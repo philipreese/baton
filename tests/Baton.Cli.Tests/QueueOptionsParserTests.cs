@@ -477,6 +477,30 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
+    public void List_parses_recovery_as_an_explicit_bounded_json_selection()
+    {
+        var options = QueueOptionsParser.Parse([
+            "list", "--recovery", "--history", "--format", "json", "--page-size", "1", "--cursor", "opaque"]);
+
+        Assert.True(options.Recovery);
+        Assert.True(options.IncludeRetained);
+        Assert.Equal(QueueListOutputFormat.Json, options.ListFormat);
+        Assert.Equal(1, options.PageSize);
+        Assert.Equal("opaque", options.Cursor);
+        Assert.Contains("--recovery", QueueOptionsParser.Usage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void List_rejects_duplicate_or_unbounded_recovery_requests()
+    {
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--recovery", "--recovery"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--recovery=value"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--recovery", "--page-size", "1"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "list", "--recovery", "--format", "json", "--page-size", "201"]));
+    }
+
+    [Fact]
     public void List_rejects_unbounded_or_text_paging_requests()
     {
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--format", "json", "--page-size", "201"]));

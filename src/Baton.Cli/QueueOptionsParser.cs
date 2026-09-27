@@ -20,7 +20,7 @@ public static class QueueOptionsParser
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] [--lifecycle-reason <why>] | " +
-        "baton queue list [--active] [--history] [--format text|json] [--page-size <n>] [--cursor <opaque>] | baton queue worktrees [--apply] [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
+        "baton queue list [--recovery] [--active] [--history] [--format text|json] [--page-size <n>] [--cursor <opaque>] | baton queue worktrees [--apply] [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -62,6 +62,7 @@ public static class QueueOptionsParser
     {
         var active = false;
         var includeRetained = false;
+        var recovery = false;
         var format = QueueListOutputFormat.Text;
         var formatSpecified = false;
         int? pageSize = null;
@@ -72,6 +73,10 @@ public static class QueueOptionsParser
         {
             switch (args[i])
             {
+                case "--recovery" when !recovery:
+                    recovery = true;
+                    i++;
+                    break;
                 case "--active" when !active:
                     active = true;
                     i++;
@@ -107,7 +112,7 @@ public static class QueueOptionsParser
                     break;
                 default:
                     throw new CliArgumentException(
-                        $"'baton queue list' takes '--active', '--history', '--format text|json', '--page-size <n>', and '--cursor <opaque>'. {Usage}");
+                        $"'baton queue list' takes '--recovery', '--active', '--history', '--format text|json', '--page-size <n>', and '--cursor <opaque>'. {Usage}");
             }
         }
 
@@ -122,7 +127,8 @@ public static class QueueOptionsParser
             IncludeRetained: includeRetained,
             ListFormat: format,
             PageSize: pageSize,
-            Cursor: cursor);
+            Cursor: cursor,
+            Recovery: recovery);
     }
 
     private static QueueOptions ParseImport(IReadOnlyList<string> args)

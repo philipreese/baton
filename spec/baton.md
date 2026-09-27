@@ -7573,6 +7573,28 @@ error, so continuation cannot silently skip or duplicate rows. The queue snapsho
 `observationConsistency` field makes that cross-store limit explicit; the inspection does not claim
 atomic consistency across those stores.
 
+**Retained recovery inspection (#2468).** `queue list --recovery` is an opt-in read-only view of
+retained conductor requests, separate from ordinary queue rows. Its default selection includes
+pending, submitted, transport-acknowledged, blocked and unsupported records; `--history` also includes
+action-observed records. A keyed quarantine remains visible even when its retained record would
+otherwise be excluded. Text and JSON use the same projection. JSON reuses the bounded page-size
+contract above, orders by creation time then ordinal idempotency key, and ties its cursor to recovery
+selection plus a fingerprint of the full queue snapshot, obligation records and quarantine errors.
+Changing evidence or using a cursor across normal/recovery views refuses. `observedAt` is not part
+of that fingerprint; clients derive age from it and each retained `createdAt`.
+
+Each row preserves the request identity, project, target room/execution, retained head, owner,
+action, adapter/capability, lifecycle status, receipt and independent action proof separately. Only
+canonical queue-owned continuation identity joins related source/continuation queue rows; missing
+or duplicate evidence is not collapsed. Saved PR observations are not fresh forge checks or current
+approval. The next-trigger description names the existing scheduler reconciliation or explicit
+owner intervention; it neither retries nor guesses a foreign owner's capabilities. Quarantine
+marks retained values non-authoritative. Separate queue and obligation reads are not atomic.
+The inspection reads both retained event segments and terminal projection-only records without
+truncating torn tails, repairing projections or appending facts. Missing state is empty;
+unreadable, malformed or torn evidence explicitly refuses or exposes keyed quarantine, never a
+healthy empty result. It calls no worker, model, transport or forge and does not deliver a wake.
+
 **The fleet-event vocabulary and identity rule (#2140).** The closed vocabulary is `workQueued`,
 `admissionDecided`, `attemptStarted`, `attemptProgressed`, `attemptRefused`,
 `attemptRetryScheduled`, `attemptSettled`, `revisionProduced`, `reviewVerdictObserved`,
