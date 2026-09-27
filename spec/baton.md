@@ -1617,7 +1617,9 @@ place that reads it (withholding arms 2 and 3, never arm 1):
   step hangs off: for `review` that is `verdict_schema: true` → `ContractValidator` →
   `ReviewVerdictSchema.TryParse`, whose floor is stated at that type, not here. A verdict that carries
   no `decision` still settles the room succeeded-shaped and reaches a person through the conductor
-  queue — §13's ruling, unchanged by this.
+  queue — §13's ruling, unchanged by this. The same parse-only rule applies to optional `completion`:
+  `complete` and `in_progress` are readable worker assertions, while missing, wrong-type and unknown
+  values remain unknown; only §13's lifecycle routing may require `complete`.
 
 This reverses #1702's own "a role has no authority to opt a workspace out of it" reading for the
 read-shaped half only. The reading was right about the roles it was measured on: a workspace's gate
@@ -7958,6 +7960,15 @@ instead, `WorkItemLifecycle`, where a verdict with no decision is the operator's
 prompt (`WorkerRoles.json`) and both queue review briefs still ask for it, because a decision written
 is a round carried. That split is also what lets the queue tell "the reviewer wrote no decision" apart
 from "there is no readable verdict at all", which are different messages with different recoveries.
+
+**A review must explicitly assert completion before the queue routes its decision** (issue #2457).
+`verdict.json` may carry optional `"completion": "complete" | "in_progress"`; missing, wrong-type and
+unknown values remain readable as unknown for inspection, accounting and watch. `WorkItemLifecycle`
+requires `complete` in both the settled Review/ReReview path and persisted Ready reconciliation.
+Unknown or `in_progress` evidence stops before a fix allowance, round, or readiness assertion is
+spent; when an open PR is authoritatively observed, the existing draft reconciliation restores draft.
+Closed/merged or unavailable forge observations keep their earlier no-mutation behavior. Completion is
+a worker assertion, not proof of semantic review quality, and does not promise atomic publication.
 
 **Nothing reads the verdict's `summary` or a finding's `detail` to decide anything**, and that is the
 line this ruling draws: routing on a worker's prose is what Architecture Rule 1 forbids, and it stays

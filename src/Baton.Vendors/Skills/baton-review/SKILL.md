@@ -59,7 +59,10 @@ review rather than none.
 4. What could not be verified, named as such rather than assumed either way.
 
 Where the role also declares a structured verdict file, its `decision` is your own call and is
-always written; its findings mirror the prose.
+always written; its findings mirror the prose. Set `completion` to `complete` only when all review
+work is finished, or to `in_progress` while evidence remains to be collected or checked. Publish
+the final verdict only when review work is finished. See `spec/baton.md` §13 for the completion
+evidence limits and routing consequences.
 
 ## Public repository
 

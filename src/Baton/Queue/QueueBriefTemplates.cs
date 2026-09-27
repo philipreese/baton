@@ -249,7 +249,10 @@ public static class QueueBriefTemplates
 
                Write the structured verdict to `$BATON_OUTPUT_DIR/verdict.json`. Set `reviewedRef` to
                `{context.HeadSha}` exactly, with no PR label, branch, prefix, suffix, or whitespace.
-               This field is machine-checked readiness evidence.
+               Set `completion` to `complete` only after all review work is finished; use `in_progress`
+               while evidence remains to be collected or checked. Publish the final verdict only when
+               review work is finished. Completion is a worker assertion, not proof of semantic review
+               quality or a guarantee of atomic publication. This field is machine-checked routing evidence.
                """
             : brief;
     }
@@ -355,6 +358,11 @@ public static class QueueBriefTemplates
         Issue #{{ISSUE}}, round {{ROUND}}. This is the FIRST review of this PR — there is no previous
         round, and no findings to carry.
 
+        The verdict must set `completion` to `complete` only after all review work is finished, or to
+        `in_progress` while evidence remains to be collected or checked. Publish the final verdict only
+        when review work is finished. Completion is a worker assertion, not proof of semantic review
+        quality or a guarantee of atomic publication.
+
         ## Do
 
         Review PR #{{PR}} at `{{SHA}}` independently against issue #{{ISSUE}}: does the change do what
@@ -375,6 +383,11 @@ public static class QueueBriefTemplates
 
     private const string ReReviewDefault = """
         # Re-review PR #{{PR}} at {{SHA}}
+
+        The verdict must set `completion` to `complete` only after all review work is finished, or to
+        `in_progress` while evidence remains to be collected or checked. Publish the final verdict only
+        when review work is finished. Completion is a worker assertion, not proof of semantic review
+        quality or a guarantee of atomic publication.
 
         Issue #{{ISSUE}}, round {{ROUND}}. Review the PR as it stands now.
 

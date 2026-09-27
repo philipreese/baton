@@ -171,7 +171,11 @@ public sealed class QueueBriefTemplatesTests
         Assert.Contains("verdict.json", brief, StringComparison.Ordinal);
         Assert.Contains("Set `reviewedRef` to", brief, StringComparison.Ordinal);
         Assert.Contains($"`{head}` exactly, with no PR label, branch, prefix, suffix, or whitespace.", brief, StringComparison.Ordinal);
-        Assert.EndsWith("This field is machine-checked readiness evidence.", brief.TrimEnd(), StringComparison.Ordinal);
+        Assert.Contains("Set `completion` to `complete` only after all review work is finished", brief, StringComparison.Ordinal);
+        Assert.Contains("`in_progress`", brief, StringComparison.Ordinal);
+        Assert.Contains("evidence remains", brief, StringComparison.Ordinal);
+        Assert.EndsWith("quality or a guarantee of atomic publication. This field is machine-checked routing evidence.",
+            brief.TrimEnd(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -191,7 +195,8 @@ public sealed class QueueBriefTemplatesTests
         var requirement = brief.LastIndexOf($"`{head}` exactly", StringComparison.Ordinal);
         Assert.True(contradictory >= 0);
         Assert.True(requirement > contradictory);
-        Assert.EndsWith("This field is machine-checked readiness evidence.", brief.TrimEnd(), StringComparison.Ordinal);
+        Assert.EndsWith("quality or a guarantee of atomic publication. This field is machine-checked routing evidence.",
+            brief.TrimEnd(), StringComparison.Ordinal);
     }
 
     /// <summary>

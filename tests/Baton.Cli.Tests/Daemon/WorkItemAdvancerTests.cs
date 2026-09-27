@@ -152,7 +152,7 @@ public sealed class WorkItemAdvancerTests
     /// (spec/baton.md §13).
     /// </summary>
     private const string BlockingVerdict = """
-        {"reviewedRef":"PR #77","decision":"block","summary":"one blocker","findings":[
+        {"reviewedRef":"PR #77","completion":"complete","decision":"block","summary":"one blocker","findings":[
           {"claim":"the guard is never reached","severity":"medium","status":"confirmed",
            "anchor":{"file":"src/Baton/Queue/QueueScheduler.cs","line":62},"detail":"Decide returns first"}]}
         """;
@@ -160,19 +160,19 @@ public sealed class WorkItemAdvancerTests
     /// <summary>The polarity partner, and crossed the other way: two CONFIRMED HIGHS the reviewer
     /// nonetheless approved.</summary>
     private const string ApprovingVerdict = """
-        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","decision":"approve","summary":"nothing blocking","findings":[
+        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","completion":"complete","decision":"approve","summary":"nothing blocking","findings":[
           {"claim":"a real one, already fixed on the branch","severity":"high","status":"confirmed"},
           {"claim":"another","severity":"high","status":"confirmed"}]}
         """;
 
     private const string NoncanonicalApprovingVerdict = """
-        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccdddddddd","decision":"approve","summary":"nothing blocking","findings":[]}
+        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccdddddddd","completion":"complete","decision":"approve","summary":"nothing blocking","findings":[]}
         """;
 
     /// <summary>A readable verdict the reviewer left no decision on — the arm that has to reach a
     /// person rather than being guessed from the two confirmed highs in it.</summary>
     private const string DecisionlessVerdict = """
-        {"reviewedRef":"PR #77","summary":"I could not decide","findings":[
+        {"reviewedRef":"PR #77","completion":"complete","summary":"I could not decide","findings":[
           {"claim":"maybe a problem","severity":"high","status":"confirmed"}]}
         """;
 

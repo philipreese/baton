@@ -43,7 +43,10 @@ public sealed class WorkItemLifecycleTests
     /// cannot pass.
     /// </summary>
     private static ReviewVerdict Verdict(ReviewDecision? decision, params ReviewFinding[] findings) =>
-        new(CurrentHead, findings, "the summary, which nothing routes on", Decision: decision);
+        // Lifecycle routing fixtures explicitly model a completed review. Legacy omission coverage
+        // belongs to the schema and incomplete-evidence tests below, not these positive controls.
+        new(CurrentHead, findings, "the summary, which nothing routes on", Decision: decision,
+            Completion: ReviewCompletion.Complete);
 
     private static ReviewFinding Finding(
         ReviewFindingSeverity severity, ReviewFindingStatus status, string claim = "the claim") =>
@@ -154,6 +157,99 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
+    public void A_decision_without_completion_evidence_does_not_assert_readiness()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review,
+            verdict: new ReviewVerdict(CurrentHead, [], Decision: ReviewDecision.Approve)));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
+    }
+
+    [Fact]
+    public void An_in_progress_block_does_not_spend_a_fix_round_or_allowance()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview,
+            verdict: new ReviewVerdict(CurrentHead, [], Decision: ReviewDecision.Block,
+                Completion: ReviewCompletion.InProgress),
+            round: 4,
+            automaticFixUsed: false,
+            prDraft: false));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.False(transition.UsesAutomaticFix);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+    }
+
+    [Fact]
+    public void An_incomplete_persisted_ready_item_is_drafted_without_asserting_readiness()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Ready,
+            verdict: new ReviewVerdict(CurrentHead, [], Decision: ReviewDecision.Approve,
+                Completion: ReviewCompletion.InProgress),
+            prDraft: false));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+    }
+
+    [Theory]
+    [InlineData(false, true, WorkItemTransitionKind.None)]
+    [InlineData(true, false, WorkItemTransitionKind.NeedsOperator)]
+    public void Incomplete_evidence_keeps_existing_closed_or_unavailable_forge_no_mutation(
+        bool pullRequestObserved, bool pullRequestOpen, WorkItemTransitionKind expectedKind)
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review,
+            verdict: new ReviewVerdict(CurrentHead, [], Decision: ReviewDecision.Approve),
+            prObserved: pullRequestObserved,
+            prOpen: pullRequestOpen,
+            prDraft: false));
+
+        Assert.Equal(expectedKind, transition.Kind);
+        Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
+        Assert.Null(transition.NextStage);
+    }
+
+    [Fact]
+    public void A_partial_review_at_the_round_cap_cannot_become_ready_or_buy_a_fix()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview,
+            verdict: new ReviewVerdict(CurrentHead, [], "evidence pending", Decision: ReviewDecision.Block,
+                Completion: ReviewCompletion.InProgress),
+            round: WorkStages.MaxRounds,
+            automaticFixUsed: false));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.False(transition.UsesAutomaticFix);
+    }
+
+    [Fact]
+    public void An_interrupted_json_publication_remains_unreadable_and_cannot_route()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review,
+            verdict: null,
+            round: WorkStages.MaxRounds));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.False(transition.UsesAutomaticFix);
+    }
+
+    [Fact]
     public void A_second_block_after_the_one_automatic_fix_stops_for_the_conductor()
     {
         // The marker, not the aggregate round, is the evidence: a retry or continuation can reach
@@ -248,7 +344,8 @@ public sealed class WorkItemLifecycleTests
     [Fact]
     public void An_approval_for_a_previous_head_re_drafts_and_re_reviews_the_new_head()
     {
-        var stale = new ReviewVerdict(PreviousHead, [], Decision: ReviewDecision.Approve);
+        var stale = new ReviewVerdict(PreviousHead, [], Decision: ReviewDecision.Approve,
+            Completion: ReviewCompletion.Complete);
 
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Review, verdict: stale, prDraft: false));
@@ -278,7 +375,8 @@ public sealed class WorkItemLifecycleTests
     {
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Review,
-            verdict: new ReviewVerdict(reviewedRef!, [], Decision: ReviewDecision.Approve),
+            verdict: new ReviewVerdict(reviewedRef!, [], Decision: ReviewDecision.Approve,
+                Completion: ReviewCompletion.Complete),
             round: 3));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
@@ -294,7 +392,8 @@ public sealed class WorkItemLifecycleTests
     {
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Review,
-            verdict: new ReviewVerdict(CurrentHead.ToUpperInvariant(), [], Decision: ReviewDecision.Approve)));
+            verdict: new ReviewVerdict(CurrentHead.ToUpperInvariant(), [], Decision: ReviewDecision.Approve,
+                Completion: ReviewCompletion.Complete)));
 
         Assert.Equal(WorkItemTransitionKind.Stop, transition.Kind);
         Assert.Equal(WorkStage.Ready, transition.NextStage);
@@ -351,7 +450,8 @@ public sealed class WorkItemLifecycleTests
     [Fact]
     public void A_ready_item_with_a_new_head_is_re_drafted_and_re_reviewed()
     {
-        var stale = new ReviewVerdict(PreviousHead, [], Decision: ReviewDecision.Approve);
+        var stale = new ReviewVerdict(PreviousHead, [], Decision: ReviewDecision.Approve,
+            Completion: ReviewCompletion.Complete);
 
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Ready, verdict: stale, prDraft: false));
@@ -366,7 +466,8 @@ public sealed class WorkItemLifecycleTests
     {
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Ready,
-            verdict: new ReviewVerdict($"PR #42 at {CurrentHead}", [], Decision: ReviewDecision.Approve),
+            verdict: new ReviewVerdict($"PR #42 at {CurrentHead}", [], Decision: ReviewDecision.Approve,
+                Completion: ReviewCompletion.Complete),
             prDraft: false,
             round: 3));
 

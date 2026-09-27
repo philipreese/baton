@@ -38,6 +38,11 @@ namespace Baton.Domain;
 /// verdict to the operator with "carries no decision" rather than being handed a guess. Null when the
 /// document names no decision or names one this enum does not have.
 /// </param>
+/// <param name="Completion">
+/// The reviewer's assertion that review work is complete. Optional on the wire so legacy and custom
+/// verdicts remain readable; the conductor queue requires <see cref="ReviewCompletion.Complete"/>
+/// before it routes a decision. Null means missing, malformed or an unknown token.
+/// </param>
 public sealed record ReviewVerdict(
     string ReviewedRef,
     IReadOnlyList<ReviewFinding> Findings,
@@ -45,7 +50,9 @@ public sealed record ReviewVerdict(
     [property: JsonConverter(typeof(TolerantVerifyInstrumentListConverter))]
     IReadOnlyList<VerifyInstrument>? Instruments = null,
     [property: JsonConverter(typeof(TolerantReviewDecisionConverter))]
-    ReviewDecision? Decision = null);
+    ReviewDecision? Decision = null,
+    [property: JsonConverter(typeof(TolerantReviewCompletionConverter))]
+    ReviewCompletion? Completion = null);
 
 /// <summary>
 /// What the reviewer decided the PR should do next. <b>Two values, and no third for "unsure"</b>: the
@@ -59,6 +66,16 @@ public enum ReviewDecision
 
     /// <summary>The PR needs another round before it can merge.</summary>
     Block,
+}
+
+/// <summary>
+/// Whether the reviewer asserts that it finished the review. This is worker evidence, not proof of
+/// semantic review quality; the conductor still inspects the review before accepting its routing.
+/// </summary>
+public enum ReviewCompletion
+{
+    Complete,
+    InProgress,
 }
 
 /// <summary>
@@ -129,6 +146,42 @@ internal sealed class TolerantReviewDecisionConverter : JsonConverter<ReviewDeci
 /// reader sees.
 /// </para>
 /// </summary>
+/// <summary>
+/// Reads <c>completion</c> as <see langword="null"/> for anything other than the two explicit review
+/// completion tokens. Tolerance preserves otherwise readable legacy/custom verdict evidence while
+/// keeping lifecycle routing fail-closed.
+/// </summary>
+internal sealed class TolerantReviewCompletionConverter : JsonConverter<ReviewCompletion?>
+{
+    public override ReviewCompletion? Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var element = JsonElement.ParseValue(ref reader);
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return element.GetString() switch
+        {
+            { } value when value.Equals("complete", StringComparison.OrdinalIgnoreCase) => ReviewCompletion.Complete,
+            { } value when value.Equals("in_progress", StringComparison.OrdinalIgnoreCase) => ReviewCompletion.InProgress,
+            _ => null,
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, ReviewCompletion? value, JsonSerializerOptions options)
+    {
+        if (value is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStringValue(value.Value == ReviewCompletion.Complete ? "complete" : "in_progress");
+    }
+}
+
 internal sealed class TolerantVerifyInstrumentListConverter : JsonConverter<IReadOnlyList<VerifyInstrument>?>
 {
     public override IReadOnlyList<VerifyInstrument>? Read(
