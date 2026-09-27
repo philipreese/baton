@@ -48,23 +48,31 @@ public class VendorExhaustionFallbackTests
         {
             var snapshot = SingleStepSnapshot("snapshot-802a", "template-802a");
 
+            var primaryBinding = new WorkerBinding.Process(
+                new WorkerContract("worker-a", [], [], []),
+                ExitCleanlyWithoutWriting(),
+                TimeSpan.FromSeconds(30),
+                Adapter: "agy",
+                Model: "gemini-3-pro",
+                TokenBudget: 1000,
+                MaxToolSteps: 10,
+                BilledRateLimit: 100);
             var primaryBindings = new Dictionary<string, WorkerBinding>
             {
-                ["worker-a"] = new WorkerBinding.Process(
-                    new WorkerContract("worker-a", [], [], []),
-                    ExitCleanlyWithoutWriting(),
-                    TimeSpan.FromSeconds(30),
-                    Adapter: "agy",
-                    Model: "gemini-3-pro"),
+                ["worker-a"] = primaryBinding,
             };
+            var fallbackBinding = new WorkerBinding.Process(
+                new WorkerContract("worker-a", [], [], []),
+                ExitCleanlyWithoutWriting(),
+                TimeSpan.FromSeconds(45),
+                Adapter: "claude",
+                Model: "sonnet",
+                TokenBudget: 2000,
+                MaxToolSteps: 20,
+                BilledRateLimit: 200);
             var fallbackBindings = new Dictionary<string, WorkerBinding>
             {
-                ["worker-a"] = new WorkerBinding.Process(
-                    new WorkerContract("worker-a", [], [], []),
-                    ExitCleanlyWithoutWriting(),
-                    TimeSpan.FromSeconds(30),
-                    Adapter: "claude",
-                    Model: "sonnet"),
+                ["worker-a"] = fallbackBinding,
             };
 
             var firstAttempt = new ExecutionId("a-1");
@@ -74,7 +82,8 @@ public class VendorExhaustionFallbackTests
                 await writerInit.AppendAsync(new FlowEvent.ExecutionRequestAccepted(
                     new ExecutionRequest(
                         firstAttempt, new WorkflowId("wf-802a"), StepA, "worker-a", [], [], TimeSpan.FromSeconds(30), [],
-                        new Dictionary<StepId, ExecutionId>(), Adapter: "agy", Model: "gemini-3-pro")), ct);
+                        new Dictionary<StepId, ExecutionId>(), Adapter: "agy", Model: "gemini-3-pro",
+                        Limits: primaryBinding.EffectiveLimitEvidence)), ct);
                 await writerInit.AppendAsync(new FlowEvent.ExecutionFailed(
                     firstAttempt, FailureClassification.ExhaustedUntil, "quota exhausted", farFutureReset), ct);
             }
@@ -112,6 +121,8 @@ public class VendorExhaustionFallbackTests
             Assert.Equal("agy", accepted[0].Request.Adapter);
             Assert.Equal("claude", accepted[1].Request.Adapter);
             Assert.Equal("sonnet", accepted[1].Request.Model);
+            Assert.Equal(primaryBinding.EffectiveLimitEvidence, accepted[0].Request.Limits);
+            Assert.Equal(fallbackBinding.EffectiveLimitEvidence, accepted[1].Request.Limits);
 
             // The StepRebound journal line PrepareExecutionAsync's dispatch-loop caller appends.
             var rebound = Assert.Single(events.OfType<FlowEvent.StepRebound>());
@@ -121,6 +132,8 @@ public class VendorExhaustionFallbackTests
             Assert.Equal("gemini-3-pro", rebound.PreviousModel);
             Assert.Equal("claude", rebound.NewAdapter);
             Assert.Equal("sonnet", rebound.NewModel);
+            Assert.Equal(primaryBinding.EffectiveLimitEvidence, rebound.PreviousLimits);
+            Assert.Equal(fallbackBinding.EffectiveLimitEvidence, rebound.NewLimits);
             Assert.Contains(farFutureReset.ToString("O"), rebound.Reason, StringComparison.Ordinal);
 
             // The retry/attempt counters treat the fallback dispatch as a new attempt of the same

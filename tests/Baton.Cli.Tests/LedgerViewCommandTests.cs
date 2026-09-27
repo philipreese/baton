@@ -240,6 +240,45 @@ public sealed class LedgerViewCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Csv_serializes_populated_limits_as_one_quoted_cell_and_leaves_legacy_limits_empty()
+    {
+        var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "limits.jsonl");
+        var limits = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 4321, 17, 900);
+        await CostLedgerStore.AppendAsync(
+            [
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "with-limits",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(10),
+                    Limits: limits),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "legacy-null",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(11)),
+            ],
+            ledgerPath,
+            TestContext.Current.CancellationToken);
+
+        var lines = (await RunOverAsync(ledgerPath, "--format", "csv"))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var limitsColumn = LedgerCsv.Columns.ToList().IndexOf("limits");
+        var populated = ParseCsvLine(lines[1]);
+        var legacy = ParseCsvLine(lines[2]);
+
+        Assert.Equal(LedgerCsv.Columns.Count, populated.Count);
+        Assert.Equal(LedgerCsv.Columns.Count, legacy.Count);
+        Assert.Contains("\"\"TokenBudget\"\"", lines[1], StringComparison.Ordinal);
+        using var serialized = JsonDocument.Parse(populated[limitsColumn]);
+        Assert.Equal(4321, serialized.RootElement.GetProperty("TokenBudget").GetInt64());
+        Assert.Equal(17, serialized.RootElement.GetProperty("MaxToolSteps").GetInt32());
+        Assert.Equal(string.Empty, legacy[limitsColumn]);
+    }
+
+    [Fact]
     public async Task The_same_query_over_the_same_file_is_byte_identical()
     {
         var first = await RunAsync("--format", "json", "--drill", "--since", "2026-09-04T00:00:00Z");
@@ -631,6 +670,49 @@ public sealed class LedgerViewCommandTests : IDisposable
 
         Assert.Equal(0, exitCode);
         return output.ToString();
+    }
+
+    private static List<string> ParseCsvLine(string line)
+    {
+        var cells = new List<string>();
+        var cell = new System.Text.StringBuilder();
+        var quoted = false;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var character = line[i];
+            if (quoted)
+            {
+                if (character == '"' && i + 1 < line.Length && line[i + 1] == '"')
+                {
+                    cell.Append('"');
+                    i++;
+                }
+                else if (character == '"')
+                {
+                    quoted = false;
+                }
+                else
+                {
+                    cell.Append(character);
+                }
+            }
+            else if (character == '"' && cell.Length == 0)
+            {
+                quoted = true;
+            }
+            else if (character == ',')
+            {
+                cells.Add(cell.ToString());
+                cell.Clear();
+            }
+            else
+            {
+                cell.Append(character);
+            }
+        }
+
+        cells.Add(cell.ToString());
+        return cells;
     }
 
     /// <summary>Written once per file, through the production writer — <see cref="CostLedgerStore.AppendAsync"/> skips an execution id already present, so re-seeding is idempotent.</summary>

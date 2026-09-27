@@ -790,6 +790,170 @@ public class MutationInterfaceCrashRecoveryTests
     }
 
     [Fact]
+    public async Task StartWorkflowAsync_journals_StepRebound_when_resubmitting_through_divergent_monitor_limits_while_preserving_accepted_timeout()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var initialLimits = new ExecutionLimitEvidence(
+                Timeout,
+                TokenBudget: 1000,
+                MaxToolSteps: 10,
+                BilledRateLimit: 100);
+
+            // Resubmission binding has a new timeout (e.g. 60s) AND changed monitor inputs (2000, 20, 200).
+            var newTimeout = TimeSpan.FromSeconds(60);
+            var bindings = MakeBindings(
+                adapter: "claude",
+                model: "sonnet",
+                timeout: newTimeout,
+                tokenBudget: 2000,
+                maxToolSteps: 20,
+                billedRateLimit: 200);
+            var workflowId = new WorkflowId("wf");
+
+            var executionId = await AcceptRequestAsync(
+                writer, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet", limits: initialLimits);
+
+            var stub = new StubCoreDispatcher();
+            var aResult = stub.EnqueueResult(A);
+
+            var runTask = MutationInterface.StartWorkflowAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(A, await ReadNextDispatchAsync(stub));
+            aResult.SetResult(Succeeded);
+            var state = await runTask;
+
+            Assert.Equal(StepStatus.Succeeded, state.Steps.Single().Status);
+            Assert.Equal(executionId, state.Steps.Single().LatestExecutionId);
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            var rebound = Assert.Single(events.OfType<FlowEvent.StepRebound>());
+            Assert.Equal(A, rebound.StepId);
+            Assert.Equal(executionId, rebound.ForExecutionId);
+            Assert.Equal("claude", rebound.PreviousAdapter);
+            Assert.Equal("sonnet", rebound.PreviousModel);
+            Assert.Equal("claude", rebound.NewAdapter);
+            Assert.Equal("sonnet", rebound.NewModel);
+            Assert.Equal(initialLimits, rebound.PreviousLimits);
+
+            // Must preserve original accepted Timeout (30s), while applying new monitor inputs (2000, 20, 200).
+            var expectedAppliedLimits = new ExecutionLimitEvidence(
+                Timeout,
+                TokenBudget: 2000,
+                MaxToolSteps: 20,
+                BilledRateLimit: 200);
+            Assert.Equal(expectedAppliedLimits, rebound.NewLimits);
+
+            // Verify the actual dispatched request to CoreDispatcher preserved the accepted Timeout and carried new limits
+            Assert.NotNull(stub.LastDispatchedRequest);
+            Assert.Equal(Timeout, stub.LastDispatchedRequest.Timeout);
+            Assert.Equal(expectedAppliedLimits, stub.LastDispatchedRequest.Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task StartWorkflowAsync_does_not_journal_StepRebound_when_resubmitting_through_identical_limits()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var initialLimits = new ExecutionLimitEvidence(
+                Timeout,
+                TokenBudget: 1000,
+                MaxToolSteps: 10,
+                BilledRateLimit: 100);
+
+            var bindings = MakeBindings(
+                adapter: "claude",
+                model: "sonnet",
+                timeout: Timeout,
+                tokenBudget: 1000,
+                maxToolSteps: 10,
+                billedRateLimit: 100);
+            var workflowId = new WorkflowId("wf");
+
+            var executionId = await AcceptRequestAsync(
+                writer, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet", limits: initialLimits);
+
+            var stub = new StubCoreDispatcher();
+            var aResult = stub.EnqueueResult(A);
+
+            var runTask = MutationInterface.StartWorkflowAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(A, await ReadNextDispatchAsync(stub));
+            aResult.SetResult(Succeeded);
+            var state = await runTask;
+
+            Assert.Equal(StepStatus.Succeeded, state.Steps.Single().Status);
+            Assert.Equal(executionId, state.Steps.Single().LatestExecutionId);
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Empty(events.OfType<FlowEvent.StepRebound>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task StartWorkflowAsync_does_not_journal_StepRebound_for_legacy_request_with_no_recorded_limits()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var bindings = MakeBindings(
+                adapter: "claude",
+                model: "sonnet",
+                timeout: Timeout,
+                tokenBudget: 2000,
+                maxToolSteps: 20,
+                billedRateLimit: 200);
+            var workflowId = new WorkflowId("wf");
+
+            // Legacy request: limits is null
+            var executionId = await AcceptRequestAsync(
+                writer, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet", limits: null);
+
+            var stub = new StubCoreDispatcher();
+            var aResult = stub.EnqueueResult(A);
+
+            var runTask = MutationInterface.StartWorkflowAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(A, await ReadNextDispatchAsync(stub));
+            aResult.SetResult(Succeeded);
+            var state = await runTask;
+
+            Assert.Equal(StepStatus.Succeeded, state.Steps.Single().Status);
+            Assert.Equal(executionId, state.Steps.Single().LatestExecutionId);
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Empty(events.OfType<FlowEvent.StepRebound>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
     public async Task StartWorkflowAsync_settles_unmatched_VerifyStarted_Indeterminate_across_engine_restart()
     {
         // #1623 F2 crash recovery arm: see MutationInterface.cs ToClassify reconciliation.
@@ -1521,7 +1685,8 @@ public class MutationInterfaceCrashRecoveryTests
         StepId stepId,
         string? adapter = null,
         string? model = null,
-        bool? deliversBranch = null)
+        bool? deliversBranch = null,
+        ExecutionLimitEvidence? limits = null)
     {
         var executionId = new ExecutionId(Guid.NewGuid().ToString("n"));
         var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, executionId);
@@ -1537,7 +1702,8 @@ public class MutationInterfaceCrashRecoveryTests
             UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
             Adapter: adapter,
             Model: model,
-            DeliversBranch: deliversBranch);
+            DeliversBranch: deliversBranch,
+            Limits: limits);
 
         await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(request));
         return executionId;
@@ -1556,10 +1722,26 @@ public class MutationInterfaceCrashRecoveryTests
         WorkflowTemplateVersion: 1,
         Steps: steps);
 
-    private static Dictionary<string, WorkerBinding> MakeBindings(string? adapter = null, string? model = null) => new()
-    {
-        ["stub-worker"] = new WorkerBinding.Process(ProcessContract, Target, Timeout, Adapter: adapter, Model: model),
-    };
+    private static Dictionary<string, WorkerBinding> MakeBindings(
+        string? adapter = null,
+        string? model = null,
+        TimeSpan? timeout = null,
+        int? tokenBudget = null,
+        int? maxToolSteps = null,
+        long? billedRateLimit = null,
+        ExecutionLimitEvidence? limitEvidence = null) => new()
+        {
+            ["stub-worker"] = new WorkerBinding.Process(
+                ProcessContract,
+                Target,
+                timeout ?? Timeout,
+                Adapter: adapter,
+                Model: model,
+                TokenBudget: tokenBudget,
+                MaxToolSteps: maxToolSteps,
+                BilledRateLimit: billedRateLimit,
+                LimitEvidence: limitEvidence),
+        };
 
     private sealed class LateCapacityClassifier : IFailureClassifier
     {

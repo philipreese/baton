@@ -64,7 +64,12 @@ public sealed class CostLedgerStoreTests
     private const string AgyStepUpdateUsageLine =
         """{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","usage":{"input_tokens":14407,"output_tokens":1173,"thinking_tokens":992,"cache_read_tokens":40765,"total_tokens":15580}}}""";
 
-    private static ExecutionRequest AcceptedRequest(ExecutionId executionId, string worker, string? adapter, string? model) => new(
+    private static ExecutionRequest AcceptedRequest(
+        ExecutionId executionId,
+        string worker,
+        string? adapter,
+        string? model,
+        ExecutionLimitEvidence? limits = null) => new(
         executionId,
         new WorkflowId("wf-cost-ledger"),
         new StepId(worker),
@@ -75,7 +80,8 @@ public sealed class CostLedgerStoreTests
         Environment: [],
         UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
         Adapter: adapter,
-        Model: model);
+        Model: model,
+        Limits: limits);
 
     /// <summary>
     /// Writes the captured stdout the projector reads its usage out of, at exactly the path
@@ -108,9 +114,14 @@ public sealed class CostLedgerStoreTests
     }
 
     private static List<LogEntry> SettledExecution(
-        ExecutionId executionId, string adapter, string? model, DateTime start, string worker = "implement") =>
+        ExecutionId executionId,
+        string adapter,
+        string? model,
+        DateTime start,
+        string worker = "implement",
+        ExecutionLimitEvidence? limits = null) =>
     [
-        new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(AcceptedRequest(executionId, worker, adapter, model))),
+        new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(AcceptedRequest(executionId, worker, adapter, model, limits))),
         new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(executionId, Pid: 1), start),
         new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(executionId, 0, CoreExitReason.Natural), start.AddSeconds(2)),
         new LogEntry.FlowLogEntry(new FlowEvent.ExecutionSucceeded(executionId)),
@@ -202,8 +213,14 @@ public sealed class CostLedgerStoreTests
         {
             var original = new ExecutionId("original");
             var checkpoint = new ExecutionId("checkpoint");
-            var checkpointRequest = AcceptedRequest(checkpoint, "review", "claude", "claude-opus-5");
-            var entries = SettledExecution(original, "claude", "claude-opus-5", Start, "review");
+            var originalLimits = new ExecutionLimitEvidence(
+                TimeSpan.FromMinutes(5),
+                TokenBudget: 2000,
+                MaxToolSteps: 10,
+                BilledRateLimit: 500,
+                ChosenKey: "review/profile");
+            var checkpointRequest = AcceptedRequest(checkpoint, "review", "claude", "claude-opus-5", limits: null);
+            var entries = SettledExecution(original, "claude", "claude-opus-5", Start, "review", limits: originalLimits);
             entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
                 checkpoint, original, ["report.md"], checkpointRequest)));
             entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(checkpoint, 2), Start.AddSeconds(3)));
@@ -223,7 +240,64 @@ public sealed class CostLedgerStoreTests
             Assert.Equal(CoreExitReason.Natural, checkpointRow.ExitReason);
             Assert.Equal(7, checkpointRow.TokensIn);
             Assert.Equal(3, checkpointRow.TokensOut);
-            Assert.Single(rows, row => row.Execution == original.Value);
+            Assert.Null(checkpointRow.Limits);
+
+            var originalRow = Assert.Single(rows, row => row.Execution == original.Value);
+            Assert.Equal(originalLimits, originalRow.Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public void Cost_ledger_projects_recorded_limit_evidence_and_preserves_on_resolution_correction_row()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-limits");
+            var expectedLimits = new ExecutionLimitEvidence(
+                TimeSpan.FromMinutes(5),
+                TokenBudget: 4000,
+                MaxToolSteps: 20,
+                BilledRateLimit: 500,
+                ChosenKey: "claude/opus/review",
+                TimeoutSource: "profile",
+                TokenBudgetSource: "profile",
+                MaxToolStepsSource: "profile");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var entries = SettledExecution(executionId, "claude", "claude-opus-5", Start, limits: expectedLimits);
+            var rows = CostLedgerStore.BuildEntries(entries, room, Repository);
+
+            var row = Assert.Single(rows);
+            Assert.Equal(expectedLimits, row.Limits);
+
+            var resolution = CostLedgerStore.BuildResolutionRow(
+                rows, BatonPaths.RecordKey(room), ConductorResolution.Reject, "quality check");
+            Assert.NotNull(resolution);
+            Assert.Equal(expectedLimits, resolution.Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public void Cost_ledger_keeps_legacy_request_limits_as_null()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-legacy");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var entries = SettledExecution(executionId, "claude", "claude-opus-5", Start, limits: null);
+            var rows = CostLedgerStore.BuildEntries(entries, room, Repository);
+
+            var row = Assert.Single(rows);
+            Assert.Null(row.Limits);
         }
         finally
         {

@@ -1642,7 +1642,9 @@ public static class MutationInterface
                                     NewModel: fallbackBinding.Model,
                                     Reason: "vendor-exhaustion fallback: "
                                         + $"{previousProcess.Adapter} parked until "
-                                        + $"{stepStateForDispatch.LatestExecutionFailedRetryNotBefore?.ToString("O") ?? "unknown"}"),
+                                        + $"{stepStateForDispatch.LatestExecutionFailedRetryNotBefore?.ToString("O") ?? "unknown"}",
+                                    PreviousLimits: previousProcess.EffectiveLimitEvidence,
+                                    NewLimits: fallbackBinding.EffectiveLimitEvidence),
                                 ioCancellationToken)
                             .ConfigureAwait(false);
                     }
@@ -2986,6 +2988,7 @@ public static class MutationInterface
         {
             ExecutionId = checkpointExecutionId,
             Timeout = ArtifactCheckpoint.WallClockTimeout,
+            Limits = null,
         };
         using var checkpointCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hostCancellationToken);
         using var linked = monitor is null ? null : CancellationTokenSource.CreateLinkedTokenSource(checkpointCancellation.Token, monitor.ArrestRequested);
@@ -3095,6 +3098,7 @@ public static class MutationInterface
         {
             Timeout = GraceTurn.WallClockTimeout,
             Environment = graceEnvironment,
+            Limits = null,
         };
 
         using var graceLinkedCancellation = graceMonitor is not null

@@ -65,6 +65,60 @@ public class MutationInterfaceResumeTests
     }
 
     [Fact]
+    public async Task RecordResumeAsync_captures_effective_limit_evidence_on_accepted_request()
+    {
+        var snapshot = MakeSnapshot(Step(Solo, worker: "solo-worker"));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            var expectedLimits = new ExecutionLimitEvidence(
+                Timeout,
+                TokenBudget: 5000,
+                MaxToolSteps: 25,
+                BilledRateLimit: 1200,
+                ChosenKey: "solo/model/profile",
+                TimeoutSource: "profile",
+                TokenBudgetSource: "profile",
+                MaxToolStepsSource: "profile");
+            var bindings = new Dictionary<string, WorkerBinding>
+            {
+                ["solo-worker"] = new WorkerBinding.Process(
+                    Contract,
+                    WriteFile("plan", "first"),
+                    Timeout,
+                    TokenBudget: 5000,
+                    MaxToolSteps: 25,
+                    BilledRateLimit: 1200,
+                    LimitEvidence: expectedLimits),
+            };
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var dispatcher = new CoreDispatcher(writer, writer);
+            var workflowId = new WorkflowId("wf-resume-limits");
+
+            await MutationInterface.StartWorkflowAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            var (resumedState, resumedExecutionId) = await MutationInterface.RecordResumeAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, "solo-worker",
+                reader, writer, dispatcher, cancellationToken: TestContext.Current.CancellationToken);
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            var acceptedRequests = events.OfType<FlowEvent.ExecutionRequestAccepted>().ToList();
+            Assert.Equal(2, acceptedRequests.Count);
+
+            var resumedAccept = Assert.Single(acceptedRequests, a => a.Request.ExecutionId == resumedExecutionId);
+            Assert.Equal(expectedLimits, resumedAccept.Request.Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
     public async Task RecordResumeAsync_dispatches_a_linked_execution_for_a_Paused_step()
     {
         // #1388 review F10: a Paused step is the other resume target InvalidResumeException's own

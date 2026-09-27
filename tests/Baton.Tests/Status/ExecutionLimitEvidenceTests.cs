@@ -2,6 +2,7 @@ using System.Text.Json;
 using Baton.Domain;
 using Baton.Status;
 using Baton.Store;
+using Baton.Tests.Shared;
 
 namespace Baton.Tests.Status;
 
@@ -64,6 +65,79 @@ public sealed class ExecutionLimitEvidenceTests
 
         Assert.Equal(latest, resolved[ExecutionId.Value].Limits);
         Assert.Equal(first, resolved[other.Value].Limits);
+    }
+
+    [Fact]
+    public void Status_projection_preserves_immutable_limits_updates_on_rebound_and_keeps_legacy_null()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"limit-status-{Guid.NewGuid():N}");
+        try
+        {
+            var first = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null);
+            var latest = first with { TokenBudget = 2000 };
+            var legacyId = new ExecutionId("legacy-1");
+            var start = DateTime.UtcNow;
+
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(Request(ExecutionId, first))),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(ExecutionId, 1), start),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(ExecutionId, 0, CoreExitReason.Natural), start.AddSeconds(1)),
+
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(Request(legacyId, limits: null))),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(legacyId, 2), start),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(legacyId, 0, CoreExitReason.Natural), start.AddSeconds(1)),
+
+                new LogEntry.FlowLogEntry(new FlowEvent.StepRebound(
+                    StepId, ExecutionId, "claude", "sonnet", "claude", "sonnet",
+                    "changed monitor inputs", first, latest)),
+            };
+
+            var views = ExecutionUsageProjector.BuildByExecutionId(entries, tempDir);
+
+            Assert.Equal(latest, views[ExecutionId.Value].Limits);
+            Assert.Null(views[legacyId.Value].Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDir);
+        }
+    }
+
+    [Fact]
+    public void Status_projection_isolates_checkpoint_child_limits_from_predecessor()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"limit-chk-{Guid.NewGuid():N}");
+        try
+        {
+            var parentLimits = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null);
+            var checkpointId = new ExecutionId("checkpoint-1");
+            var start = DateTime.UtcNow;
+
+            var checkpointRequest = Request(checkpointId, limits: null);
+
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(Request(ExecutionId, parentLimits))),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(ExecutionId, 1), start),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(ExecutionId, -1, CoreExitReason.CancelRequested), start.AddSeconds(1)),
+                new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
+                    checkpointId, ExecutionId, ["report.md"], checkpointRequest)),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(checkpointId, 2), start.AddSeconds(1)),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(checkpointId, 0, CoreExitReason.Natural), start.AddSeconds(2)),
+                new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointCompleted(
+                    checkpointId, CoreExitReason.Natural)),
+            };
+
+            var views = ExecutionUsageProjector.BuildByExecutionId(entries, tempDir);
+
+            Assert.Equal(parentLimits, views[ExecutionId.Value].Limits);
+            Assert.Null(views[checkpointId.Value].Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDir);
+        }
     }
 
     private static ExecutionRequest Request(ExecutionLimitEvidence? limits = null) =>
