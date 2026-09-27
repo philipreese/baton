@@ -225,6 +225,7 @@ public class RedispatchBindingTests
         Assert.Equal(ExecutionLimitSource.Profile, child.ExecutionLimitResolution?.TimeoutSource);
         Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
         Assert.Equal(ExecutionLimitSource.Profile, child.ExecutionLimitResolution?.MaxToolStepsSource);
+        Assert.Equal("claude/opus/advise/small", child.ExecutionLimitResolution?.OriginatingSelectionKey);
     }
 
     [Fact]
@@ -235,6 +236,7 @@ public class RedispatchBindingTests
 
         Assert.NotNull(child.ExecutionLimitResolution);
         Assert.Null(child.ExecutionLimitResolution!.ChosenKey);
+        Assert.Null(child.ExecutionLimitResolution.OriginatingSelectionKey);
         Assert.Null(child.ExecutionLimitResolution.TimeoutSource);
         Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution.TokenBudgetSource);
         Assert.Null(child.ExecutionLimitResolution.MaxToolStepsSource);
@@ -293,6 +295,30 @@ public class RedispatchBindingTests
         Assert.Equal(TimeSpan.FromMinutes(60), child.ExecutionLimitResolution?.Timeout);
         Assert.Equal(1000, child.ExecutionLimitResolution?.TokenBudget);
         Assert.Equal(10, child.ExecutionLimitResolution?.MaxToolSteps);
+    }
+
+    [Fact]
+    public void Adapter_change_clears_the_originating_selection_identity()
+    {
+        var parent = ParentEntry() with
+        {
+            DeclaredTaskSize = new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            TokenBudget = 1000,
+            MaxToolSteps = 10,
+            ExecutionLimitResolution = new ExecutionLimitResolution(
+                "claude/opus/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10,
+                "claude/opus/advise/small"),
+        };
+
+        var child = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Adapter: "agy", TokenBudget: 2000));
+
+        Assert.Null(child.ExecutionLimitResolution?.ChosenKey);
+        Assert.Null(child.ExecutionLimitResolution?.OriginatingSelectionKey);
+        Assert.Null(child.ExecutionLimitResolution?.TimeoutSource);
+        Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
+        Assert.Null(child.ExecutionLimitResolution?.MaxToolStepsSource);
     }
 
     [Fact]

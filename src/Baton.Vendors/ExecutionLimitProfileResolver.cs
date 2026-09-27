@@ -22,7 +22,8 @@ public sealed record ExecutionLimitResolution(
     string? MaxToolStepsSource,
     TimeSpan Timeout,
     long? TokenBudget,
-    int? MaxToolSteps);
+    int? MaxToolSteps,
+    string? OriginatingSelectionKey = null);
 
 public static class ExecutionLimitSource
 {
@@ -62,14 +63,16 @@ public static class ExecutionLimitProfileResolver
         var profile = key is { } actualKey
             ? profiles?.FirstOrDefault(candidate => actualKey.Equals(candidate.ToKey()))
             : null;
+        var selectedKey = profile is null ? null : key!.Value.ToString();
         return new ExecutionLimitResolution(
-            profile is null ? null : key!.Value.ToString(),
+            selectedKey,
             timeoutOverride is not null ? ExecutionLimitSource.DispatchOverride : profile is not null ? ExecutionLimitSource.Profile : ExecutionLimitSource.RoleDefault,
             tokenBudgetOverride is not null ? ExecutionLimitSource.DispatchOverride : profile is not null ? ExecutionLimitSource.Profile : ExecutionLimitSource.RoleDefault,
             maxToolStepsOverride is not null ? ExecutionLimitSource.DispatchOverride : profile is not null ? ExecutionLimitSource.Profile : ExecutionLimitSource.RoleDefault,
             timeoutOverride ?? profile?.Timeout ?? roleTimeout,
             tokenBudgetOverride ?? profile?.TokenBudget ?? roleTokenBudget,
-            maxToolStepsOverride ?? profile?.MaxToolSteps ?? roleMaxToolSteps);
+            maxToolStepsOverride ?? profile?.MaxToolSteps ?? roleMaxToolSteps,
+            selectedKey);
     }
 
     /// <summary>Check a recorded selection against the exact normalized key this resolver produces.</summary>

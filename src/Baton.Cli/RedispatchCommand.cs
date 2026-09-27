@@ -462,7 +462,10 @@ public static class RedispatchCommand
                 : InheritedSource(parentResolution?.MaxToolStepsSource, inherited.MaxToolSteps, parentResolution?.MaxToolSteps),
             inherited.Timeout,
             inherited.TokenBudget,
-            inherited.MaxToolSteps);
+            inherited.MaxToolSteps,
+            selectionStillDescribesChild
+                ? parentResolution?.OriginatingSelectionKey ?? parentResolution?.ChosenKey
+                : null);
     }
 
     /// <summary>

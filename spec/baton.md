@@ -325,8 +325,12 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   null brakes as known unlimited only when the monitor predicate was available. A serialized
   `MonitorInputsKnown` flag distinguishes this from an unavailable parser, which leaves those
   monitor axes unknown while genuine timeout evidence remains. It carries only profile
-  and per-axis source stamps that describe the whole recorded snapshot; an aggregate profile key is
-  cleared for a mixed snapshot. An absent value remains unknown for legacy and supplementary
+  and per-axis source stamps that describe the whole recorded snapshot. A fresh profile selection may
+  retain its aggregate key alongside explicit per-axis overrides; a later redispatch mixed snapshot
+  clears that aggregate key but carries a separate originating selection identity only through
+  legitimate same-identity inheritance. Consumers validate that identity against the resolved
+  adapter, model, role, and size. Legacy records may use a valid existing aggregate key, but a null
+  key does not authorize inventing profile identity. An absent value remains unknown for legacy and supplementary
   executions. A crash-recovery resubmit keeps the accepted timeout provenance while recording changed
   current monitor inputs in `StepRebound` before spawn. Status and the cost ledger project that latest
   applied snapshot from the journal, so settings or binding edits cannot rewrite settled history.

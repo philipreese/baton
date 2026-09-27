@@ -318,14 +318,23 @@ public static class WorkerBindingResolver
     private static ExecutionLimitEvidence CreateLimitEvidence(
         WorkerBindingConfigEntry entry, ExecutionLimitResolution resolution)
     {
-        var selectionMatches = resolution.ChosenKey is null
-            || ExecutionLimitProfileResolver.ChosenKeyMatchesSelection(
-                resolution.ChosenKey, entry.Adapter, entry.ModelResolved ?? entry.Model,
-                entry.Contract.WorkerName, entry.DeclaredTaskSize?.Size ?? DeclaredTaskSize.Unknown);
+        var resolvedModel = entry.ModelResolved ?? entry.Model;
+        var role = entry.Contract.WorkerName;
+        var size = entry.DeclaredTaskSize?.Size ?? DeclaredTaskSize.Unknown;
+        // OriginatingSelectionKey is the independent identity for a mixed redispatch snapshot.
+        // Older records have no such member, so a present ChosenKey is the only identity they may
+        // contribute; a null key must remain unverifiable rather than becoming a wildcard.
+        var selectionKey = resolution.OriginatingSelectionKey ?? resolution.ChosenKey;
+        var selectionMatches = selectionKey is not null
+            && ExecutionLimitProfileResolver.ChosenKeyMatchesSelection(
+                selectionKey, entry.Adapter, resolvedModel, role, size);
+        var chosenKeyMatches = resolution.ChosenKey is not null
+            && ExecutionLimitProfileResolver.ChosenKeyMatchesSelection(
+                resolution.ChosenKey, entry.Adapter, resolvedModel, role, size);
         var timeoutMatches = entry.Timeout == resolution.Timeout;
         var tokenBudgetMatches = entry.TokenBudget == resolution.TokenBudget;
         var maxToolStepsMatches = entry.MaxToolSteps == resolution.MaxToolSteps;
-        var aggregateMatches = selectionMatches && timeoutMatches && tokenBudgetMatches && maxToolStepsMatches;
+        var aggregateMatches = chosenKeyMatches && timeoutMatches && tokenBudgetMatches && maxToolStepsMatches;
 
         return new ExecutionLimitEvidence(
             entry.Timeout,

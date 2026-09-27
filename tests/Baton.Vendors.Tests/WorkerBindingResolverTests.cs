@@ -258,6 +258,27 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void Null_aggregate_key_without_selection_identity_fails_closed_even_when_numbers_match()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30), Model: "model-b",
+            ModelResolved: "model-b", TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                null, ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Null(binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Null(binding.EffectiveLimitEvidence.TimeoutSource);
+        Assert.Null(binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.Null(binding.EffectiveLimitEvidence.MaxToolStepsSource);
+    }
+
+    [Fact]
     public void Hand_authored_base_without_Baton_authority_does_not_enable_exact_file_restore()
     {
         var room = Path.Combine(Path.GetTempPath(), $"baton-hand-restore-{Guid.NewGuid():N}");
