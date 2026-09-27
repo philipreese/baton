@@ -2715,14 +2715,14 @@ def _selftest_scheduler_protocol_and_heartbeat_identity() -> bool:
             print(f"  FAILED ({label}): state={state!r}, calls={calls!r}, want {expected!r} and one exact query")
             ok = False
 
-    now = dt.datetime(2026, 9, 26, 16, 0, tzinfo=dt.timezone.utc)
-    candidate = DaemonIdentity(4243, "2026-09-26T15:58:00.2997980Z", r"C:\baton\tools\new\baton.exe", "2.0.0")
+    now = dt.datetime(2026, 9, 27, 8, 29, 27, tzinfo=dt.timezone.utc)
+    candidate = DaemonIdentity(4243, "2026-09-27T08:27:27.2997980Z", r"C:\baton\tools\new\baton.exe", "2.0.0")
     base = {
-        "startedAt": "2026-09-26T15:58:00.000Z",
-        "tickCompletedAt": "2026-09-26T15:59:30.000Z",
+        "startedAt": "2026-09-27T08:27:27.000Z",
+        "tickCompletedAt": "2026-09-27T08:28:30.000Z",
         "identity": {
             "pid": candidate.pid,
-            "processStartTime": "2026-09-26T15:58:00.2997983Z",
+            "processStartTime": "2026-09-27T08:27:27.2997983Z",
             "executablePath": candidate.executable_path,
             "version": candidate.version,
         },
@@ -2742,16 +2742,16 @@ def _selftest_scheduler_protocol_and_heartbeat_identity() -> bool:
     cases = [
         ("correct replacement heartbeat", base, True),
         ("old but recent heartbeat", {**base, "identity": {**base["identity"], "pid": 4242}}, False),
-        ("stale heartbeat", {**base, "tickCompletedAt": "2026-09-26T15:57:59.000Z"}, False),
-        ("future clock skew", {**base, "tickCompletedAt": "2026-09-26T16:00:06.000Z"}, False),
+        ("stale heartbeat", {**base, "tickCompletedAt": "2026-09-27T08:26:59.000Z"}, False),
+        ("future clock skew", {**base, "tickCompletedAt": "2026-09-27T08:29:33.000Z"}, False),
         ("malformed times", {**base, "startedAt": "not-a-time"}, False),
         ("candidate identity mismatch", {**base, "identity": {**base["identity"], "version": "1.0.0"}}, False),
         (
             "microsecond process identity mismatch",
-            {**base, "identity": {**base["identity"], "processStartTime": "2026-09-26T15:58:00.2997990Z"}},
+            {**base, "identity": {**base["identity"], "processStartTime": "2026-09-27T08:27:27.2997990Z"}},
             False,
         ),
-        ("invalid ordering", {**base, "startedAt": "2026-09-26T16:00:01.000Z"}, False),
+        ("invalid ordering", {**base, "startedAt": "2026-09-27T08:29:28.000Z"}, False),
         ("malformed identity time", {**base, "identity": {**base["identity"], "processStartTime": "bad"}}, False),
     ]
     for label, body, expected in cases:
