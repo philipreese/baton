@@ -396,7 +396,7 @@ def daemon_process_query_cmd() -> List[str]:
         # '*daemon*' substring match, which would also catch e.g. `baton dispatch --spec-text
         # "... daemon ..."` and kill an unrelated live process on every refresh (#1777 fix round F2).
         "Where-Object { $_.CommandLine -match '^(\"[^\"]+\"|\\S+)\\s+daemon(\\s|$)' } | "
-        "ForEach-Object { \"{0}|{1}|{2}\" -f $_.ProcessId, $_.CreationDate, $_.ExecutablePath }",
+        "ForEach-Object { \"{0}|{1}|{2}\" -f $_.ProcessId, $_.CreationDate.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture), $_.ExecutablePath }",
     ]
 
 
@@ -518,33 +518,54 @@ def wait_for_daemon_exit(
     return DaemonExitState.TIMEOUT
 
 
-def _parse_timestamp(value: object) -> Optional[float]:
+def _parse_datetime(value: object) -> Optional[dt.datetime]:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
-    try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt.timezone.utc)
-        return parsed.timestamp()
-    except ValueError:
-        dmtf = re.fullmatch(r"(\d{14})\.\d{6}([+-])(\d{3})", text)
-        if not dmtf:
+    dmtf = re.fullmatch(r"(\d{14})\.(\d{6})([+-])(\d{3})", text)
+    if dmtf:
+        try:
+            base = dt.datetime.strptime(dmtf.group(1), "%Y%m%d%H%M%S")
+            offset_minutes = int(dmtf.group(4))
+            if offset_minutes > 14 * 60:
+                return None
+            if dmtf.group(3) == "-":
+                offset_minutes = -offset_minutes
+            parsed = base.replace(
+                microsecond=int(dmtf.group(2)),
+                tzinfo=dt.timezone(dt.timedelta(minutes=offset_minutes)),
+            )
+        except (ValueError, OverflowError):
             return None
-        base = dt.datetime.strptime(dmtf.group(1), "%Y%m%d%H%M%S")
-        offset = int(dmtf.group(3)) * 60
-        if dmtf.group(2) == "-":
-            offset = -offset
-        return base.replace(tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
+    else:
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    try:
+        return parsed.astimezone(dt.timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _parse_timestamp(value: object) -> Optional[float]:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return None
+    try:
+        return parsed.timestamp()
+    except (OSError, ValueError, OverflowError):
+        return None
 
 
 def _canonical_timestamp(value: object) -> Optional[str]:
-    """Returns the millisecond UTC spelling used to compare CIM and heartbeat start times."""
-    parsed = _parse_timestamp(value)
-    if parsed is None:
+    """Returns the microsecond UTC spelling shared by CIM and heartbeat process start times."""
+    instant = _parse_datetime(value)
+    if instant is None:
         return None
-    instant = dt.datetime.fromtimestamp(parsed, tz=dt.timezone.utc)
-    return instant.strftime("%Y-%m-%dT%H:%M:%S.") + f"{instant.microsecond // 1000:03d}Z"
+    return instant.strftime("%Y-%m-%dT%H:%M:%S.") + f"{instant.microsecond:06d}Z"
 
 
 DAEMON_HEARTBEAT_MAX_AGE_S = 120.0
@@ -2595,6 +2616,74 @@ def _selftest_daemon_query_matches_verb_position_not_anywhere() -> bool:
     return ok
 
 
+def _selftest_daemon_query_serializes_invariant_creation_time() -> bool:
+    """The process-query boundary must not emit PowerShell's locale-formatted CreationDate."""
+    ok = True
+    query = daemon_process_query_cmd()
+    expected_format = (
+        "CreationDate.ToUniversalTime().ToString('o', "
+        "[System.Globalization.CultureInfo]::InvariantCulture)"
+    )
+    if expected_format not in query[3]:
+        print(f"  FAILED: process query does not serialize CreationDate invariantly: {query[3]!r}")
+        ok = False
+
+    creation_time = "2026-09-27T08:27:27.2997980Z"
+    executable_path = r"C:\baton\tools\new\baton.exe"
+    calls: List[List[str]] = []
+
+    def run(command: List[str]) -> CommandResult:
+        calls.append(command)
+        return CommandResult(0, f"134756|{creation_time}|{executable_path}\n")
+
+    processes = query_daemon_processes(Deps(run=run))
+    expected = [DaemonProcess(134756, creation_time, executable_path)]
+    if processes != expected or calls != [query]:
+        print(f"  FAILED: invariant query fixture parsed as {processes!r}, calls={calls!r}")
+        ok = False
+    return ok
+
+
+def _selftest_timestamp_parsing() -> bool:
+    """DMTF offsets must match ISO instants and malformed values must fail closed."""
+    ok = True
+    equivalent_pairs = [
+        ("positive DMTF offset", "20260926155800.299798+060", "2026-09-26T15:58:00.299798+01:00", "2026-09-26T14:58:00.299798Z"),
+        ("negative DMTF offset", "20260926155800.299798-060", "2026-09-26T15:58:00.299798-01:00", "2026-09-26T16:58:00.299798Z"),
+    ]
+    for label, dmtf, iso, expected_utc in equivalent_pairs:
+        try:
+            parsed = _parse_timestamp(dmtf)
+            canonical = _canonical_timestamp(dmtf)
+        except (TypeError, ValueError, OverflowError) as exc:
+            print(f"  FAILED ({label}): valid DMTF timestamp raised {exc!r}")
+            ok = False
+            continue
+        if (parsed is None or parsed != _parse_timestamp(iso)
+                or canonical != expected_utc or _canonical_timestamp(iso) != expected_utc):
+            print(f"  FAILED ({label}): DMTF and ISO timestamps did not resolve to the same instant")
+            ok = False
+
+    malformed = [
+        "20261326155800.299798+060",
+        "20260926155800.299798+999",
+        "20260926155800.bad+060",
+        "9/27/2026 4:27:27 AM",
+    ]
+    for value in malformed:
+        try:
+            parsed = _parse_timestamp(value)
+            canonical = _canonical_timestamp(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            print(f"  FAILED ({value!r}): malformed timestamp raised {exc!r}")
+            ok = False
+            continue
+        if parsed is not None or canonical is not None:
+            print(f"  FAILED ({value!r}): malformed timestamp was accepted")
+            ok = False
+    return ok
+
+
 def _selftest_scheduler_protocol_and_heartbeat_identity() -> bool:
     """Cover the fail-closed scheduler protocol and every replacement-heartbeat polarity."""
     import tempfile
@@ -2627,44 +2716,55 @@ def _selftest_scheduler_protocol_and_heartbeat_identity() -> bool:
             print(f"  FAILED ({label}): state={state!r}, calls={calls!r}, want {expected!r} and one exact query")
             ok = False
 
-    now = dt.datetime(2026, 9, 26, 16, 0, tzinfo=dt.timezone.utc)
-    candidate = DaemonIdentity(4243, "2026-09-26T15:58:00.000Z", r"C:\baton\tools\new\baton.exe", "2.0.0")
+    now = dt.datetime(2026, 9, 27, 8, 29, 27, tzinfo=dt.timezone.utc)
+    candidate = DaemonIdentity(4243, "2026-09-27T08:27:27.2997980Z", r"C:\baton\tools\new\baton.exe", "2.0.0")
     base = {
-        "startedAt": "2026-09-26T15:58:00.000Z",
-        "tickCompletedAt": "2026-09-26T15:59:30.000Z",
+        "startedAt": "2026-09-27T08:27:27.000Z",
+        "tickCompletedAt": "2026-09-27T08:28:30.000Z",
         "identity": {
             "pid": candidate.pid,
-            "processStartTime": candidate.creation_time,
+            "processStartTime": "2026-09-27T08:27:27.2997983Z",
             "executablePath": candidate.executable_path,
             "version": candidate.version,
         },
         "services": {},
     }
 
-    def probe(body: dict) -> bool:
+    def probe(body: dict, probe_identity: DaemonIdentity = candidate) -> bool:
         with tempfile.TemporaryDirectory() as td:
             heartbeat_path = os.path.join(td, "fleet", "heartbeat.json")
             os.makedirs(os.path.dirname(heartbeat_path), exist_ok=True)
             with open(heartbeat_path, "w", encoding="utf-8") as f:
                 json.dump(body, f)
             return daemon_health_probe(
-                Deps(baton_home=td, clock=lambda: now.timestamp()), candidate
+                Deps(baton_home=td, clock=lambda: now.timestamp()), probe_identity
             )
 
     cases = [
         ("correct replacement heartbeat", base, True),
         ("old but recent heartbeat", {**base, "identity": {**base["identity"], "pid": 4242}}, False),
-        ("stale heartbeat", {**base, "tickCompletedAt": "2026-09-26T15:57:59.000Z"}, False),
-        ("future clock skew", {**base, "tickCompletedAt": "2026-09-26T16:00:06.000Z"}, False),
+        ("stale heartbeat", {**base, "tickCompletedAt": "2026-09-27T08:26:59.000Z"}, False),
+        ("future clock skew", {**base, "tickCompletedAt": "2026-09-27T08:29:33.000Z"}, False),
         ("malformed times", {**base, "startedAt": "not-a-time"}, False),
         ("candidate identity mismatch", {**base, "identity": {**base["identity"], "version": "1.0.0"}}, False),
-        ("invalid ordering", {**base, "startedAt": "2026-09-26T16:00:01.000Z"}, False),
+        (
+            "microsecond process identity mismatch",
+            {**base, "identity": {**base["identity"], "processStartTime": "2026-09-27T08:27:27.2997990Z"}},
+            False,
+        ),
+        ("invalid ordering", {**base, "startedAt": "2026-09-27T08:29:28.000Z"}, False),
         ("malformed identity time", {**base, "identity": {**base["identity"], "processStartTime": "bad"}}, False),
     ]
     for label, body, expected in cases:
         if probe(body) != expected:
             print(f"  FAILED ({label}): heartbeat acceptance polarity was wrong")
             ok = False
+    locale_candidate = DaemonIdentity(
+        candidate.pid, "9/27/2026 4:27:27 AM", candidate.executable_path, candidate.version
+    )
+    if probe(base, locale_candidate):
+        print("  FAILED: locale-formatted process identity was accepted")
+        ok = False
     return ok
 
 
@@ -2684,6 +2784,8 @@ def selftest() -> int:
         ("install_launcher fails closed on a stale exe", _selftest_install_launcher_fails_closed_on_stale_exe),
         ("full refresh daemon outcomes are bounded and classified", _selftest_full_refresh_daemon_outcomes),
         ("daemon process query anchors on the verb position, not '*daemon*' anywhere", _selftest_daemon_query_matches_verb_position_not_anywhere),
+        ("daemon process query serializes invariant UTC creation time", _selftest_daemon_query_serializes_invariant_creation_time),
+        ("timestamp parsing is equivalent and fail closed", _selftest_timestamp_parsing),
         ("scheduler protocol and heartbeat identity are fail closed", _selftest_scheduler_protocol_and_heartbeat_identity),
     ]
     ok = True

@@ -4359,9 +4359,10 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   on the next tick after the pool is released; real registry-lock and child-process controls produce
   the narrower one-loop signature.
   An outside replacement verifier accepts freshness only when `identity` matches the candidate PID,
-  process creation time, executable path, and version exactly; an old daemon's recent heartbeat is
-  therefore not evidence for its replacement. It rejects unparseable identity or timestamps and
-  requires `startedAt <= tickCompletedAt` before applying the existing freshness tolerance.
+  process creation time by equality at the shared microsecond UTC precision (never by timing
+  tolerance), executable path, and version exactly; an old daemon's recent heartbeat is therefore
+  not evidence for its replacement. It rejects unparseable identity or timestamps and requires
+  `startedAt <= tickCompletedAt` before applying the existing freshness tolerance.
   A service's `lastTickMs` against its `intervalMs` is the host-load signal that predates the freeze:
   on 2026-09-08 `FleetProjectionWriter` had reached 10.97 s against 30 s in the last body written
   before every loop stopped. The watchdog's verdict line (`{Root}/fleet/watchdog.txt`) carries a
