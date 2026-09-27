@@ -2648,10 +2648,10 @@ def _selftest_timestamp_parsing() -> bool:
     """DMTF offsets must match ISO instants and malformed values must fail closed."""
     ok = True
     equivalent_pairs = [
-        ("positive DMTF offset", "20260926155800.299798+060", "2026-09-26T15:58:00.299798+01:00"),
-        ("negative DMTF offset", "20260926155800.299798-060", "2026-09-26T15:58:00.299798-01:00"),
+        ("positive DMTF offset", "20260926155800.299798+060", "2026-09-26T15:58:00.299798+01:00", "2026-09-26T14:58:00.299798Z"),
+        ("negative DMTF offset", "20260926155800.299798-060", "2026-09-26T15:58:00.299798-01:00", "2026-09-26T16:58:00.299798Z"),
     ]
-    for label, dmtf, iso in equivalent_pairs:
+    for label, dmtf, iso, expected_utc in equivalent_pairs:
         try:
             parsed = _parse_timestamp(dmtf)
             canonical = _canonical_timestamp(dmtf)
@@ -2659,7 +2659,8 @@ def _selftest_timestamp_parsing() -> bool:
             print(f"  FAILED ({label}): valid DMTF timestamp raised {exc!r}")
             ok = False
             continue
-        if parsed != _parse_timestamp(iso) or canonical != _canonical_timestamp(iso):
+        if (parsed is None or parsed != _parse_timestamp(iso)
+                or canonical != expected_utc or _canonical_timestamp(iso) != expected_utc):
             print(f"  FAILED ({label}): DMTF and ISO timestamps did not resolve to the same instant")
             ok = False
 
