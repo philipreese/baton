@@ -18,7 +18,10 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
     private readonly string _parentIdentity;
     private string? _temporaryLeaf;
     private string? _quarantineLeaf;
-    private bool _preserveQuarantine;
+    private string? _failedLeaf;
+    private SafeFileHandle? _capturedLeaf;
+    private SafeFileHandle? _replacementLeaf;
+    private ExactFileSnapshot? _replacementExpected;
 
     private ExactFileRestoreFileTransaction(
         SafeFileHandle root,
@@ -127,12 +130,23 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         }
     }
 
-    internal ExactFileSnapshot Capture()
+    internal ExactFileSnapshot Capture(bool dirtyFile)
     {
-        using var leaf = TryOpenLeaf();
-        return leaf is null
-            ? ExactFileSnapshot.Missing
-            : new ExactFileSnapshot(true, Identity(leaf), Hash(leaf));
+        _capturedLeaf = TryOpenLeaf(excludeWriters: dirtyFile && OperatingSystem.IsWindows());
+        if (_capturedLeaf is null)
+        {
+            return ExactFileSnapshot.Missing;
+        }
+
+        if (dirtyFile && !OperatingSystem.IsWindows())
+        {
+            _capturedLeaf.Dispose();
+            _capturedLeaf = null;
+            throw new PlatformNotSupportedException(
+                "dirty exact-file restore is refused on this platform because concurrent writers cannot be excluded");
+        }
+
+        return Snapshot(_capturedLeaf);
     }
 
     /// <summary>
@@ -142,16 +156,24 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
     internal ExactFileCommitResult Commit(
         ExactFileSnapshot expected,
         ReadOnlySpan<byte> replacement,
-        Action<string?> writePrepared,
+        Action<ExactFileRecoveryNames> writePrepared,
         Action writeCommitted,
         Action writeRolledBack,
         Action<string, string?> writeRecoveryRequired,
         Action? beforeCompareAndSwap = null,
-        Action? beforeRollbackRestore = null)
+        Action? beforeRollbackRestore = null,
+        Action? beforeDurableCommit = null,
+        Action? beforeDelete = null)
     {
+        _temporaryLeaf = $".{_leaf}.baton-restore-{Guid.NewGuid():N}.tmp";
+        _quarantineLeaf = expected.Exists
+            ? $".{_leaf}.baton-quarantine-{Guid.NewGuid():N}"
+            : null;
+        _failedLeaf = $".{_leaf}.baton-uncommitted-{Guid.NewGuid():N}";
         StageReplacement(replacement);
         ProbeNoReplace();
-        writePrepared(null);
+        FlushParent();
+        writePrepared(new ExactFileRecoveryNames(_temporaryLeaf, _quarantineLeaf, _failedLeaf));
         beforeCompareAndSwap?.Invoke();
         if (!ParentStillAnchored())
         {
@@ -173,8 +195,9 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
 
             try
             {
-                RenameNoReplace(_temporaryLeaf!, _leaf);
+                RenameReplacementNoReplace(_temporaryLeaf!, _leaf);
                 _temporaryLeaf = null;
+                FlushParent();
             }
             catch (IOException ex)
             {
@@ -186,6 +209,14 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
 
             try
             {
+                beforeDurableCommit?.Invoke();
+                if (!InstalledMatches())
+                {
+                    TryWriteRecovery(writeRecoveryRequired,
+                        "the installed replacement changed before durable commit", null);
+                    return ExactFileCommitResult.Recovery(
+                        "the installed replacement changed before durable commit", null);
+                }
                 writeCommitted();
                 return ExactFileCommitResult.Committed;
             }
@@ -199,10 +230,17 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
             }
         }
 
-        _quarantineLeaf = $".{_leaf}.baton-quarantine-{Guid.NewGuid():N}";
+        if (!NamedMatches(_leaf, _capturedLeaf!, expected))
+        {
+            CleanupTemporary();
+            writeRolledBack();
+            return ExactFileCommitResult.Conflict(
+                "the target identity or content changed after the dirty-file check");
+        }
         try
         {
-            RenameNoReplace(_leaf, _quarantineLeaf);
+            RenameCapturedNoReplace(_leaf, _quarantineLeaf!);
+            FlushParent();
         }
         catch (IOException ex)
         {
@@ -215,8 +253,7 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         ExactFileSnapshot quarantined;
         try
         {
-            using var oldLeaf = OpenNamedLeaf(_quarantineLeaf);
-            quarantined = new ExactFileSnapshot(true, Identity(oldLeaf), Hash(oldLeaf));
+            quarantined = Snapshot(_capturedLeaf!);
         }
         catch (Exception ex) when (IsRecoverable(ex))
         {
@@ -227,7 +264,7 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
                 beforeRollbackRestore);
         }
 
-        if (quarantined != expected)
+        if (quarantined != expected || !NamedMatches(_quarantineLeaf!, _capturedLeaf!, expected))
         {
             return RestoreQuarantineAfterFailure(
                 "the target identity or content changed after the dirty-file check",
@@ -238,8 +275,9 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
 
         try
         {
-            RenameNoReplace(_temporaryLeaf!, _leaf);
+            RenameReplacementNoReplace(_temporaryLeaf!, _leaf);
             _temporaryLeaf = null;
+            FlushParent();
         }
         catch (IOException ex)
         {
@@ -252,6 +290,17 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
 
         try
         {
+            beforeDurableCommit?.Invoke();
+            if (!InstalledMatches()
+                || !NamedMatches(_quarantineLeaf!, _capturedLeaf!, expected))
+            {
+                TryWriteRecovery(writeRecoveryRequired,
+                    "the installed replacement or quarantined original changed before durable commit",
+                    _quarantineLeaf);
+                return ExactFileCommitResult.Recovery(
+                    "the installed replacement or quarantined original changed before durable commit",
+                    _quarantineLeaf);
+            }
             writeCommitted();
         }
         catch (Exception ex) when (IsRecoverable(ex))
@@ -263,7 +312,17 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
                 beforeRollbackRestore);
         }
 
-        DeleteNamedLeaf(_quarantineLeaf);
+        beforeDelete?.Invoke();
+        if (!InstalledMatches()
+            || !NamedMatches(_quarantineLeaf!, _capturedLeaf!, expected))
+        {
+            TryWriteRecovery(writeRecoveryRequired,
+                "terminal revalidation failed before deleting the quarantined original", _quarantineLeaf);
+            return ExactFileCommitResult.Recovery(
+                "terminal revalidation failed before deleting the quarantined original", _quarantineLeaf);
+        }
+        DeleteRetainedLeaf(_quarantineLeaf, _capturedLeaf!);
+        FlushParent();
         _quarantineLeaf = null;
         return ExactFileCommitResult.Committed;
     }
@@ -274,22 +333,34 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         Action<string, string?> writeRecoveryRequired,
         Action? beforeRollbackRestore)
     {
-        var failedLeaf = $".{_leaf}.baton-uncommitted-{Guid.NewGuid():N}";
+        if (!InstalledMatches())
+        {
+            TryWriteRecovery(writeRecoveryRequired,
+                "the installed name was replaced before rollback", null);
+            return ExactFileCommitResult.Recovery(
+                "audit failed and the installed name was replaced before rollback", null);
+        }
         try
         {
-            RenameNoReplace(_leaf, failedLeaf);
+            RenameReplacementNoReplace(_leaf, _failedLeaf!);
+            FlushParent();
             beforeRollbackRestore?.Invoke();
-            DeleteNamedLeaf(failedLeaf);
+            if (!NamedMatches(_failedLeaf!, _replacementLeaf!, _replacementExpected!))
+            {
+                throw new IOException("the uncommitted replacement changed before rollback deletion");
+            }
+            DeleteRetainedLeaf(_failedLeaf, _replacementLeaf!);
+            FlushParent();
             writeRolledBack();
             return ExactFileCommitResult.Refused(
                 $"committed audit evidence failed and the new target was removed: {evidenceFailure.Message}");
         }
         catch (Exception rollbackFailure) when (IsRecoverable(rollbackFailure))
         {
-            TryWriteRecovery(writeRecoveryRequired, rollbackFailure.Message, failedLeaf);
+            TryWriteRecovery(writeRecoveryRequired, rollbackFailure.Message, _failedLeaf);
             return ExactFileCommitResult.Recovery(
                 $"audit failed and rollback could not remove the uncommitted target: {rollbackFailure.Message}",
-                failedLeaf);
+                _failedLeaf);
         }
     }
 
@@ -299,21 +370,33 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         Action<string, string?> writeRecoveryRequired,
         Action? beforeRollbackRestore)
     {
-        var failedLeaf = $".{_leaf}.baton-uncommitted-{Guid.NewGuid():N}";
+        if (!InstalledMatches())
+        {
+            TryWriteRecovery(writeRecoveryRequired,
+                "the installed name was replaced before rollback", _quarantineLeaf);
+            return ExactFileCommitResult.Recovery(
+                "audit failed and the installed name was replaced before rollback", _quarantineLeaf);
+        }
         try
         {
-            RenameNoReplace(_leaf, failedLeaf);
+            RenameReplacementNoReplace(_leaf, _failedLeaf!);
+            FlushParent();
             beforeRollbackRestore?.Invoke();
-            RenameNoReplace(_quarantineLeaf!, _leaf);
+            RenameCapturedNoReplace(_quarantineLeaf!, _leaf);
+            FlushParent();
             _quarantineLeaf = null;
-            DeleteNamedLeaf(failedLeaf);
+            if (!NamedMatches(_failedLeaf!, _replacementLeaf!, _replacementExpected!))
+            {
+                throw new IOException("the uncommitted replacement changed before rollback deletion");
+            }
+            DeleteRetainedLeaf(_failedLeaf, _replacementLeaf!);
+            FlushParent();
             writeRolledBack();
             return ExactFileCommitResult.Refused(
                 $"committed audit evidence failed and the original target was restored: {evidenceFailure.Message}");
         }
         catch (Exception rollbackFailure) when (IsRecoverable(rollbackFailure))
         {
-            _preserveQuarantine = true;
             TryWriteRecovery(writeRecoveryRequired, rollbackFailure.Message, _quarantineLeaf);
             return ExactFileCommitResult.Recovery(
                 $"audit failed and rollback requires recovery: {rollbackFailure.Message}",
@@ -331,14 +414,14 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         try
         {
             beforeRollbackRestore?.Invoke();
-            RenameNoReplace(_quarantineLeaf!, _leaf);
+            RenameCapturedNoReplace(_quarantineLeaf!, _leaf);
+            FlushParent();
             _quarantineLeaf = null;
             writeRolledBack();
             return ExactFileCommitResult.Conflict(reason);
         }
         catch (Exception rollbackFailure) when (IsRecoverable(rollbackFailure))
         {
-            _preserveQuarantine = true;
             TryWriteRecovery(writeRecoveryRequired, rollbackFailure.Message, _quarantineLeaf);
             return ExactFileCommitResult.Recovery(
                 $"{reason}; restoring the quarantined original requires recovery: {rollbackFailure.Message}",
@@ -365,17 +448,17 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
 
     private void StageReplacement(ReadOnlySpan<byte> replacement)
     {
-        _temporaryLeaf = $".{_leaf}.baton-restore-{Guid.NewGuid():N}.tmp";
-        using var handle = CreateNamedLeaf(_temporaryLeaf);
+        _replacementLeaf = CreateNamedLeaf(_temporaryLeaf!, excludeWriters: true);
         var offset = 0L;
         while (!replacement.IsEmpty)
         {
-            RandomAccess.Write(handle, replacement, offset);
+            RandomAccess.Write(_replacementLeaf, replacement, offset);
             offset += replacement.Length;
             replacement = [];
         }
 
-        RandomAccess.FlushToDisk(handle);
+        RandomAccess.FlushToDisk(_replacementLeaf);
+        _replacementExpected = Snapshot(_replacementLeaf);
     }
 
     private void ProbeNoReplace()
@@ -405,11 +488,11 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         }
     }
 
-    private SafeFileHandle? TryOpenLeaf()
+    private SafeFileHandle? TryOpenLeaf(bool excludeWriters = false)
     {
         try
         {
-            return OpenNamedLeaf(_leaf);
+            return OpenNamedLeaf(_leaf, excludeWriters);
         }
         catch (FileNotFoundException)
         {
@@ -417,18 +500,45 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         }
     }
 
-    private SafeFileHandle OpenNamedLeaf(string name) =>
+    private SafeFileHandle OpenNamedLeaf(
+        string name,
+        bool excludeWriters = false,
+        bool deleteAccess = true) =>
         _windows
-            ? WindowsNative.OpenRelative(_parent, name, directory: false, create: false)
+            ? WindowsNative.OpenRelative(
+                _parent, name, directory: false, create: false, excludeWriters, deleteAccess)
             : UnixNative.OpenRelative(_parent, name, directory: false, create: false);
 
-    private SafeFileHandle CreateNamedLeaf(string name) =>
+    private SafeFileHandle CreateNamedLeaf(string name, bool excludeWriters = false) =>
         _windows
-            ? WindowsNative.OpenRelative(_parent, name, directory: false, create: true)
+            ? WindowsNative.OpenRelative(_parent, name, directory: false, create: true, excludeWriters)
             : UnixNative.OpenRelative(_parent, name, directory: false, create: true);
 
     private string Identity(SafeFileHandle handle) =>
         _windows ? WindowsNative.Identity(handle) : UnixNative.Identity(handle, requireRegular: true);
+
+    private ExactFileSnapshot Snapshot(SafeFileHandle handle) =>
+        new(true, Identity(handle), Hash(handle));
+
+    private bool NamedMatches(string name, SafeFileHandle retained, ExactFileSnapshot expected)
+    {
+        try
+        {
+            using var named = OpenNamedLeaf(name, deleteAccess: false);
+            return string.Equals(Identity(named), Identity(retained), StringComparison.Ordinal)
+                && Snapshot(retained) == expected
+                && Snapshot(named) == expected;
+        }
+        catch (Exception ex) when (IsRecoverable(ex) || ex is FileNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private bool InstalledMatches() =>
+        _replacementLeaf is not null
+        && _replacementExpected is not null
+        && NamedMatches(_leaf, _replacementLeaf, _replacementExpected);
 
     private bool ParentStillAnchored()
     {
@@ -476,6 +586,59 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         else
         {
             UnixNative.RenameNoReplace(_parent, source, destination);
+        }
+    }
+
+    private void RenameCapturedNoReplace(string source, string destination)
+    {
+        if (_windows)
+        {
+            WindowsNative.RenameNoReplace(_capturedLeaf!, _parent, destination);
+        }
+        else
+        {
+            UnixNative.RenameNoReplace(_parent, source, destination);
+        }
+    }
+
+    private void RenameReplacementNoReplace(string source, string destination)
+    {
+        if (_windows)
+        {
+            WindowsNative.RenameNoReplace(_replacementLeaf!, _parent, destination);
+        }
+        else
+        {
+            UnixNative.RenameNoReplace(_parent, source, destination);
+        }
+    }
+
+    private void DeleteRetainedLeaf(string? name, SafeFileHandle retained)
+    {
+        if (name is null)
+        {
+            return;
+        }
+
+        if (_windows)
+        {
+            WindowsNative.Delete(retained);
+        }
+        else
+        {
+            UnixNative.Delete(_parent, name);
+        }
+    }
+
+    private void FlushParent()
+    {
+        if (_windows)
+        {
+            WindowsNative.Flush(_parent);
+        }
+        else
+        {
+            UnixNative.Flush(_parent);
         }
     }
 
@@ -534,7 +697,15 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
 
     private void CleanupTemporary()
     {
-        DeleteNamedLeaf(_temporaryLeaf);
+        if (_temporaryLeaf is not null && _replacementLeaf is not null)
+        {
+            DeleteRetainedLeaf(_temporaryLeaf, _replacementLeaf);
+            FlushParent();
+        }
+        else
+        {
+            DeleteNamedLeaf(_temporaryLeaf);
+        }
         _temporaryLeaf = null;
     }
 
@@ -545,11 +716,11 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
     public void Dispose()
     {
         CleanupTemporary();
-        if (!_preserveQuarantine)
-        {
-            DeleteNamedLeaf(_quarantineLeaf);
-        }
+        // A non-null quarantine at disposal means no terminal path proved it safe to delete. Leave
+        // it in place; recovery admission will block the requested path rather than guessing.
 
+        _capturedLeaf?.Dispose();
+        _replacementLeaf?.Dispose();
         if (!ReferenceEquals(_parent, _root))
         {
             _parent.Dispose();
@@ -657,6 +828,14 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
             }
         }
 
+        internal static void Flush(SafeFileHandle directory)
+        {
+            if (fsync(checked((int)directory.DangerousGetHandle())) != 0)
+            {
+                throw Error("flush transaction directory");
+            }
+        }
+
         private static int OpenFlags(bool directory, bool create)
         {
             if (OperatingSystem.IsLinux())
@@ -720,6 +899,9 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
 
         [DllImport("libc", SetLastError = true)]
         private static extern int unlinkat(int directory, string pathname, int flags);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int fsync(int fileDescriptor);
     }
 
     private static class WindowsNative
@@ -730,6 +912,7 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         private const uint Synchronize = 0x00100000;
         private const uint FileReadAttributes = 0x80;
         private const uint FileShareAll = 0x7;
+        private const uint FileShareRead = 0x1;
         private const uint OpenExisting = 3;
         private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint FileFlagOpenReparsePoint = 0x00200000;
@@ -753,7 +936,7 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
         {
             var handle = CreateFileW(
                 path,
-                GenericRead,
+                GenericRead | GenericWrite,
                 FileShareAll,
                 0,
                 OpenExisting,
@@ -771,7 +954,9 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
             SafeFileHandle parent,
             string name,
             bool directory,
-            bool create)
+            bool create,
+            bool excludeWriters = false,
+            bool deleteAccess = true)
         {
             using var objectName = new NativeUnicodeString(name);
             var attributes = new ObjectAttributes
@@ -782,7 +967,11 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
                 Attributes = 0x40,
             };
             var desired = GenericRead | FileReadAttributes | Synchronize;
-            if (!directory)
+            if (directory)
+            {
+                desired |= GenericWrite;
+            }
+            if (!directory && deleteAccess)
             {
                 desired |= DeleteAccess;
             }
@@ -798,7 +987,7 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
                 out _,
                 0,
                 0,
-                FileShareAll,
+                excludeWriters ? FileShareRead : FileShareAll,
                 create ? FileCreate : FileOpen,
                 FileSynchronousIoNonAlert | FileOpenReparsePoint
                     | (directory ? FileDirectoryFile : FileNonDirectoryFile),
@@ -907,6 +1096,17 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
             finally
             {
                 Marshal.FreeHGlobal(value);
+            }
+        }
+
+        internal static void Flush(SafeFileHandle directory)
+        {
+            var status = NtFlushBuffersFile(directory, out _);
+            if (status < 0)
+            {
+                var error = unchecked((int)RtlNtStatusToDosError(status));
+                throw new IOException(
+                    $"flush transaction directory failed: {new Win32Exception(error).Message}");
             }
         }
 
@@ -1065,6 +1265,11 @@ internal sealed class ExactFileRestoreFileTransaction : IDisposable
             int informationClass,
             nint information,
             uint bufferSize);
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtFlushBuffersFile(
+            SafeFileHandle fileHandle,
+            out IoStatusBlock ioStatusBlock);
     }
 
     private sealed class ExactFileAlreadyExistsException(string destination)
@@ -1075,6 +1280,11 @@ internal sealed record ExactFileSnapshot(bool Exists, string? Identity, string? 
 {
     internal static ExactFileSnapshot Missing { get; } = new(false, null, null);
 }
+
+internal sealed record ExactFileRecoveryNames(
+    string Temporary,
+    string? Quarantine,
+    string Uncommitted);
 
 internal sealed record ExactFileCommitResult(
     bool Succeeded,

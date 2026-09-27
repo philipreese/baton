@@ -23,10 +23,15 @@ internal sealed class GrantConsumingContractOutputWorkerAdapter(
 {
     private readonly ContractOutputWorkerAdapter _inner = new(satisfyOutputs, outputFixtures, deliverBranch: deliverBranch);
 
+    public WorkerInvocation? LastInvocation { get; private set; }
+
     public bool WithheldWritesReachTheOutbox => true;
 
-    public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract) =>
-        _inner.Resolve(invocation, contract);
+    public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
+    {
+        LastInvocation = invocation;
+        return _inner.Resolve(invocation, contract);
+    }
 
     public bool TryTranslatePermissionGrant(PermissionGrant grant, out string? resolvedValue, out string? gapReason)
     {

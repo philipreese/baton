@@ -255,6 +255,15 @@ public static class RedispatchCommand
             entry = entry with { OriginatingPullRequestOwnership = null };
         }
 
+        var parentCapturedRestoreBase = entry.ExactFileRestoreBaseSha is { Length: > 0 } inheritedBase
+            && string.Equals(
+                ExactFileRestoreAuthorityStore.Read(options.ParentRoomDirectoryPath, workerName),
+                inheritedBase,
+                StringComparison.Ordinal)
+                ? inheritedBase
+                : null;
+        entry = entry with { ExactFileRestoreBaseSha = parentCapturedRestoreBase };
+
         if (options.Timeout is { } timeoutOverride && timeoutOverride > TimeSpan.FromMinutes(DispatchOptionsParser.WarnTimeoutMinutes))
         {
             Console.Error.WriteLine(
@@ -299,6 +308,10 @@ public static class RedispatchCommand
             .ConfigureAwait(false);
         await OriginatingPullRequestAuthorityStore.WriteAsync(
             entry.OriginatingPullRequestOwnership, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
+        await ExactFileRestoreAuthorityStore.WriteAsync(
+            new Dictionary<string, WorkerBindingConfigEntry> { [workerName] = entry },
+            options.RoomDirectoryPath,
+            cancellationToken).ConfigureAwait(false);
 
         var workspace = entry.WorkingDirectory ?? entry.Worktree?.Repository ?? Directory.GetCurrentDirectory();
 

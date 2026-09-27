@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Artifacts;
 using Baton.Vendors;
 
 namespace Baton.Cli;
@@ -21,7 +22,7 @@ internal static class CodexBrokerCommand
                 ?? throw new JsonException("Codex broker configuration was null.");
             return await CodexAppServerBroker.RunAsync(
                 configuration, args[2], Console.Out, Console.Error, cancellationToken,
-                ExecuteMemoryAddAsync).ConfigureAwait(false);
+                ExecuteMemoryAddAsync, ExecuteExactFileRestoreAsync).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -45,5 +46,43 @@ internal static class CodexBrokerCommand
             brokerAuthority: invocation.HostAuthority)
             .ConfigureAwait(false);
         return new MemoryAddCommandExecution(exitCode == 0, writer.ToString());
+    }
+
+    /// <summary>The production host-side executor for Codex's grant-gated restore tool.</summary>
+    internal static async Task<CodexExactFileRestoreExecution> ExecuteExactFileRestoreAsync(
+        CodexExactFileRestoreInvocation invocation,
+        CancellationToken cancellationToken)
+    {
+        var executionDirectory = Path.GetFullPath(invocation.HostAuthority.OutputDirectory);
+        var artifactsRoot = Path.GetDirectoryName(executionDirectory);
+        var roomDirectory = artifactsRoot is null ? null : Path.GetDirectoryName(artifactsRoot);
+        var executionName = Path.GetFileName(executionDirectory);
+        var artifactsMatch = artifactsRoot is not null
+            && string.Equals(
+                Path.GetFileName(artifactsRoot), ArtifactManager.ArtifactsDirectoryName,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        var executionId = executionName.StartsWith("execution_", StringComparison.Ordinal)
+            && executionName.Length > "execution_".Length
+                ? executionName["execution_".Length..]
+                : null;
+        if (!artifactsMatch || roomDirectory is null || executionId is null
+            || !Directory.Exists(roomDirectory))
+        {
+            return new CodexExactFileRestoreExecution(
+                false, "Exact-file restore refused: the broker output authority is not a Baton room execution.");
+        }
+
+        var tool = new Mcp.ExactFileRestoreTool(
+            invocation.HostAuthority.WorkspaceDirectory,
+            invocation.HostAuthority.BaseRevision,
+            executionId,
+            roomDirectory);
+        var arguments = JsonSerializer.SerializeToElement(new
+        {
+            path = invocation.Path,
+            acknowledgeDirtyFile = invocation.AcknowledgeDirtyFile,
+        });
+        var result = await tool.CallAsync(arguments, cancellationToken).ConfigureAwait(false);
+        return new CodexExactFileRestoreExecution(!result.IsError, result.Text);
     }
 }

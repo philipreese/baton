@@ -19,7 +19,8 @@ public sealed record CodexBrokerConfiguration(
     bool AllowsSubagents,
     GhPullRequestCreateProvenance? PullRequestCreateProvenance = null,
     OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null,
-    CodexMemoryAddHostAuthority? MemoryAddAuthority = null);
+    CodexMemoryAddHostAuthority? MemoryAddAuthority = null,
+    CodexExactFileRestoreHostAuthority? ExactFileRestoreAuthority = null);
 
 /// <summary>Host-materialized identity for the one brokered worker memory write.</summary>
 public sealed record CodexMemoryAddHostAuthority(
@@ -27,3 +28,16 @@ public sealed record CodexMemoryAddHostAuthority(
     string ArtifactsRoot,
     string OutputDirectory,
     MemoryAddDispatchGrant Grant);
+
+/// <summary>Host-materialized authority for Codex's exact-file restore dynamic tool.</summary>
+public sealed record CodexExactFileRestoreHostAuthority(
+    string WorkspaceDirectory,
+    string BaseRevision,
+    string OutputDirectory);
+
+public sealed record CodexExactFileRestoreInvocation(
+    string Path,
+    bool AcknowledgeDirtyFile,
+    CodexExactFileRestoreHostAuthority HostAuthority);
+
+public sealed record CodexExactFileRestoreExecution(bool Success, string Output);

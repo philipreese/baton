@@ -255,6 +255,14 @@ public static class WorkerBindingResolver
         // load-bearing one because it is the only check the run path reaches.
         var skills = SkillPackageResolver.ResolveAll(entry.Skills, workingDirectory);
         RefuseIfASkillRequiresMoreThanTheGrant(workerName, skills, entry.PermissionGrant);
+        var capturedRestoreBase = entry.PermissionGrant?.ExactFileRestore == true
+            && entry.ExactFileRestoreBaseSha is { Length: > 0 } candidateBase
+            && string.Equals(
+                ExactFileRestoreAuthorityStore.Read(bindingsFileDirectory, workerName),
+                candidateBase,
+                StringComparison.Ordinal)
+                ? candidateBase
+                : null;
 
         var invocation = new WorkerInvocation(
             entry.PromptTemplate, entry.Model, entry.PermissionScope, entry.PermissionGrant,
@@ -276,9 +284,8 @@ public static class WorkerBindingResolver
                     ? originating
                     : null,
             MemoryAddGrant: entry.MemoryAddGrant,
-            EnableExactFileRestoreTool: entry.PermissionGrant?.ExactFileRestore == true
-                && entry.ExactFileRestoreBaseSha is { Length: > 0 },
-            ExactFileRestoreBaseSha: entry.ExactFileRestoreBaseSha);
+            EnableExactFileRestoreTool: capturedRestoreBase is not null,
+            ExactFileRestoreBaseSha: capturedRestoreBase);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)

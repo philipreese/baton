@@ -208,6 +208,15 @@ public static class DispatchCommand
             WorkerBindingConfigEntry resumedEntry;
             (resumedEntry, continuation) = await ResolveContinuationAsync(
                 options.ContinueFromRoomDirectoryPath, continuedEntry, cancellationToken).ConfigureAwait(false);
+            var continuedCapturedBase = resumedEntry.ExactFileRestoreBaseSha is { Length: > 0 } continuedBase
+                && string.Equals(
+                    ExactFileRestoreAuthorityStore.Read(
+                        options.ContinueFromRoomDirectoryPath, continuedWorkerName),
+                    continuedBase,
+                    StringComparison.Ordinal)
+                    ? continuedBase
+                    : null;
+            resumedEntry = resumedEntry with { ExactFileRestoreBaseSha = continuedCapturedBase };
             if (options.DeclaredTaskSize is not null && resumedEntry.DeclaredTaskSize is not null
                 && options.DeclaredTaskSize != resumedEntry.DeclaredTaskSize)
             {
@@ -499,6 +508,8 @@ public static class DispatchCommand
         await OriginatingPullRequestAuthorityStore.WriteAsync(
             originatingPullRequests.SingleOrDefault(),
             options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
+        await ExactFileRestoreAuthorityStore.WriteAsync(
+            bindings, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
         // Register: true -- rationale is spec/baton.md §8 (#1657).
         var runOptions = new RunOptions(

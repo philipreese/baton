@@ -1,6 +1,9 @@
 using System.Security.Cryptography;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 using Baton;
 using Baton.Status;
 using Baton.Vendors;
@@ -189,9 +192,6 @@ public sealed class ExactFileRestoreTool : IMcpTool
                     sourceBlob);
             }
 
-            // The dirty acknowledgement is bound to this exact snapshot by the final transaction CAS.
-            var before = transaction.Capture();
-
             var status = await RunGitAsync(
                 ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", relativePath],
                 cancellationToken).ConfigureAwait(false);
@@ -202,11 +202,17 @@ public sealed class ExactFileRestoreTool : IMcpTool
                     status);
             }
 
-            if (status.RawStdout.Length > 0 && !acknowledgement.GetBoolean())
+            var isDirty = status.RawStdout.Length > 0;
+            if (isDirty && !acknowledgement.GetBoolean())
             {
                 return Refusal(
                     "the named file is dirty; set 'acknowledgeDirtyFile' to true to acknowledge this exact file");
             }
+
+            // Capture after status so a dirty original is opened with the platform's writer-exclusion
+            // primitive and retained through the terminal transition. Unix has no equivalent and the
+            // transaction refuses an existing dirty leaf before mutation.
+            var before = transaction.Capture(isDirty);
 
             var source = await RunGitAsync(
                 ["cat-file", "blob", $"{baseRevision}:{relativePath}"],
@@ -228,61 +234,54 @@ public sealed class ExactFileRestoreTool : IMcpTool
                 ".baton",
                 AuditFileName);
             Directory.CreateDirectory(Path.GetDirectoryName(auditPath)!);
+            var transactionId = Guid.NewGuid().ToString("N");
+            ExactFileRecoveryNames? recoveryNames = null;
 
             var result = await Task.Run(
                 () => MutexGuardedFileLock.RunUnderLock(
                     auditPath,
                     "baton-exact-file-restore",
                     AuditLockTimeout,
-                    () => transaction.Commit(
+                    () =>
+                    {
+                        RefuseUnresolvedTransaction(auditPath, repositoryRoot, relativePath);
+                        return transaction.Commit(
                         before,
                         source.RawStdout,
-                        quarantine => AppendAudit(
+                        names =>
+                        {
+                            recoveryNames = names;
+                            AppendAudit(auditPath, CreateAudit(
+                                ExactFileRestoreAuditState.Prepared, transactionId, repositoryRoot,
+                                relativePath, before.Blob, baseRevision, sourceBlobId, restoredBlob,
+                                names, null));
+                        },
+                        () => AppendAudit(
                             auditPath,
                             CreateAudit(
-                                ExactFileRestoreAuditState.Prepared,
-                                relativePath,
-                                before.Blob,
-                                baseRevision,
-                                sourceBlobId,
-                                restoredBlob,
-                                quarantine,
+                                ExactFileRestoreAuditState.Committed, transactionId, repositoryRoot,
+                                relativePath, before.Blob, baseRevision, sourceBlobId, restoredBlob,
+                                recoveryNames,
                                 null)),
                         () => AppendAudit(
                             auditPath,
                             CreateAudit(
-                                ExactFileRestoreAuditState.Committed,
-                                relativePath,
-                                before.Blob,
-                                baseRevision,
-                                sourceBlobId,
-                                restoredBlob,
-                                null,
+                                ExactFileRestoreAuditState.RolledBack, transactionId, repositoryRoot,
+                                relativePath, before.Blob, baseRevision, sourceBlobId, restoredBlob,
+                                recoveryNames,
                                 null)),
-                        () => AppendAudit(
+                        (reason, quarantine) => AppendRecoveryAudit(
                             auditPath,
                             CreateAudit(
-                                ExactFileRestoreAuditState.RolledBack,
-                                relativePath,
-                                before.Blob,
-                                baseRevision,
-                                sourceBlobId,
-                                restoredBlob,
-                                null,
-                                null)),
-                        (reason, quarantine) => AppendAudit(
-                            auditPath,
-                            CreateAudit(
-                                ExactFileRestoreAuditState.RecoveryRequired,
-                                relativePath,
-                                before.Blob,
-                                baseRevision,
-                                sourceBlobId,
-                                restoredBlob,
-                                quarantine,
+                                ExactFileRestoreAuditState.RecoveryRequired, transactionId, repositoryRoot,
+                                relativePath, before.Blob, baseRevision, sourceBlobId, restoredBlob,
+                                recoveryNames is null ? null : recoveryNames with { Quarantine = quarantine },
                                 reason)),
                         _testHooks.BeforeCompareAndSwap,
-                        _testHooks.BeforeRollbackRestore)),
+                        _testHooks.BeforeRollbackRestore,
+                        _testHooks.BeforeDurableCommit,
+                        _testHooks.BeforeDelete);
+                    }),
                 CancellationToken.None).ConfigureAwait(false);
 
             if (!result.Succeeded)
@@ -308,15 +307,17 @@ public sealed class ExactFileRestoreTool : IMcpTool
 
     private ExactFileRestoreAudit CreateAudit(
         ExactFileRestoreAuditState state,
+        string transactionId,
+        string repositoryRoot,
         string path,
         string? beforeBlob,
         string sourceRevision,
         string sourceBlob,
         string restoredBlob,
-        string? quarantine,
+        ExactFileRecoveryNames? recoveryNames,
         string? reason) =>
         new(
-            Version: 2,
+            Version: 3,
             State: state.ToString(),
             ExecutionId: _executionId,
             Path: path,
@@ -325,8 +326,12 @@ public sealed class ExactFileRestoreTool : IMcpTool
             SourceBlob: sourceBlob,
             RestoredBlob: restoredBlob,
             RecordedAtUtc: DateTimeOffset.UtcNow,
-            Quarantine: quarantine,
-            Reason: reason);
+            Quarantine: recoveryNames?.Quarantine,
+            Reason: reason,
+            TransactionId: transactionId,
+            RepositoryRoot: repositoryRoot,
+            Temporary: recoveryNames?.Temporary,
+            Uncommitted: recoveryNames?.Uncommitted);
 
     private void AppendAudit(string auditPath, ExactFileRestoreAudit audit)
     {
@@ -347,6 +352,109 @@ public sealed class ExactFileRestoreTool : IMcpTool
         writer.WriteLine(JsonSerializer.Serialize(audit));
         writer.Flush();
         stream.Flush(flushToDisk: true);
+        DurableDirectory.Flush(Path.GetDirectoryName(auditPath)!);
+    }
+
+    private void AppendRecoveryAudit(string auditPath, ExactFileRestoreAudit audit)
+    {
+        try
+        {
+            AppendAudit(auditPath, audit);
+        }
+        catch (Exception appendFailure) when (appendFailure is IOException
+            or UnauthorizedAccessException or InvalidOperationException)
+        {
+            var markerPath = $"{auditPath}.{audit.TransactionId}.recovery-required";
+            using var stream = new FileStream(
+                markerPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096,
+                FileOptions.WriteThrough);
+            using var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: true);
+            writer.Write(JsonSerializer.Serialize(audit with
+            {
+                Reason = $"{audit.Reason}; journal append failed: {appendFailure.Message}",
+            }));
+            writer.Flush();
+            stream.Flush(flushToDisk: true);
+            DurableDirectory.Flush(Path.GetDirectoryName(auditPath)!);
+        }
+    }
+
+    private static void RefuseUnresolvedTransaction(
+        string auditPath,
+        string repositoryRoot,
+        string relativePath)
+    {
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var states = new Dictionary<string, ExactFileRestoreAudit>(StringComparer.Ordinal);
+
+        if (File.Exists(auditPath))
+        {
+            foreach (var line in File.ReadLines(auditPath))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                var audit = ReadAudit(line, "journal");
+                if (!string.Equals(audit.Path, relativePath, StringComparison.Ordinal)
+                    || audit.RepositoryRoot is not null
+                        && !comparer.Equals(Path.GetFullPath(audit.RepositoryRoot), repositoryRoot))
+                {
+                    continue;
+                }
+
+                var key = audit.TransactionId
+                    ?? $"legacy:{audit.ExecutionId}:{audit.Path}";
+                states[key] = audit;
+            }
+        }
+
+        var directory = Path.GetDirectoryName(auditPath)!;
+        var markerPattern = $"{Path.GetFileName(auditPath)}.*.recovery-required";
+        foreach (var marker in Directory.EnumerateFiles(directory, markerPattern))
+        {
+            var audit = ReadAudit(File.ReadAllText(marker), "recovery marker");
+            if (string.Equals(audit.Path, relativePath, StringComparison.Ordinal)
+                && (audit.RepositoryRoot is null
+                    || comparer.Equals(Path.GetFullPath(audit.RepositoryRoot), repositoryRoot)))
+            {
+                throw new IOException(
+                    $"unresolved exact-file restore transaction '{audit.TransactionId ?? audit.ExecutionId}' "
+                    + "requires recovery before this path can be restored again");
+            }
+        }
+
+        var unresolved = states.Values.FirstOrDefault(audit =>
+            audit.State is nameof(ExactFileRestoreAuditState.Prepared)
+                or nameof(ExactFileRestoreAuditState.RecoveryRequired));
+        if (unresolved is not null)
+        {
+            throw new IOException(
+                $"unresolved exact-file restore transaction '{unresolved.TransactionId ?? unresolved.ExecutionId}' "
+                + $"is {unresolved.State} and requires recovery before this path can be restored again");
+        }
+    }
+
+    private static ExactFileRestoreAudit ReadAudit(string json, string source)
+    {
+        try
+        {
+            var audit = JsonSerializer.Deserialize<ExactFileRestoreAudit>(json)
+                ?? throw new IOException($"the exact-file restore {source} contains a null record");
+            if (!Enum.TryParse<ExactFileRestoreAuditState>(audit.State, ignoreCase: false, out _))
+            {
+                throw new IOException(
+                    $"the exact-file restore {source} contains unknown state '{audit.State}'");
+            }
+            return audit;
+        }
+        catch (JsonException ex)
+        {
+            throw new IOException($"the exact-file restore {source} is malformed", ex);
+        }
     }
 
     private async Task<GitResult> RunGitAsync(
@@ -362,6 +470,8 @@ public sealed class ExactFileRestoreTool : IMcpTool
                 startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
                 startInfo.Environment["GCM_INTERACTIVE"] = "Never";
                 startInfo.Environment["GIT_LITERAL_PATHSPECS"] = "1";
+                startInfo.Environment["GIT_NO_LAZY_FETCH"] = "1";
+                startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
                 if (_testHooks.GitEnvironment is not null)
                 {
                     foreach (var (name, value) in _testHooks.GitEnvironment)
@@ -369,6 +479,16 @@ public sealed class ExactFileRestoreTool : IMcpTool
                         startInfo.Environment[name] = value;
                     }
                 }
+                // These queries need repository metadata, but never repository-configured programs.
+                // In particular status and ls-files otherwise honor core.fsmonitor. The empty hook
+                // root and disabled lazy fetch keep every query local even in hostile repository
+                // configuration; the explicit -c values outrank local/global/system config.
+                startInfo.ArgumentList.Add("-c");
+                startInfo.ArgumentList.Add("core.fsmonitor=false");
+                startInfo.ArgumentList.Add("-c");
+                startInfo.ArgumentList.Add("core.untrackedCache=false");
+                startInfo.ArgumentList.Add("-c");
+                startInfo.ArgumentList.Add($"core.hooksPath={Path.Combine(_roomDirectoryPath, ".baton", "disabled-git-hooks")}");
                 foreach (var argument in arguments)
                 {
                     startInfo.ArgumentList.Add(argument);
@@ -463,12 +583,13 @@ public sealed class ExactFileRestoreTool : IMcpTool
         parts = [];
         refusal = null;
 
-        var windowsDrive = input.Length >= 2
+        var windowsDrive = OperatingSystem.IsWindows()
+            && input.Length >= 2
             && char.IsAsciiLetter(input[0])
             && input[1] == ':';
-        var windowsRooted = input.StartsWith('\\')
-            || input.StartsWith('/')
-            || input.StartsWith("//", StringComparison.Ordinal);
+        var windowsRooted = OperatingSystem.IsWindows()
+            ? input.StartsWith('\\') || input.StartsWith('/')
+            : input.StartsWith('/');
         if (windowsDrive || windowsRooted)
         {
             refusal = "'path' must be repository-relative, not rooted, UNC, device, or drive-qualified";
@@ -536,6 +657,70 @@ public sealed class ExactFileRestoreTool : IMcpTool
                 stderr,
                 $"git exited with code {exitCode}: {Encoding.UTF8.GetString(stderr).Trim()}");
     }
+
+    private static class DurableDirectory
+    {
+        internal static void Flush(string path)
+        {
+            using var handle = OperatingSystem.IsWindows()
+                ? OpenWindows(path)
+                : OpenUnix(path);
+            if (OperatingSystem.IsWindows())
+            {
+                var status = NtFlushBuffersFile(handle, out _);
+                if (status < 0)
+                {
+                    throw new IOException(
+                        $"flush audit directory failed with NTSTATUS 0x{status:x8}");
+                }
+            }
+            else if (fsync(checked((int)handle.DangerousGetHandle())) != 0)
+            {
+                throw Error("flush audit directory");
+            }
+        }
+
+        private static SafeFileHandle OpenWindows(string path)
+        {
+            var handle = CreateFileW(path, 0xC0000000, 0x7, 0, 3, 0x02000000, 0);
+            return handle.IsInvalid ? throw Error("open audit directory") : handle;
+        }
+
+        private static SafeFileHandle OpenUnix(string path)
+        {
+            var directoryFlag = OperatingSystem.IsMacOS() ? 0x100000 : 0x10000;
+            var descriptor = open(path, directoryFlag, 0);
+            return descriptor < 0
+                ? throw Error("open audit directory")
+                : new SafeFileHandle(descriptor, ownsHandle: true);
+        }
+
+        private static IOException Error(string operation) =>
+            new($"{operation} failed: {new Win32Exception(Marshal.GetLastPInvokeError()).Message}");
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName, uint desiredAccess, uint shareMode, nint securityAttributes,
+            uint creationDisposition, uint flagsAndAttributes, nint templateFile);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoStatusBlock
+        {
+            internal nint Status;
+            internal nuint Information;
+        }
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtFlushBuffersFile(
+            SafeFileHandle fileHandle,
+            out IoStatusBlock ioStatusBlock);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int open(string pathname, int flags, uint mode);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int fsync(int fileDescriptor);
+    }
 }
 
 internal enum ExactFileRestoreAuditState
@@ -552,7 +737,9 @@ internal sealed record ExactFileRestoreTestHooks(
     Func<ExactFileRestoreAuditState, Exception?>? AuditFailure = null,
     string GitFileName = "git",
     TimeSpan? GitTimeout = null,
-    IReadOnlyDictionary<string, string?>? GitEnvironment = null);
+    IReadOnlyDictionary<string, string?>? GitEnvironment = null,
+    Action? BeforeDurableCommit = null,
+    Action? BeforeDelete = null);
 
 public sealed record ExactFileRestoreAudit(
     int Version,
@@ -565,4 +752,8 @@ public sealed record ExactFileRestoreAudit(
     string RestoredBlob,
     DateTimeOffset RecordedAtUtc,
     string? Quarantine,
-    string? Reason);
+    string? Reason,
+    string? TransactionId = null,
+    string? RepositoryRoot = null,
+    string? Temporary = null,
+    string? Uncommitted = null);

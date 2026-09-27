@@ -29,6 +29,7 @@
     "write_files": true,
     "run_shell_commands": true,
     "network_access": true,
+    "exact_file_restore": true,
     "denied_shell_command_patterns": [
       "gh label*", "gh pr merge*", "gh api*",
       "baton *", "baton ledger --rebuild*", "baton ledger backfill*", "baton ledger export*",

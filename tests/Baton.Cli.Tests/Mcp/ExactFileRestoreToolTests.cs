@@ -45,7 +45,11 @@ public sealed class ExactFileRestoreToolTests
                 .Select(line => JsonSerializer.Deserialize<ExactFileRestoreAudit>(line)!)
                 .ToArray();
             Assert.Equal(["Prepared", "Committed"], records.Select(record => record.State).ToArray());
-            Assert.All(records, record => Assert.Equal(2, record.Version));
+            Assert.All(records, record => Assert.Equal(3, record.Version));
+            Assert.All(records, record => Assert.False(string.IsNullOrWhiteSpace(record.TransactionId)));
+            Assert.False(string.IsNullOrWhiteSpace(records[0].Temporary));
+            Assert.False(string.IsNullOrWhiteSpace(records[0].Uncommitted));
+            Assert.False(string.IsNullOrWhiteSpace(records[0].Quarantine));
         }
         finally
         {
@@ -279,9 +283,17 @@ public sealed class ExactFileRestoreToolTests
                 Args("nested/target.txt", acknowledgeDirtyFile: true), Ct);
 
             Assert.True(result.IsError);
-            Assert.Contains("ancestor", result.Text, StringComparison.OrdinalIgnoreCase);
-            Assert.Equal("decoy\n", await File.ReadAllTextAsync(Path.Combine(nested, "target.txt"), Ct));
-            Assert.Equal("base\n", await File.ReadAllTextAsync(Path.Combine(moved, "target.txt"), Ct));
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.True(Directory.Exists(nested));
+                Assert.Equal("base\n", await File.ReadAllTextAsync(Path.Combine(nested, "target.txt"), Ct));
+            }
+            else
+            {
+                Assert.Contains("ancestor", result.Text, StringComparison.OrdinalIgnoreCase);
+                Assert.Equal("decoy\n", await File.ReadAllTextAsync(Path.Combine(nested, "target.txt"), Ct));
+                Assert.Equal("base\n", await File.ReadAllTextAsync(Path.Combine(moved, "target.txt"), Ct));
+            }
         }
         finally
         {
@@ -321,8 +333,15 @@ public sealed class ExactFileRestoreToolTests
             var result = await tool.CallAsync(Args("target.txt", acknowledgement), Ct);
 
             Assert.True(result.IsError);
-            Assert.Contains("changed", result.Text, StringComparison.OrdinalIgnoreCase);
-            Assert.Equal("concurrent\n", await File.ReadAllTextAsync(target, Ct));
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.Equal("base\n", await File.ReadAllTextAsync(target, Ct));
+            }
+            else
+            {
+                Assert.Contains("changed", result.Text, StringComparison.OrdinalIgnoreCase);
+                Assert.Equal("concurrent\n", await File.ReadAllTextAsync(target, Ct));
+            }
         }
         finally
         {
@@ -446,6 +465,110 @@ public sealed class ExactFileRestoreToolTests
     }
 
     [Fact]
+    public async Task RecoveryRequired_append_failure_writes_fallback_and_blocks_restart()
+    {
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            await File.WriteAllTextAsync(target, "damaged\n", Ct);
+            var tool = await NewToolAsync(
+                root,
+                new ExactFileRestoreTestHooks(
+                    BeforeRollbackRestore: () => File.WriteAllText(target, "concurrent\n"),
+                    AuditFailure: state => state is ExactFileRestoreAuditState.Committed
+                        or ExactFileRestoreAuditState.RecoveryRequired
+                            ? new IOException($"{state} fault")
+                            : null));
+
+            var result = await tool.CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Equal("concurrent\n", await File.ReadAllTextAsync(target, Ct));
+            Assert.Single(Directory.GetFiles(
+                Path.GetDirectoryName(AuditPath(root))!,
+                ExactFileRestoreTool.AuditFileName + ".*.recovery-required"));
+
+            var restart = await (await NewToolAsync(root))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+            Assert.True(restart.IsError);
+            Assert.Contains("unresolved", restart.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("concurrent\n", await File.ReadAllTextAsync(target, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task Prepared_journal_record_blocks_a_new_restore_for_the_same_root_and_path()
+    {
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            await File.WriteAllTextAsync(target, "damaged\n", Ct);
+            var auditPath = AuditPath(root);
+            Directory.CreateDirectory(Path.GetDirectoryName(auditPath)!);
+            var record = new ExactFileRestoreAudit(
+                3, nameof(ExactFileRestoreAuditState.Prepared), "old-execution", "target.txt",
+                null, new string('a', 40), new string('b', 40), new string('b', 40),
+                DateTimeOffset.UtcNow, ".target.txt.baton-quarantine-old", null,
+                "old-transaction", root, ".target.txt.baton-restore-old.tmp",
+                ".target.txt.baton-uncommitted-old");
+            await File.WriteAllTextAsync(auditPath, JsonSerializer.Serialize(record) + Environment.NewLine, Ct);
+
+            var result = await (await NewToolAsync(root))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.True(result.IsError);
+            Assert.Contains("unresolved", result.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("damaged\n", await File.ReadAllTextAsync(target, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task Windows_retained_replacement_handle_excludes_post_hash_writer()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows share-mode exclusion is required");
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var target = Path.Combine(root, "target.txt");
+            await File.WriteAllTextAsync(target, "damaged\n", Ct);
+            var writerWasDenied = false;
+            var tool = await NewToolAsync(
+                root,
+                new ExactFileRestoreTestHooks(BeforeDurableCommit: () =>
+                {
+                    try
+                    {
+                        File.WriteAllText(target, "post-hash\n");
+                    }
+                    catch (IOException)
+                    {
+                        writerWasDenied = true;
+                    }
+                }));
+
+            var result = await tool.CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.False(result.IsError, result.Text);
+            Assert.True(writerWasDenied);
+            Assert.Equal("base\n", await File.ReadAllTextAsync(target, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
     public async Task Unix_restores_exact_colon_and_backslash_names()
     {
         Assert.SkipUnless(!OperatingSystem.IsWindows(), "Unix filename semantics are required");
@@ -456,7 +579,7 @@ public sealed class ExactFileRestoreToolTests
             await GitAsync(root, "init");
             await GitAsync(root, "config", "user.name", "Test");
             await GitAsync(root, "config", "user.email", "test@test.com");
-            var names = new[] { "colon:name.txt", "back\\slash.txt" };
+            var names = new[] { "C:relative.txt", "\\rooted.txt", "colon:name.txt", "back\\slash.txt" };
             foreach (var name in names)
             {
                 await File.WriteAllTextAsync(Path.Combine(root, name), $"base-{name}\n", Ct);
@@ -466,7 +589,7 @@ public sealed class ExactFileRestoreToolTests
             await GitAsync(root, "commit", "-m", "base");
             foreach (var name in names)
             {
-                await File.WriteAllTextAsync(Path.Combine(root, name), "damaged\n", Ct);
+                FileCleanup.EnsureDeleted(Path.Combine(root, name));
                 var result = await (await NewToolAsync(root))
                     .CallAsync(Args(name, acknowledgeDirtyFile: true), Ct);
                 Assert.False(result.IsError, result.Text);
@@ -485,8 +608,9 @@ public sealed class ExactFileRestoreToolTests
     [InlineData("\\\\server\\share\\file.txt")]
     [InlineData("\\\\?\\C:\\device.txt")]
     [InlineData("\\rooted.txt")]
-    public async Task Rejects_Windows_looking_rooted_or_drive_paths_on_every_platform(string path)
+    public async Task Rejects_Windows_rooted_or_drive_paths_on_Windows(string path)
     {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows path grammar is required");
         var root = await CreateRepositoryAsync();
         try
         {
@@ -494,6 +618,34 @@ public sealed class ExactFileRestoreToolTests
                 .CallAsync(Args(path, acknowledgeDirtyFile: true), Ct);
             Assert.True(result.IsError);
             Assert.Contains("repository-relative", result.Text, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task Repository_configured_fsmonitor_helper_is_disabled_for_every_git_query()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows helper fixture is required");
+        var root = await CreateRepositoryAsync();
+        try
+        {
+            var marker = Path.Combine(root, "helper-escaped.txt");
+            var helper = Path.Combine(root, "fsmonitor-helper.cmd");
+            await File.WriteAllTextAsync(
+                helper,
+                $"@echo off{Environment.NewLine}echo escaped>\"{marker}\"{Environment.NewLine}exit /b 0{Environment.NewLine}",
+                Ct);
+            await GitAsync(root, "config", "core.fsmonitor", helper);
+            await File.WriteAllTextAsync(Path.Combine(root, "target.txt"), "damaged\n", Ct);
+
+            var result = await (await NewToolAsync(root))
+                .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
+
+            Assert.False(result.IsError, result.Text);
+            Assert.False(File.Exists(marker));
         }
         finally
         {

@@ -260,13 +260,20 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
                 parentBindingsPath, TestContext.Current.CancellationToken);
             const string capturedBase = "0123456789abcdef0123456789abcdef01234567";
-            await WorkerBindingConfigWriter.SaveToFileAsync(
-                new Dictionary<string, WorkerBindingConfigEntry>
+            var capturedBindings = new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["advise"] = parentBindings["advise"] with
                 {
-                    ["advise"] = parentBindings["advise"] with { ExactFileRestoreBaseSha = capturedBase },
+                    PermissionGrant = new PermissionGrant(ExactFileRestore: true),
+                    ExactFileRestoreBaseSha = capturedBase,
                 },
+            };
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                capturedBindings,
                 parentBindingsPath,
                 TestContext.Current.CancellationToken);
+            await ExactFileRestoreAuthorityStore.WriteAsync(
+                capturedBindings, parentRoom, TestContext.Current.CancellationToken);
 
             var amendedSpec = Path.Combine(testRoot, "amended.md");
             await File.WriteAllTextAsync(

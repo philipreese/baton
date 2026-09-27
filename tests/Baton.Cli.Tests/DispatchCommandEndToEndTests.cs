@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text.Json;
+using Baton.Cli.Mcp;
 using Baton.Vendors;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
@@ -50,6 +52,67 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
     {
         _catalogScope.Dispose();
         _batonHome.Dispose();
+    }
+
+    [Fact]
+    public async Task Cold_implement_dispatch_captures_base_and_the_real_restore_tool_uses_it()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-restore-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var workspace = Path.Combine(testRoot, "workspace");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "captured-base\n",
+                TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
+            var capturedHead = await ReadGitAsync(workspace, "rev-parse", "HEAD");
+            var roomDirectory = Path.Combine(testRoot, "task");
+            var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
+            var adapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", specPath, roomDirectory, Adapter: "fake", ExpectPr: false),
+                new Dictionary<string, IWorkerAdapter> { ["fake"] = adapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace);
+
+            var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(roomDirectory, "bindings.json"), TestContext.Current.CancellationToken);
+            var binding = bindings["implement"];
+            Assert.True(binding.PermissionGrant!.ExactFileRestore);
+            Assert.Equal(capturedHead, binding.ExactFileRestoreBaseSha);
+            Assert.Equal(
+                capturedHead,
+                ExactFileRestoreAuthorityStore.Read(roomDirectory, "implement"));
+            Assert.True(adapter.LastInvocation!.EnableExactFileRestoreTool);
+            Assert.Equal(capturedHead, adapter.LastInvocation.ExactFileRestoreBaseSha);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "damaged\n",
+                TestContext.Current.CancellationToken);
+            var result = await new ExactFileRestoreTool(
+                    workspace, binding.ExactFileRestoreBaseSha!, "cold-dispatch", roomDirectory)
+                .CallAsync(
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        path = "tracked.txt",
+                        acknowledgeDirtyFile = true,
+                    }),
+                    TestContext.Current.CancellationToken);
+
+            Assert.False(result.IsError, result.Text);
+            Assert.Equal(
+                "captured-base\n",
+                await File.ReadAllTextAsync(
+                    Path.Combine(workspace, "tracked.txt"), TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
     }
 
     [Fact]
@@ -1130,6 +1193,7 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
                 gates-quiet = { cmd = "cmd /c exit 0" }
                 """,
                 TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
@@ -1296,6 +1360,7 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
         {
             var workspace = Path.Combine(testRoot, "workspace");
             Directory.CreateDirectory(workspace);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
@@ -1358,6 +1423,7 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
                 gates-quiet = { cmd = "cmd /c exit 1" }
                 """,
                 TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
@@ -1853,6 +1919,31 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
         {
             throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {stderr.Trim()}");
         }
+    }
+
+    private static async Task<string> ReadGitAsync(string workingDirectory, params string[] args)
+    {
+        var startInfo = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start git — is it on PATH? These tests need git.");
+        var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+            process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {stderr.Trim()}");
+        }
+        return stdout.Trim();
     }
 
     /// <summary>

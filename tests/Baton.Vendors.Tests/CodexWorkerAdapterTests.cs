@@ -267,6 +267,29 @@ public sealed class CodexWorkerAdapterTests
     }
 
     [Fact]
+    public void Exact_file_restore_authority_reaches_the_broker_configuration()
+    {
+        var project = Path.Combine(Path.GetTempPath(), $"baton-codex-restore-{Guid.NewGuid():N}");
+        ProjectCeilingStore.Set(project, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        var baseSha = new string('a', 40);
+
+        var target = new CodexWorkerAdapter().Resolve(
+            new WorkerInvocation(
+                "Implement.",
+                PermissionGrant: new PermissionGrant(ExactFileRestore: true),
+                WorkingDirectory: project,
+                EnableExactFileRestoreTool: true,
+                ExactFileRestoreBaseSha: baseSha),
+            SingleOutputContract);
+
+        var authority = Assert.IsType<CodexExactFileRestoreHostAuthority>(
+            BrokerConfiguration(target).ExactFileRestoreAuthority);
+        Assert.Equal(project, authority.WorkspaceDirectory);
+        Assert.Equal(baseSha, authority.BaseRevision);
+        Assert.Equal("%BATON_OUTPUT_DIR%", authority.OutputDirectory);
+    }
+
+    [Fact]
     public void Network_grant_enables_sandbox_network_and_live_web_search()
     {
         var grant = new PermissionGrant(

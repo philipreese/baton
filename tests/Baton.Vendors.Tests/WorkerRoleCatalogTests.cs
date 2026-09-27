@@ -131,6 +131,10 @@ public class WorkerRoleCatalogTests
         // off would make every unmodified dispatch of this role throw whichever vendor the tier names.
         // See the role's own purpose field in WorkerRoles.json for the full reasoning.
         Assert.True(implement.Grant.NetworkAccess);
+        Assert.True(implement.Grant.ExactFileRestore);
+        Assert.All(
+            WorkerRoleCatalog.All.Where(role => role.Id != "implement"),
+            role => Assert.False(role.Grant.ExactFileRestore));
         Assert.False(implement.ProducesVerdict);
         Assert.Equal(TimeSpan.FromMinutes(40), implement.Timeout);
     }
