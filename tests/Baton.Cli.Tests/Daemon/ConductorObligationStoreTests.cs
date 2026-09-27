@@ -1,4 +1,6 @@
+using Baton.Cli;
 using Baton.Cli.Daemon;
+using Baton.Queue;
 using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -381,6 +383,90 @@ public sealed class ConductorObligationStoreTests : IDisposable
         {
             Assert.Equal(rolloverBytes, await File.ReadAllBytesAsync(_rollover, Ct));
         }
+    }
+
+    [Theory]
+    [InlineData("missing-action-proof")]
+    [InlineData("default-created-at")]
+    [InlineData("missing-target")]
+    public async Task Inspection_quarantines_malformed_fact_only_rows_and_projection_keeps_error_visible(string shape)
+    {
+        var store = Store();
+        await store.EnqueueAsync(Request(), Ct);
+        await store.ObserveActionAsync("obligation-1", "execution-1-complete", Ct);
+
+        var rows = (await File.ReadAllLinesAsync(_events, Ct))
+            .Select(line => System.Text.Json.Nodes.JsonNode.Parse(line)!)
+            .ToArray();
+        switch (shape)
+        {
+            case "missing-action-proof":
+                Assert.Contains(rows, row => row["obligationActionProof"]?.GetValue<string>() == "execution-1-complete");
+                rows.Single(row => row["obligationActionProof"]?.GetValue<string>() == "execution-1-complete")
+                    ["obligationActionProof"] = null;
+                break;
+            case "default-created-at":
+                foreach (var row in rows)
+                {
+                    row["obligationCreatedAt"] = DateTimeOffset.MinValue.ToString("O");
+                }
+                break;
+            case "missing-target":
+                foreach (var row in rows)
+                {
+                    row["obligationTargetRoom"] = null;
+                    row["obligationTargetExecution"] = null;
+                    row["obligationPullRequestHead"] = null;
+                }
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(shape), shape, "Unknown malformed fact fixture shape.");
+        }
+
+        var rewrittenFacts = string.Join('\n', rows.Select(row => row.ToJsonString())) + "\n";
+        await File.WriteAllTextAsync(_events, rewrittenFacts, Ct);
+        File.Delete(_projection);
+        var eventBytes = await File.ReadAllBytesAsync(_events, Ct);
+        var rolloverExisted = File.Exists(_rollover);
+        var rolloverBytes = rolloverExisted ? await File.ReadAllBytesAsync(_rollover, Ct) : [];
+
+        var inspection = await Store().InspectAsync(Ct);
+
+        Assert.Contains("obligation-1", inspection.Quarantined.Keys);
+        Assert.Contains(_events, inspection.Quarantined["obligation-1"], StringComparison.Ordinal);
+        Assert.Contains("line ", inspection.Quarantined["obligation-1"], StringComparison.Ordinal);
+        var recoveryRow = Assert.Single(QueueRecoveryInspection.Project(QueueSnapshot.Empty, inspection, history: false));
+        Assert.NotNull(recoveryRow.ObservationError);
+        Assert.False(recoveryRow.Authoritative);
+        Assert.Contains(_events, recoveryRow.ObservationError, StringComparison.Ordinal);
+        Assert.Equal(eventBytes, await File.ReadAllBytesAsync(_events, Ct));
+        Assert.Equal(rolloverExisted, File.Exists(_rollover));
+        if (rolloverExisted)
+        {
+            Assert.Equal(rolloverBytes, await File.ReadAllBytesAsync(_rollover, Ct));
+        }
+        Assert.False(File.Exists(_projection));
+    }
+
+    [Theory]
+    [InlineData("projection")]
+    [InlineData("live")]
+    [InlineData("rollover")]
+    public async Task Inspection_refuses_directory_at_evidence_path_instead_of_returning_empty(string segment)
+    {
+        var path = segment switch
+        {
+            "projection" => _projection,
+            "live" => _events,
+            "rollover" => _rollover,
+            _ => throw new ArgumentOutOfRangeException(nameof(segment), segment, "Unknown evidence segment."),
+        };
+        Directory.CreateDirectory(path);
+
+        var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(() => Store().InspectAsync(Ct));
+
+        Assert.Contains(path, error.Message, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(path));
     }
 
     [Theory]

@@ -475,8 +475,8 @@ public sealed class FleetEventLog
             LockTimeout,
             () =>
             {
-                var rollover = Read(_rolloverPath);
-                var live = Read(_livePath);
+                var rollover = Read(_rolloverPath, strictMissing: true);
+                var live = Read(_livePath, strictMissing: true);
                 ThrowIfTornTail(_rolloverPath, rollover.TornTailOffset);
                 ThrowIfTornTail(_livePath, live.TornTailOffset);
                 return (IReadOnlyList<FleetEvent>)rollover.Events.Concat(live.Events).ToList();
@@ -587,15 +587,25 @@ public sealed class FleetEventLog
         return entry;
     }
 
-    private static FleetEventReadResult Read(string path)
+    private static FleetEventReadResult Read(string path, bool strictMissing = false)
     {
-        if (!File.Exists(path))
+        if (!strictMissing && !File.Exists(path))
         {
             return new([], null);
         }
 
         var result = new List<FleetEvent>();
-        var bytes = File.ReadAllBytes(path);
+        byte[] bytes;
+        try
+        {
+            // File.Exists can hide access errors as absence. Inspection opens the evidence and
+            // treats only explicit missing-file/directory errors as an empty segment.
+            bytes = File.ReadAllBytes(path);
+        }
+        catch (Exception ex) when (strictMissing && ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new([], null);
+        }
         var offset = 0;
         var lineNumber = 0;
         while (offset < bytes.Length)

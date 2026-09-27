@@ -434,7 +434,7 @@ public sealed class ConductorObligationStore
         CancellationToken cancellationToken,
         bool repairProjection = true)
     {
-        var snapshot = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        var snapshot = await ReadSnapshotAsync(cancellationToken, strictMissing: !repairProjection).ConfigureAwait(false);
         if (!repairProjection) ValidateInspectionSnapshot(snapshot);
         IReadOnlyList<FleetEvent> rows;
         try
@@ -466,12 +466,13 @@ public sealed class ConductorObligationStore
                 }
 
                 var retained = Project(group.OrderBy(row => row.Id).ToList());
+                if (!repairProjection) ValidateInspectionObligation(retained);
                 projected[group.Key] = projected.TryGetValue(group.Key, out var materialized)
                     ? MergeLifecycle(materialized, retained)
                     : retained;
             }
             catch (Exception ex) when (ex is ConductorObligationStoreException
-                || !repairProjection && ex is ConductorObligationConflictException)
+                || !repairProjection && ex is ConductorObligationConflictException or ArgumentException or InvalidDataException)
             {
                 if (!string.IsNullOrEmpty(group.Key))
                 {
@@ -662,18 +663,18 @@ public sealed class ConductorObligationStore
             .ConfigureAwait(false);
     }
 
-    private Task<ProjectionFile> ReadSnapshotAsync(CancellationToken cancellationToken) =>
+    private Task<ProjectionFile> ReadSnapshotAsync(CancellationToken cancellationToken, bool strictMissing = false) =>
         Task.Run(
             () => MutexGuardedFileLock.RunUnderLock(
                 _snapshotPath,
                 LockNamePrefix,
                 LockTimeout,
-                ReadSnapshotUnlocked),
+                () => ReadSnapshotUnlocked(strictMissing)),
             cancellationToken);
 
-    private ProjectionFile ReadSnapshotUnlocked()
+    private ProjectionFile ReadSnapshotUnlocked(bool strictMissing = false)
     {
-        if (!File.Exists(_snapshotPath))
+        if (!strictMissing && !File.Exists(_snapshotPath))
         {
             return new(ProjectionVersion, [], []);
         }
@@ -692,6 +693,10 @@ public sealed class ConductorObligationStore
             }
 
             return projection;
+        }
+        catch (Exception ex) when (strictMissing && ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new(ProjectionVersion, [], []);
         }
         catch (Exception ex) when (ex is JsonException
             or InvalidDataException
@@ -721,21 +726,11 @@ public sealed class ConductorObligationStore
                 foreach (var item in items)
                 {
                     if (item is null) throw new InvalidDataException("A retained obligation is null.");
-                    ValidateRequest(new(item.IdempotencyKey, item.TargetProject, item.TargetRoom,
-                        item.TargetExecution, item.PullRequestHead, item.RequestedAction, item.Owner,
-                        item.CreatedAt, item.Adapter, item.AdapterCapability, item.AdapterSupported, item.Reason));
-                    if (string.IsNullOrWhiteSpace(item.ObligationId)
-                        || item.CreatedAt == default
-                        || !Enum.IsDefined(item.Status)
-                        || IsTerminal(item.Status) != terminal
+                    ValidateInspectionObligation(item);
+                    if (IsTerminal(item.Status) != terminal
                         || !keys.Add(item.IdempotencyKey))
                     {
-                        throw new InvalidDataException("A retained obligation has invalid identity, age, status, partition or a duplicate key.");
-                    }
-                    if (item.Status == ConductorObligationStatus.ActionObserved
-                        && (item.ActionObservedAt is null || string.IsNullOrWhiteSpace(item.ActionProof)))
-                    {
-                        throw new InvalidDataException("An action-observed obligation is missing independent action evidence.");
+                        throw new InvalidDataException("A retained obligation has an invalid partition or a duplicate key.");
                     }
                 }
             }
@@ -746,6 +741,22 @@ public sealed class ConductorObligationStore
                 $"Conductor-obligation projection '{_snapshotPath}' is malformed: {ex.Message} "
                 + "Operator recovery: restore a valid projection or quarantine it for repair; never delete the only surviving authoritative state.",
                 ex);
+        }
+    }
+
+    private static void ValidateInspectionObligation(ConductorObligation item)
+    {
+        ValidateRequest(new(item.IdempotencyKey, item.TargetProject, item.TargetRoom,
+            item.TargetExecution, item.PullRequestHead, item.RequestedAction, item.Owner,
+            item.CreatedAt, item.Adapter, item.AdapterCapability, item.AdapterSupported, item.Reason));
+        if (string.IsNullOrWhiteSpace(item.ObligationId) || item.CreatedAt == default || !Enum.IsDefined(item.Status))
+        {
+            throw new InvalidDataException("A retained obligation has invalid identity, age or status.");
+        }
+        if (item.Status == ConductorObligationStatus.ActionObserved
+            && (item.ActionObservedAt is null || string.IsNullOrWhiteSpace(item.ActionProof)))
+        {
+            throw new InvalidDataException("An action-observed obligation is missing independent action evidence.");
         }
     }
 
