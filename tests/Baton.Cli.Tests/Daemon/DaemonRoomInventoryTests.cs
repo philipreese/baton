@@ -9,6 +9,8 @@ namespace Baton.Cli.Tests.Daemon;
 public sealed class DaemonRoomInventoryTests
 {
     private static readonly CancellationToken Ct = TestContext.Current.CancellationToken;
+    private static readonly TimeSpan ObserveRerunTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan WatcherCallbackTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
     public async Task Real_consumers_invalidate_one_changed_room_and_keep_its_rerun_active_on_the_third_cadence()
@@ -255,6 +257,9 @@ public sealed class DaemonRoomInventoryTests
         string sentinelPath,
         IReadOnlyList<string> expectedRooms)
     {
+        using var timeout = new CancellationTokenSource(ObserveRerunTimeout);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(Ct, timeout.Token);
+        var helperCt = cancellation.Token;
         var changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnChanged() => changed.TrySetResult();
 
@@ -265,24 +270,36 @@ public sealed class DaemonRoomInventoryTests
             var cadence = inventory.ObserveAsync(
                 DaemonRoomInventory.InventoryScope.Active,
                 DaemonRoomInventory.InventoryFreshness.Current,
-                Ct);
+                helperCt);
 
             // A watcher callback and a Current cadence are both valid synchronization edges. The
             // cadence may win because it re-reads the room version before FileSystemWatcher has
             // delivered its callback; if it does not see the rerun yet, wait for that callback
             // before giving the same cadence one bounded retry.
-            await Task.WhenAny(cadence, changed.Task).WaitAsync(Ct);
-            var observed = await cadence.WaitAsync(Ct);
+            await Task.WhenAny(cadence, changed.Task).WaitAsync(helperCt);
+            var observed = await cadence.WaitAsync(helperCt);
             if (observed.Select(room => room.Room.RoomDir).SequenceEqual(expectedRooms))
             {
                 return observed;
             }
 
-            await changed.Task.WaitAsync(Ct);
+            try
+            {
+                await changed.Task.WaitAsync(WatcherCallbackTimeout, helperCt);
+            }
+            catch (TimeoutException)
+            {
+                Assert.Fail(
+                    $"The room watcher callback did not arrive within {WatcherCallbackTimeout} after deleting "
+                    + $"'{sentinelPath}'. Watchers: {tracker.WatcherCount}; polled rooms: {tracker.PolledRoomCount}; "
+                    + $"observed rooms: [{string.Join(", ", observed.Select(room => room.Room.RoomDir))}]; "
+                    + $"expected rooms: [{string.Join(", ", expectedRooms)}].");
+            }
+
             return await inventory.ObserveAsync(
                 DaemonRoomInventory.InventoryScope.Active,
                 DaemonRoomInventory.InventoryFreshness.Current,
-                Ct);
+                helperCt);
         }
         finally
         {
