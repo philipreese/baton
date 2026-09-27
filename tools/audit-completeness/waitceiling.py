@@ -46,6 +46,19 @@ GIT_TEXT = {"encoding": "utf-8", "errors": "replace"}
 # on the next line — and tests about this checker are the likeliest place to write that prose.
 _MARKER_RE = re.compile(r"(?://|/\*|<!--)\s*wait-ok\b:?\s*(.*)")
 
+_FORMATTER_SAFE_WAIT_EXAMPLE_LINES = (
+    "await RunAsync(async () =>",
+    "{",
+    "    await Task.Delay(TimeSpan.FromSeconds(5)); // wait-ok: formatter-safe fixture timeout",
+    "});",
+)
+_FORMATTER_SAFE_WAIT_EXAMPLE = "\n".join(_FORMATTER_SAFE_WAIT_EXAMPLE_LINES)
+_WAIT_CEILING_GUIDANCE = (
+    "Raise ceiling to >=60s, or mark 'wait-ok: <reason>' on the line or line above.\n"
+    "For an expression lambda, use this formatter-safe block body so the wait and marker stay "
+    f"together:\n{_FORMATTER_SAFE_WAIT_EXAMPLE}"
+)
+
 
 def find_wait_ok_marker(text: str) -> dict[str, str] | None:
     """Extract a wait-ok marker and its reason, or None. The marker must open its comment."""
@@ -117,7 +130,7 @@ def inspect_lines(added_items: list[tuple[str, int, str]], file_lines_map: dict[
         if has_context and short_literal:
             faults.append(
                 f"{rel_path}:{lineno}: fixed wait ceiling literal '{short_literal}' under 60s in test code. "
-                "Raise ceiling to >=60s, or mark 'wait-ok: <reason>' on the line or line above."
+                f"{_WAIT_CEILING_GUIDANCE}"
             )
 
     return faults
@@ -133,6 +146,8 @@ def _selftest() -> int:
     faults_a = inspect_lines(added_a, file_map_a)
     if not faults_a or "TimeSpan.FromSeconds(5)" not in faults_a[0]:
         failures.append("Arm (a) FAIL: unmarked added short wait did not fire")
+    elif _WAIT_CEILING_GUIDANCE not in faults_a[0]:
+        failures.append("Arm (a) FAIL: formatter-safe guidance was not emitted")
 
     # (b) same line with wait-ok: reason -> silent
     file_map_b = {"tests/FooTests.cs": ["class Foo {", "    await Task.Delay(TimeSpan.FromSeconds(5)); // wait-ok: testing fast timeout", "}"]}
@@ -180,6 +195,15 @@ def _selftest() -> int:
     if not faults_g or "TimeSpan.FromSeconds(5)" not in faults_g[0]:
         failures.append("Arm (g) FAIL: prose mention of the marker exempted a bad wait")
 
+    # (i) formatter-shaped block-bodied lambda with same-line marker -> silent
+    file_map_i = {
+        "tests/FooTests.cs": ["class Foo {", *_FORMATTER_SAFE_WAIT_EXAMPLE_LINES, "}"]
+    }
+    added_i = [("tests/FooTests.cs", 4, _FORMATTER_SAFE_WAIT_EXAMPLE_LINES[2])]
+    faults_i = inspect_lines(added_i, file_map_i)
+    if faults_i:
+        failures.append("Arm (i) FAIL: recommended formatter-safe annotated lambda fired")
+
     # (h) the diff parser itself: two files, multiple hunks, deletions, a non-tests path filtered
     diff_h = "\n".join([
         "diff --git a/tests/A.cs b/tests/A.cs",
@@ -215,7 +239,7 @@ def _selftest() -> int:
     if failures:
         print("waitceiling selftest: FAIL -- " + "; ".join(failures), file=sys.stderr)
         return 1
-    print("waitceiling selftest: pass (all 8 arms discriminate)")
+    print("waitceiling selftest: pass (all 9 arms discriminate)")
     return 0
 
 
