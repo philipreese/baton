@@ -268,6 +268,69 @@ public sealed class ConductorObligationStoreTests : IDisposable
 
     private FleetEventLog Log(long maxLiveBytes = 100_000) => new(_events, _rollover, maxLiveBytes);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Advancing_clock_preserves_exact_transition_timestamps_and_terminal_replay(bool block)
+    {
+        var instant = DateTimeOffset.Parse("2026-09-18T12:00:00Z");
+        DateTimeOffset Now() => instant = instant.AddTicks(1);
+        var store = new ConductorObligationStore(Log(), _projection, Now);
+        await store.EnqueueAsync(Request(), Ct);
+        await store.SubmitAsync(
+            "obligation-1",
+            (_, _) => Task.FromResult(new ConductorTransportResult(true, "receipt-1")),
+            Ct);
+
+        var terminal = block
+            ? await store.BlockAsync("obligation-1", "receiver unavailable", Ct)
+            : await store.ObserveActionAsync("obligation-1", "execution-1-complete", Ct);
+        var restarted = new ConductorObligationStore(Log(), _projection, Now);
+        Assert.Equal(terminal, await restarted.ReadAsync("obligation-1", Ct));
+        Assert.Empty(await restarted.ReconcileAsync(Ct));
+        Assert.Equal(terminal, block
+            ? await restarted.BlockAsync("obligation-1", "receiver unavailable", Ct)
+            : await restarted.ObserveActionAsync("obligation-1", "execution-1-complete", Ct));
+        Assert.Equal(terminal, await restarted.SubmitAsync(
+            "obligation-1", (_, _) => throw new InvalidOperationException("completed transport must not repeat"), Ct));
+        await Assert.ThrowsAsync<ConductorObligationConflictException>(() => block
+            ? restarted.BlockAsync("obligation-1", "different reason", Ct)
+            : restarted.ObserveActionAsync("obligation-1", "different proof", Ct));
+
+        using var projection = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(_projection, Ct));
+        var saved = Assert.Single(projection.RootElement.GetProperty("terminalObligations").EnumerateArray());
+        var rows = await Log().ReadRetainedRepairingTornTails(Ct);
+        Assert.Equal(terminal.SubmittedAt, saved.GetProperty("submittedAt").GetDateTimeOffset());
+        Assert.Equal(terminal.TransportAcknowledgedAt, saved.GetProperty("transportAcknowledgedAt").GetDateTimeOffset());
+        Assert.Equal(terminal.SubmittedAt, Assert.Single(rows, row => row.Kind == FleetEventKind.ConductorObligationSubmitted).At);
+        Assert.Equal(terminal.TransportAcknowledgedAt,
+            Assert.Single(rows, row => row.Kind == FleetEventKind.ConductorObligationTransportAcknowledged).At);
+        if (!block)
+        {
+            Assert.Equal(terminal.ActionObservedAt, saved.GetProperty("actionObservedAt").GetDateTimeOffset());
+            Assert.Equal(terminal.ActionObservedAt,
+                Assert.Single(rows, row => row.Kind == FleetEventKind.ConductorObligationActionObserved).At);
+        }
+    }
+
+    [Theory]
+    [InlineData("actionObservedAt", "2026-09-18T12:00:00.0000001+00:00")]
+    [InlineData("actionProof", "different proof")]
+    public async Task Conflicting_persisted_terminal_evidence_fails_closed_without_rewriting(string property, string value)
+    {
+        var store = Store();
+        await store.EnqueueAsync(Request(), Ct);
+        await store.ObserveActionAsync("obligation-1", "execution-1-complete", Ct);
+        var projection = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(_projection, Ct))!;
+        projection["terminalObligations"]![0]![property] = value;
+        var conflicting = projection.ToJsonString();
+        await File.WriteAllTextAsync(_projection, conflicting, Ct);
+
+        var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(() => Store().ReadAsync("obligation-1", Ct));
+        Assert.Contains("conflicting terminal results", error.Message, StringComparison.Ordinal);
+        Assert.Equal(conflicting, await File.ReadAllTextAsync(_projection, Ct));
+    }
+
     private ConductorObligationStore Store() => new(Log(), _projection, () => DateTimeOffset.Parse("2026-09-18T12:00:00Z"));
 
     private static ConductorObligationRequest Request(string idempotencyKey = "obligation-1") => new(
