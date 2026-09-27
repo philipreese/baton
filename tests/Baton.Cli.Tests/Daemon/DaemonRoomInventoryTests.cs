@@ -9,6 +9,8 @@ namespace Baton.Cli.Tests.Daemon;
 public sealed class DaemonRoomInventoryTests
 {
     private static readonly CancellationToken Ct = TestContext.Current.CancellationToken;
+    private static readonly TimeSpan ObserveRerunTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan WatcherCallbackTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
     public async Task Real_consumers_invalidate_one_changed_room_and_keep_its_rerun_active_on_the_third_cadence()
@@ -205,52 +207,24 @@ public sealed class DaemonRoomInventoryTests
                 Assert.Equal(0, tracker.PolledRoomCount);
             }
 
-            TaskCompletionSource? firstChange = null;
-            Action? onFirstChange = null;
-            if (!expectPolling)
-            {
-                firstChange = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                onFirstChange = () => firstChange.TrySetResult();
-                tracker.Changed += onFirstChange;
-            }
-            FileCleanup.EnsureDeleted(Path.Combine(
-                rooms[500].RoomDir,
-                TerminalSentinelWriter.TerminalSentinelFileName));
-            if (firstChange is not null)
-            {
-                await firstChange.Task.WaitAsync(Ct);
-                tracker.Changed -= onFirstChange;
-            }
-
             now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
-            var secondCadence = await inventory.ObserveAsync(
-                DaemonRoomInventory.InventoryScope.Active,
-                DaemonRoomInventory.InventoryFreshness.Current,
-                Ct);
+            var secondCadence = await ObserveRerunAsync(
+                inventory,
+                tracker,
+                Path.Combine(
+                    rooms[500].RoomDir,
+                    TerminalSentinelWriter.TerminalSentinelFileName),
+                [rooms[500].RoomDir]);
             Assert.Equal(rooms[500].RoomDir, Assert.Single(secondCadence).Room.RoomDir);
 
-            TaskCompletionSource? secondChange = null;
-            Action? onSecondChange = null;
-            if (!expectPolling)
-            {
-                secondChange = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                onSecondChange = () => secondChange.TrySetResult();
-                tracker.Changed += onSecondChange;
-            }
-            FileCleanup.EnsureDeleted(Path.Combine(
-                rooms[501].RoomDir,
-                TerminalSentinelWriter.TerminalSentinelFileName));
-            if (secondChange is not null)
-            {
-                await secondChange.Task.WaitAsync(Ct);
-                tracker.Changed -= onSecondChange;
-            }
-
             now += DaemonRoomInventory.ReuseWindow + TimeSpan.FromSeconds(1);
-            var thirdCadence = await inventory.ObserveAsync(
-                DaemonRoomInventory.InventoryScope.Active,
-                DaemonRoomInventory.InventoryFreshness.Current,
-                Ct);
+            var thirdCadence = await ObserveRerunAsync(
+                inventory,
+                tracker,
+                Path.Combine(
+                    rooms[501].RoomDir,
+                    TerminalSentinelWriter.TerminalSentinelFileName),
+                [rooms[500].RoomDir, rooms[501].RoomDir]);
 
             Assert.Equal(
                 [rooms[500].RoomDir, rooms[501].RoomDir],
@@ -274,6 +248,62 @@ public sealed class DaemonRoomInventoryTests
         finally
         {
             DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    private static async Task<IReadOnlyList<DaemonRoomObservation>> ObserveRerunAsync(
+        DaemonRoomInventory inventory,
+        DaemonRoomInventory.RoomChangeTracker tracker,
+        string sentinelPath,
+        IReadOnlyList<string> expectedRooms)
+    {
+        using var timeout = new CancellationTokenSource(ObserveRerunTimeout);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(Ct, timeout.Token);
+        var helperCt = cancellation.Token;
+        var changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnChanged() => changed.TrySetResult();
+
+        tracker.Changed += OnChanged;
+        try
+        {
+            FileCleanup.EnsureDeleted(sentinelPath);
+            var cadence = inventory.ObserveAsync(
+                DaemonRoomInventory.InventoryScope.Active,
+                DaemonRoomInventory.InventoryFreshness.Current,
+                helperCt);
+
+            // A watcher callback and a Current cadence are both valid synchronization edges. The
+            // cadence may win because it re-reads the room version before FileSystemWatcher has
+            // delivered its callback; if it does not see the rerun yet, wait for that callback
+            // before giving the same cadence one bounded retry.
+            await Task.WhenAny(cadence, changed.Task).WaitAsync(helperCt);
+            var observed = await cadence.WaitAsync(helperCt);
+            if (observed.Select(room => room.Room.RoomDir).SequenceEqual(expectedRooms))
+            {
+                return observed;
+            }
+
+            try
+            {
+                await changed.Task.WaitAsync(WatcherCallbackTimeout, helperCt);
+            }
+            catch (TimeoutException)
+            {
+                Assert.Fail(
+                    $"The room watcher callback did not arrive within {WatcherCallbackTimeout} after deleting "
+                    + $"'{sentinelPath}'. Watchers: {tracker.WatcherCount}; polled rooms: {tracker.PolledRoomCount}; "
+                    + $"observed rooms: [{string.Join(", ", observed.Select(room => room.Room.RoomDir))}]; "
+                    + $"expected rooms: [{string.Join(", ", expectedRooms)}].");
+            }
+
+            return await inventory.ObserveAsync(
+                DaemonRoomInventory.InventoryScope.Active,
+                DaemonRoomInventory.InventoryFreshness.Current,
+                helperCt);
+        }
+        finally
+        {
+            tracker.Changed -= OnChanged;
         }
     }
 
