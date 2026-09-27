@@ -6,6 +6,7 @@ namespace Baton.Vendors.Tests;
 /// <see cref="BatonProfileStore"/>'s "malformed throws" precedent -- a bad concurrency cap must never
 /// stop the daemon from starting, so both absent and malformed resolve to defaults here.
 /// </summary>
+[Collection(ConsoleErrorCaptureCollection.Name)]
 public class DaemonSettingsStoreTests
 {
     private static string TempPath() => Path.Combine(Path.GetTempPath(), $"baton-settings-{Guid.NewGuid():N}.json");
