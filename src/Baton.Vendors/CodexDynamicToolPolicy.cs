@@ -21,6 +21,7 @@ public sealed class CodexDynamicToolPolicy
     internal const string ReadCommandOutputTool = "baton_read_command_output";
     internal const string WriteOutputTool = "baton_write_output";
     internal const string WriteTextTool = "baton_write_text";
+    internal const string ExactFileRestoreTool = "restore-exact-file";
     /// <summary>Named once in the engine (<see cref="CodexUsageParser.RunCommandToolName"/>) — see there for why.</summary>
     internal const string RunCommandTool = CodexUsageParser.RunCommandToolName;
 
@@ -111,6 +112,9 @@ public sealed class CodexDynamicToolPolicy
     private readonly OwnPullRequestOnlyRule? _ownPullRequestOnly;
     private readonly Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? _memoryAddExecutor;
     private readonly CodexMemoryAddHostAuthority? _memoryAddAuthority;
+    private readonly Func<CodexExactFileRestoreInvocation, CancellationToken,
+        Task<CodexExactFileRestoreExecution>>? _exactFileRestoreExecutor;
+    private readonly CodexExactFileRestoreHostAuthority? _exactFileRestoreAuthority;
 
     /// <param name="commandCeiling">
     /// How long one <c>baton_run_command</c> of a given class may run before Baton kills its process
@@ -137,7 +141,10 @@ public sealed class CodexDynamicToolPolicy
         OriginatingPullRequestOwnership? originatingPullRequestOwnership = null,
         IEnumerable<string>? artifactOnlyOutputNames = null,
         Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null,
-        CodexMemoryAddHostAuthority? memoryAddAuthority = null)
+        CodexMemoryAddHostAuthority? memoryAddAuthority = null,
+        Func<CodexExactFileRestoreInvocation, CancellationToken,
+            Task<CodexExactFileRestoreExecution>>? exactFileRestoreExecutor = null,
+        CodexExactFileRestoreHostAuthority? exactFileRestoreAuthority = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -168,6 +175,8 @@ public sealed class CodexDynamicToolPolicy
         _ownPullRequestOnly?.Observe(originatingPullRequestOwnership?.ToEvidence());
         _memoryAddExecutor = memoryAddExecutor;
         _memoryAddAuthority = memoryAddAuthority;
+        _exactFileRestoreExecutor = exactFileRestoreExecutor;
+        _exactFileRestoreAuthority = exactFileRestoreAuthority;
     }
 
     /// <summary>
@@ -296,6 +305,26 @@ public sealed class CodexDynamicToolPolicy
                 ReadCommandOutputSchema()));
         }
 
+        if (_grant.ExactFileRestore
+            && _exactFileRestoreExecutor is not null
+            && _exactFileRestoreAuthority is not null)
+        {
+            tools.Add(Function(
+                ExactFileRestoreTool,
+                "Restore one literal tracked file from the dispatch-captured base commit.",
+                new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["path"] = new JsonObject { ["type"] = "string" },
+                        ["acknowledgeDirtyFile"] = new JsonObject { ["type"] = "boolean" },
+                    },
+                    ["required"] = new JsonArray("path", "acknowledgeDirtyFile"),
+                    ["additionalProperties"] = false,
+                }));
+        }
+
         return tools;
     }
 
@@ -348,7 +377,7 @@ public sealed class CodexDynamicToolPolicy
         var identity = toolName switch
         {
             RunCommandTool => OptionalString(arguments, "command"),
-            ReadTextTool or ListFilesTool or SearchTextTool or WriteTextTool =>
+            ReadTextTool or ListFilesTool or SearchTextTool or WriteTextTool or ExactFileRestoreTool =>
                 OptionalString(arguments, "path"),
             ReadCommandOutputTool => OptionalString(arguments, "reference"),
             WriteOutputTool => OptionalString(arguments, "name"),
@@ -427,6 +456,8 @@ public sealed class CodexDynamicToolPolicy
                 ApplyPatchTool => ApplyPatch(RequiredString(arguments, "input")),
                 RunCommandTool => await RunCommandAsync(
                     RequiredString(arguments, "command"), cancellationToken).ConfigureAwait(false),
+                ExactFileRestoreTool => await RestoreExactFileAsync(arguments, cancellationToken)
+                    .ConfigureAwait(false),
                 // Not a refusal (#1921 re-review): each of the seven implemented names has its own case
                 // above and does its own grant check there, so a tool a grant WITHHELD never reaches
                 // here. What reaches here is a name Baton implements nowhere — a hallucinated or stale
@@ -449,6 +480,30 @@ public sealed class CodexDynamicToolPolicy
         {
             return CodexDynamicToolResult.Failed(ex.Message);
         }
+    }
+
+    private async Task<CodexDynamicToolResult> RestoreExactFileAsync(
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!_grant.ExactFileRestore
+            || _exactFileRestoreExecutor is null
+            || _exactFileRestoreAuthority is null)
+        {
+            return CodexDynamicToolResult.Refused(
+                "This Baton role has no dispatch-captured exact-file restore authority.",
+                GrantRules.WithheldTool);
+        }
+
+        var execution = await _exactFileRestoreExecutor(
+            new CodexExactFileRestoreInvocation(
+                RequiredString(arguments, "path"),
+                RequiredBoolean(arguments, "acknowledgeDirtyFile"),
+                _exactFileRestoreAuthority),
+            cancellationToken).ConfigureAwait(false);
+        return execution.Success
+            ? CodexDynamicToolResult.Allowed(execution.Output)
+            : CodexDynamicToolResult.Failed(execution.Output);
     }
 
     /// <summary>
@@ -2066,6 +2121,17 @@ public sealed class CodexDynamicToolPolicy
             throw new ArgumentException($"Dynamic tool argument '{name}' must be a non-empty string.");
         }
         return value.GetString()!;
+    }
+
+    private static bool RequiredBoolean(JsonElement arguments, string name)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object
+            || !arguments.TryGetProperty(name, out var value)
+            || value.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            throw new ArgumentException($"Dynamic tool argument '{name}' must be a boolean.");
+        }
+        return value.GetBoolean();
     }
 
     private static int? OptionalInteger(JsonElement arguments, string name)

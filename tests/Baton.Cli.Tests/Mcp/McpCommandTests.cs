@@ -100,6 +100,7 @@ public sealed class McpCommandTests
         Assert.False(options.EnableMemoryProposalTool);
         Assert.False(options.EnableFleetStatusTool);
         Assert.False(options.EnableRoomDetailTool);
+        Assert.False(options.EnableExactFileRestoreTool);
     }
 
     [Fact]
@@ -108,11 +109,13 @@ public sealed class McpCommandTests
         var options = McpOptionsParser.Parse([
             "--capture-file", "capture.json",
             "--memory-proposal-tool",
+            "--exact-file-restore-tool",
             "--fleet-status-tool",
             "--room-detail-tool",
         ]);
         Assert.Equal("capture.json", options.CaptureFilePath);
         Assert.True(options.EnableMemoryProposalTool);
+        Assert.True(options.EnableExactFileRestoreTool);
         Assert.True(options.EnableFleetStatusTool);
         Assert.True(options.EnableRoomDetailTool);
     }

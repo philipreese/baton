@@ -249,6 +249,52 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Amended_spec_redispatch_serializes_the_parents_exact_file_restore_base()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-exact-base-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Repair the file.");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            const string capturedBase = "0123456789abcdef0123456789abcdef01234567";
+            var capturedBindings = new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["advise"] = parentBindings["advise"] with
+                {
+                    PermissionGrant = new PermissionGrant(ExactFileRestore: true),
+                    ExactFileRestoreBaseSha = capturedBase,
+                },
+            };
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                capturedBindings,
+                parentBindingsPath,
+                TestContext.Current.CancellationToken);
+            await ExactFileRestoreAuthorityStore.WriteAsync(
+                capturedBindings, parentRoom, TestContext.Current.CancellationToken);
+
+            var amendedSpec = Path.Combine(testRoot, "amended.md");
+            await File.WriteAllTextAsync(
+                amendedSpec, "Repair the file using the amended instructions.", TestContext.Current.CancellationToken);
+            var childRoom = Path.Combine(testRoot, "child");
+
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, childRoom, SpecFilePath: amendedSpec, Adapter: "fake"),
+                Adapters,
+                TestContext.Current.CancellationToken);
+
+            var serializedChild = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Equal(capturedBase, serializedChild["advise"].ExactFileRestoreBaseSha);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     /// <summary>
     /// #1927 review HIGH, sub-note — the half a display assertion cannot catch. The amended-spec path
     /// passed <c>options.Model ?? parentEntry.Model</c> into <c>RoleDispatch.ToBinding</c> as an

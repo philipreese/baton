@@ -4,12 +4,13 @@ internal sealed record McpOptions(
     string? CaptureFilePath,
     bool EnableMemoryProposalTool,
     bool EnableFleetStatusTool,
-    bool EnableRoomDetailTool);
+    bool EnableRoomDetailTool,
+    bool EnableExactFileRestoreTool);
 
 internal static class McpOptionsParser
 {
     public const string Usage =
-        "Usage: baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]";
+        "Usage: baton mcp [--capture-file <path>] [--memory-proposal-tool] [--exact-file-restore-tool] [--fleet-status-tool] [--room-detail-tool]";
 
     public static McpOptions Parse(IReadOnlyList<string> args)
     {
@@ -19,6 +20,7 @@ internal static class McpOptionsParser
         var enableMemoryProposalTool = false;
         var enableFleetStatusTool = false;
         var enableRoomDetailTool = false;
+        var enableExactFileRestoreTool = false;
 
         var i = 0;
         while (i < args.Count)
@@ -67,6 +69,15 @@ internal static class McpOptionsParser
                     enableRoomDetailTool = true;
                     i++;
                     break;
+                case "--exact-file-restore-tool":
+                    if (enableExactFileRestoreTool)
+                    {
+                        throw new CliArgumentException($"Option '--exact-file-restore-tool' may only be specified once. {Usage}");
+                    }
+
+                    enableExactFileRestoreTool = true;
+                    i++;
+                    break;
                 default:
                     if (arg.StartsWith("--", StringComparison.Ordinal))
                     {
@@ -77,6 +88,8 @@ internal static class McpOptionsParser
             }
         }
 
-        return new McpOptions(captureFilePath, enableMemoryProposalTool, enableFleetStatusTool, enableRoomDetailTool);
+        return new McpOptions(
+            captureFilePath, enableMemoryProposalTool, enableFleetStatusTool, enableRoomDetailTool,
+            enableExactFileRestoreTool);
     }
 }

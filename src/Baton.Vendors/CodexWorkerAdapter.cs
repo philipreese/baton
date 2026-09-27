@@ -760,7 +760,13 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
                     "%BATON_ARTIFACTS_ROOT%",
                     "%BATON_OUTPUT_DIR%",
                     memoryAddGrant)
-                : null);
+                : null,
+            invocation.EnableExactFileRestoreTool
+                && invocation.ExactFileRestoreBaseSha is { Length: > 0 } restoreBase
+                && invocation.WorkingDirectory is { Length: > 0 } restoreWorkspace
+                    ? new CodexExactFileRestoreHostAuthority(
+                        restoreWorkspace, restoreBase, "%BATON_OUTPUT_DIR%")
+                    : null);
         CoreDispatchTarget BuildBrokerTarget(CodexBrokerConfiguration brokerConfiguration, string brokerPrompt) => new(
             "dotnet",
             [hostDllPath, "codex-broker", "--config", configPath, brokerPrompt],

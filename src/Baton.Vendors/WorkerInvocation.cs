@@ -165,5 +165,7 @@ public sealed record WorkerInvocation(
     // #2190: durable binding authority, not a live workspace claim.
     GhPullRequestCreateIdentity? PullRequestCreateIdentity = null,
     OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null,
-    Baton.Queue.MemoryAddDispatchGrant? MemoryAddGrant = null);
+    Baton.Queue.MemoryAddDispatchGrant? MemoryAddGrant = null,
+    bool EnableExactFileRestoreTool = false,
+    string? ExactFileRestoreBaseSha = null);
 

@@ -1146,12 +1146,14 @@ public class AgyWorkerAdapterTests
             .SelectMany(c => c.GetParameters())
             .Where(p => p.ParameterType == typeof(bool))
             .Select(p => p.Name!)
-            .Where(name => name != nameof(PermissionGrant.ShellCommandsAreReadOnly))
+            .Where(name => name is not (nameof(PermissionGrant.ShellCommandsAreReadOnly)
+                or nameof(PermissionGrant.ExactFileRestore)))
             .ToHashSet();
 
-        // Each name here is asserted by a test in this file: reads and writes by the two
+        // Each category name here is asserted by a test in this file: reads and writes by the two
         // skip-permissions arms, the shell by the background-process arm, the network by the arm
-        // directly above.
+        // directly above. ExactFileRestore is a narrow Baton-owned capability, not an agy
+        // permission category, so it is deliberately outside this vendor withholding roster.
         var covered = new HashSet<string>
         {
             nameof(PermissionGrant.ReadFiles),

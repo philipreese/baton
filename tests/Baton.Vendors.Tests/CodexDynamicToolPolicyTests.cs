@@ -10,6 +10,50 @@ namespace Baton.Vendors.Tests;
 public sealed class CodexDynamicToolPolicyTests
 {
     [Fact]
+    public async Task Exact_file_restore_grant_declares_and_executes_the_host_bound_tool()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-codex-restore-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            CodexExactFileRestoreInvocation? observed = null;
+            var authority = new CodexExactFileRestoreHostAuthority(
+                root, new string('a', 40), Path.Combine(root, "artifacts", "execution_test"));
+            var policy = new CodexDynamicToolPolicy(
+                new PermissionGrant(ExactFileRestore: true),
+                root,
+                Path.Combine(root, "output"),
+                [],
+                [],
+                exactFileRestoreExecutor: (invocation, _) =>
+                {
+                    observed = invocation;
+                    return Task.FromResult(new CodexExactFileRestoreExecution(true, "restored"));
+                },
+                exactFileRestoreAuthority: authority);
+
+            Assert.Contains(CodexDynamicToolPolicy.ExactFileRestoreTool, ToolNames(policy));
+            var result = await policy.ExecuteAsync(
+                CodexDynamicToolPolicy.ExactFileRestoreTool,
+                JsonSerializer.SerializeToElement(new
+                {
+                    path = "tracked.txt",
+                    acknowledgeDirtyFile = true,
+                }),
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(GrantRules.Allowed, result.Rule);
+            Assert.Equal("tracked.txt", observed!.Path);
+            Assert.True(observed.AcknowledgeDirtyFile);
+            Assert.Same(authority, observed.HostAuthority);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
     public void Read_only_role_gets_reads_and_declared_output_but_no_workspace_write_or_command()
     {
         using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);

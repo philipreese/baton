@@ -1,5 +1,6 @@
 using Baton.Artifacts;
 using Baton.Status;
+using Baton.Vendors;
 
 namespace Baton.Cli.Mcp;
 
@@ -24,6 +25,7 @@ public static class McpCommand
         var enableMemoryProposalTool = options.EnableMemoryProposalTool;
         var enableFleetStatusTool = options.EnableFleetStatusTool;
         var enableRoomDetailTool = options.EnableRoomDetailTool;
+        var enableExactFileRestoreTool = options.EnableExactFileRestoreTool;
 
         List<IMcpTool> tools = [];
         if (captureFilePath is not null)
@@ -96,6 +98,53 @@ public static class McpCommand
             var attribution = new ArtifactAttribution(ExecutionId: executionId, Role: null, Adapter: null, Model: null);
 
             tools.Add(new PromoteArtifactTool(roomDirectoryPath, executionDirectory, attribution));
+        }
+
+        if (enableExactFileRestoreTool)
+        {
+            var exactOutputDirectory = Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR");
+            if (string.IsNullOrWhiteSpace(exactOutputDirectory))
+            {
+                Console.Error.WriteLine(
+                    "--exact-file-restore-tool requires BATON_OUTPUT_DIR from the current execution.");
+                return 1;
+            }
+
+            var workspaceDirectory = Environment.GetEnvironmentVariable(WorkerEnvironment.WorkspaceVariable);
+            var baseRevision = Environment.GetEnvironmentVariable(WorkerEnvironment.ExactFileRestoreBaseVariable);
+            if (string.IsNullOrWhiteSpace(workspaceDirectory) || string.IsNullOrWhiteSpace(baseRevision)
+                || !Path.IsPathFullyQualified(workspaceDirectory))
+            {
+                Console.Error.WriteLine(
+                    "--exact-file-restore-tool requires absolute BATON_WORKSPACE_DIR and "
+                    + "BATON_EXACT_FILE_RESTORE_BASE values from the dispatch-captured binding.");
+                return 1;
+            }
+
+            var exactExecutionDirectory = Path.GetFullPath(
+                exactOutputDirectory);
+            var exactArtifactsRoot = Path.GetDirectoryName(exactExecutionDirectory);
+            var exactRoomDirectory = exactArtifactsRoot is null ? null : Path.GetDirectoryName(exactArtifactsRoot);
+            var exactExecutionName = Path.GetFileName(exactExecutionDirectory);
+            var exactArtifactsMatch = exactArtifactsRoot is not null
+                && string.Equals(
+                    Path.GetFileName(exactArtifactsRoot), ArtifactManager.ArtifactsDirectoryName,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+            var exactExecutionId = exactExecutionName.StartsWith("execution_", StringComparison.Ordinal)
+                && exactExecutionName.Length > "execution_".Length
+                ? exactExecutionName["execution_".Length..]
+                : null;
+            if (!exactArtifactsMatch || exactRoomDirectory is null || exactExecutionId is null
+                || !Directory.Exists(exactRoomDirectory))
+            {
+                Console.Error.WriteLine(
+                    "--exact-file-restore-tool requires BATON_OUTPUT_DIR to be an existing room directory's "
+                    + "'artifacts\\execution_<id>' directory.");
+                return 1;
+            }
+
+            tools.Add(new ExactFileRestoreTool(
+                workspaceDirectory, baseRevision, exactExecutionId, exactRoomDirectory));
         }
 
         if (tools.Count == 0)

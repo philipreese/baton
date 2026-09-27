@@ -48,6 +48,8 @@ public class ExecutionOutputDirectoryListingTests
         // Lists a room's memory root (fact files), never an execution's own output directory.
         ["Baton/Domain/RoomMemoryDocument.cs"] = "lists memoryRoot (room memory), not an execution output directory",
         ["Baton/Mutation/MemoryProposalApplier.cs"] = "lists memoryRoot (room memory), not an execution output directory",
+        // Lists only Baton's room-level exact-file recovery markers under <room>/.baton.
+        ["Baton.Cli/Mcp/ExactFileRestoreTool.cs"] = "lists the exact-file audit directory, not an execution output directory",
         // Lists a memory-proposal capture directory, never an execution's own output directory.
         ["Baton/Mutation/MemoryProposalEscalation.cs"] = "lists captureDirectoryPath (proposal capture), not an execution output directory",
         // Lists a slash-command definitions directory shipped alongside the adapter, never an

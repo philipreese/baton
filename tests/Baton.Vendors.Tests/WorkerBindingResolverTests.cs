@@ -34,6 +34,31 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void Hand_authored_base_without_Baton_authority_does_not_enable_exact_file_restore()
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"baton-hand-restore-{Guid.NewGuid():N}");
+        var adapter = new InvocationCaptureAdapter();
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["worker"] = new WorkerBindingConfigEntry(
+                "capture",
+                new WorkerContract("worker", [], [], []),
+                "Repair.",
+                TimeSpan.FromMinutes(5),
+                PermissionGrant: new PermissionGrant(ExactFileRestore: true),
+                ExactFileRestoreBaseSha: new string('a', 40)),
+        };
+
+        WorkerBindingResolver.Resolve(
+            config,
+            new Dictionary<string, IWorkerAdapter> { ["capture"] = adapter },
+            bindingsFileDirectory: room);
+
+        Assert.False(adapter.Invocation!.EnableExactFileRestoreTool);
+        Assert.Null(adapter.Invocation.ExactFileRestoreBaseSha);
+    }
+
+    [Fact]
     public void The_resolved_target_carries_the_invocation_and_contract_fields_the_adapter_received()
     {
         var config = new Dictionary<string, WorkerBindingConfigEntry>
@@ -1012,6 +1037,17 @@ public class WorkerBindingResolverTests
         // And the adapter field itself is left exactly as authored, casing included: normalizing it
         // here would make a spelling the registry does not carry resolve instead of refusing.
         Assert.Equal("Claude", kept.Adapter);
+    }
+
+    private sealed class InvocationCaptureAdapter : IWorkerAdapter
+    {
+        internal WorkerInvocation? Invocation { get; private set; }
+
+        public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
+        {
+            Invocation = invocation;
+            return new CoreDispatchTarget("capture", [], invocation.WorkingDirectory);
+        }
     }
 }
 

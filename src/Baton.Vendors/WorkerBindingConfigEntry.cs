@@ -222,6 +222,12 @@ namespace Baton.Vendors;
 /// hand-authored value came from equally trusted conductor input. The durable contract is
 /// spec/baton.md §9.
 /// </param>
+/// <param name="ExactFileRestoreBaseSha">
+/// The immutable base commit captured by the conductor for the exact-file restore capability. A
+/// fresh dispatch writes this only after observing its launch workspace; resume and redispatch carry
+/// it forward unchanged. Hand-authored values are not admitted by the restore tool without the same
+/// binding capability and the tool's ancestry checks.
+/// </param>
 public sealed record WorkerBindingConfigEntry(
     string Adapter,
     WorkerContract Contract,
@@ -291,7 +297,8 @@ public sealed record WorkerBindingConfigEntry(
     TaskRequirementAdmission? TaskRequirementAdmission = null,
     TaskSizeDeclaration? DeclaredTaskSize = null,
     // #2100: present only on a queue-materialized room; absent is no authority.
-    MemoryAddDispatchGrant? MemoryAddGrant = null);
+    MemoryAddDispatchGrant? MemoryAddGrant = null,
+    string? ExactFileRestoreBaseSha = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

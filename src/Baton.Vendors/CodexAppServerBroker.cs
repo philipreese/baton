@@ -60,7 +60,9 @@ public static class CodexAppServerBroker
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken = default,
-        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null)
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null,
+        Func<CodexExactFileRestoreInvocation, CancellationToken,
+            Task<CodexExactFileRestoreExecution>>? exactFileRestoreExecutor = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(prompt);
@@ -96,7 +98,8 @@ public static class CodexAppServerBroker
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .ToArray();
         var policy = CreateDynamicToolPolicy(
-            configuration, outputDirectory, inputPaths, ReadArtifactOnlyOutputs(), memoryAddExecutor);
+            configuration, outputDirectory, inputPaths, ReadArtifactOnlyOutputs(), memoryAddExecutor,
+            exactFileRestoreExecutor);
 
         using var process = StartAppServer(configuration, isolatedHome);
         if (process is null)
@@ -160,7 +163,9 @@ public static class CodexAppServerBroker
         string outputDirectory,
         IEnumerable<string> inputPaths,
         IEnumerable<string>? artifactOnlyOutputNames,
-        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null) =>
+        Func<MemoryAddCommandInvocation, CancellationToken, Task<MemoryAddCommandExecution>>? memoryAddExecutor = null,
+        Func<CodexExactFileRestoreInvocation, CancellationToken,
+            Task<CodexExactFileRestoreExecution>>? exactFileRestoreExecutor = null) =>
         new(
             configuration.PermissionGrant,
             configuration.WorkingDirectory,
@@ -171,7 +176,9 @@ public static class CodexAppServerBroker
             pullRequestCreateProvenance: configuration.PullRequestCreateProvenance,
             originatingPullRequestOwnership: configuration.OriginatingPullRequestOwnership,
             memoryAddExecutor: memoryAddExecutor,
-            memoryAddAuthority: configuration.MemoryAddAuthority);
+            memoryAddAuthority: configuration.MemoryAddAuthority,
+            exactFileRestoreExecutor: exactFileRestoreExecutor,
+            exactFileRestoreAuthority: configuration.ExactFileRestoreAuthority);
 
     /// <summary>
     /// Reads authenticated account limits through the broker's isolated home and app-server

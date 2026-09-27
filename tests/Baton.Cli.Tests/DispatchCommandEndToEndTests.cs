@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text.Json;
+using Baton.Cli.Mcp;
 using Baton.Vendors;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
@@ -50,6 +52,181 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
     {
         _catalogScope.Dispose();
         _batonHome.Dispose();
+    }
+
+    [Fact]
+    public async Task Cold_implement_dispatch_captures_base_and_the_real_restore_tool_uses_it()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-restore-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var workspace = Path.Combine(testRoot, "workspace");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "captured-base\n",
+                TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
+            var capturedHead = await ReadGitAsync(workspace, "rev-parse", "HEAD");
+            var roomDirectory = Path.Combine(testRoot, "task");
+            var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
+            var adapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", specPath, roomDirectory, Adapter: "fake", ExpectPr: false),
+                new Dictionary<string, IWorkerAdapter> { ["fake"] = adapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace);
+
+            var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(roomDirectory, "bindings.json"), TestContext.Current.CancellationToken);
+            var binding = bindings["implement"];
+            Assert.True(binding.PermissionGrant!.ExactFileRestore);
+            Assert.Equal(capturedHead, binding.ExactFileRestoreBaseSha);
+            Assert.Equal(
+                capturedHead,
+                ExactFileRestoreAuthorityStore.Read(roomDirectory, "implement"));
+            Assert.True(adapter.LastInvocation!.EnableExactFileRestoreTool);
+            Assert.Equal(capturedHead, adapter.LastInvocation.ExactFileRestoreBaseSha);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "damaged\n",
+                TestContext.Current.CancellationToken);
+            var result = await new ExactFileRestoreTool(
+                    workspace, binding.ExactFileRestoreBaseSha!, "cold-dispatch", roomDirectory)
+                .CallAsync(
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        path = "tracked.txt",
+                        acknowledgeDirtyFile = true,
+                    }),
+                    TestContext.Current.CancellationToken);
+
+            Assert.False(result.IsError, result.Text);
+            Assert.Equal(
+                "captured-base\n",
+                await File.ReadAllTextAsync(
+                    Path.Combine(workspace, "tracked.txt"), TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Continued_implement_dispatch_carries_authorized_base_and_exposes_restore_tool()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-restore-continue-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var workspace = Path.Combine(testRoot, "workspace");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "captured-base\n",
+                TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
+            var capturedHead = await ReadGitAsync(workspace, "rev-parse", "HEAD");
+            var parentRoom = Path.Combine(testRoot, "parent");
+            var parentAdapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+            var parentResult = await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", await WriteSpecAsync(testRoot, "Start the bounded repair."), parentRoom,
+                    Adapter: "codex", ExpectPr: false),
+                new Dictionary<string, IWorkerAdapter> { ["codex"] = parentAdapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit);
+            await TerminalSentinelWriter.WriteAsync(
+                parentRoom,
+                WorkflowStatusProjector.Project(parentResult.State, parentResult.Snapshot, parentRoom),
+                TestContext.Current.CancellationToken);
+
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = parentBindings["implement"] with { SessionId = "codex-thread-restore" },
+                },
+                parentBindingsPath,
+                TestContext.Current.CancellationToken);
+
+            var childRoom = Path.Combine(testRoot, "child");
+            var childAdapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", await WriteSpecAsync(testRoot, "Continue the bounded repair."), childRoom,
+                    Adapter: "codex", ExpectPr: false, ContinueFromRoomDirectoryPath: parentRoom),
+                new Dictionary<string, IWorkerAdapter> { ["codex"] = childAdapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit);
+
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var childBinding = childBindings["implement"];
+            Assert.Equal(capturedHead, childBinding.ExactFileRestoreBaseSha);
+            Assert.Equal(capturedHead, ExactFileRestoreAuthorityStore.Read(childRoom, "implement"));
+            Assert.True(childAdapter.LastInvocation!.EnableExactFileRestoreTool);
+            Assert.Equal(capturedHead, childAdapter.LastInvocation.ExactFileRestoreBaseSha);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "tracked.txt"), "damaged\n",
+                TestContext.Current.CancellationToken);
+            var restore = await new ExactFileRestoreTool(
+                    workspace, childBinding.ExactFileRestoreBaseSha!, "continued-dispatch", childRoom)
+                .CallAsync(
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        path = "tracked.txt",
+                        acknowledgeDirtyFile = true,
+                    }),
+                    TestContext.Current.CancellationToken);
+            Assert.False(restore.IsError, restore.Text);
+            Assert.Equal(
+                "captured-base\n",
+                await File.ReadAllTextAsync(
+                    Path.Combine(workspace, "tracked.txt"), TestContext.Current.CancellationToken));
+
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = parentBindings["implement"] with
+                    {
+                        SessionId = "codex-thread-restore",
+                        ExactFileRestoreBaseSha = new string('f', 40),
+                    },
+                },
+                parentBindingsPath,
+                TestContext.Current.CancellationToken);
+            var refusedChildRoom = Path.Combine(testRoot, "child-with-tampered-parent");
+            var refusedAdapter = new GrantConsumingContractOutputWorkerAdapter(
+                satisfyOutputs: true, deliverBranch: true);
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "implement", await WriteSpecAsync(testRoot, "Continue without forged authority."),
+                    refusedChildRoom, Adapter: "codex", ExpectPr: false,
+                    ContinueFromRoomDirectoryPath: parentRoom),
+                new Dictionary<string, IWorkerAdapter> { ["codex"] = refusedAdapter },
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit);
+            var refusedBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(refusedChildRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Null(refusedBindings["implement"].ExactFileRestoreBaseSha);
+            Assert.Null(ExactFileRestoreAuthorityStore.Read(refusedChildRoom, "implement"));
+            Assert.False(refusedAdapter.LastInvocation!.EnableExactFileRestoreTool);
+            Assert.Null(refusedAdapter.LastInvocation.ExactFileRestoreBaseSha);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
     }
 
     [Fact]
@@ -1130,6 +1307,7 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
                 gates-quiet = { cmd = "cmd /c exit 0" }
                 """,
                 TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
@@ -1296,6 +1474,7 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
         {
             var workspace = Path.Combine(testRoot, "workspace");
             Directory.CreateDirectory(workspace);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
@@ -1358,6 +1537,7 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
                 gates-quiet = { cmd = "cmd /c exit 1" }
                 """,
                 TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
 
             var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
             var roomDirectory = Path.Combine(testRoot, "task");
@@ -1853,6 +2033,31 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
         {
             throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {stderr.Trim()}");
         }
+    }
+
+    private static async Task<string> ReadGitAsync(string workingDirectory, params string[] args)
+    {
+        var startInfo = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start git — is it on PATH? These tests need git.");
+        var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+            process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {stderr.Trim()}");
+        }
+        return stdout.Trim();
     }
 
     /// <summary>

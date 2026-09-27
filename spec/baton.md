@@ -5194,6 +5194,66 @@ explicitly on every call (`DecideOptionsParser.cs`: *"pass --bindings <path-to-b
 naming the same bindings the paused room was dispatched with"*) — there is no separate global
 last-used-file fallback the CLI path is ever subject to.
 
+**Exact-file restore is a captured-authority, one-path transaction (#2415).** The shipped
+`implement` catalog role opts into `PermissionGrant.ExactFileRestore`; no other shipped role does.
+A cold dispatch captures the workspace `HEAD` SHA at the dispatch trust boundary and writes it to
+`ExactFileRestoreBaseSha`. Continuation and amended-spec redispatch may preserve that value but never
+recapture it from worker-controlled state. Binding resolution enables the tool only when both the
+grant and SHA match Baton's room-keyed authority record outside the room; a hand-authored binding
+cannot mint that record. Continuation and redispatch write a child record only after the parent value
+matches its own authority record. Every selectable adapter, including the brokered Codex
+adapter, carries those two facts to the same `ExactFileRestoreTool`. A worker supplies only one
+literal repository-relative tracked path and a dirty-file acknowledgement; it never supplies a
+revision. The tool proves the captured SHA is the exact canonical commit and an ancestor of `HEAD`,
+then reads and verifies that commit's Git blob. Git path arguments use literal pathspecs.
+
+The Windows filesystem transaction retains the repository root, final parent, original file and
+staged replacement handles. It predeclares temporary, quarantine and uncommitted names before the
+durable `Prepared` record, stages and flushes replacement bytes, and uses no-follow traversal plus
+handle-anchored atomic no-replace renames and deletion. Immediately before durable `Committed`
+evidence and again before deleting a quarantine, the installed name and quarantined original must
+still match their retained identities and Git-blob bytes. A failed `Committed` append rolls back only
+after another compare-and-swap proves the installed name is still the transaction's replacement; a
+mismatch leaves the current name untouched and preserves the original quarantine. Windows share modes
+exclude writers to an acknowledged dirty original and the staged replacement through the terminal
+transition. Linux and macOS expose parent-relative pathname rename and unlink here, not the required
+retained-handle identity-anchored operation, so both existing- and missing-file mutation transitions
+refuse before staging any file. Unix path validation and Git lookup still treat only `/` as rooted:
+colon and backslash bytes, including `C:relative.txt` and a leading backslash, are legal literal
+relative names, but their restoration is refused with every other Unix mutation. Windows applies
+drive, UNC and device grammar. Other platforms, or Windows filesystems lacking the required
+no-follow/no-replace/durable-directory primitives, likewise refuse before changing the requested
+name.
+
+The journal states are `Prepared`, `Committed`, `CleanupCompleted`, `RolledBack` and
+`RecoveryRequired`. Every record
+binds transaction id, execution, canonical repository root, path, before/source/restored blobs and
+all recovery names. Journal bytes and both audit- and file-directory metadata are flushed in order
+around rename/delete transitions. If the `RecoveryRequired` append fails, a separately created and
+flushed per-transaction recovery marker is the fallback. Before a new restore mutates the same
+root/path, the production reader folds the journal by transaction and reads fallback markers; a
+latest `Prepared`, `Committed`, or `RecoveryRequired`, a malformed record, or unreadable evidence
+refuses admission until operator recovery. `Committed` proves the replacement but remains unresolved
+until quarantine deletion and its directory flush are followed by `CleanupCompleted`; a cleanup
+failure appends `RecoveryRequired` and preserves any still-named original. `CleanupCompleted` and
+`RolledBack` are the only resolved terminal states. The reader validates every required field,
+including root and path grammar, before filtering a record by root/path. Audit failure is therefore
+never treated as successful restoration, and recovery ambiguity never licenses deleting an unknown
+current name.
+
+Every local Git query is bounded and noninteractive, drains both byte streams concurrently, and runs
+through Baton's contained-child seam. Query-local `-c` overrides disable repository fsmonitor,
+untracked-cache and hooks, while `GIT_NO_LAZY_FETCH=1`, `GIT_OPTIONAL_LOCKS=0`, prompt denial and
+literal pathspec mode prevent configured helper/network escape for this command set. Start, nonzero,
+timeout, cancellation and bounded teardown failures all become tool refusals. The admitted command
+set is `rev-parse`, `merge-base`, `ls-files`, `check-attr`, `status`, and `cat-file`. Before `status`,
+the restore path checks the target's ordinary and cached `filter` attributes, covering worktree,
+index, info, and configured attribute-file sources, and refuses any configured filter. This
+filter-free preflight prevents `status` from reaching a repository-configured clean or process
+filter, so with those overrides it has no repository-configured executable edge; the shared Unix
+process seam's lack of descendant-tree containment is not reachable from this restore path. No Git
+failure grants filesystem mutation authority.
+
 **`PullRequestCreateIdentity` is serialized repository/head authority, not ordinary harness
 configuration (#2190).** Its JSON value is `{Repository, HeadBranch}`. A cold `baton dispatch`
 captures it from the conductor-selected workspace with an absolute, link-free workspace identity and

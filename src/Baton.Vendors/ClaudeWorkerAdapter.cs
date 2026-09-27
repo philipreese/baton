@@ -180,7 +180,11 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         args.Add("--settings");
         args.Add(settingsPath);
         args.Add("--mcp-config");
-        args.Add(invocation.EnableMemoryProposalTool ? EnsureMemoryProposalMcpConfig() : mcpConfigPath);
+        args.Add(invocation.EnableMemoryProposalTool
+            ? EnsureMcpConfig(enableMemoryProposal: true, enableExactFileRestore: invocation.EnableExactFileRestoreTool)
+            : invocation.EnableExactFileRestoreTool
+                ? EnsureMcpConfig(enableMemoryProposal: false, enableExactFileRestore: true)
+                : mcpConfigPath);
 
         // #331: --allowedTools only *pre-approves* tools so they don't prompt; it is not a sandbox,
         // and omitting a tool leaves it in the model's reach (a shell-denied session ran `hostname`
@@ -327,6 +331,11 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         if (invocation.WorkingDirectory is { } workspace)
         {
             environment.Add((WorkerEnvironment.WorkspaceVariable, workspace));
+        }
+
+        if (invocation.EnableExactFileRestoreTool && invocation.ExactFileRestoreBaseSha is { } baseSha)
+        {
+            environment.Add((WorkerEnvironment.ExactFileRestoreBaseVariable, baseSha));
         }
 
         // This literal name resolves through PATH the same way scripts/verify-pack-roundtrip.sh
@@ -515,7 +524,10 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// spawn time, not loudly at dispatch.
     /// </para>
     /// </remarks>
-    private static string EnsureMemoryProposalMcpConfig()
+    private static string EnsureMemoryProposalMcpConfig() =>
+        EnsureMcpConfig(enableMemoryProposal: true, enableExactFileRestore: false);
+
+    private static string EnsureMcpConfig(bool enableMemoryProposal, bool enableExactFileRestore)
     {
         Directory.CreateDirectory(BatonPaths.WorkerLaunchConfig);
         var hostDllPath = Path.Combine(AppContext.BaseDirectory, "Baton.Cli.dll");
@@ -528,17 +540,31 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
                 "loudly here instead, before any worker is dispatched.");
         }
 
-        var configPath = Path.Combine(BatonPaths.WorkerLaunchConfig, "claude-mcp-memory-proposal.json");
+        var configPath = Path.Combine(
+            BatonPaths.WorkerLaunchConfig,
+            enableMemoryProposal ? "claude-mcp-memory-proposal.json" : "claude-mcp-exact-file-restore.json");
+        var servers = new Dictionary<string, object>();
+        if (enableMemoryProposal)
+        {
+            servers["baton-memory-proposal"] = new
+            {
+                command = "dotnet",
+                args = new[] { hostDllPath, "mcp", "--memory-proposal-tool" },
+            };
+        }
+
+        if (enableExactFileRestore)
+        {
+            servers["baton-exact-file-restore"] = new
+            {
+                command = "dotnet",
+                args = new[] { hostDllPath, "mcp", "--exact-file-restore-tool" },
+            };
+        }
+
         var json = JsonSerializer.Serialize(new
         {
-            mcpServers = new Dictionary<string, object>
-            {
-                ["baton-memory-proposal"] = new
-                {
-                    command = "dotnet",
-                    args = new[] { hostDllPath, "mcp", "--memory-proposal-tool" },
-                },
-            },
+            mcpServers = servers,
         });
 
         AtomicLaunchConfigWriter.Write(configPath, json);
