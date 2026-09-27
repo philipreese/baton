@@ -46,12 +46,39 @@ GIT_TEXT = {"encoding": "utf-8", "errors": "replace"}
 # on the next line — and tests about this checker are the likeliest place to write that prose.
 _MARKER_RE = re.compile(r"(?://|/\*|<!--)\s*wait-ok\b:?\s*(.*)")
 
-_FORMATTER_SAFE_WAIT_EXAMPLE_LINES = (
-    "await RunAsync(async () =>",
-    "{",
-    "    await Task.Delay(TimeSpan.FromSeconds(5)); // wait-ok: formatter-safe fixture timeout",
-    "});",
-)
+FIXTURE_RELPATH = "tests/Baton.Tests/Fixtures/WaitCeilingFixture.cs"
+FIXTURE_PATH = ROOT / FIXTURE_RELPATH
+
+
+def _load_formatter_safe_example() -> tuple[str, ...]:
+    if not FIXTURE_PATH.exists():
+        return (
+            "await RunAsync(async () =>",
+            "{",
+            "    await Task.Delay(TimeSpan.FromSeconds(5)); // wait-ok: formatter-safe fixture timeout",
+            "});",
+        )
+    lines = FIXTURE_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    start = -1
+    end = -1
+    for i, line in enumerate(lines):
+        if "await RunAsync(" in line and start == -1:
+            start = i
+        if start != -1 and line.strip() == "});":
+            end = i + 1
+            break
+    if start != -1 and end != -1:
+        import textwrap
+        return tuple(textwrap.dedent("\n".join(lines[start:end])).splitlines())
+    return (
+        "await RunAsync(async () =>",
+        "{",
+        "    await Task.Delay(TimeSpan.FromSeconds(5)); // wait-ok: formatter-safe fixture timeout",
+        "});",
+    )
+
+
+_FORMATTER_SAFE_WAIT_EXAMPLE_LINES = _load_formatter_safe_example()
 _FORMATTER_SAFE_WAIT_EXAMPLE = "\n".join(_FORMATTER_SAFE_WAIT_EXAMPLE_LINES)
 _WAIT_CEILING_GUIDANCE = (
     "Raise ceiling to >=60s, or mark 'wait-ok: <reason>' on the line or line above.\n"
@@ -195,14 +222,37 @@ def _selftest() -> int:
     if not faults_g or "TimeSpan.FromSeconds(5)" not in faults_g[0]:
         failures.append("Arm (g) FAIL: prose mention of the marker exempted a bad wait")
 
-    # (i) formatter-shaped block-bodied lambda with same-line marker -> silent
-    file_map_i = {
-        "tests/FooTests.cs": ["class Foo {", *_FORMATTER_SAFE_WAIT_EXAMPLE_LINES, "}"]
-    }
-    added_i = [("tests/FooTests.cs", 4, _FORMATTER_SAFE_WAIT_EXAMPLE_LINES[2])]
-    faults_i = inspect_lines(added_i, file_map_i)
-    if faults_i:
-        failures.append("Arm (i) FAIL: recommended formatter-safe annotated lambda fired")
+    # (i) committed representative fixture formatted output through the audit -> silent
+    if not FIXTURE_PATH.exists():
+        failures.append(f"Arm (i) FAIL: committed representative fixture {FIXTURE_RELPATH} not found")
+    else:
+        fixture_lines = FIXTURE_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+        wait_linenos = [
+            idx + 1 for idx, l in enumerate(fixture_lines)
+            if "TimeSpan.FromSeconds(5)" in l
+        ]
+        if not wait_linenos:
+            failures.append("Arm (i) FAIL: wait line not found in committed fixture")
+        else:
+            wait_line_no = wait_linenos[0]
+            wait_line_text = fixture_lines[wait_line_no - 1]
+            file_map_fixture = {FIXTURE_RELPATH: fixture_lines}
+            added_fixture = [(FIXTURE_RELPATH, wait_line_no, wait_line_text)]
+            faults_fixture = inspect_lines(added_fixture, file_map_fixture)
+            if faults_fixture:
+                failures.append(f"Arm (i) FAIL: committed representative fixture failed audit: {faults_fixture}")
+
+            # Polarity: the same fixture line without the wait-ok marker must fail loudly
+            stripped_line = re.sub(r"\s*//\s*wait-ok:.*$", "", wait_line_text)
+            mutated_lines = list(fixture_lines)
+            mutated_lines[wait_line_no - 1] = stripped_line
+            file_map_mutated = {FIXTURE_RELPATH: mutated_lines}
+            added_mutated = [(FIXTURE_RELPATH, wait_line_no, stripped_line)]
+            faults_mutated = inspect_lines(added_mutated, file_map_mutated)
+            if not faults_mutated or "TimeSpan.FromSeconds(5)" not in faults_mutated[0]:
+                failures.append("Arm (i) FAIL: unannotated fixture wait did not fire")
+            elif _WAIT_CEILING_GUIDANCE not in faults_mutated[0]:
+                failures.append("Arm (i) FAIL: unannotated fixture fault did not contain guidance")
 
     # (h) the diff parser itself: two files, multiple hunks, deletions, a non-tests path filtered
     diff_h = "\n".join([
