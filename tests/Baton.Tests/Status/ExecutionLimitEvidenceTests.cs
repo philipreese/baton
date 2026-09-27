@@ -240,6 +240,16 @@ public sealed class ExecutionLimitEvidenceTests
                 TimeSpan.FromMinutes(5), 1000, 10, 700, ChosenKey: "parent-profile",
                 TimeoutSource: "profile", TokenBudgetSource: "profile", MaxToolStepsSource: "profile",
                 MonitorInputsKnown: true);
+            var laterParentLimits = parentLimits with
+            {
+                Timeout = TimeSpan.FromMinutes(2),
+                TokenBudget = 2500,
+                MaxToolSteps = 25,
+                ChosenKey = null,
+                TimeoutSource = "dispatch-override",
+                TokenBudgetSource = "dispatch-override",
+                MaxToolStepsSource = "dispatch-override",
+            };
             var childLimits = ArtifactCheckpoint.CreateLimitEvidence(monitorInputsKnown: true);
             var checkpointId = new ExecutionId("checkpoint-evidence");
             var checkpointRequest = Request(checkpointId, childLimits) with
@@ -253,6 +263,13 @@ public sealed class ExecutionLimitEvidenceTests
                     TestContext.Current.CancellationToken);
                 await writer.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
                     checkpointId, ExecutionId, ["report.md"], checkpointRequest),
+                    TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new FlowEvent.StepRebound(
+                    StepId, ExecutionId,
+                    PreviousAdapter: "codex", PreviousModel: "gpt-5.6-sol",
+                    NewAdapter: "codex", NewModel: "gpt-5.6-sol",
+                    Reason: "later settings changed the ordinary request",
+                    PreviousLimits: parentLimits, NewLimits: laterParentLimits),
                     TestContext.Current.CancellationToken);
             }
 
@@ -270,12 +287,22 @@ public sealed class ExecutionLimitEvidenceTests
             entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(checkpointId, 0, CoreExitReason.Natural), now.AddSeconds(2)));
 
             var status = ExecutionUsageProjector.BuildByExecutionId(entries, tempDir);
-            Assert.Equal(parentLimits, status[ExecutionId.Value].Limits);
+            Assert.Equal(laterParentLimits, status[ExecutionId.Value].Limits);
             Assert.Equal(childLimits, status[checkpointId.Value].Limits);
-            Assert.NotEqual(parentLimits, status[checkpointId.Value].Limits);
+            Assert.NotEqual(laterParentLimits, status[checkpointId.Value].Limits);
 
             var resolved = ExecutionBindingResolver.Resolve(entries);
+            Assert.Equal(laterParentLimits, resolved[ExecutionId.Value].Limits);
             Assert.Equal(childLimits, resolved[checkpointId.Value].Limits);
+
+            var rows = CostLedgerStore.BuildEntries(
+                entries, tempDir,
+                RepositoryIdentity.From("https://github.com/example/checkpoint-limits.git", null)!);
+            var childRow = Assert.Single(rows, row => row.Execution == checkpointId.Value);
+            Assert.Equal(childLimits, childRow.Limits);
+            var correction = CostLedgerStore.BuildResolutionRow(
+                [childRow], BatonPaths.RecordKey(tempDir), ConductorResolution.Reject, "checkpoint limits review");
+            Assert.Equal(childLimits, correction!.Limits);
         }
         finally
         {
@@ -290,6 +317,11 @@ public sealed class ExecutionLimitEvidenceTests
         try
         {
             var parentLimits = new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), 1000, 10, null, MonitorInputsKnown: true);
+            var laterParentLimits = parentLimits with
+            {
+                TokenBudget = 2500,
+                TokenBudgetSource = "dispatch-override",
+            };
             var missingRequestId = new ExecutionId("checkpoint-missing-request");
             var nullLimitsId = new ExecutionId("checkpoint-null-limits");
             var noRequest = new FlowEvent.ArtifactCheckpointAttempted(
@@ -314,14 +346,18 @@ public sealed class ExecutionLimitEvidenceTests
                 new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(missingRequestId, 0, CoreExitReason.Natural), start.AddSeconds(2)),
                 new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(nullLimitsId, 3), start.AddSeconds(2)),
                 new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(nullLimitsId, 0, CoreExitReason.Natural), start.AddSeconds(3)),
+                new LogEntry.FlowLogEntry(new FlowEvent.StepRebound(
+                    StepId, ExecutionId, "codex", "gpt-5.6-sol", "codex", "gpt-5.6-sol",
+                    "later binding settings changed", parentLimits, laterParentLimits)),
             };
 
             var status = ExecutionUsageProjector.BuildByExecutionId(entries, tempDir);
-            Assert.Equal(parentLimits, status[ExecutionId.Value].Limits);
+            Assert.Equal(laterParentLimits, status[ExecutionId.Value].Limits);
             Assert.Null(status[missingRequestId.Value].Limits);
             Assert.Null(status[nullLimitsId.Value].Limits);
 
             var resolved = ExecutionBindingResolver.Resolve(entries);
+            Assert.Equal(laterParentLimits, resolved[ExecutionId.Value].Limits);
             Assert.Null(resolved.GetValueOrDefault(missingRequestId.Value).Limits);
             Assert.Null(resolved[nullLimitsId.Value].Limits);
         }
