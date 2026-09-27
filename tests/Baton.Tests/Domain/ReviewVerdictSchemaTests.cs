@@ -58,6 +58,23 @@ public class ReviewVerdictSchemaTests
         Assert.Equal(expected, verdict!.Decision);
     }
 
+    [Theory]
+    [InlineData("\"completion\": \"complete\",", ReviewCompletion.Complete)]
+    [InlineData("\"completion\": \"IN_PROGRESS\",", ReviewCompletion.InProgress)]
+    [InlineData("\"completion\": \"paused\",", null)]
+    [InlineData("\"completion\": true,", null)]
+    [InlineData("\"completion\": null,", null)]
+    [InlineData("", null)]
+    public void Completion_is_tolerant_and_unknown_values_remain_readable(
+        string completionField, ReviewCompletion? expected)
+    {
+        var bytes = Encoding.UTF8.GetBytes($$"""{"reviewedRef": "main", {{completionField}} "findings": []}""");
+
+        Assert.True(ReviewVerdictSchema.TryParse(bytes, out var verdict, out var error));
+        Assert.Null(error);
+        Assert.Equal(expected, verdict!.Completion);
+    }
+
     /// <summary>
     /// There is ONE parse, and a missing <c>decision</c> does not fail it (operator ruling,
     /// spec/baton.md §13). The field is optional on the wire and required only by the conductor
@@ -175,7 +192,8 @@ public class ReviewVerdictSchemaTests
             "main",
             [new ReviewFinding(ReviewFindingSeverity.Low, "x", ReviewFindingStatus.Confirmed)],
             Instruments: [new VerifyInstrument("dotnet build", 0, 34300), new VerifyInstrument("dotnet test", null, 91002)],
-            Decision: ReviewDecision.Block);
+            Decision: ReviewDecision.Block,
+            Completion: ReviewCompletion.Complete);
 
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(original));
 
@@ -185,6 +203,7 @@ public class ReviewVerdictSchemaTests
         // The decision converter's write half, for the same reason: it is the only thing that renders
         // the enum as the lower-case word the contract reads back, and a round trip is what runs it.
         Assert.Equal(ReviewDecision.Block, verdict.Decision);
+        Assert.Equal(ReviewCompletion.Complete, verdict.Completion);
     }
 
     /// <summary>

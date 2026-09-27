@@ -187,6 +187,13 @@ public static class WorkItemLifecycle
                 + "for reconciliation");
         }
 
+        if (observation.Verdict?.Completion != ReviewCompletion.Complete)
+        {
+            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                $"the ready item's verdict has no completed review assertion for PR #{observation.PullRequest}; "
+                + "the queue will not preserve a ready signal without that evidence"));
+        }
+
         if (observation.Verdict is not { Decision: ReviewDecision.Approve } verdict)
         {
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
@@ -264,6 +271,14 @@ public static class WorkItemLifecycle
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} but wrote no readable "
                 + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}"));
+        }
+
+        if (verdict.Completion != ReviewCompletion.Complete)
+        {
+            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane's verdict does not assert completed review work "
+                + "— retain the evidence without spending a round or automatic fix; "
+                + Recovery(observation.Stage)));
         }
 
         // Never a guess from the findings. A decision-less verdict reaches a person with the findings

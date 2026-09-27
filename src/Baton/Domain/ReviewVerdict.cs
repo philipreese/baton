@@ -10,10 +10,10 @@ namespace Baton.Domain;
 /// ended; a <see cref="ReviewVerdict"/> is content a worker wrote, and per decision 0043 the engine
 /// only ever checks that it <i>parses</i> — severity and status are evidence surfaced to a person,
 /// never inputs to routing (Architecture Rule 1, decision 0038) — a rule about Flow's routing, which
-/// spec/baton.md §13 carves the conductor queue out of: <c>WorkItemLifecycle</c> reads
-/// <see cref="Decision"/>, the field the reviewer wrote its own APPROVE/BLOCK into. That carve-out,
-/// and what it does not license, is stated there — severity and status remain evidence for a person
-/// and route nothing.
+/// spec/baton.md §13 carves the conductor queue out of: <c>WorkItemLifecycle</c> gates on
+/// <see cref="Completion"/> and branches on <see cref="Decision"/>, the field the reviewer wrote its
+/// own APPROVE/BLOCK into. That carve-out, and what it does not license, is stated there — severity
+/// and status remain evidence for a person and route nothing.
 /// </summary>
 /// <param name="ReviewedRef">
 /// What was reviewed — a branch, commit, or PR reference. Required: an unanchored verdict cannot
@@ -30,13 +30,19 @@ namespace Baton.Domain;
 /// instrument it did not have" true rather than merely asked for.
 /// </param>
 /// <param name="Decision">
-/// <b>The reviewer's own APPROVE/BLOCK, and the only thing the conductor queue routes on</b>
+/// <b>The reviewer's own APPROVE/BLOCK branch for routing once review completion is verified</b>
 /// (operator ruling, spec/baton.md §13). <b>Optional on the wire, required by the conductor queue to
 /// advance</b>: nothing about a review room's output contract asks for it, so a verdict without one
 /// still settles its room succeeded-shaped and is still readable by the ledger and by a person — and
-/// <c>Baton.Queue.WorkItemLifecycle</c> is the one place that requires it, routing a decision-less
-/// verdict to the operator with "carries no decision" rather than being handed a guess. Null when the
-/// document names no decision or names one this enum does not have.
+/// <c>Baton.Queue.WorkItemLifecycle</c> is the one place that requires it after gating on
+/// <see cref="Completion"/>, routing a decision-less verdict to the operator with "carries no decision"
+/// rather than being handed a guess. Null when the document names no decision or names one this enum
+/// does not have.
+/// </param>
+/// <param name="Completion">
+/// The reviewer's assertion that review work is complete. Optional on the wire so legacy and custom
+/// verdicts remain readable; the conductor queue requires <see cref="ReviewCompletion.Complete"/>
+/// before it routes a decision. Null means missing, malformed or an unknown token.
 /// </param>
 public sealed record ReviewVerdict(
     string ReviewedRef,
@@ -45,7 +51,9 @@ public sealed record ReviewVerdict(
     [property: JsonConverter(typeof(TolerantVerifyInstrumentListConverter))]
     IReadOnlyList<VerifyInstrument>? Instruments = null,
     [property: JsonConverter(typeof(TolerantReviewDecisionConverter))]
-    ReviewDecision? Decision = null);
+    ReviewDecision? Decision = null,
+    [property: JsonConverter(typeof(TolerantReviewCompletionConverter))]
+    ReviewCompletion? Completion = null);
 
 /// <summary>
 /// What the reviewer decided the PR should do next. <b>Two values, and no third for "unsure"</b>: the
@@ -59,6 +67,16 @@ public enum ReviewDecision
 
     /// <summary>The PR needs another round before it can merge.</summary>
     Block,
+}
+
+/// <summary>
+/// Whether the reviewer asserts that it finished the review. This is worker evidence, not proof of
+/// semantic review quality; the conductor still inspects the review before accepting its routing.
+/// </summary>
+public enum ReviewCompletion
+{
+    Complete,
+    InProgress,
 }
 
 /// <summary>
@@ -107,6 +125,42 @@ internal sealed class TolerantReviewDecisionConverter : JsonConverter<ReviewDeci
         }
 
         writer.WriteStringValue(value.Value == ReviewDecision.Approve ? "approve" : "block");
+    }
+}
+
+/// <summary>
+/// Reads <c>completion</c> as <see langword="null"/> for anything other than the two explicit review
+/// completion tokens. Tolerance preserves otherwise readable legacy/custom verdict evidence while
+/// keeping lifecycle routing fail-closed.
+/// </summary>
+internal sealed class TolerantReviewCompletionConverter : JsonConverter<ReviewCompletion?>
+{
+    public override ReviewCompletion? Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var element = JsonElement.ParseValue(ref reader);
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return element.GetString() switch
+        {
+            { } value when value.Equals("complete", StringComparison.OrdinalIgnoreCase) => ReviewCompletion.Complete,
+            { } value when value.Equals("in_progress", StringComparison.OrdinalIgnoreCase) => ReviewCompletion.InProgress,
+            _ => null,
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, ReviewCompletion? value, JsonSerializerOptions options)
+    {
+        if (value is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStringValue(value.Value == ReviewCompletion.Complete ? "complete" : "in_progress");
     }
 }
 

@@ -60,7 +60,7 @@ public class VerifyStepInstrumentsTests
     {
         var path = TempVerdict(
             """
-            {"reviewedRef": "1882-lane", "summary": "one defect",
+            {"reviewedRef": "1882-lane", "summary": "one defect", "completion": "complete",
              "findings": [{"severity": "high", "claim": "x", "status": "confirmed", "confidence": 0.9}],
              "model": "opus"}
             """);
@@ -71,6 +71,7 @@ public class VerifyStepInstrumentsTests
             var bytes = File.ReadAllBytes(path);
             var root = JsonDocument.Parse(bytes).RootElement;
             Assert.Equal("one defect", root.GetProperty("summary").GetString());
+            Assert.Equal("complete", root.GetProperty("completion").GetString());
             // The two unknown extras the schema promises to tolerate -- one top level, one per finding.
             Assert.Equal("opus", root.GetProperty("model").GetString());
             Assert.Equal(0.9, root.GetProperty("findings")[0].GetProperty("confidence").GetDouble(), 3);
@@ -79,6 +80,7 @@ public class VerifyStepInstrumentsTests
             Assert.True(ReviewVerdictSchema.TryParse(bytes, out var verdict, out var error), error);
             Assert.Equal(2, verdict!.Instruments!.Count);
             Assert.Equal(91_002, verdict.Instruments[1].WallClockMs);
+            Assert.Equal(ReviewCompletion.Complete, verdict.Completion);
         }
         finally
         {
