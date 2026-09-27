@@ -671,7 +671,7 @@ def _sabotage_fleet_glass_selftest() -> None:
 # Allowlist for gate members where sabotage is not meaningful, each with a one-line justification.
 ALLOWLIST: dict[str, str] = {
     "audit-staleness-ext-selftest": "pure synthetic selftest already proving internal polarity without live GitHub dependencies",
-    "audit-waitceiling-selftest": "pure synthetic selftest exercising 8 red/green discrimination arms",
+    "audit-waitceiling-selftest": "pure synthetic selftest exercising 9 red/green discrimination arms",
     "audit-retiredphrases-selftest": "pure synthetic selftest exercising regex and marker polarity arms",
     "audit-docsbudget-selftest": "pure synthetic selftest exercising allowlist discrimination",
     "audit-speccitations-selftest": "pure synthetic selftest exercising citation pattern discrimination",
