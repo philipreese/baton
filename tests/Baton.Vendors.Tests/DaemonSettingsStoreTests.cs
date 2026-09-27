@@ -85,6 +85,100 @@ public class DaemonSettingsStoreTests
         }
     }
 
+    [Fact]
+    public async Task Loading_a_locked_file_warns_and_resolves_to_defaults()
+    {
+        var path = TempPath();
+        var originalError = Console.Error;
+        using var error = new StringWriter();
+        try
+        {
+            await File.WriteAllTextAsync(path, "{\"GlobalConcurrencyCap\":99}", TestContext.Current.CancellationToken);
+            await using var fileLock = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            Console.SetError(error);
+
+            var settings = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Equal(DaemonSettings.DefaultGlobalConcurrencyCap, settings.GlobalConcurrencyCap);
+            Assert.Equal(DaemonSettings.DefaultPerVendorConcurrencyCap, settings.PerVendorConcurrencyCap);
+            Assert.Contains("Malformed or unreadable settings", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetError(originalError);
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Camel_case_execution_limit_profiles_load_and_validate_rows()
+    {
+        var path = TempPath();
+        try
+        {
+            await File.WriteAllTextAsync(
+                path,
+                "{\"executionLimitProfiles\":[{\"adapter\":\"claude\",\"model\":\"sonnet\",\"role\":\"review\",\"declaredTaskSize\":\"medium\",\"timeout\":\"00:10:00\",\"tokenBudget\":1000,\"maxToolSteps\":10}]}",
+                TestContext.Current.CancellationToken);
+
+            var loaded = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.NotNull(loaded.ExecutionLimitProfiles);
+            Assert.Equal(1000, loaded.ExecutionLimitProfiles[0].TokenBudget);
+            Assert.Equal(TimeSpan.FromMinutes(10), loaded.ExecutionLimitProfiles[0].Timeout);
+
+            await File.WriteAllTextAsync(
+                path,
+                "{\"executionLimitProfiles\":[{\"adapter\":\"claude\",\"model\":\"sonnet\",\"role\":\"review\",\"declaredTaskSize\":\"medium\",\"timeout\":\"00:10:00\",\"tokenBudget\":0,\"maxToolSteps\":10}]}",
+                TestContext.Current.CancellationToken);
+
+            await Assert.ThrowsAsync<ExecutionLimitProfileConfigurationException>(
+                () => DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Null_execution_limit_profiles_remains_legacy_compatible()
+    {
+        var path = TempPath();
+        try
+        {
+            await File.WriteAllTextAsync(path, "{\"executionLimitProfiles\":null}", TestContext.Current.CancellationToken);
+
+            var settings = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Null(settings.ExecutionLimitProfiles);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Duplicate_case_variant_execution_limit_profiles_sections_are_rejected()
+    {
+        var path = TempPath();
+        try
+        {
+            await File.WriteAllTextAsync(
+                path,
+                "{\"ExecutionLimitProfiles\":null,\"executionLimitProfiles\":null}",
+                TestContext.Current.CancellationToken);
+
+            await Assert.ThrowsAsync<ExecutionLimitProfileConfigurationException>(
+                () => DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
     // #2111: RoomsRetentionDays defaults to 30 now -- see DaemonSettings.DefaultRoomsRetentionDays for
     // the decision-round measurement that moved this off #1659's original "operator opts in" default.
     [Fact]

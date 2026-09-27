@@ -101,6 +101,41 @@ public sealed class DispatchExecutionLimitProfileTests : IDisposable
     }
 
     [Fact]
+    public async Task Direct_dispatch_with_camel_case_profile_section_applies_profile_limits()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-profile-camel-case-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(
+                BatonPaths.SettingsFile,
+                "{\"executionLimitProfiles\":[{\"adapter\":\"fake\",\"model\":\"test-model\",\"role\":\"implement\",\"declaredTaskSize\":\"small\",\"timeout\":\"00:11:00\",\"tokenBudget\":12345,\"maxToolSteps\":22}]}",
+                TestContext.Current.CancellationToken);
+
+            var specPath = await WriteSpecAsync(testRoot, "Implement feature with a camel-case profile.");
+            var roomDir = Path.Combine(testRoot, "room");
+            var options = new DispatchOptions(
+                "implement", specPath, roomDir, Adapter: "fake", Model: "test-model",
+                DeclaredTaskSize: TaskSizeDeclaration.Parse("small", "camel-case profile test"));
+
+            var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+
+            Assert.Equal(WorkflowStatus.Terminal, result.State.Status);
+            var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(roomDir, "bindings.json"), TestContext.Current.CancellationToken);
+            var binding = bindings["implement"];
+
+            Assert.Equal(TimeSpan.FromMinutes(11), binding.Timeout);
+            Assert.Equal(12345, binding.TokenBudget);
+            Assert.Equal(22, binding.MaxToolSteps);
+            Assert.Equal(ExecutionLimitSource.Profile, binding.ExecutionLimitResolution?.TimeoutSource);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task Direct_dispatch_with_explicit_overrides_wins_independently_per_brake()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-profile-override-{Guid.NewGuid():N}");

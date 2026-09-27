@@ -284,10 +284,11 @@ public static class DaemonSettingsStore
             return new DaemonSettings();
         }
 
-        var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
-        var hasExecutionLimitProfiles = json.Contains("ExecutionLimitProfiles", StringComparison.OrdinalIgnoreCase);
+        var hasExecutionLimitProfiles = false;
         try
         {
+            var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+            hasExecutionLimitProfiles = json.Contains("ExecutionLimitProfiles", StringComparison.OrdinalIgnoreCase);
             using var document = JsonDocument.Parse(json);
             hasExecutionLimitProfiles = ExecutionLimitProfileResolver.TryGetProfilesProperty(document.RootElement, out var profilesProp)
                 && profilesProp.ValueKind != JsonValueKind.Null;
@@ -296,6 +297,12 @@ public static class DaemonSettingsStore
             var settings = await JsonSerializer.DeserializeAsync<DaemonSettings>(stream, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             settings ??= new DaemonSettings();
+            if (hasExecutionLimitProfiles)
+            {
+                var profiles = profilesProp.Deserialize<IReadOnlyList<ExecutionLimitProfile>>(
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                settings = settings with { ExecutionLimitProfiles = profiles };
+            }
             ExecutionLimitProfileResolver.Validate(settings.ExecutionLimitProfiles);
             return settings;
         }

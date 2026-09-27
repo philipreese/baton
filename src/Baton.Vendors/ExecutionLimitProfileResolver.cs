@@ -109,13 +109,22 @@ public static class ExecutionLimitProfileResolver
             return false;
         }
 
+        JsonElement? found = null;
         foreach (var property in root.EnumerateObject())
         {
             if (string.Equals(property.Name, "ExecutionLimitProfiles", StringComparison.OrdinalIgnoreCase))
             {
-                profiles = property.Value;
-                return true;
+                if (found is not null)
+                    throw new ExecutionLimitProfileConfigurationException(
+                        "ExecutionLimitProfiles must not be specified more than once, including case variants.");
+                found = property.Value;
             }
+        }
+
+        if (found is { } value)
+        {
+            profiles = value;
+            return true;
         }
 
         profiles = default;
