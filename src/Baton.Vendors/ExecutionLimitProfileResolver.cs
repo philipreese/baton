@@ -17,9 +17,9 @@ public sealed record ExecutionLimitProfile
 
 public sealed record ExecutionLimitResolution(
     string? ChosenKey,
-    string TimeoutSource,
-    string TokenBudgetSource,
-    string MaxToolStepsSource,
+    string? TimeoutSource,
+    string? TokenBudgetSource,
+    string? MaxToolStepsSource,
     TimeSpan Timeout,
     long? TokenBudget,
     int? MaxToolSteps);

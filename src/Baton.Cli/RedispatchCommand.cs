@@ -375,7 +375,7 @@ public static class RedispatchCommand
             }
         }
 
-        return WithResolvedStamps(parentEntry with
+        var inherited = parentEntry with
         {
             Adapter = adapter,
             Model = model,
@@ -404,7 +404,49 @@ public static class RedispatchCommand
             // A redispatch is a fresh worker turn, never a continuation of the parent's own session.
             SessionId = null,
             ResumeSession = false,
-        }, parentEntry, options);
+        };
+
+        return WithResolvedStamps(
+            inherited with
+            {
+                ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, inherited, options),
+            },
+            parentEntry,
+            options);
+    }
+
+    private static ExecutionLimitResolution? InheritExecutionLimitResolution(
+        WorkerBindingConfigEntry parentEntry,
+        WorkerBindingConfigEntry inherited,
+        RedispatchOptions options)
+    {
+        var parentResolution = parentEntry.ExecutionLimitResolution;
+        var hasOverride = options.Timeout is not null
+            || options.TokenBudget is not null
+            || options.MaxToolSteps is not null;
+        if (parentResolution is null && !hasOverride)
+        {
+            return null;
+        }
+
+        var selectionStillDescribesChild = string.Equals(
+                inherited.Adapter.Trim(), parentEntry.Adapter.Trim(), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(inherited.Model, parentEntry.Model, StringComparison.Ordinal);
+
+        return new ExecutionLimitResolution(
+            selectionStillDescribesChild ? parentResolution?.ChosenKey : null,
+            options.Timeout is not null
+                ? ExecutionLimitSource.DispatchOverride
+                : parentResolution?.TimeoutSource,
+            options.TokenBudget is not null
+                ? ExecutionLimitSource.DispatchOverride
+                : parentResolution?.TokenBudgetSource,
+            options.MaxToolSteps is not null
+                ? ExecutionLimitSource.DispatchOverride
+                : parentResolution?.MaxToolStepsSource,
+            inherited.Timeout,
+            inherited.TokenBudget,
+            inherited.MaxToolSteps);
     }
 
     /// <summary>

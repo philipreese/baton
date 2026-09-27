@@ -1,7 +1,9 @@
 using System.Text.Json;
+using Baton.Accounting;
 using Baton.Vendors;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
+using Baton.Store;
 using Baton.Status;
 using Baton.Templates;
 
@@ -66,6 +68,73 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
                 Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
             Assert.Equal(parentBindings["advise"].PromptTemplate, childBindings["advise"].PromptTemplate);
             Assert.Equal(parentBindings["advise"].Adapter, childBindings["advise"].Adapter);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Redispatch_limit_overrides_reach_child_binding_accepted_status_and_ledger_evidence()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-limits-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Continue the limit-evidence repair.");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            var parent = parentBindings["advise"] with
+            {
+                Timeout = TimeSpan.FromMinutes(30),
+                TokenBudget = 1000,
+                MaxToolSteps = 10,
+                ExecutionLimitResolution = new ExecutionLimitResolution(
+                    "fake/parent-model/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                    ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10),
+            };
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry> { ["advise"] = parent },
+                parentBindingsPath, TestContext.Current.CancellationToken);
+
+            var childRoom = Path.Combine(testRoot, "child");
+            var childResult = await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(
+                    parentRoom, childRoom, Timeout: TimeSpan.FromMinutes(60), TokenBudget: 2000,
+                    MaxToolSteps: 20),
+                Adapters, TestContext.Current.CancellationToken);
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var child = childBindings["advise"];
+            Assert.Equal(TimeSpan.FromMinutes(60), child.Timeout);
+            Assert.Equal(2000, child.TokenBudget);
+            Assert.Equal(20, child.MaxToolSteps);
+            Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.MaxToolStepsSource);
+
+            var entries = await new FlowEventLogReader(
+                Path.Combine(childRoom, BatonPaths.FlowLogFileName)).ReadAllEntriesWithTimestampsAsync(
+                    TestContext.Current.CancellationToken);
+            var accepted = Assert.Single(entries.OfType<LogEntry.FlowLogEntry>()
+                .Select(entry => entry.Event)
+                .OfType<FlowEvent.ExecutionRequestAccepted>());
+            var expectedLimits = new ExecutionLimitEvidence(
+                TimeSpan.FromMinutes(60), 2000, 20, child.BilledRateLimit,
+                child.ExecutionLimitResolution?.ChosenKey,
+                child.ExecutionLimitResolution?.TimeoutSource,
+                child.ExecutionLimitResolution?.TokenBudgetSource,
+                child.ExecutionLimitResolution?.MaxToolStepsSource);
+            Assert.Equal(expectedLimits, accepted.Request.Limits);
+
+            var status = WorkflowStatusProjector.Project(
+                childResult.State, childResult.Snapshot, childRoom, entries);
+            Assert.Equal(expectedLimits, Assert.Single(status.Steps).Usage?.Limits);
+
+            var repository = RepositoryIdentity.From("https://github.com/example/redispatch-limits.git", null)!;
+            var ledgerRow = Assert.Single(CostLedgerStore.BuildEntries(entries, childRoom, repository));
+            Assert.Equal(expectedLimits, ledgerRow.Limits);
         }
         finally
         {

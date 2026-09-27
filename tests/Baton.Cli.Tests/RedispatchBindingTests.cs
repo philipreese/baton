@@ -175,6 +175,90 @@ public class RedispatchBindingTests
     }
 
     [Fact]
+    public void Redispatch_overrides_record_actual_limit_values_and_explicit_sources()
+    {
+        var parent = ParentEntry() with
+        {
+            TokenBudget = 1000,
+            MaxToolSteps = 10,
+            ExecutionLimitResolution = new ExecutionLimitResolution(
+                "claude/opus/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10),
+        };
+
+        var child = RedispatchCommand.InheritBinding(
+            parent,
+            new RedispatchOptions(
+                "parent-room", "new-room", Timeout: TimeSpan.FromMinutes(60), TokenBudget: 2000,
+                MaxToolSteps: 20));
+
+        Assert.Equal(TimeSpan.FromMinutes(60), child.Timeout);
+        Assert.Equal(2000, child.TokenBudget);
+        Assert.Equal(20, child.MaxToolSteps);
+        Assert.Equal(TimeSpan.FromMinutes(60), child.ExecutionLimitResolution?.Timeout);
+        Assert.Equal(2000, child.ExecutionLimitResolution?.TokenBudget);
+        Assert.Equal(20, child.ExecutionLimitResolution?.MaxToolSteps);
+        Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TimeoutSource);
+        Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
+        Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.MaxToolStepsSource);
+        Assert.Equal("claude/opus/advise/small", child.ExecutionLimitResolution?.ChosenKey);
+    }
+
+    [Fact]
+    public void Redispatch_mixed_limit_override_changes_only_its_axis_and_keeps_parent_provenance()
+    {
+        var parent = ParentEntry() with
+        {
+            TokenBudget = 1000,
+            MaxToolSteps = 10,
+            ExecutionLimitResolution = new ExecutionLimitResolution(
+                "claude/opus/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10),
+        };
+
+        var child = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", TokenBudget: 2000));
+
+        Assert.Equal(TimeSpan.FromMinutes(30), child.ExecutionLimitResolution?.Timeout);
+        Assert.Equal(2000, child.ExecutionLimitResolution?.TokenBudget);
+        Assert.Equal(10, child.ExecutionLimitResolution?.MaxToolSteps);
+        Assert.Equal(ExecutionLimitSource.Profile, child.ExecutionLimitResolution?.TimeoutSource);
+        Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
+        Assert.Equal(ExecutionLimitSource.Profile, child.ExecutionLimitResolution?.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Legacy_parent_with_an_explicit_limit_override_records_no_profile_selection()
+    {
+        var child = RedispatchCommand.InheritBinding(
+            ParentEntry(), new RedispatchOptions("parent-room", "new-room", TokenBudget: 2000));
+
+        Assert.NotNull(child.ExecutionLimitResolution);
+        Assert.Null(child.ExecutionLimitResolution!.ChosenKey);
+        Assert.Null(child.ExecutionLimitResolution.TimeoutSource);
+        Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution.TokenBudgetSource);
+        Assert.Null(child.ExecutionLimitResolution.MaxToolStepsSource);
+        Assert.Equal(2000, child.ExecutionLimitResolution.TokenBudget);
+    }
+
+    [Fact]
+    public void Adapter_or_model_change_does_not_claim_the_parents_profile_selection()
+    {
+        var parent = ParentEntry() with
+        {
+            ExecutionLimitResolution = new ExecutionLimitResolution(
+                "claude/opus/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), null, null),
+        };
+
+        var child = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Adapter: "agy", Model: "new-model"));
+
+        Assert.Null(child.ExecutionLimitResolution?.ChosenKey);
+        Assert.Equal(ExecutionLimitSource.Profile, child.ExecutionLimitResolution?.TimeoutSource);
+    }
+
+    [Fact]
     public void With_no_label_override_the_parents_label_is_inherited()
     {
         var parent = ParentEntry() with { Label = "env-snapshot lane" };

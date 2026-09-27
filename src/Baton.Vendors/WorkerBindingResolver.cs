@@ -310,9 +310,9 @@ public static class WorkerBindingResolver
             entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace,
             entry.ExecutionLimitResolution is { } resolution
                 ? new ExecutionLimitEvidence(
-                    resolution.Timeout,
-                    resolution.TokenBudget,
-                    resolution.MaxToolSteps,
+                    entry.Timeout,
+                    entry.TokenBudget,
+                    entry.MaxToolSteps,
                     entry.BilledRateLimit,
                     resolution.ChosenKey,
                     resolution.TimeoutSource,

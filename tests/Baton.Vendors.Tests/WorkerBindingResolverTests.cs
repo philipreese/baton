@@ -117,6 +117,29 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void Resolved_limit_evidence_uses_the_binding_values_not_stale_resolution_values()
+    {
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["architect"] = new WorkerBindingConfigEntry(
+                "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(60),
+                TokenBudget: 2000, MaxToolSteps: 20,
+                ExecutionLimitResolution: new ExecutionLimitResolution(
+                    "echo/model/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                    ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10)),
+        };
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            config, new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Equal(TimeSpan.FromMinutes(60), binding.EffectiveLimitEvidence.Timeout);
+        Assert.Equal(2000, binding.EffectiveLimitEvidence.TokenBudget);
+        Assert.Equal(20, binding.EffectiveLimitEvidence.MaxToolSteps);
+        Assert.Equal("echo/model/architect/small", binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.TimeoutSource);
+    }
+
+    [Fact]
     public void Hand_authored_base_without_Baton_authority_does_not_enable_exact_file_restore()
     {
         var room = Path.Combine(Path.GetTempPath(), $"baton-hand-restore-{Guid.NewGuid():N}");
