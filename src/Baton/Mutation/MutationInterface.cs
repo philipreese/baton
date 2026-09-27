@@ -3040,7 +3040,7 @@ public static class MutationInterface
         {
             ExecutionId = checkpointExecutionId,
             Timeout = ArtifactCheckpoint.WallClockTimeout,
-            Limits = null,
+            Limits = ArtifactCheckpoint.CreateLimitEvidence(monitor is not null),
         };
         using var checkpointCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hostCancellationToken);
         using var linked = monitor is null ? null : CancellationTokenSource.CreateLinkedTokenSource(checkpointCancellation.Token, monitor.ArrestRequested);
