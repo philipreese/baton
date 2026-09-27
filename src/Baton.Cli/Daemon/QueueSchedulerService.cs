@@ -779,9 +779,24 @@ public sealed class QueueSchedulerService : BackgroundService
 
         foreach (var obligation in open)
         {
+            // Protected invariant: this consumer may mutate only its exact owner namespace. It may observe
+            // action only when the canonical continuation payload and deterministic key agree; malformed
+            // records owned by this consumer are blocked below.
+            if (!string.Equals(obligation.Owner, ConductorContinuation.Owner, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             if (!string.Equals(obligation.RequestedAction, ConductorContinuation.Action, StringComparison.Ordinal)
+                || !string.Equals(obligation.Adapter, ConductorContinuation.Adapter, StringComparison.Ordinal)
+                || !string.Equals(
+                    obligation.AdapterCapability, ConductorContinuation.AdapterCapability, StringComparison.Ordinal)
                 || !ConductorContinuation.TryParseKey(
-                    obligation.IdempotencyKey, out var tag, out var sourceAttemptId, out var nextRound))
+                    obligation.IdempotencyKey, out var tag, out var sourceAttemptId, out var nextRound)
+                || !string.Equals(
+                    obligation.IdempotencyKey,
+                    ConductorContinuation.IdempotencyKey(tag, sourceAttemptId, nextRound),
+                    StringComparison.Ordinal))
             {
                 await _conductorObligations.BlockAsync(
                     obligation.IdempotencyKey,

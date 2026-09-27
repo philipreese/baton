@@ -105,6 +105,138 @@ public sealed class ConductorContinuationTests
     }
 
     [Fact]
+    public async Task Scheduler_leaves_foreign_noncontinuation_obligations_unchanged_across_ticks_and_restart()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var firstStore = CreateStore();
+            var request = Request(home) with
+            {
+                RequestedAction = "inspect",
+                Owner = "recovery-inspector",
+                Adapter = "inspection-adapter",
+                AdapterCapability = "inspect",
+            };
+            var retained = await firstStore.EnqueueAsync(request, Ct);
+            await CreateService(firstStore).TickOnceAsync(Ct);
+            Assert.Equal(retained, await firstStore.ReadAsync(retained.IdempotencyKey, Ct));
+            Assert.Equal([retained], await firstStore.ReconcileAsync(Ct));
+
+            var restartedStore = CreateStore();
+            await CreateService(restartedStore).TickOnceAsync(Ct);
+
+            Assert.Equal(retained, await restartedStore.ReadAsync(retained.IdempotencyKey, Ct));
+            Assert.Equal([retained], await restartedStore.ReconcileAsync(Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("recovery-inspector")]
+    [InlineData("Queue-Lifecycle")]
+    public async Task Scheduler_leaves_foreign_continue_shaped_obligations_unchanged_with_matching_queue_evidence(
+        string owner)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var store = CreateStore();
+            var retained = await store.EnqueueAsync(Request(home) with { Owner = owner }, Ct);
+            await SaveQueueAsync([ContinuationQueueItem(home)]);
+
+            await CreateService(store).TickOnceAsync(Ct);
+
+            var restartedStore = CreateStore();
+            Assert.Equal(retained, await restartedStore.ReadAsync(retained.IdempotencyKey, Ct));
+            Assert.Equal([retained], await restartedStore.ReconcileAsync(Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("action")]
+    [InlineData("adapter")]
+    [InlineData("capability")]
+    [InlineData("key")]
+    [InlineData("noncanonical-key")]
+    public async Task Scheduler_blocks_malformed_queue_owned_obligations_without_action_proof(string malformedField)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var request = Request(home) with
+            {
+                RequestedAction = malformedField == "action" ? "inspect" : ConductorContinuation.Action,
+                Adapter = malformedField == "adapter" ? "other-adapter" : ConductorContinuation.Adapter,
+                AdapterCapability = malformedField == "capability"
+                    ? "other-capability"
+                    : ConductorContinuation.AdapterCapability,
+                IdempotencyKey = malformedField switch
+                {
+                    "key" => "continue:continue-tag:attempt-1:1:extra",
+                    "noncanonical-key" => "continue:continue-tag:attempt-1:01",
+                    _ => ConductorContinuation.IdempotencyKey("continue-tag", new FleetAttemptId("attempt-1"), 1),
+                },
+            };
+            var store = CreateStore();
+            var retained = await store.EnqueueAsync(request, Ct);
+            await SaveQueueAsync([ContinuationQueueItem(home)]);
+
+            await CreateService(store).TickOnceAsync(Ct);
+
+            var blocked = await store.ReadAsync(retained.IdempotencyKey, Ct);
+            Assert.NotNull(blocked);
+            Assert.Equal(ConductorObligationStatus.Blocked, blocked.Status);
+            Assert.Null(blocked.ActionProof);
+            Assert.Equal("the open obligation is not a deterministic queue continuation", blocked.Reason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Scheduler_blocks_duplicate_matching_continuation_queue_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var store = CreateStore();
+            var retained = await store.EnqueueAsync(Request(home), Ct);
+            var item = ContinuationQueueItem(home);
+            await SaveQueueAsync([item, item with { }]);
+
+            await CreateService(store).TickOnceAsync(Ct);
+
+            var blocked = await store.ReadAsync(retained.IdempotencyKey, Ct);
+            Assert.NotNull(blocked);
+            Assert.Equal(ConductorObligationStatus.Blocked, blocked.Status);
+            Assert.Null(blocked.ActionProof);
+            Assert.Contains("more than one continuation", blocked.Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Scheduler_requires_the_obligation_tag_when_selecting_continuation_evidence()
     {
         var home = CreateTempHome();
@@ -263,6 +395,60 @@ public sealed class ConductorContinuationTests
         AttemptId = attemptId,
         LaunchedAt = DateTimeOffset.UnixEpoch,
     };
+
+    private static ConductorObligationStore CreateStore()
+    {
+        var log = new FleetEventLog(
+            BatonPaths.FleetEventsFile,
+            BatonPaths.FleetEventsRolloverFile,
+            100_000);
+        return new ConductorObligationStore(log, BatonPaths.ConductorObligationsFile, () => DateTimeOffset.UnixEpoch);
+    }
+
+    private static ConductorObligationRequest Request(string home)
+    {
+        var sourceAttempt = new FleetAttemptId("attempt-1");
+        var room = Path.Combine(home, "rooms", "settled-source");
+        Directory.CreateDirectory(room);
+        return ConductorContinuation.TryRequest(
+            Item(sourceAttempt, room),
+            room,
+            new WorkflowStatusView(
+                WorkflowOutcome.Failed,
+                [new WorkflowStatusStepView("implement", "Failed", "execution-1")],
+                [],
+                null),
+            "head-1",
+            new WorkItemTransition(WorkItemTransitionKind.Dispatch, WorkStage.Continue, 1, "retry"),
+            DateTimeOffset.UnixEpoch)!;
+    }
+
+    private static QueueItem ContinuationQueueItem(string home)
+    {
+        var sourceAttempt = new FleetAttemptId("attempt-1");
+        return Item(sourceAttempt, Path.Combine(home, "rooms", "settled-source")) with
+        {
+            Stage = WorkStage.Continue,
+            Round = 1,
+            ParentAttemptId = sourceAttempt,
+            AttemptId = new FleetAttemptId("child-attempt"),
+            State = QueueItemState.Failed,
+            Halted = true,
+        };
+    }
+
+    private static Task SaveQueueAsync(IReadOnlyList<QueueItem> items) =>
+        QueueStore.MutateAsync(
+            BatonPaths.QueueFile,
+            snapshot => snapshot with { Items = items },
+            Ct);
+
+    private static QueueSchedulerService CreateService(ConductorObligationStore store) => new(
+        (_, _) => throw new InvalidOperationException("a continuation reconciliation must not launch"),
+        _ => Task.FromResult(0d),
+        () => 16d,
+        () => DateTimeOffset.UnixEpoch,
+        conductorObligations: store);
 
     private static string CreateTempHome()
     {
