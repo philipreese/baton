@@ -368,10 +368,19 @@ public sealed class ConductorObligationStore
         string? receipt = null,
         string? actionProof = null)
     {
+        // One transition has one authoritative instant in both projection and supporting fact;
+        // replay must preserve exact terminal evidence, rather than tolerate clock disagreement.
+        var occurredAt = kind switch
+        {
+            FleetEventKind.ConductorObligationSubmitted => obligation.SubmittedAt!.Value,
+            FleetEventKind.ConductorObligationTransportAcknowledged => obligation.TransportAcknowledgedAt!.Value,
+            FleetEventKind.ConductorObligationActionObserved => obligation.ActionObservedAt!.Value,
+            _ => _now().ToUniversalTime(),
+        };
         var draft = new FleetEventDraft(
             kind,
             DedupeKey(kind, obligation.IdempotencyKey),
-            _now().ToUniversalTime(),
+            occurredAt,
             ObligationId: obligation.ObligationId,
             ObligationIdempotencyKey: obligation.IdempotencyKey,
             ObligationTargetProject: obligation.TargetProject,
