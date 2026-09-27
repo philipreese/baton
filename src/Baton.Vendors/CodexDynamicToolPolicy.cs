@@ -87,6 +87,7 @@ public sealed class CodexDynamicToolPolicy
     private readonly string? _workspaceRoot;
     private readonly string _outputRoot;
     private readonly IReadOnlyList<string> _inputRoots;
+    private readonly HashSet<string> _attachmentFiles;
     private readonly HashSet<string> _declaredOutputs;
     private readonly HashSet<string>? _artifactOnlyOutputs;
     private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
@@ -144,7 +145,8 @@ public sealed class CodexDynamicToolPolicy
         CodexMemoryAddHostAuthority? memoryAddAuthority = null,
         Func<CodexExactFileRestoreInvocation, CancellationToken,
             Task<CodexExactFileRestoreExecution>>? exactFileRestoreExecutor = null,
-        CodexExactFileRestoreHostAuthority? exactFileRestoreAuthority = null)
+        CodexExactFileRestoreHostAuthority? exactFileRestoreAuthority = null,
+        IEnumerable<string>? attachmentPaths = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -156,6 +158,8 @@ public sealed class CodexDynamicToolPolicy
         _outputRoot = NormalizeRoot(outputDirectory);
         _inputRoots = inputPaths.Where(path => !string.IsNullOrWhiteSpace(path))
             .Select(Path.GetFullPath).Distinct(PathComparer).ToArray();
+        _attachmentFiles = attachmentPaths?.Select(Path.GetFullPath).ToHashSet(PathComparer)
+            ?? new HashSet<string>(PathComparer);
         _declaredOutputs = producedOutputNames.Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
         _artifactOnlyOutputs = artifactOnlyOutputNames is null ? null : artifactOnlyOutputNames
@@ -1811,6 +1815,11 @@ public sealed class CodexDynamicToolPolicy
         {
             return candidate;
         }
+        if (_grant.ReadFiles && _attachmentFiles.Contains(candidate) && File.Exists(candidate)
+            && !Directory.Exists(candidate) && !AttachmentReadInputs.CrossesLink(candidate))
+        {
+            return candidate;
+        }
         // #1920 (table row 1, the conductor-brief case): the refusal names the roots it checked and
         // the remedy, because the measured failure was a worker handed another room's path and left
         // to guess. Another Baton room is never readable from here, however the path was obtained.
@@ -1835,6 +1844,7 @@ public sealed class CodexDynamicToolPolicy
         }
         roots.Add($"this worker's outbox ({_outputRoot})");
         roots.AddRange(_inputRoots.Select(input => $"the declared input '{input}'"));
+        roots.AddRange(_attachmentFiles.Select(path => $"the attached file '{path}'"));
         return string.Join("; ", roots);
     }
 

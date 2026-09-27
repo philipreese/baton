@@ -178,7 +178,8 @@ public static class CodexAppServerBroker
             memoryAddExecutor: memoryAddExecutor,
             memoryAddAuthority: configuration.MemoryAddAuthority,
             exactFileRestoreExecutor: exactFileRestoreExecutor,
-            exactFileRestoreAuthority: configuration.ExactFileRestoreAuthority);
+            exactFileRestoreAuthority: configuration.ExactFileRestoreAuthority,
+            attachmentPaths: configuration.AttachmentPaths);
 
     /// <summary>
     /// Reads authenticated account limits through the broker's isolated home and app-server

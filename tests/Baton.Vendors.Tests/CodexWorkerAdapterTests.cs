@@ -10,6 +10,45 @@ namespace Baton.Vendors.Tests;
 [Collection(LaunchConfigCollection.Name)]
 public sealed class CodexWorkerAdapterTests
 {
+    [Fact]
+    public async Task Role_binding_reaches_broker_policy_with_exact_attachment_read_authority()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-dispatch-attachment-{Guid.NewGuid():N}");
+        var room = Path.Combine(root, "current");
+        var attachments = Path.Combine(room, "artifacts", "attachments");
+        Directory.CreateDirectory(attachments);
+        try
+        {
+            var attached = Path.Combine(attachments, "evidence.txt");
+            var sibling = Path.Combine(attachments, "sibling.txt");
+            File.WriteAllText(attached, "unique dispatch bytes 2442");
+            File.WriteAllText(sibling, "not granted");
+            var binding = RoleDispatch.ToBinding(
+                WorkerRoleCatalog.For("review"), "Read evidence.", adapterOverride: "codex",
+                autoProvisionWorktree: false,
+                attachments: [attached], attachmentsDirectory: attachments,
+                attachDefaultSkills: false);
+            var resolved = WorkerBindingResolver.Resolve(
+                new Dictionary<string, WorkerBindingConfigEntry> { ["review"] = binding },
+                new Dictionary<string, IWorkerAdapter> { ["codex"] = new CodexWorkerAdapter() },
+                bindingsFileDirectory: room);
+            var target = Assert.IsType<Baton.Mutation.WorkerBinding.Process>(resolved["review"]).Target;
+            var configuration = BrokerConfiguration(target);
+            Assert.Equal([attached], configuration.AttachmentPaths);
+            var policy = CodexAppServerBroker.CreateDynamicToolPolicy(
+                configuration, Path.Combine(room, "artifacts", "execution_test"), [], null);
+            async Task<CodexDynamicToolResult> Read(string path) => await policy.ExecuteAsync(
+                CodexDynamicToolPolicy.ReadTextTool, JsonSerializer.SerializeToElement(new { path }),
+                TestContext.Current.CancellationToken);
+            Assert.Contains("unique dispatch bytes 2442", (await Read(attached)).Text);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await Read(sibling)).Rule);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     private static readonly WorkerContract SingleOutputContract = new(
         "architect", ["goal"], [new ProducedOutput("plan.md")], []);
 

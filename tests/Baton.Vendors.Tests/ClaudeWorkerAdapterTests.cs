@@ -25,6 +25,21 @@ namespace Baton.Vendors.Tests;
 [Collection(LaunchConfigCollection.Name)]
 public class ClaudeWorkerAdapterTests
 {
+    [Fact]
+    public void Attached_file_disclosure_uses_existing_artifacts_directory_and_read_grant()
+    {
+        const string path = "C:\\room\\artifacts\\attachments\\evidence.txt";
+        var grant = new PermissionGrant(ReadFiles: true);
+        var target = new ClaudeWorkerAdapter().Resolve(
+            new WorkerInvocation($"Attached files (in C:\\room\\artifacts\\attachments): evidence.txt",
+                PermissionGrant: grant, AttachmentPaths: [path]), ArchitectContract);
+
+        Assert.Contains("C:\\room\\artifacts\\attachments", GetPrompt(target));
+        Assert.Equal("%BATON_ARTIFACTS_ROOT%", ArgValue(target, "--add-dir"));
+        Assert.DoesNotContain("Read", ClaudeWorkerAdapter.BuildHookDeniedTools(grant));
+        Assert.Contains("Read", ClaudeWorkerAdapter.BuildHookDeniedTools(new PermissionGrant()));
+    }
+
     private static readonly WorkerContract ArchitectContract = new(
         "architect", ["goal"], [new ProducedOutput("plan.md")], []);
 
