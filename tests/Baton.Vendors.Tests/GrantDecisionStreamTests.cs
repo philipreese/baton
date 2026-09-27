@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json.Nodes;
+using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Tests.Shared;
 
@@ -138,6 +140,54 @@ public sealed class GrantDecisionStreamTests
         }
     }
 
+    /// <summary>
+    /// The broker's typed own-PR denial is written to the unrolled authority log as well as the
+    /// captured stream. The stream is then driven through more than one tiny rollover so the test
+    /// proves the lifecycle evidence is not dependent on the surviving stdout window.
+    /// </summary>
+    [Fact]
+    public async Task An_own_PR_denial_survives_stdout_rollover_in_the_authority_log()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-grant-rollover-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(root, "workspace");
+        var output = Path.Combine(root, "output");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(output);
+        try
+        {
+            var grant = WorkerRoleCatalog.For("implement").Grant;
+            var configuration = new CodexBrokerConfiguration(
+                workspace, "gpt-5.6-terra", "low", null, false, grant, ["changes.md"], false);
+            var policy = new CodexDynamicToolPolicy(grant, workspace, output, [], ["changes.md"]);
+            var lines = await RunTurnAsync(
+                configuration, policy, output,
+                Call(41, CodexDynamicToolPolicy.RunCommandTool,
+                    new JsonObject { ["command"] = "gh pr view 1994" }));
+
+            var authorityLog = Path.Combine(output, GrantDecisionLog.FileName);
+            Assert.True(File.Exists(authorityLog));
+            Assert.True(GrantDecisionLog.ContainsDenial(authorityLog, GrantRules.OwnPullRequestOnly));
+
+            var logger = new ExecutionStreamLogger(output, maxSizeBytes: 64);
+            foreach (var line in lines)
+            {
+                logger.AppendStdout(Encoding.UTF8.GetBytes(line + "\n"));
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                logger.AppendStdout(Encoding.UTF8.GetBytes(new string((char)('a' + i), 80)));
+            }
+
+            Assert.True(File.Exists(Path.Combine(output, ExecutionStreamLogger.StdoutRolloverFileName)));
+            Assert.True(GrantDecisionLog.ContainsDenial(authorityLog, GrantRules.OwnPullRequestOnly));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     private static JsonObject Call(int id, string tool, JsonObject arguments) => new()
     {
         ["id"] = id,
@@ -152,8 +202,17 @@ public sealed class GrantDecisionStreamTests
         },
     };
 
+    private static Task<string[]> RunTurnAsync(
+        CodexBrokerConfiguration configuration,
+        CodexDynamicToolPolicy policy,
+        params JsonObject[] calls) =>
+        RunTurnAsync(configuration, policy, null, calls);
+
     private static async Task<string[]> RunTurnAsync(
-        CodexBrokerConfiguration configuration, CodexDynamicToolPolicy policy, params JsonObject[] calls)
+        CodexBrokerConfiguration configuration,
+        CodexDynamicToolPolicy policy,
+        string? outputDirectory,
+        params JsonObject[] calls)
     {
         var transcript = string.Join('\n',
         [
@@ -169,9 +228,13 @@ public sealed class GrantDecisionStreamTests
         using var batonOutput = new StringWriter();
         using var error = new StringWriter();
 
-        var exitCode = await CodexAppServerBroker.RunProtocolAsync(
-            configuration, "Do the work.", policy, serverInput, serverOutput,
-            batonOutput, error, TestContext.Current.CancellationToken);
+        var exitCode = outputDirectory is null
+            ? await CodexAppServerBroker.RunProtocolAsync(
+                configuration, "Do the work.", policy, serverInput, serverOutput,
+                batonOutput, error, TestContext.Current.CancellationToken)
+            : await CodexAppServerBroker.RunProtocolAsync(
+                configuration, "Do the work.", outputDirectory, [], null, null,
+                serverInput, serverOutput, batonOutput, error, TestContext.Current.CancellationToken);
 
         Assert.Equal(0, exitCode);
         return batonOutput.ToString()

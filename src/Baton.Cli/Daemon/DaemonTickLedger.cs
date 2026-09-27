@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json.Nodes;
+using Baton.Cli;
 using Baton.Status;
 
 namespace Baton.Cli.Daemon;
@@ -40,13 +43,18 @@ internal sealed class DaemonTickLedger
     private readonly ConcurrentDictionary<string, ServiceTick> _ticks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ActiveTickRegistration> _active = new(StringComparer.Ordinal);
     private readonly DateTimeOffset _startedAt;
+    private readonly DaemonHeartbeatIdentity _identity;
     private IReadOnlyList<string>? _glassBoundPrefixes;
 
-    internal DaemonTickLedger(Func<DateTimeOffset> clock, Action<string>? log = null)
+    internal DaemonTickLedger(
+        Func<DateTimeOffset> clock,
+        Action<string>? log = null,
+        DaemonHeartbeatIdentity? identity = null)
     {
         _clock = clock;
         _log = log ?? Console.Error.WriteLine;
         _startedAt = clock();
+        _identity = identity ?? DaemonHeartbeatIdentity.Capture();
     }
 
     /// <summary>When the process came up — the watchdog's baseline before any service has completed a
@@ -205,6 +213,7 @@ internal sealed class DaemonTickLedger
             // time, which is what "nothing has completed since" honestly means at that point.
             ["tickCompletedAt"] = (newest ?? _startedAt).ToString("O"),
             ["startedAt"] = _startedAt.ToString("O"),
+            ["identity"] = _identity.ToJson(),
             ["services"] = services,
             ["hostLoad"] = load.ToJson(),
         };
@@ -217,6 +226,35 @@ internal sealed class DaemonTickLedger
         }
 
         return body.ToJsonString();
+    }
+
+    /// <summary>
+    /// The process identity carried by the external heartbeat. A PID alone can be reused, so the
+    /// replacement verifier matches all four fields before it accepts freshness from this body.
+    /// </summary>
+    internal sealed record DaemonHeartbeatIdentity(
+        int ProcessId,
+        DateTimeOffset ProcessStartedAt,
+        string ExecutablePath,
+        string Version)
+    {
+        internal static DaemonHeartbeatIdentity Capture()
+        {
+            using var process = Process.GetCurrentProcess();
+            return new(
+                Environment.ProcessId,
+                process.StartTime.ToUniversalTime(),
+                Environment.ProcessPath ?? string.Empty,
+                VersionInfo.GetVersion(Assembly.GetExecutingAssembly()));
+        }
+
+        internal JsonObject ToJson() => new()
+        {
+            ["pid"] = ProcessId,
+            ["processStartTime"] = ProcessStartedAt.ToUniversalTime().ToString("O"),
+            ["executablePath"] = ExecutablePath,
+            ["version"] = Version,
+        };
     }
 
     /// <summary>One service's most recent completed tick. <see cref="Service"/> is filled in by

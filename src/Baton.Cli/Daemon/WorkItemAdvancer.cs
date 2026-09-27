@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Artifacts;
 using Baton.Domain;
+using Baton.Dispatch;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Vendors;
@@ -305,7 +307,8 @@ public sealed class WorkItemAdvancer
             reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
             sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null,
-            item.AttemptBaseRevision, deliveryFailingMembers);
+            item.AttemptBaseRevision, deliveryFailingMembers,
+            HasPullRequestAuthorityRefusal(room, sentinel));
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
@@ -1629,6 +1632,55 @@ public sealed class WorkItemAdvancer
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         return members.Length == 0 ? null : members;
+    }
+
+    /// <summary>
+    /// Reads the current terminal execution's engine-owned grant decisions. The aggregate refused-tool
+    /// count is deliberately not used here: a denied shell command is incidental, while only a denied
+    /// <see cref="GrantRules.OwnPullRequestOnly"/> decision proves that the lane was refused its exact
+    /// originating-PR authority.
+    /// </summary>
+    private static bool HasPullRequestAuthorityRefusal(
+        string? roomDirectory, WorkflowStatusView? sentinel)
+    {
+        if (roomDirectory is not { Length: > 0 })
+        {
+            return false;
+        }
+
+        try
+        {
+            var artifactsRoot = Path.Combine(roomDirectory, ArtifactManager.ArtifactsDirectoryName);
+            if (!Directory.Exists(artifactsRoot))
+            {
+                return false;
+            }
+
+            var executionIds = sentinel?.Steps
+                .Select(step => step.Execution)
+                .Where(execution => execution is { Length: > 0 })
+                .Select(execution => execution!)
+                .ToHashSet(StringComparer.Ordinal) ?? [];
+            var executionDirectories = executionIds.Count > 0
+                ? executionIds.Select(execution => Path.Combine(artifactsRoot, "execution_" + execution))
+                : Directory.EnumerateDirectories(artifactsRoot, "execution_*", SearchOption.TopDirectoryOnly);
+            foreach (var executionDirectory in executionDirectories)
+            {
+                var path = Path.Combine(executionDirectory, GrantDecisionLog.FileName);
+                if (File.Exists(path)
+                    && GrantDecisionLog.ContainsDenial(path, GrantRules.OwnPullRequestOnly))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // An unreadable optional observation is not evidence of a refusal. The lifecycle will
+            // retain its ordinary settled-row handling and the operator can inspect the room.
+        }
+
+        return false;
     }
 
     /// <summary>

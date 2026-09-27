@@ -139,6 +139,28 @@ public sealed class QueueTierTableTests
         Assert.Equal("cheap sweep, no judgment needed", overridden.OverrideReason);
     }
 
+    [Fact]
+    public void Lifecycle_reason_is_projected_once_and_stage_reason_wins_for_that_stage()
+    {
+        var item = Item("implement", "engine") with
+        {
+            LifecycleReason = "one fallback rationale",
+            StageSelections =
+            [
+                new() { Stage = WorkStage.Review, Model = "gpt-5.6-sol", Reason = "review rationale" },
+                new() { Stage = WorkStage.Fix, Model = "gpt-6-astra" },
+            ],
+        };
+
+        var review = QueueTierTable.ResolveForStage(item, WorkStage.Review, new QueueSettings(), NoNamedTiers, NoNamedTiers);
+        var fix = QueueTierTable.ResolveForStage(item, WorkStage.Fix, new QueueSettings(), NoNamedTiers, NoNamedTiers);
+
+        Assert.Equal("review rationale", review.OverrideReason);
+        Assert.Equal("one fallback rationale", fix.OverrideReason);
+        Assert.Equal("one fallback rationale", item.LifecycleReason);
+        Assert.Null(item.StageSelections!.Single(s => s.Stage == WorkStage.Fix).Reason);
+    }
+
     /// <summary>
     /// Override detection reads the FLATTENED tier, not the row: an item naming the tier's own vendor
     /// is not an override, and one naming a different vendor is. Both arms, because getting the

@@ -1005,9 +1005,15 @@ public static class QueueLauncher
                 Effort = envelope.Effort,
             }
             : ApplyFrozenAssignment(item, request.Tier);
-        var followOn = item.Stage is WorkStage.Continue or WorkStage.Fix;
-        if (followOn && (item.Repository is not { Length: > 0 } || item.PullRequest is null
-            || item.Branch is not { Length: > 0 }))
+        // Repository, branch, and PR are durable lifecycle lineage. An implement row without that
+        // lineage is the initial PR-creating lane; once the row carries all three, it is a follow-on
+        // lane too and must use the exact-originating-PR verifier before the worker starts.
+        var hasPullRequestLineage = item.Repository is { Length: > 0 }
+            && item.PullRequest is not null
+            && item.Branch is { Length: > 0 };
+        var followOn = item.Stage is WorkStage.Continue or WorkStage.Fix
+            || item.Stage == WorkStage.Implement && hasPullRequestLineage;
+        if (followOn && !hasPullRequestLineage)
         {
             throw new CliArgumentException(
                 $"Queue {WorkStages.Token(item.Stage!.Value)} cannot launch without its canonical repository, recorded branch, and tracked open PR.");

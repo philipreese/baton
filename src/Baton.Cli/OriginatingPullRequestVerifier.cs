@@ -46,7 +46,11 @@ internal static class OriginatingPullRequestVerifier
             info.StandardOutputEncoding = Encoding.UTF8;
             info.StandardErrorEncoding = Encoding.UTF8;
         });
-        foreach (var argument in new[] { "pr", "view", number.ToString(), "--repo", repository, "--json", "state,headRefName,headRefOid" }) start.ArgumentList.Add(argument);
+        foreach (var argument in new[]
+        {
+            "pr", "view", number.ToString(), "--repo", repository, "--json",
+            "state,headRefName,headRefOid,isCrossRepository",
+        }) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new CliArgumentException("Could not start gh to verify '--originating-pr'.");
         using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         bound.CancelAfter(GhVerificationTimeout);
@@ -315,10 +319,12 @@ internal static class OriginatingPullRequestVerifier
                 || !root.TryGetProperty("headRefOid", out var headValue)
                 || stateValue.ValueKind != JsonValueKind.String
                 || branchValue.ValueKind != JsonValueKind.String
-                || headValue.ValueKind != JsonValueKind.String)
+                || headValue.ValueKind != JsonValueKind.String
+                || !root.TryGetProperty("isCrossRepository", out var crossRepositoryValue)
+                || crossRepositoryValue.ValueKind != JsonValueKind.False)
             {
                 throw new CliArgumentException(
-                    "The originating pull request returned a malformed response; retry after GitHub is reachable.");
+                    "The originating pull request response must include isCrossRepository as the JSON boolean false.");
             }
 
             var state = stateValue.GetString();

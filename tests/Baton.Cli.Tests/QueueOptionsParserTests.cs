@@ -14,6 +14,48 @@ public sealed class QueueOptionsParserTests
     {
         Assert.Contains($"--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>", QueueOptionsParser.Usage, StringComparison.Ordinal);
         Assert.Contains("--size-rationale <clause>", QueueOptionsParser.Usage, StringComparison.Ordinal);
+        Assert.Contains("--lifecycle-reason <why>", QueueOptionsParser.Usage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Lifecycle_reason_is_persisted_as_a_single_fallback_and_stage_reason_is_kept_specific()
+    {
+        var options = QueueOptionsParser.Parse([
+            "add", "2418-lane", "--issue", "2418", "--lifecycle",
+            "--declared-size", "medium", "--size-rationale", "one routing seam",
+            "--lifecycle-reason", "one rationale for the selected stages",
+            "--stage", "review", "--model", "gpt-5.6-sol", "--reason", "review-specific rationale",
+            "--stage", "fix", "--model", "gpt-6-astra",
+        ]);
+
+        Assert.Equal("one rationale for the selected stages", options.LifecycleReason);
+        Assert.Equal("review-specific rationale", options.StageSelections!.Single(s => s.Stage == Baton.Queue.WorkStage.Review).Reason);
+        Assert.Null(options.StageSelections!.Single(s => s.Stage == Baton.Queue.WorkStage.Fix).Reason);
+    }
+
+    [Fact]
+    public void Lifecycle_reason_is_rejected_outside_lifecycle_admission()
+    {
+        var refusal = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "add", "ordinary", "--role", "implement", "--spec", "brief.md", "--workspace", "C:\\x",
+            "--lifecycle-reason", "not applicable",
+        ]));
+
+        Assert.Contains("requires '--lifecycle'", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Lifecycle_parser_lists_every_selected_stage_missing_a_rationale()
+    {
+        var refusal = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "add", "2418-lane", "--issue", "2418", "--lifecycle", "--scope", "engine",
+            "--declared-size", "medium", "--size-rationale", "one routing seam",
+            "--stage", "review", "--adapter", "codex", "--model", "gpt-5.6-sol",
+            "--stage", "fix", "--adapter", "claude", "--model", "sonnet",
+        ]));
+
+        Assert.Contains("review", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("fix", refusal.Message, StringComparison.Ordinal);
     }
 
     [Theory]

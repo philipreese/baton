@@ -4293,7 +4293,8 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   in-memory samples ride the tick's eventual log and heartbeat; the watchdog performs no extra
   healthy-pass console or filesystem write that could itself wedge supervision.
   **The heartbeat's schema, stated here once:** `tickCompletedAt` (newest completion across
-  services), `startedAt` (process start), `services` (per service: `lastTickMs`, `completedAt`,
+  services), `startedAt` (process start), `identity` (the daemon's `pid`, `processStartTime`,
+  `executablePath`, and `version`), `services` (per service: `lastTickMs`, `completedAt`,
   `intervalMs`, and, only when that tick exceeded its interval, bounded aggregated `latePhases`
   entries with `name`, total `elapsedMs`, and `count`, plus bounded `lateSamples` entries with
   `sampledAt`, current `phase`, `phaseElapsedMs`, and that sample's `hostLoad`), `hostLoad` (#2082:
@@ -4307,6 +4308,10 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   independent driver continuations both miss cadence, retain separate phase attribution, and recover
   on the next tick after the pool is released; real registry-lock and child-process controls produce
   the narrower one-loop signature.
+  An outside replacement verifier accepts freshness only when `identity` matches the candidate PID,
+  process creation time, executable path, and version exactly; an old daemon's recent heartbeat is
+  therefore not evidence for its replacement. It rejects unparseable identity or timestamps and
+  requires `startedAt <= tickCompletedAt` before applying the existing freshness tolerance.
   A service's `lastTickMs` against its `intervalMs` is the host-load signal that predates the freeze:
   on 2026-09-08 `FleetProjectionWriter` had reached 10.97 s against 30 s in the last body written
   before every loop stopped. The watchdog's verdict line (`{Root}/fleet/watchdog.txt`) carries a
@@ -7360,7 +7365,8 @@ observation are retained on the queue row, and the disposition uses the existing
 
 `baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
 engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeout <minutes>] [--max-tool-steps]
-[--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`,
+[--token-budget] [--override-runway <reason>] [--reason <why>] [--lifecycle-reason <why>] [--lifecycle
+| --lifecycle-pin] [--stage <stage>]`, plus `list`, `hold`, `resume`, `cancel <tag>`,
 `retire <tag> --reason <text> [--merged-pr <n>]`, `restore <tag> --reason <text>`, `import <file>`, and
 `worktrees [--format text|json]`.
 
@@ -7756,7 +7762,13 @@ combined with `--stage`, so unset, stage override and whole-lifecycle pin are th
 states rather than inferred intent. `baton queue list` prints the effective plan and its source for
 every dispatchable stage; launch facts record the selected adapter/model/effort and `selectionSource`.
 Stage choices never alter timeout, tool-step or token budgets, and no stage advance escalates a
-vendor or model.
+vendor or model. Every explicit stage routing departure from its scope tier must carry a rationale
+before queue mutation. `--lifecycle-reason <why>` supplies one persisted fallback rationale for all
+explicit lifecycle-stage routing; a stage's named/current `--reason <why>` takes precedence only for
+that stage. The fallback is stored once on the queue item and projected into the effective launch
+reason at resolution time; it is not copied into every stage selection. `--lifecycle-reason` is
+refused outside lifecycle admission, and admission names every selected stage still missing a
+rationale before provisioning, spec copy, or queue mutation.
 
 **Persisted-item compatibility is explicit.** A lifecycle row written before this rule has no
 `stageSelections` field. If it also carries an adapter, model or effort, those stored axes retain
@@ -7775,7 +7787,7 @@ written:
 | implement | succeeded-shaped, PR open | **review** | there is something to review |
 | continue | succeeded-shaped, PR open, readable distinct attempt revision | **review** | the recovered work has a new authoritative revision to review |
 | fix | succeeded-shaped, PR open, readable distinct attempt revision | **re-review** | the prior verdict's findings are being checked against a new authoritative revision |
-| implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
+| implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR; a conductor-supplied exact draft PR is reconciled before another lifecycle round |
 | review / re-review | succeeded-shaped, `decision: approve`, exact full `reviewedRef` = current PR head, required checks passing | **ready** | only current-head approval plus green required checks may clear draft |
 | review / re-review | succeeded-shaped, `decision: approve`, canonical full-SHA `reviewedRef` differs from current PR head | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
 | review / re-review | succeeded-shaped, `decision: approve`, noncanonical `reviewedRef` | **operator** | lifecycle approval requires exactly one full 40-character hexadecimal PR-head SHA; halt rather than spend a re-review |
@@ -7829,6 +7841,17 @@ be readable and differ before a fix can re-review or a continuation can review; 
 baseline, or an unreadable delivered head is an operator halt for every terminal outcome. The terminal
 room, attempt identity, baseline, and last verdict stay on the item for recovery. A prose claim in
 `changes.md` is not revision evidence, and this guard runs before any review round is reserved.
+
+**A pull-request authority refusal is typed and narrow.** The advancer reads engine-owned
+`baton.grant` records in the terminal execution's unrolled `.baton-grants.ndjson` authority log and
+treats only a denied `rule: own-pr-only` record as originating-PR authority evidence. Codex mirrors
+the same record into its bounded captured stream for diagnostics, but that stream is not lifecycle
+evidence after rollover. The
+aggregate `refusedToolSteps` count is not used: an incidental denied shell command does not change
+lifecycle routing. For a mutating implement/fix/continue lane with no bound PR, that exact refusal
+produces `AwaitingVerifiedPullRequest`; a bound PR, review verdict, or ordinary outcome keeps the
+normal lifecycle precedence. The conductor then supplies the exact repository/branch PR, and the
+existing originating-PR verifier rechecks that it is open and at the required head before launch.
 
 **Arrest continuation evidence (#2253).** The dispatcher captures the attempt-start SHA and the
 engine-placed-file list before the worker starts. After the existing grace turn, it records

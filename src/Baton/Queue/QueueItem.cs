@@ -111,6 +111,13 @@ public sealed record QueueItem
     /// when any axis is overridden; recorded on the launch fact and on the room's bindings.</summary>
     public string? Reason { get; init; }
 
+    /// <summary>
+    /// One persisted fallback rationale for explicit lifecycle-stage routing. A stage selection's
+    /// <see cref="QueueStageSelection.Reason"/> takes precedence without copying this value into
+    /// each selection.
+    /// </summary>
+    public string? LifecycleReason { get; init; }
+
     /// <summary>The GitHub issue this item's worktree was provisioned from, when it was. Recorded so
     /// the room can be traced back; a work item (<see cref="Stage"/> non-null) is <em>anchored</em> on
     /// it — every brief it renders and every PR it looks for is that issue's.</summary>
