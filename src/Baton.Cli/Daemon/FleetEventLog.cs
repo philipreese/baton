@@ -463,6 +463,27 @@ public sealed class FleetEventLog
     }
 
     /// <summary>
+    /// Reads both retained segments without repairing them. An incomplete final row is an explicit
+    /// refusal because omitting it could make retained recovery evidence appear absent.
+    /// </summary>
+    internal Task<IReadOnlyList<FleetEvent>> ReadRetainedForInspection(
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+            _livePath,
+            LockNamePrefix,
+            LockTimeout,
+            () =>
+            {
+                var rollover = Read(_rolloverPath);
+                var live = Read(_livePath);
+                ThrowIfTornTail(_rolloverPath, rollover.TornTailOffset);
+                ThrowIfTornTail(_livePath, live.TornTailOffset);
+                return (IReadOnlyList<FleetEvent>)rollover.Events.Concat(live.Events).ToList();
+            }), cancellationToken);
+    }
+
+    /// <summary>
     /// A strict, read-deny-write snapshot of both retained segments for an operator proof. Unlike
     /// display replay, a torn tail or unreadable segment cannot be treated as absence. The caller
     /// holds the streams through its queue commit so append/rotation cannot invalidate the proof.
@@ -686,6 +707,14 @@ public sealed class FleetEventLog
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
         stream.SetLength(truncateAt);
         stream.Flush(flushToDisk: true);
+    }
+
+    private static void ThrowIfTornTail(string path, long? offset)
+    {
+        if (offset is { } byteOffset)
+        {
+            throw new IOException($"Fleet-event segment '{path}' has an incomplete final row at byte offset {byteOffset}.");
+        }
     }
 
     private sealed record FleetEventReadResult(IReadOnlyList<FleetEvent> Events, long? TornTailOffset);

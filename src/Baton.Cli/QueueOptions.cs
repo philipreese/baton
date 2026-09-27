@@ -83,6 +83,7 @@ public enum QueueListOutputFormat
 /// <param name="ListFormat">The output format for <c>baton queue list</c>.</param>
 /// <param name="PageSize">The bounded JSON inspection page size.</param>
 /// <param name="Cursor">The opaque JSON inspection continuation cursor.</param>
+/// <param name="Recovery">Inspects retained conductor obligations without modifying them.</param>
 /// <param name="Apply">Claims and removes static worktree candidates after a final recheck.</param>
 public sealed record QueueOptions(
     QueueVerb Verb,
@@ -115,4 +116,5 @@ public sealed record QueueOptions(
     bool IncludeRetained = false,
     QueueListOutputFormat ListFormat = QueueListOutputFormat.Text,
     int? PageSize = null,
-    string? Cursor = null);
+    string? Cursor = null,
+    bool Recovery = false);

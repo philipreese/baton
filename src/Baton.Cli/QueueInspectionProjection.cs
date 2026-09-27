@@ -138,13 +138,22 @@ internal static class QueueInspectionProjection
         return rows;
     }
 
-    internal static QueueInspectionWindow PageItems(
+    internal static QueueInspectionWindow<QueueItem> PageItems(
         IReadOnlyList<QueueItem> items,
         string fingerprint,
         bool active,
         bool includeRetained,
         int pageSize,
-        string? cursor)
+        string? cursor) => PageItems<QueueItem>(items, fingerprint, active, includeRetained, pageSize, cursor);
+
+    internal static QueueInspectionWindow<T> PageItems<T>(
+        IReadOnlyList<T> items,
+        string fingerprint,
+        bool active,
+        bool includeRetained,
+        int pageSize,
+        string? cursor,
+        bool recovery = false)
     {
         var start = 0;
         if (cursor is not null)
@@ -155,7 +164,7 @@ internal static class QueueInspectionProjection
                 throw new CliArgumentException(ChangedSnapshotMessage);
             }
 
-            if (decoded.Active != active || decoded.IncludeRetained != includeRetained)
+            if (decoded.Active != active || decoded.IncludeRetained != includeRetained || decoded.Recovery != recovery)
             {
                 throw new CliArgumentException(ChangedSelectionMessage);
             }
@@ -166,9 +175,9 @@ internal static class QueueInspectionProjection
         var page = items.Skip(start).Take(pageSize).ToArray();
         var nextOffset = start + page.Length;
         var nextCursor = nextOffset < items.Count
-            ? EncodeCursor(new QueueInspectionCursor(1, fingerprint, nextOffset, active, includeRetained))
+            ? EncodeCursor(new QueueInspectionCursor(1, fingerprint, nextOffset, active, includeRetained, recovery))
             : null;
-        return new QueueInspectionWindow(page, nextCursor);
+        return new QueueInspectionWindow<T>(page, nextCursor);
     }
 
     private static string? PullRequestState(QueuePullRequestObservation? observation) =>
@@ -197,9 +206,10 @@ internal sealed record QueueInspectionCursor(
     string Fingerprint,
     int Offset,
     bool Active,
-    bool IncludeRetained);
+    bool IncludeRetained,
+    bool Recovery = false);
 
-internal sealed record QueueInspectionWindow(IReadOnlyList<QueueItem> Items, string? NextCursor);
+internal sealed record QueueInspectionWindow<T>(IReadOnlyList<T> Items, string? NextCursor);
 
 internal sealed record QueueInspectionDocument(
     int SchemaVersion,

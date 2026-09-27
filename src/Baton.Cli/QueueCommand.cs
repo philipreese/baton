@@ -20,8 +20,8 @@ namespace Baton.Cli;
 /// </summary>
 /// <remarks>
 /// <b>Nothing here starts a lane</b> — spec/baton.md §13 states that split and why. What it means for
-/// this file specifically: every method below returns having written the queue file (and, for
-/// <c>add</c>, the spec copy and possibly a worktree), and never having touched a room.
+/// this file specifically: list inspections do not write the queue; mutations write queue control
+/// state (and, for <c>add</c>, the spec copy and possibly a worktree), never starting a room.
 /// </remarks>
 public static class QueueCommand
 {
@@ -962,6 +962,11 @@ public static class QueueCommand
         CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        if (options.Recovery)
+        {
+            return await QueueRecoveryInspection.WriteAsync(options, snapshot, output, cancellationToken)
+                .ConfigureAwait(false);
+        }
         var active = options.Active || options.ListFormat == QueueListOutputFormat.Json && !options.IncludeRetained;
         var items = options.IncludeRetained
             ? snapshot.Items

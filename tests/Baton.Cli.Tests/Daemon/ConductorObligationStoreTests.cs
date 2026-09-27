@@ -175,6 +175,256 @@ public sealed class ConductorObligationStoreTests : IDisposable
         Assert.DoesNotContain(
             await rotatingLog.ReadRetainedRepairingTornTails(Ct),
             row => row.Kind == FleetEventKind.ConductorObligationActionObserved);
+
+        var inspection = await restarted.InspectAsync(Ct);
+        var inspectedTerminal = Assert.Single(inspection.Obligations);
+        Assert.Equal(ConductorObligationStatus.ActionObserved, inspectedTerminal.Status);
+        Assert.Equal("execution-1-complete", inspectedTerminal.ActionProof);
+    }
+
+    [Fact]
+    public async Task Inspection_of_missing_state_returns_empty_without_creating_files()
+    {
+        var inspection = await Store().InspectAsync(Ct);
+
+        Assert.Empty(inspection.Obligations);
+        Assert.Empty(inspection.Quarantined);
+        Assert.False(File.Exists(_events));
+        Assert.False(File.Exists(_rollover));
+        Assert.False(File.Exists(_projection));
+    }
+
+    [Fact]
+    public async Task Inspection_returns_all_statuses_including_projection_only_terminals_after_rotation()
+    {
+        var store = Store();
+        await store.EnqueueAsync(Request("pending"), Ct);
+        await store.EnqueueAsync(Request("submitted"), Ct);
+        await store.SubmitAsync("submitted", (_, _) => Task.FromResult(new ConductorTransportResult(false)), Ct);
+        await store.EnqueueAsync(Request("acknowledged"), Ct);
+        await store.SubmitAsync("acknowledged", (_, _) => Task.FromResult(new ConductorTransportResult(true, "receipt")), Ct);
+        await store.EnqueueAsync(Request("observed"), Ct);
+        await store.ObserveActionAsync("observed", "proof", Ct);
+        await store.EnqueueAsync(Request("blocked"), Ct);
+        await store.BlockAsync("blocked", "needs owner", Ct);
+        await store.EnqueueAsync(Request("unsupported") with
+        {
+            AdapterSupported = false,
+            UnsupportedReason = "not supported",
+        }, Ct);
+
+        var rotatingLog = Log(maxLiveBytes: 1);
+        for (var index = 0; index < 3; index++)
+        {
+            await rotatingLog.Append(
+                new FleetEventDraft(
+                    FleetEventKind.DaemonStarted,
+                    $"inspection-rotation:{index}",
+                    DateTimeOffset.Parse("2026-09-18T12:00:00Z").AddMinutes(index)),
+                Ct);
+        }
+
+        var inspection = await Store().InspectAsync(Ct);
+        Assert.Equal(
+            new Dictionary<string, ConductorObligationStatus>(StringComparer.Ordinal)
+            {
+                ["pending"] = ConductorObligationStatus.Pending,
+                ["submitted"] = ConductorObligationStatus.Submitted,
+                ["acknowledged"] = ConductorObligationStatus.TransportAcknowledged,
+                ["observed"] = ConductorObligationStatus.ActionObserved,
+                ["blocked"] = ConductorObligationStatus.Blocked,
+                ["unsupported"] = ConductorObligationStatus.Unsupported,
+            },
+            inspection.Obligations.ToDictionary(item => item.IdempotencyKey, item => item.Status, StringComparer.Ordinal));
+        Assert.Empty(inspection.Quarantined);
+        Assert.Contains(await rotatingLog.ReadRetainedRepairingTornTails(Ct), row => row.Kind == FleetEventKind.DaemonStarted);
+    }
+
+    [Fact]
+    public async Task Inspection_reconstructs_fact_only_state_without_writing_projection()
+    {
+        await Store().EnqueueAsync(Request(), Ct);
+        File.Delete(_projection);
+
+        var inspection = await Store().InspectAsync(Ct);
+
+        Assert.Equal(ConductorObligationStatus.Pending, Assert.Single(inspection.Obligations).Status);
+        Assert.False(File.Exists(_projection));
+    }
+
+    [Fact]
+    public async Task Inspection_preserves_records_owned_by_other_conductors()
+    {
+        var store = Store();
+        await store.EnqueueAsync(Request("owner-a"), Ct);
+        await store.EnqueueAsync(Request("owner-b") with { Owner = "conductor-b" }, Ct);
+
+        var inspection = await Store().InspectAsync(Ct);
+
+        Assert.Equal(2, inspection.Obligations.Count);
+        Assert.Equal("conductor-a", inspection.Obligations.Single(item => item.IdempotencyKey == "owner-a").Owner);
+        Assert.Equal("conductor-b", inspection.Obligations.Single(item => item.IdempotencyKey == "owner-b").Owner);
+    }
+
+    [Fact]
+    public async Task Inspection_exposes_contradictory_fact_as_keyed_quarantine()
+    {
+        await Store().EnqueueAsync(Request(), Ct);
+        await Log().Append(ObligationDraft(
+            FleetEventKind.ConductorObligationPending,
+            "conductor-obligation:conductorObligationPending:contradiction",
+            Request() with { TargetProject = "different-project" }), Ct);
+
+        var inspection = await Store().InspectAsync(Ct);
+
+        Assert.Contains("obligation-1", inspection.Quarantined.Keys);
+        Assert.Contains("malformed", inspection.Quarantined["obligation-1"], StringComparison.Ordinal);
+        Assert.Equal("project-a", Assert.Single(inspection.Obligations).TargetProject);
+    }
+
+    [Fact]
+    public async Task Inspection_refuses_unkeyed_fact_with_source_location_without_writing()
+    {
+        await Log().Append(
+            new FleetEventDraft(
+                FleetEventKind.ConductorObligationPending,
+                "conductor-obligation:pending:missing-key",
+                DateTimeOffset.Parse("2026-09-18T12:00:00Z"),
+                ObligationId: "missing-key-id",
+                ObligationTargetProject: "project-a",
+                ObligationTargetExecution: "execution-1",
+                ObligationRequestedAction: "continue",
+                ObligationOwner: "conductor-a",
+                ObligationCreatedAt: DateTimeOffset.Parse("2026-09-18T11:00:00Z"),
+                ObligationAdapter: "test-adapter",
+                ObligationAdapterCapability: "conductor-submit",
+                ObligationAdapterSupported: true),
+            Ct);
+        var eventBytes = await File.ReadAllBytesAsync(_events, Ct);
+
+        var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(() => Store().InspectAsync(Ct));
+
+        Assert.Contains("no idempotency key", error.Message, StringComparison.Ordinal);
+        Assert.Contains(_events, error.Message, StringComparison.Ordinal);
+        Assert.Contains("line 1", error.Message, StringComparison.Ordinal);
+        Assert.Equal(eventBytes, await File.ReadAllBytesAsync(_events, Ct));
+        Assert.False(File.Exists(_projection));
+    }
+
+    [Theory]
+    [InlineData("null-entry")]
+    [InlineData("duplicate-key")]
+    [InlineData("empty-owner")]
+    [InlineData("invalid-status")]
+    [InlineData("default-created-at")]
+    [InlineData("action-observed-missing-proof")]
+    [InlineData("terminal-in-open-partition")]
+    public async Task Inspection_refuses_malformed_projection_without_changing_any_store_bytes(string shape)
+    {
+        var store = Store();
+        await store.EnqueueAsync(Request(), Ct);
+        var terminalCase = shape is "action-observed-missing-proof" or "terminal-in-open-partition";
+        if (terminalCase)
+        {
+            await store.ObserveActionAsync("obligation-1", "execution-1-complete", Ct);
+        }
+
+        var projection = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(_projection, Ct))!;
+        var open = projection["openObligations"]!.AsArray();
+        var terminal = projection["terminalObligations"]!.AsArray();
+        switch (shape)
+        {
+            case "null-entry":
+                open[0] = null;
+                break;
+            case "duplicate-key":
+                open.Add(open[0]!.DeepClone());
+                break;
+            case "empty-owner":
+                open[0]!["owner"] = string.Empty;
+                break;
+            case "invalid-status":
+                open[0]!["status"] = 999;
+                break;
+            case "default-created-at":
+                open[0]!["createdAt"] = DateTimeOffset.MinValue.ToString("O");
+                break;
+            case "action-observed-missing-proof":
+                terminal[0]!["actionProof"] = null;
+                break;
+            case "terminal-in-open-partition":
+                open.Add(terminal[0]!.DeepClone());
+                terminal.RemoveAt(0);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(shape), shape, "Unknown projection fixture shape.");
+        }
+
+        await File.WriteAllTextAsync(_projection, projection.ToJsonString(), Ct);
+        var projectionBytes = await File.ReadAllBytesAsync(_projection, Ct);
+        var eventsExisted = File.Exists(_events);
+        var eventsBytes = eventsExisted ? await File.ReadAllBytesAsync(_events, Ct) : [];
+        var rolloverExisted = File.Exists(_rollover);
+        var rolloverBytes = rolloverExisted ? await File.ReadAllBytesAsync(_rollover, Ct) : [];
+
+        var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(() => Store().InspectAsync(Ct));
+
+        Assert.Contains(_projection, error.Message, StringComparison.Ordinal);
+        Assert.Equal(projectionBytes, await File.ReadAllBytesAsync(_projection, Ct));
+        Assert.Equal(eventsExisted, File.Exists(_events));
+        if (eventsExisted)
+        {
+            Assert.Equal(eventsBytes, await File.ReadAllBytesAsync(_events, Ct));
+        }
+        Assert.Equal(rolloverExisted, File.Exists(_rollover));
+        if (rolloverExisted)
+        {
+            Assert.Equal(rolloverBytes, await File.ReadAllBytesAsync(_rollover, Ct));
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Inspection_refuses_corrupt_or_torn_rows_in_either_segment_without_changing_bytes(
+        bool rollover,
+        bool torn)
+    {
+        await Store().EnqueueAsync(Request(), Ct);
+        var path = rollover ? _rollover : _events;
+        var original = torn ? "{\"id\":2,\"kind\":\"attemptSettled\"" : "not-json\n";
+        await File.WriteAllTextAsync(path, original, Ct);
+        var projectionBefore = await File.ReadAllTextAsync(_projection, Ct);
+
+        var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(() => Store().InspectAsync(Ct));
+
+        Assert.Contains(path, error.Message, StringComparison.Ordinal);
+        if (torn)
+        {
+            Assert.Contains("byte offset 0", error.Message, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.IsType<FleetEventLogReadException>(error.InnerException);
+        }
+        Assert.Equal(original, await File.ReadAllTextAsync(path, Ct));
+        Assert.Equal(projectionBefore, await File.ReadAllTextAsync(_projection, Ct));
+    }
+
+    [Fact]
+    public async Task Repeated_inspection_leaves_projection_and_retained_obligation_facts_unchanged()
+    {
+        await Store().EnqueueAsync(Request(), Ct);
+        var eventBytes = await File.ReadAllBytesAsync(_events, Ct);
+        var projectionBytes = await File.ReadAllBytesAsync(_projection, Ct);
+
+        await Store().InspectAsync(Ct);
+        await Store().InspectAsync(Ct);
+
+        Assert.Equal(eventBytes, await File.ReadAllBytesAsync(_events, Ct));
+        Assert.Equal(projectionBytes, await File.ReadAllBytesAsync(_projection, Ct));
     }
 
     [Fact]
@@ -267,6 +517,26 @@ public sealed class ConductorObligationStoreTests : IDisposable
     }
 
     private FleetEventLog Log(long maxLiveBytes = 100_000) => new(_events, _rollover, maxLiveBytes);
+
+    private static FleetEventDraft ObligationDraft(
+        FleetEventKind kind,
+        string dedupeKey,
+        ConductorObligationRequest request) => new(
+            kind,
+            dedupeKey,
+            DateTimeOffset.Parse("2026-09-18T12:00:00Z"),
+            ObligationId: $"id-{request.IdempotencyKey}",
+            ObligationIdempotencyKey: request.IdempotencyKey,
+            ObligationTargetProject: request.TargetProject,
+            ObligationTargetRoom: request.TargetRoom,
+            ObligationTargetExecution: request.TargetExecution,
+            ObligationPullRequestHead: request.PullRequestHead,
+            ObligationRequestedAction: request.RequestedAction,
+            ObligationOwner: request.Owner,
+            ObligationCreatedAt: request.CreatedAt,
+            ObligationAdapter: request.Adapter,
+            ObligationAdapterCapability: request.AdapterCapability,
+            ObligationAdapterSupported: request.AdapterSupported);
 
     [Theory]
     [InlineData(false)]
