@@ -284,9 +284,10 @@ public static class RedispatchCommand
         // not the raw `options.Workstream` a bare `baton redispatch` never passes at all.
         WorkstreamJunctionLinker.CreateIfRequested(entry.Workstream, options.RoomDirectoryPath);
 
-        // #1576: the same copy DispatchCommand's own --attach path runs -- reached only via the
-        // --spec + --attach combination refused above, so this is unreachable on the bare-redispatch path.
-        RoleSpecMaterializer.CopyAttachmentsIntoRoom(options.Attachments, options.RoomDirectoryPath);
+        var attachmentSources = options.SpecFilePath is null
+            ? AttachmentReadInputs.Resolve(entry.AttachmentNames, options.ParentRoomDirectoryPath)
+            : options.Attachments;
+        RoleSpecMaterializer.CopyAttachmentsIntoRoom(attachmentSources, options.RoomDirectoryPath);
 
         Console.Out.WriteLine($"Room directory: {options.RoomDirectoryPath}");
         Console.Out.WriteLine($"Redispatched from: {options.ParentRoomDirectoryPath}");
@@ -397,7 +398,9 @@ public static class RedispatchCommand
             StreamJson = RoleDispatch.StreamsJson(adapter),
             // #1895: the one thing the inherited prompt does NOT carry across -- RoleDispatch's own
             // method doc has the reasoning, and spec/baton.md §2 records the exception to "verbatim".
-            PromptTemplate = RoleDispatch.WithoutVerifyResultsParagraph(parentEntry.PromptTemplate),
+            PromptTemplate = RebaseAttachmentDisclosure(
+                RoleDispatch.WithoutVerifyResultsParagraph(parentEntry.PromptTemplate),
+                parentEntry.AttachmentNames, options.ParentRoomDirectoryPath, options.RoomDirectoryPath),
             // A redispatch is a fresh worker turn, never a continuation of the parent's own session.
             SessionId = null,
             ResumeSession = false,
@@ -412,6 +415,37 @@ public static class RedispatchCommand
     /// </summary>
     internal static string InheritedAdapter(WorkerBindingConfigEntry parentEntry, RedispatchOptions options) =>
         (options.Adapter ?? parentEntry.Adapter).Trim().ToLowerInvariant();
+
+    private static string RebaseAttachmentDisclosure(
+        string prompt, IReadOnlyList<string>? names, string parentRoom, string childRoom)
+    {
+        var parentDirectory = Path.Combine(parentRoom, Baton.Artifacts.ArtifactManager.ArtifactsDirectoryName, "attachments");
+        var marker = $"\n\nAttached files (in {parentDirectory}): ";
+        var start = prompt.IndexOf(marker, StringComparison.Ordinal);
+        if (names is not { Count: > 0 })
+        {
+            if (start < 0)
+            {
+                return prompt;
+            }
+            var end = prompt.IndexOf('\n', start + marker.Length);
+            return end < 0 ? prompt[..start] : prompt.Remove(start, end - start);
+        }
+
+        var suffix = $": {string.Join(", ", names)}";
+        var parent = $"Attached files (in {parentDirectory}){suffix}";
+        var child = $"Attached files (in {Path.Combine(childRoom, Baton.Artifacts.ArtifactManager.ArtifactsDirectoryName, "attachments")}){suffix}";
+        if (prompt.Contains(parent, StringComparison.Ordinal))
+        {
+            return prompt.Replace(parent, child, StringComparison.Ordinal);
+        }
+        if (start >= 0)
+        {
+            var end = prompt.IndexOf('\n', start + marker.Length);
+            prompt = end < 0 ? prompt[..start] : prompt.Remove(start, end - start);
+        }
+        return prompt + "\n\n" + child;
+    }
 
     /// <summary>
     /// <see cref="RoleDispatch.ToBinding"/>'s vendor-swap axis rule (#1082, spec/baton.md §2), as one

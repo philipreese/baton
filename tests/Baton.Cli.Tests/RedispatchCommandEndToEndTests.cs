@@ -1006,10 +1006,55 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
                 Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
             Assert.Contains($"Attached files (in {attachmentsDir}): context.txt", childBindings["advise"].PromptTemplate);
+            Assert.Equal(["context.txt"], childBindings["advise"].AttachmentNames);
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Bare_redispatch_copies_only_inherited_attachments_and_amended_spec_clears_them()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"redispatch-attachments-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "evidence.txt");
+            await File.WriteAllTextAsync(source, "inherited bytes", TestContext.Current.CancellationToken);
+            var parent = await DispatchTerminalParentAsync(root, "Read evidence.", attachments: [source]);
+            var parentAttachments = Path.Combine(parent, "artifacts", "attachments");
+            await File.WriteAllTextAsync(Path.Combine(parentAttachments, "worker-produced.txt"),
+                "must stay behind", TestContext.Current.CancellationToken);
+
+            var child = Path.Combine(root, "child");
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parent, child, Adapter: "fake"), Adapters,
+                TestContext.Current.CancellationToken);
+            var childEntry = (await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(child, "bindings.json"), TestContext.Current.CancellationToken))["advise"];
+            Assert.Equal(["evidence.txt"], childEntry.AttachmentNames);
+            Assert.Equal("inherited bytes", await File.ReadAllTextAsync(
+                Path.Combine(child, "artifacts", "attachments", "evidence.txt"), TestContext.Current.CancellationToken));
+            Assert.False(File.Exists(Path.Combine(child, "artifacts", "attachments", "worker-produced.txt")));
+            Assert.Contains(Path.Combine(child, "artifacts", "attachments"), childEntry.PromptTemplate);
+            Assert.DoesNotContain(parentAttachments, childEntry.PromptTemplate);
+
+            var amendedSpec = Path.Combine(root, "amended.md");
+            await File.WriteAllTextAsync(amendedSpec, "New brief.", TestContext.Current.CancellationToken);
+            var amended = Path.Combine(root, "amended");
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parent, amended, SpecFilePath: amendedSpec, Adapter: "fake"), Adapters,
+                TestContext.Current.CancellationToken);
+            var amendedEntry = (await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(amended, "bindings.json"), TestContext.Current.CancellationToken))["advise"];
+            Assert.Null(amendedEntry.AttachmentNames);
+            Assert.False(File.Exists(Path.Combine(amended, "artifacts", "attachments", "evidence.txt")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
         }
     }
 
@@ -1240,13 +1285,14 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
 
     private static async Task<string> DispatchTerminalParentAsync(
         string testRoot, string spec, string adapter = "fake", TimeSpan? timeout = null, string? label = null,
-        string? workstream = null, IReadOnlyList<string>? skills = null, string? model = null)
+        string? workstream = null, IReadOnlyList<string>? skills = null, string? model = null,
+        IReadOnlyList<string>? attachments = null)
     {
         var specPath = await WriteSpecAsync(testRoot, spec);
         var roomDirectory = Path.Combine(testRoot, "parent");
         var options = new DispatchOptions(
             "advise", specPath, roomDirectory, Adapter: adapter, Model: model, Timeout: timeout, Label: label,
-            Workstream: workstream, Skills: skills);
+            Workstream: workstream, Skills: skills, Attachments: attachments);
 
         var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);
 

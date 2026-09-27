@@ -93,7 +93,8 @@ public static class DecideCommand
             WorktreeWorkspaces.Provision(bindingConfig, options.RoomDirectoryPath);
         var profiles = await BatonProfileStore.LoadAsync(BatonProfileStore.DefaultPath, cancellationToken).ConfigureAwait(false);
         var workerBindings = WorkerBindingResolver.Resolve(
-            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath), onWorkerStdoutLine);
+            provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath), onWorkerStdoutLine,
+            options.RoomDirectoryPath);
 
         var workflowId = new WorkflowId(options.WorkflowId ?? snapshot.WorkflowTemplateId.Value);
         var referencedExecutionId = new ExecutionId(options.ExecutionId);

@@ -144,7 +144,7 @@ public static class ResumeCommand
 
         var resolvedOverride = WorkerBindingResolver.Resolve(
             new Dictionary<string, WorkerBindingConfigEntry> { [options.Worker] = overrideEntry },
-            adapters, profiles, bindingsFileDirectory);
+            adapters, profiles, bindingsFileDirectory, roomDirectory: options.RoomDirectoryPath);
 
         var workflowId = new WorkflowId(options.WorkflowId ?? snapshot.WorkflowTemplateId.Value);
 
@@ -180,7 +180,7 @@ public static class ResumeCommand
         // rest on): a resume targets one already-dispatched worker — a bindings file naming an
         // unrelated, unresolvable adapter for a step this call never touches must not block it.
         var lazyBaseBindings = WorkerBindingResolver.ResolveLazily(
-            provisionedConfig, adapters, profiles, bindingsFileDirectory);
+            provisionedConfig, adapters, profiles, bindingsFileDirectory, roomDirectory: options.RoomDirectoryPath);
         var workerBindings = new WorkerBindingOverride(lazyBaseBindings, options.Worker, resolvedOverride[options.Worker]);
 
         var settledState = await MutationInterface.StartWorkflowAsync(

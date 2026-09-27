@@ -173,8 +173,11 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
 
             var parentSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var parentRoom = Path.Combine(testRoot, "parent");
+            var parentAttachment = Path.Combine(testRoot, "parent-evidence.txt");
+            await File.WriteAllTextAsync(parentAttachment, "parent bytes", TestContext.Current.CancellationToken);
             var parentOptions = new DispatchOptions(
-                "advise", parentSpecPath, parentRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: grandparentRoom);
+                "advise", parentSpecPath, parentRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: grandparentRoom,
+                Attachments: [parentAttachment]);
             var parentResult = await DispatchCommand.ExecuteAsync(parentOptions, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
             var parentView = WorkflowStatusProjector.Project(parentResult.State, parentResult.Snapshot, parentRoom);
             await TerminalSentinelWriter.WriteAsync(parentRoom, parentView, TestContext.Current.CancellationToken);
@@ -190,6 +193,8 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
                 Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
             Assert.Equal("sess-abc-123", childBindings["advise"].SessionId);
             Assert.True(childBindings["advise"].ResumeSession);
+            Assert.Null(childBindings["advise"].AttachmentNames);
+            Assert.False(File.Exists(Path.Combine(childRoom, "artifacts", "attachments", "parent-evidence.txt")));
         }
         finally
         {

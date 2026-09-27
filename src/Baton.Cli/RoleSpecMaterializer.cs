@@ -96,11 +96,23 @@ internal static class RoleSpecMaterializer
         }
 
         var attachmentsDir = ComputeAttachmentsDirectory(roomDirectoryPath);
+        if (AttachmentReadInputs.CrossesLink(attachmentsDir))
+        {
+            throw new CliArgumentException($"Attachment directory '{attachmentsDir}' crosses a link.");
+        }
         Directory.CreateDirectory(attachmentsDir);
+        if (AttachmentReadInputs.CrossesLink(attachmentsDir))
+        {
+            throw new CliArgumentException($"Attachment directory '{attachmentsDir}' crosses a link.");
+        }
         foreach (var attachPath in attachmentsToCopy)
         {
             var fileName = Path.GetFileName(attachPath);
             var destPath = Path.Combine(attachmentsDir, fileName);
+            if (AttachmentReadInputs.CrossesLink(destPath))
+            {
+                throw new CliArgumentException($"Attachment destination '{destPath}' crosses a link.");
+            }
             try
             {
                 File.Copy(attachPath, destPath, overwrite: true);
@@ -136,6 +148,14 @@ internal static class RoleSpecMaterializer
             }
 
             var fileName = Path.GetFileName(file);
+            try
+            {
+                AttachmentReadInputs.ValidateNames([fileName]);
+            }
+            catch (WorkerBindingConfigException ex)
+            {
+                throw new CliArgumentException(ex.Message);
+            }
             if (seenFileNames.TryGetValue(fileName, out var priorPath))
             {
                 throw new CliArgumentException(

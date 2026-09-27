@@ -238,6 +238,8 @@ public static class RoleDispatch
             Adapter: adapter,
             Contract: contract,
             PromptTemplate: BuildPrompt(role, adapter, spec, outputs, attachments, attachmentsDirectory, verifyResultsPath),
+            AttachmentNames: attachments is { Count: > 0 } && !string.IsNullOrEmpty(attachmentsDirectory)
+                ? attachments.Select(path => Path.GetFileName(path)!).ToArray() : null,
             Timeout: timeoutOverride ?? role.Timeout,
             Model: model,
             PermissionGrant: grant,
