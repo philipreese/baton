@@ -186,6 +186,31 @@ public static class DispatchCommand
                 pair => pair.Key, pair => pair.Value with { DeclaredTaskSize = options.DeclaredTaskSize }, StringComparer.Ordinal);
         }
 
+        // Resolve exact execution-limit profiles once, after the actual adapter/model and declared
+        // size exist. Templates and continuations intentionally do not enter this arm.
+        if (options.ContinueFromRoomDirectoryPath is null && bindings.Count == 1
+            && WorkerRoleCatalog.All.Any(role => string.Equals(role.Id, options.Name, StringComparison.Ordinal)))
+        {
+            var declaredSize = options.DeclaredTaskSize ?? TaskSizeDeclaration.Unknown;
+            DaemonSettings settings;
+            try
+            {
+                settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (ExecutionLimitProfileConfigurationException ex)
+            {
+                throw new CliArgumentException(
+                    ex.Message,
+                    "fix or remove the malformed ExecutionLimitProfiles rows before dispatching a worker.");
+            }
+
+            bindings = bindings.ToDictionary(
+                pair => pair.Key,
+                pair => ApplyExecutionLimits(pair.Value, options, declaredSize, settings.ExecutionLimitProfiles),
+                StringComparer.Ordinal);
+        }
+
         // #1668: record the active tool commit SHA on each binding for room version tracking.
         if (BatonPaths.TryResolveCurrentToolSha() is { } toolSha)
         {
@@ -1440,6 +1465,31 @@ public static class DispatchCommand
                 StringComparer.Ordinal));
     }
 
+    private static WorkerBindingConfigEntry ApplyExecutionLimits(
+        WorkerBindingConfigEntry binding,
+        DispatchOptions options,
+        TaskSizeDeclaration declaredSize,
+        IReadOnlyList<ExecutionLimitProfile>? profiles)
+    {
+        var role = WorkerRoleCatalog.For(options.Name);
+        var resolution = ExecutionLimitProfileResolver.Resolve(
+            profiles, binding.Adapter, binding.ModelResolved ?? binding.Model, role.Id, declaredSize.Size,
+            role.Timeout,
+            options.TokenBudget is null ? role.TokenBudget?.Resolve(role.Id, binding.Adapter) : null,
+            role.MaxToolSteps,
+            options.Timeout,
+            options.TokenBudget,
+            options.MaxToolSteps);
+
+        return binding with
+        {
+            Timeout = resolution.Timeout,
+            TokenBudget = resolution.TokenBudget,
+            MaxToolSteps = resolution.MaxToolSteps,
+            ExecutionLimitResolution = resolution,
+        };
+    }
+
     /// <summary>
     /// #1882: where this dispatch's <c>verify-results.md</c> will land, or null when no
     /// <c>--verify-cmd</c> was passed. Computed from the room directory alone — the step runs before
@@ -1680,6 +1730,13 @@ public static class DispatchCommand
                 : null;
         var resumedEntry = entry with
         {
+            // A continuation keeps the veteran's saved limit snapshot; mutable settings are not
+            // consulted again for this same-session path.
+            Timeout = parentEntry.Timeout,
+            TokenBudget = parentEntry.TokenBudget,
+            MaxToolSteps = parentEntry.MaxToolSteps,
+            DeclaredTaskSize = parentEntry.DeclaredTaskSize ?? entry.DeclaredTaskSize,
+            ExecutionLimitResolution = parentEntry.ExecutionLimitResolution,
             SessionId = parentEntry.SessionId,
             ResumeSession = true,
             // The binding is a worker-readable projection, not authority. Carry its captured base

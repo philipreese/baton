@@ -419,6 +419,154 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Continuation_preserves_execution_limits_snapshot_even_after_settings_change()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-continue-limits-{Guid.NewGuid():N}");
+        try
+        {
+            var initialSettings = new DaemonSettings
+            {
+                ExecutionLimitProfiles =
+                [
+                    new ExecutionLimitProfile
+                    {
+                        Adapter = "claude",
+                        Model = "sonnet",
+                        Role = "advise",
+                        DeclaredTaskSize = "unknown",
+                        Timeout = TimeSpan.FromMinutes(14),
+                        TokenBudget = 45000,
+                        MaxToolSteps = 35,
+                    },
+                ],
+            };
+            await DaemonSettingsStore.SaveAsync(initialSettings, BatonPaths.SettingsFile, TestContext.Current.CancellationToken);
+
+            var parentRoom = await DispatchTerminalParentWithSessionAsync(testRoot, "Initial advice brief.", "sess-limits-456");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(parentRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var parentEntry = parentBindings["advise"];
+
+            Assert.Equal(TimeSpan.FromMinutes(14), parentEntry.Timeout);
+            Assert.Equal(45000, parentEntry.TokenBudget);
+            Assert.Equal(35, parentEntry.MaxToolSteps);
+            Assert.NotNull(parentEntry.ExecutionLimitResolution);
+            Assert.Equal("claude/sonnet/advise/unknown", parentEntry.ExecutionLimitResolution.ChosenKey);
+            Assert.Equal(ExecutionLimitSource.Profile, parentEntry.ExecutionLimitResolution.TimeoutSource);
+
+            // Change daemon settings before continuation
+            var modifiedSettings = new DaemonSettings
+            {
+                ExecutionLimitProfiles =
+                [
+                    new ExecutionLimitProfile
+                    {
+                        Adapter = "claude",
+                        Model = "sonnet",
+                        Role = "advise",
+                        DeclaredTaskSize = "unknown",
+                        Timeout = TimeSpan.FromMinutes(50),
+                        TokenBudget = 999999,
+                        MaxToolSteps = 100,
+                    },
+                ],
+            };
+            await DaemonSettingsStore.SaveAsync(modifiedSettings, BatonPaths.SettingsFile, TestContext.Current.CancellationToken);
+
+            var followUpSpecPath = await WriteSpecAsync(testRoot, "Follow up advice brief.");
+            var childRoom = Path.Combine(testRoot, "child");
+            var options = new DispatchOptions(
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
+
+            var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+
+            Assert.Equal(WorkflowStatus.Terminal, result.State.Status);
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var childEntry = childBindings["advise"];
+
+            // The child must carry the parent's saved snapshot, NOT the changed settings
+            Assert.Equal(parentEntry.Timeout, childEntry.Timeout);
+            Assert.Equal(parentEntry.TokenBudget, childEntry.TokenBudget);
+            Assert.Equal(parentEntry.MaxToolSteps, childEntry.MaxToolSteps);
+            Assert.Equal(parentEntry.ExecutionLimitResolution, childEntry.ExecutionLimitResolution);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Continuation_allows_declared_task_size_when_omitted_on_parent_dispatch()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-continue-size-add-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentWithSessionAsync(testRoot, "No size declared.", "sess-size-123");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(parentRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Null(parentBindings["advise"].DeclaredTaskSize);
+
+            var followUpSpecPath = await WriteSpecAsync(testRoot, "Declare size on continue.");
+            var childRoom = Path.Combine(testRoot, "child");
+            var declaredSize = TaskSizeDeclaration.Parse("small", "initial declaration on continuation");
+            var options = new DispatchOptions(
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet",
+                DeclaredTaskSize: declaredSize,
+                ContinueFromRoomDirectoryPath: parentRoom);
+
+            var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+
+            Assert.Equal(WorkflowStatus.Terminal, result.State.Status);
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.Equal(declaredSize, childBindings["advise"].DeclaredTaskSize);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Continuation_refuses_replacing_declared_task_size_from_parent()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-continue-size-refuse-{Guid.NewGuid():N}");
+        try
+        {
+            var specPath = await WriteSpecAsync(testRoot, "Small size declared.");
+            var parentRoom = Path.Combine(testRoot, "parent");
+            var initialSize = TaskSizeDeclaration.Parse("small", "initial small");
+            var parentOptions = new DispatchOptions(
+                "advise", specPath, parentRoom, Adapter: "claude", Model: "sonnet",
+                DeclaredTaskSize: initialSize);
+
+            var parentResult = await DispatchCommand.ExecuteAsync(parentOptions, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+            var view = WorkflowStatusProjector.Project(parentResult.State, parentResult.Snapshot, parentRoom);
+            await TerminalSentinelWriter.WriteAsync(parentRoom, view, TestContext.Current.CancellationToken);
+            await SetSessionIdAsync(parentRoom, "advise", "sess-size-repl");
+
+            var followUpSpecPath = await WriteSpecAsync(testRoot, "Try changing size.");
+            var childRoom = Path.Combine(testRoot, "child");
+            var differentSize = TaskSizeDeclaration.Parse("large", "trying to change to large");
+            var childOptions = new DispatchOptions(
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet",
+                DeclaredTaskSize: differentSize,
+                ContinueFromRoomDirectoryPath: parentRoom);
+
+            var ex = await Assert.ThrowsAsync<CliArgumentException>(
+                () => DispatchCommand.ExecuteAsync(childOptions, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit));
+
+            Assert.Contains("it cannot be replaced on continuation", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static async Task<string> DispatchTerminalParentWithSessionAsync(
         string testRoot, string spec, string sessionId, string adapter = "claude")
     {
