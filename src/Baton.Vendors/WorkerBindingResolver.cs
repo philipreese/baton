@@ -318,10 +318,14 @@ public static class WorkerBindingResolver
     private static ExecutionLimitEvidence CreateLimitEvidence(
         WorkerBindingConfigEntry entry, ExecutionLimitResolution resolution)
     {
+        var selectionMatches = resolution.ChosenKey is null
+            || ExecutionLimitProfileResolver.ChosenKeyMatchesSelection(
+                resolution.ChosenKey, entry.Adapter, entry.Model,
+                entry.Contract.WorkerName, entry.DeclaredTaskSize?.Size ?? DeclaredTaskSize.Unknown);
         var timeoutMatches = entry.Timeout == resolution.Timeout;
         var tokenBudgetMatches = entry.TokenBudget == resolution.TokenBudget;
         var maxToolStepsMatches = entry.MaxToolSteps == resolution.MaxToolSteps;
-        var aggregateMatches = timeoutMatches && tokenBudgetMatches && maxToolStepsMatches;
+        var aggregateMatches = selectionMatches && timeoutMatches && tokenBudgetMatches && maxToolStepsMatches;
 
         return new ExecutionLimitEvidence(
             entry.Timeout,
@@ -329,9 +333,9 @@ public static class WorkerBindingResolver
             entry.MaxToolSteps,
             entry.BilledRateLimit,
             aggregateMatches ? resolution.ChosenKey : null,
-            timeoutMatches ? resolution.TimeoutSource : null,
-            tokenBudgetMatches ? resolution.TokenBudgetSource : null,
-            maxToolStepsMatches ? resolution.MaxToolStepsSource : null);
+            selectionMatches && timeoutMatches ? resolution.TimeoutSource : null,
+            selectionMatches && tokenBudgetMatches ? resolution.TokenBudgetSource : null,
+            selectionMatches && maxToolStepsMatches ? resolution.MaxToolStepsSource : null);
     }
 
 

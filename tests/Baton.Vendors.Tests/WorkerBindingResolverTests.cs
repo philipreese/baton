@@ -150,8 +150,10 @@ public class WorkerBindingResolverTests
         var config = new Dictionary<string, WorkerBindingConfigEntry>
         {
             ["architect"] = new WorkerBindingConfigEntry(
-                "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30),
-                TokenBudget: 1000, MaxToolSteps: 10, ExecutionLimitResolution: resolution),
+                "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30), Model: "model",
+                TokenBudget: 1000, MaxToolSteps: 10,
+                DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+                ExecutionLimitResolution: resolution),
         };
 
         var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
@@ -161,6 +163,28 @@ public class WorkerBindingResolverTests
         Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.TimeoutSource);
         Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.TokenBudgetSource);
         Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Equal_values_do_not_preserve_a_profile_selected_for_another_model()
+    {
+        var resolution = new ExecutionLimitResolution(
+            "echo/model-a/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+            ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10);
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30), Model: "model-b",
+            TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: resolution);
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Null(binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Null(binding.EffectiveLimitEvidence.TimeoutSource);
+        Assert.Null(binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.Null(binding.EffectiveLimitEvidence.MaxToolStepsSource);
     }
 
     [Fact]

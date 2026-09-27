@@ -1,4 +1,5 @@
 using Baton.Artifacts;
+using Baton.Accounting;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
@@ -802,7 +803,10 @@ public class MutationInterfaceCrashRecoveryTests
                 Timeout,
                 TokenBudget: 1000,
                 MaxToolSteps: 10,
-                BilledRateLimit: 100);
+                BilledRateLimit: 100,
+                TimeoutSource: "dispatch-override",
+                TokenBudgetSource: "role-default",
+                MaxToolStepsSource: "role-default");
 
             // Resubmission binding has a new timeout (e.g. 60s) AND changed monitor inputs (2000, 20, 200).
             var newTimeout = TimeSpan.FromSeconds(60);
@@ -812,7 +816,12 @@ public class MutationInterfaceCrashRecoveryTests
                 timeout: newTimeout,
                 tokenBudget: 2000,
                 maxToolSteps: 20,
-                billedRateLimit: 200);
+                billedRateLimit: 200,
+                limitEvidence: new ExecutionLimitEvidence(
+                    newTimeout, 2000, 20, 200,
+                    TimeoutSource: "role-default",
+                    TokenBudgetSource: "profile",
+                    MaxToolStepsSource: "profile"));
             var workflowId = new WorkflowId("wf");
 
             var executionId = await AcceptRequestAsync(
@@ -846,13 +855,27 @@ public class MutationInterfaceCrashRecoveryTests
                 Timeout,
                 TokenBudget: 2000,
                 MaxToolSteps: 20,
-                BilledRateLimit: 200);
+                BilledRateLimit: 200,
+                TimeoutSource: "dispatch-override",
+                TokenBudgetSource: "profile",
+                MaxToolStepsSource: "profile");
             Assert.Equal(expectedAppliedLimits, rebound.NewLimits);
 
             // Verify the actual dispatched request to CoreDispatcher preserved the accepted Timeout and carried new limits
             Assert.NotNull(stub.LastDispatchedRequest);
             Assert.Equal(Timeout, stub.LastDispatchedRequest.Timeout);
             Assert.Equal(expectedAppliedLimits, stub.LastDispatchedRequest.Limits);
+
+            var entries = (await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken)).ToList();
+            var startedAt = DateTime.UtcNow;
+            entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(executionId, 1), startedAt));
+            entries.Add(new LogEntry.CoreLogEntry(
+                new CoreEvent.ExecutionExited(executionId, 0, CoreExitReason.Natural), startedAt.AddSeconds(1)));
+            var status = WorkflowStatusProjector.Project(state, snapshot, roomDirectory, entries);
+            Assert.Equal(expectedAppliedLimits, Assert.Single(status.Steps).Usage?.Limits);
+            var repository = RepositoryIdentity.From("https://github.com/example/crash-limits.git", null)!;
+            var ledger = Assert.Single(CostLedgerStore.BuildEntries(entries, roomDirectory, repository));
+            Assert.Equal(expectedAppliedLimits, ledger.Limits);
         }
         finally
         {
@@ -873,7 +896,10 @@ public class MutationInterfaceCrashRecoveryTests
                 Timeout,
                 TokenBudget: 1000,
                 MaxToolSteps: 10,
-                BilledRateLimit: 100);
+                BilledRateLimit: 100,
+                TimeoutSource: "profile",
+                TokenBudgetSource: "profile",
+                MaxToolStepsSource: "profile");
 
             var bindings = MakeBindings(
                 adapter: "claude",
@@ -881,7 +907,8 @@ public class MutationInterfaceCrashRecoveryTests
                 timeout: Timeout,
                 tokenBudget: 1000,
                 maxToolSteps: 10,
-                billedRateLimit: 100);
+                billedRateLimit: 100,
+                limitEvidence: initialLimits);
             var workflowId = new WorkflowId("wf");
 
             var executionId = await AcceptRequestAsync(

@@ -2139,10 +2139,7 @@ public static class MutationInterface
         var usageParser = processBinding.Adapter is { } adapter
             ? StandardWorkerUsageParsers.Default.GetValueOrDefault(adapter)
             : null;
-        var monitorWasConfigured = processBinding.TokenBudget is not null
-            || processBinding.MaxToolSteps is not null
-            || processBinding.BilledRateLimit is not null;
-        return usageParser is not null || !monitorWasConfigured
+        return usageParser is not null
             ? evidence
             : evidence with
             {
@@ -2152,6 +2149,7 @@ public static class MutationInterface
                 ChosenKey = null,
                 TokenBudgetSource = null,
                 MaxToolStepsSource = null,
+                MonitorInputsKnown = false,
             };
     }
 
@@ -2171,7 +2169,8 @@ public static class MutationInterface
             && acceptedLimits.ChosenKey == currentLimits.ChosenKey
             && acceptedLimits.TimeoutSource == currentLimits.TimeoutSource
             && acceptedLimits.TokenBudgetSource == currentLimits.TokenBudgetSource
-            && acceptedLimits.MaxToolStepsSource == currentLimits.MaxToolStepsSource;
+            && acceptedLimits.MaxToolStepsSource == currentLimits.MaxToolStepsSource
+            && acceptedLimits.MonitorInputsKnown == currentLimits.MonitorInputsKnown;
 
         return currentLimits with
         {

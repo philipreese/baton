@@ -322,8 +322,9 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   **Ordinary execution limit evidence (#2449).** Before an ordinary process spawn, the accepted
   request records the timeout and, when the dispatch monitor is actually available, its token,
   tool-step, and billed-rate inputs in one vendor-neutral optional value. A non-null value records
-  null brakes as known unlimited only when the monitor predicate was available; an unavailable parser
-  leaves those monitor axes unknown while genuine timeout evidence remains. It carries only profile
+  null brakes as known unlimited only when the monitor predicate was available. A serialized
+  `MonitorInputsKnown` flag distinguishes this from an unavailable parser, which leaves those
+  monitor axes unknown while genuine timeout evidence remains. It carries only profile
   and per-axis source stamps that describe the whole recorded snapshot; an aggregate profile key is
   cleared for a mixed snapshot. An absent value remains unknown for legacy and supplementary
   executions. A crash-recovery resubmit keeps the accepted timeout provenance while recording changed

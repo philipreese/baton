@@ -33,6 +33,24 @@ public sealed class ExecutionLimitEvidenceTests
         Assert.Equal(evidence, roundTripped.Request.Limits);
         Assert.Contains("TokenBudget", json, StringComparison.Ordinal);
         Assert.Contains("MaxToolSteps", json, StringComparison.Ordinal);
+        Assert.Contains("MonitorInputsKnown", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Accepted_event_round_trip_preserves_unavailable_monitor_evidence()
+    {
+        var unavailable = new ExecutionLimitEvidence(
+            TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: false);
+        var json = JsonSerializer.Serialize<FlowEvent>(
+            new FlowEvent.ExecutionRequestAccepted(Request(unavailable)), FlowEventLogJson.Options);
+        var accepted = Assert.IsType<FlowEvent.ExecutionRequestAccepted>(
+            JsonSerializer.Deserialize<FlowEvent>(json, FlowEventLogJson.Options));
+
+        Assert.Equal(unavailable, accepted.Request.Limits);
+        Assert.False(accepted.Request.Limits!.MonitorInputsKnown);
+        Assert.NotEqual(
+            new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), null, null, null),
+            accepted.Request.Limits);
     }
 
     [Fact]

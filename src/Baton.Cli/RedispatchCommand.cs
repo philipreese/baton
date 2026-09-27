@@ -434,7 +434,7 @@ public static class RedispatchCommand
             && string.Equals(inherited.Model, parentEntry.Model, StringComparison.Ordinal);
 
         return new ExecutionLimitResolution(
-            selectionStillDescribesChild ? parentResolution?.ChosenKey : null,
+            selectionStillDescribesChild && !hasOverride ? parentResolution?.ChosenKey : null,
             options.Timeout is not null
                 ? ExecutionLimitSource.DispatchOverride
                 : parentResolution?.TimeoutSource,

@@ -259,6 +259,14 @@ public sealed class LedgerViewCommandTests : IDisposable
                     Execution: "legacy-null",
                     Adapter: "claude",
                     EndedAt: Sep4.AddHours(11)),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "parser-unavailable",
+                    Adapter: "fake",
+                    EndedAt: Sep4.AddHours(12),
+                    Limits: new ExecutionLimitEvidence(
+                        TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: false)),
             ],
             ledgerPath,
             TestContext.Current.CancellationToken);
@@ -268,6 +276,7 @@ public sealed class LedgerViewCommandTests : IDisposable
         var limitsColumn = LedgerCsv.Columns.ToList().IndexOf("limits");
         var populated = ParseCsvLine(lines[1]);
         var legacy = ParseCsvLine(lines[2]);
+        var unavailable = ParseCsvLine(lines[3]);
 
         Assert.Equal(LedgerCsv.Columns.Count, populated.Count);
         Assert.Equal(LedgerCsv.Columns.Count, legacy.Count);
@@ -275,7 +284,10 @@ public sealed class LedgerViewCommandTests : IDisposable
         using var serialized = JsonDocument.Parse(populated[limitsColumn]);
         Assert.Equal(4321, serialized.RootElement.GetProperty("TokenBudget").GetInt64());
         Assert.Equal(17, serialized.RootElement.GetProperty("MaxToolSteps").GetInt32());
+        Assert.True(serialized.RootElement.GetProperty("MonitorInputsKnown").GetBoolean());
         Assert.Equal(string.Empty, legacy[limitsColumn]);
+        using var unavailableJson = JsonDocument.Parse(unavailable[limitsColumn]);
+        Assert.False(unavailableJson.RootElement.GetProperty("MonitorInputsKnown").GetBoolean());
     }
 
     [Fact]

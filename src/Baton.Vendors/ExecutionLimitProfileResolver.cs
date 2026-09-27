@@ -72,6 +72,16 @@ public static class ExecutionLimitProfileResolver
             maxToolStepsOverride ?? profile?.MaxToolSteps ?? roleMaxToolSteps);
     }
 
+    /// <summary>Check a recorded selection against the exact normalized key this resolver produces.</summary>
+    public static bool ChosenKeyMatchesSelection(
+        string? chosenKey, string adapter, string? model, string role, DeclaredTaskSize size) =>
+        chosenKey is not null
+        && model is { Length: > 0 }
+        && string.Equals(
+            chosenKey,
+            new ExecutionLimitProfileKey(adapter, model, role, size).ToString(),
+            StringComparison.Ordinal);
+
     public static void Validate(IReadOnlyList<ExecutionLimitProfile>? profiles)
     {
         if (profiles is null) return;
