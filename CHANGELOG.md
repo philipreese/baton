@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.58.2](https://github.com/philipreese/baton/compare/v0.58.1...v0.58.2) (2026-09-27)
+
+
+### Bug Fixes
+
+* **dispatch:** Carry exact attachment read authority across vendors ([#2450](https://github.com/philipreese/baton/issues/2450)) ([c9cf978](https://github.com/philipreese/baton/commit/c9cf978434d839117a40cdd35c8c240b20a8b0b2))
+
 ## [0.58.1](https://github.com/philipreese/baton/compare/v0.58.0...v0.58.1) (2026-09-27)
 
 
