@@ -8,6 +8,7 @@ capture, so a directory each would be a directory per week holding one file.
 
 | Snapshot | What it holds | Feeds |
 |---|---|---|
+| [`deepswe/2026-09-27`](deepswe/2026-09-27/README.md) | 41 selected vendor/model/effort configurations from the DeepSWE v1.1 live artifact. | Routing evidence |
 | [`deepswe/2026-09-05`](deepswe/2026-09-05/README.md) | 41 selected vendor/model/effort configurations from the DeepSWE v1.1 live artifact. | Routing evidence |
 | [`deepswe/2026-09-04`](deepswe/2026-09-04/README.md) | 36 vendor/model/effort configurations from the DeepSWE v1.1 selector: pass@1, API-cost proxy, output tokens, agent steps. | Tier pins (#1861, #1863) |
 | [`subscription-usage/2026-09-04`](subscription-usage/2026-09-04/README.md) | Baton-launched versus native Claude Code sessions, 2026-08-31 to 09-04: responses, output, cache-read, implement-room outcomes. | #1848, #1849, #1391 |
@@ -63,14 +64,10 @@ check is and what it refuses lives in `price_adjustments()` in the collector; th
 price, current price and factor land in the snapshot's own README, and so does the operator's REASON,
 for the same purpose `--allow-missing-provider`'s serves (#1955).
 
-The file is sorted with `on_vendor_frontier` rows first, then by utility, then by quality — so a row a
-same-vendor sibling dominates (Opus xhigh, 73 at 89 steps, behind Opus high's 73 at 73) sorts below
-every frontier row whatever its utility. At the default L of 0.10 (one quality point forfeited per ten
-agent steps) the first six rows are Sol max, Sol xhigh, Opus high, Sol high, Opus max, Opus medium —
-all six on their vendor's frontier, four of them on the cross-vendor one. Raise L to 0.20 and Opus
-medium passes Opus high; at 0.40 the top five are all Sol or Opus rows at 61 steps or fewer. Gemini
-3.8 Flash high ties Opus max for the best raw quality (74) and its medium row ties for sixth; at the
-default L they sit tenth and eleventh, and at 0.05 eighth and ninth.
+The file is sorted with `on_vendor_frontier` rows first, then by utility, then by quality. A row
+dominated by a same-vendor sibling sorts below every vendor-frontier row whatever its utility.
+Read rankings from the dated derived file and use the derivation's `--sweep` to compare coefficients;
+an undated example ranking would drift as snapshots and available configurations change.
 
 ## Reading rules the snapshots share
 
@@ -82,6 +79,38 @@ default L they sit tenth and eleventh, and at 0.05 eighth and ninth.
   exhaustion to fleet volume and names cache re-reads as the amplifier; reading that as "steps, not
   output, are what drain the plan" is this page's inference from it. Compare routes on quality, steps,
   and output together, then look at cost.
+
+## Choosing a worker from benchmark evidence
+
+Use [DeepSWE](https://deepswe.datacurve.ai/) and
+[Artificial Analysis's coding-agent results](https://artificialanalysis.ai/agents/coding-agents)
+to shortlist vendor/model/effort configurations, then compare accepted work in the actual native
+harness before changing a routing recommendation. Existing tier pins and authority boundaries
+remain in force; a refreshed leaderboard is evidence, not an automatic promotion.
+
+DeepSWE's [methodology](https://deepswe.datacurve.ai/blog/deepswe) is especially relevant to
+long-horizon implementation: original repository tasks and behavioral verification. Its shared
+`mini-swe-agent` harness and language mix do not directly measure Baton's native CLI or Windows/C#
+environment. Artificial Analysis's
+[coding-agent methodology](https://artificialanalysis.ai/methodology/coding-agents-benchmarking)
+adds terminal execution and repository understanding, alongside token/cache usage, runtime and
+API cost. Read the component scores for the intended role rather than only the overall index.
+Its implementation component includes DeepSWE, so the two sites are not independent votes on
+that benchmark. Repository Q&A is not a test of independent code review or conductor judgment.
+
+For each selection, name the task/role, vendor, model, effort, harness and evidence date. Where
+comparable local evidence exists, include accepted outcomes and review/rework, failed or abandoned
+attempts, tool calls, token/cache usage and elapsed time across the whole work item, not only its
+successful worker run. Keep API-dollar estimates separate from observed subscription consumption;
+unknown quota attribution stays unknown. A new model absent from a snapshot has no result there,
+not an inherited score from an older generation. Sparse local evidence supports a bounded trial,
+not a claim of proven reliability.
+
+Use the existing [cost-ledger exports](ledger/README.md) and
+[vendor/arm comparison](comparator.md) for local evidence; this guidance introduces no new score,
+collector or polling loop. Worker benchmark results do not establish permission discipline,
+recovery correctness or sustained fleet-conductor reliability. Those need their own behavior and
+acceptance evidence.
 
 ## The cast
 

@@ -7,6 +7,7 @@ benchmarks/README.md
 benchmarks/comparator.md
 benchmarks/deepswe/2026-09-04/README.md
 benchmarks/deepswe/2026-09-05/README.md
+benchmarks/deepswe/2026-09-27/README.md
 benchmarks/ledger/README.md
 benchmarks/ledger/medians.md
 benchmarks/subscription-usage/2026-09-04/README.md

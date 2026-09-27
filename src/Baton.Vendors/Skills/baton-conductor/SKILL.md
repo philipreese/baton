@@ -73,7 +73,7 @@ rediscovering the plan. Include the exact deliverable and known seam, files or s
 change, acceptance that belongs to this lane, explicit non-goals, and proportionate verification.
 Name facts already established by the conductor so the worker verifies risky assumptions rather than
 remapping the repository. Do not paste a long issue as the `Do` section and outsource scoping back to
-the implementer.
+the implementer. For model/effort selection, consult the [benchmark reading guidance](../../../../benchmarks/README.md#choosing-a-worker-from-benchmark-evidence).
 
 Calibrate instructions to the selected worker and effort. Give a weaker or unfamiliar worker more
 procedure and smaller checkpoints. Give a stronger or high-effort worker a tight search boundary and
