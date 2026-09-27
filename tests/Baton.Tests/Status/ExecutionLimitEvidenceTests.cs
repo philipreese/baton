@@ -291,6 +291,11 @@ public sealed class ExecutionLimitEvidenceTests
             Assert.Equal(childLimits, status[checkpointId.Value].Limits);
             Assert.NotEqual(laterParentLimits, status[checkpointId.Value].Limits);
 
+            // StatusCommand uses plain System.Text.Json serialization of these actual status DTOs.
+            using var statusJson = JsonDocument.Parse(JsonSerializer.Serialize(status[checkpointId.Value]));
+            Assert.Equal(childLimits,
+                statusJson.RootElement.GetProperty("limits").Deserialize<ExecutionLimitEvidence>());
+
             var resolved = ExecutionBindingResolver.Resolve(entries);
             Assert.Equal(laterParentLimits, resolved[ExecutionId.Value].Limits);
             Assert.Equal(childLimits, resolved[checkpointId.Value].Limits);
@@ -355,6 +360,12 @@ public sealed class ExecutionLimitEvidenceTests
             Assert.Equal(laterParentLimits, status[ExecutionId.Value].Limits);
             Assert.Null(status[missingRequestId.Value].Limits);
             Assert.Null(status[nullLimitsId.Value].Limits);
+
+            foreach (var historicalId in new[] { missingRequestId, nullLimitsId })
+            {
+                using var statusJson = JsonDocument.Parse(JsonSerializer.Serialize(status[historicalId.Value]));
+                Assert.False(statusJson.RootElement.TryGetProperty("limits", out _));
+            }
 
             var resolved = ExecutionBindingResolver.Resolve(entries);
             Assert.Equal(laterParentLimits, resolved[ExecutionId.Value].Limits);

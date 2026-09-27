@@ -331,12 +331,8 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   legitimate same-identity inheritance. Consumers validate that identity against the resolved
   adapter, model, role, and size. Legacy records may use a valid existing aggregate key, but a null
   key does not authorize inventing profile identity. An absent value remains unknown for legacy requests
-  and supplementary paths that do not record it. Artifact checkpoints record their own fixed timeout
-  and, when the actual checkpoint monitor exists, its token and tool-step brakes plus the known-unlimited
-  billed-rate brake in the attempted request before dispatch. The source is
-  `artifact-checkpoint` (`Mutation.ArtifactCheckpoint.LimitSource`); when the monitor is unavailable,
-  only the timeout and its source are known. This evidence describes the checkpoint child, never its
-  predecessor's selection. Grace and older checkpoints without recorded evidence remain unknown. A
+  and supplementary paths that do not record it. Artifact-checkpoint child evidence follows the
+  checkpoint contract below; grace evidence remains unknown. A
   crash-recovery resubmit keeps the accepted timeout provenance while recording changed
   current monitor inputs in `StepRebound` before spawn. Status and the cost ledger project that latest
   applied snapshot from the journal, so settings or binding edits cannot rewrite settled history.
@@ -2490,7 +2486,9 @@ the authoritative `ExecutionArrested` line, so status/ledger shows both the orig
 smaller recovery spend. Its fixed `Mutation.ArtifactCheckpoint` caps are separate from the ordinary
 role budget. The attempted request records this child's applied timeout and actual monitor inputs
 before dispatch, sourced by `Mutation.ArtifactCheckpoint.LimitSource`; it never inherits the ordinary
-predecessor's profile evidence. If the monitor is unavailable, only timeout evidence is recorded.
+predecessor's profile evidence. `MonitorInputsKnown` is true only when the actual checkpoint monitor
+exists, recording its token/tool brakes and known-unlimited absent billed-rate brake. Otherwise the
+monitor axes and their source stamps remain unknown while timeout evidence is retained.
 Older attempted requests without limit evidence remain unknown. The dispatch replaces
 the prompt and exposes only `artifact:<name>` tools for the still-missing declared names: no repository
 read, shell, network, workspace mutation, commit, push, or ordinary role tool survives. It is not a
