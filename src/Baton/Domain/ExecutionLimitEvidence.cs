@@ -3,8 +3,8 @@ using System.Text.Json.Serialization;
 namespace Baton.Domain;
 
 /// <summary>
-/// The enforcement inputs applied to one ordinary execution. A non-null value means the inputs are
-/// known. Null monitor brakes mean unlimited only when MonitorInputsKnown is true; otherwise
+/// The enforcement inputs applied to one ordinary execution. Timeout is recorded whenever evidence
+/// exists. Null monitor brakes mean unlimited only when MonitorInputsKnown is true; otherwise
 /// they are unknown because no parser could supply the monitor. A null evidence value on an
 /// older request means the journal predates limit evidence (or the execution is supplementary).
 /// </summary>
@@ -19,10 +19,6 @@ public sealed record ExecutionLimitEvidence(
     string? MaxToolStepsSource = null,
     bool MonitorInputsKnown = false)
 {
-    /// <summary>Whether the enforcement inputs, rather than legacy absence, are recorded.</summary>
-    [JsonIgnore]
-    public bool IsKnown => true;
-
     /// <summary>The selected profile key when profile selection was available.</summary>
     [JsonIgnore]
     public string? SelectionProvenance => ChosenKey;

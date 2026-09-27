@@ -406,13 +406,11 @@ public static class RedispatchCommand
             ResumeSession = false,
         };
 
-        return WithResolvedStamps(
-            inherited with
-            {
-                ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, inherited, options),
-            },
-            parentEntry,
-            options);
+        var stamped = WithResolvedStamps(inherited, parentEntry, options);
+        return stamped with
+        {
+            ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, stamped, options),
+        };
     }
 
     private static ExecutionLimitResolution? InheritExecutionLimitResolution(
@@ -431,19 +429,37 @@ public static class RedispatchCommand
 
         var selectionStillDescribesChild = string.Equals(
                 inherited.Adapter.Trim(), parentEntry.Adapter.Trim(), StringComparison.OrdinalIgnoreCase)
-            && string.Equals(inherited.Model, parentEntry.Model, StringComparison.Ordinal);
+            && string.Equals(
+                inherited.ModelResolved ?? inherited.Model,
+                parentEntry.ModelResolved ?? parentEntry.Model,
+                StringComparison.Ordinal);
+
+        string? InheritedSource(
+            string? parentSource,
+            object? inheritedValue,
+            object? parentResolutionValue)
+        {
+            if (!Equals(inheritedValue, parentResolutionValue))
+            {
+                return null;
+            }
+
+            return selectionStillDescribesChild || parentSource == ExecutionLimitSource.DispatchOverride
+                ? parentSource
+                : null;
+        }
 
         return new ExecutionLimitResolution(
             selectionStillDescribesChild && !hasOverride ? parentResolution?.ChosenKey : null,
             options.Timeout is not null
                 ? ExecutionLimitSource.DispatchOverride
-                : parentResolution?.TimeoutSource,
+                : InheritedSource(parentResolution?.TimeoutSource, inherited.Timeout, parentResolution?.Timeout),
             options.TokenBudget is not null
                 ? ExecutionLimitSource.DispatchOverride
-                : parentResolution?.TokenBudgetSource,
+                : InheritedSource(parentResolution?.TokenBudgetSource, inherited.TokenBudget, parentResolution?.TokenBudget),
             options.MaxToolSteps is not null
                 ? ExecutionLimitSource.DispatchOverride
-                : parentResolution?.MaxToolStepsSource,
+                : InheritedSource(parentResolution?.MaxToolStepsSource, inherited.MaxToolSteps, parentResolution?.MaxToolSteps),
             inherited.Timeout,
             inherited.TokenBudget,
             inherited.MaxToolSteps);
@@ -672,11 +688,11 @@ public static class RedispatchCommand
             // ToBinding stamped them from the inherited axes above, which reach it as overrides and so
             // read as "requested" even when the child merely inherited them. Limit provenance follows
             // the same rule: do not let this materialization select today's profile for an inherited axis.
-            var materialized = bindings[role.Id] with
+            var materialized = WithResolvedStamps(bindings[role.Id], parentEntry, options);
+            return (definition, materialized with
             {
-                ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, bindings[role.Id], options),
-            };
-            return (definition, WithResolvedStamps(materialized, parentEntry, options));
+                ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, materialized, options),
+            });
         }
         catch (Exception ex) when (ex is FileNotFoundException or JsonException or InvalidOperationException or KeyNotFoundException)
         {
