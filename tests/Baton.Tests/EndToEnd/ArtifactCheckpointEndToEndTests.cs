@@ -143,6 +143,9 @@ public sealed class ArtifactCheckpointEndToEndTests
 
             Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
             Assert.Equal(2, dispatcher.CallCount);
+            Assert.Equal(2, dispatcher.Requests.Count);
+            Assert.NotNull(dispatcher.Requests[0].Limits);
+            Assert.Null(dispatcher.Requests[1].Limits);
             Assert.Equal(["report.md", "verdict.json"], dispatcher.CheckpointTarget!.ArtifactOnlyOutputNames);
             Assert.Equal(ArtifactCheckpoint.PromptText, dispatcher.CheckpointTarget.PromptText);
             Assert.NotNull(dispatcher.CheckpointTarget.CaptureDirectory);
@@ -409,6 +412,7 @@ public sealed class ArtifactCheckpointEndToEndTests
         bool finishAtCap = false) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
+        public List<ExecutionRequest> Requests { get; } = [];
         public CoreDispatchTarget? CheckpointTarget { get; private set; }
         public string? OutputDirectory { get; private set; }
 
@@ -416,6 +420,7 @@ public sealed class ArtifactCheckpointEndToEndTests
             ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
         {
             CallCount++;
+            Requests.Add(request);
             if (CallCount == 1)
             {
                 target.OnStdoutLine?.Invoke("""{"type":"thread.started","thread_id":"checkpoint-session"}""");

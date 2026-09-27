@@ -29,6 +29,7 @@ public class ExecutionLimitProfileResolverTests
         Assert.Equal(20, result.MaxToolSteps);
         Assert.Equal("profile", result.TimeoutSource);
         Assert.Equal("claude/sonnet/review/medium", result.ChosenKey);
+        Assert.Equal("claude/sonnet/review/medium", result.OriginatingSelectionKey);
     }
 
     [Fact]
@@ -46,6 +47,7 @@ public class ExecutionLimitProfileResolverTests
         Assert.Equal("dispatch-override", result.TimeoutSource);
         Assert.Equal("profile", result.TokenBudgetSource);
         Assert.Equal("dispatch-override", result.MaxToolStepsSource);
+        Assert.Equal("claude/sonnet/review/medium", result.OriginatingSelectionKey);
     }
 
     [Fact]
@@ -60,6 +62,7 @@ public class ExecutionLimitProfileResolverTests
         Assert.Null(result.TokenBudget);
         Assert.Null(result.MaxToolSteps);
         Assert.Null(result.ChosenKey);
+        Assert.Null(result.OriginatingSelectionKey);
         Assert.Equal("role-default", result.TimeoutSource);
         Assert.Equal("role-default", result.TokenBudgetSource);
         Assert.Equal("role-default", result.MaxToolStepsSource);
@@ -81,7 +84,7 @@ public class ExecutionLimitProfileResolverTests
     {
         var resolution = new ExecutionLimitResolution(
             "claude/sonnet/review/medium", "profile", "dispatch-override", "role-default",
-            TimeSpan.FromMinutes(20), 2000, 5);
+            TimeSpan.FromMinutes(20), 2000, 5, "claude/sonnet/review/medium");
         var entry = new WorkerBindingConfigEntry(
             "claude",
             new WorkerContract("review", [], [new ProducedOutput("report")], []),

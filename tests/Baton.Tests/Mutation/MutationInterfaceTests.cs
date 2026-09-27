@@ -44,15 +44,19 @@ public class MutationInterfaceTests
                 ["architect"] = new WorkerBinding.Process(
                     new WorkerContract("architect", [], [new ProducedOutput("plan")], []),
                     WriteFile("plan", "architect"),
-                    TimeSpan.FromSeconds(30)),
+                    TimeSpan.FromSeconds(30),
+                    TokenBudget: 1000),
                 ["critic"] = new WorkerBinding.Process(
                     new WorkerContract("critic", ["plan"], [new ProducedOutput("review")], []),
                     CopyFirstInputTo("review"),
-                    TimeSpan.FromSeconds(30)),
+                    TimeSpan.FromSeconds(30),
+                    Adapter: "claude"),
                 ["publisher"] = new WorkerBinding.Process(
                     new WorkerContract("publisher", ["review"], [new ProducedOutput("summary")], []),
                     CopyFirstInputTo("summary"),
-                    TimeSpan.FromSeconds(30)),
+                    TimeSpan.FromSeconds(30),
+                    Adapter: "claude",
+                    TokenBudget: 5000),
             };
 
             await using var writer = new FlowEventLogWriter(logPath);
@@ -68,6 +72,24 @@ public class MutationInterfaceTests
             var summaryPath = Path.Combine(artifactsRoot, $"execution_{publisherExecutionId}", "summary");
             Assert.True(File.Exists(summaryPath));
             Assert.Equal("architect", (await File.ReadAllTextAsync(summaryPath, TestContext.Current.CancellationToken)).Trim());
+
+            var accepted = (await reader.ReadAllAsync(TestContext.Current.CancellationToken))
+                .OfType<FlowEvent.ExecutionRequestAccepted>()
+                .ToDictionary(e => e.Request.StepId!.Value);
+            var parserless = accepted[Architect].Request.Limits!;
+            Assert.Equal(TimeSpan.FromSeconds(30), parserless.Timeout);
+            Assert.False(parserless.MonitorInputsKnown);
+            Assert.Null(parserless.TokenBudget);
+            Assert.Null(parserless.MaxToolSteps);
+            Assert.Null(parserless.BilledRateLimit);
+            var unlimited = accepted[Critic].Request.Limits!;
+            Assert.True(unlimited.MonitorInputsKnown);
+            Assert.Null(unlimited.TokenBudget);
+            Assert.Null(unlimited.MaxToolSteps);
+            Assert.Null(unlimited.BilledRateLimit);
+            var budgeted = accepted[Publisher].Request.Limits!;
+            Assert.True(budgeted.MonitorInputsKnown);
+            Assert.Equal(5000, budgeted.TokenBudget);
         }
         finally
         {

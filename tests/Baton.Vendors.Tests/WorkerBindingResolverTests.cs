@@ -117,6 +117,168 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void Resolved_limit_evidence_uses_the_binding_values_not_stale_resolution_values()
+    {
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["architect"] = new WorkerBindingConfigEntry(
+                "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(60),
+                TokenBudget: 2000, MaxToolSteps: 20,
+                ExecutionLimitResolution: new ExecutionLimitResolution(
+                    "echo/model/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                    ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10)),
+        };
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            config, new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Equal(TimeSpan.FromMinutes(60), binding.EffectiveLimitEvidence.Timeout);
+        Assert.Equal(2000, binding.EffectiveLimitEvidence.TokenBudget);
+        Assert.Equal(20, binding.EffectiveLimitEvidence.MaxToolSteps);
+        Assert.Null(binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Null(binding.EffectiveLimitEvidence.TimeoutSource);
+        Assert.Null(binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.Null(binding.EffectiveLimitEvidence.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Resolved_limit_evidence_keeps_sources_when_all_values_match_the_resolution()
+    {
+        var resolution = new ExecutionLimitResolution(
+            "echo/model/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+            ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10);
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["architect"] = new WorkerBindingConfigEntry(
+                "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30), Model: "model",
+                TokenBudget: 1000, MaxToolSteps: 10,
+                DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+                ExecutionLimitResolution: resolution),
+        };
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            config, new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Equal("echo/model/architect/small", binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.TimeoutSource);
+        Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Default_model_profile_uses_the_recorded_resolved_identity()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30),
+            Model: null, ModelResolved: "model", TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                "echo/model/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Equal("echo/model/architect/small", binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Equal(ExecutionLimitSource.Profile, binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.True(binding.EffectiveLimitEvidence.MonitorInputsKnown);
+    }
+
+    [Theory]
+    [InlineData("echo/other/architect/small", 1000L, 10, true, false, null, null)]
+    [InlineData("echo/other/architect/small", 1000L, 10, false, true, "dispatch-override", null)]
+    [InlineData("echo/model/architect/small", 2000L, 10, false, true, null, "profile")]
+    public void Override_sources_survive_identity_drift_only_on_unchanged_axes(
+        string chosenKey, long tokenBudget, int maxToolSteps, bool timeoutOverride, bool tokenOverride,
+        string? expectedTokenSource, string? expectedStepsSource)
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30),
+            ModelResolved: "model", TokenBudget: tokenBudget, MaxToolSteps: maxToolSteps,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                chosenKey,
+                timeoutOverride ? ExecutionLimitSource.DispatchOverride : ExecutionLimitSource.Profile,
+                tokenOverride ? ExecutionLimitSource.DispatchOverride : ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+        var evidence = binding.EffectiveLimitEvidence;
+
+        Assert.Null(evidence.ChosenKey);
+        Assert.Equal(timeoutOverride ? ExecutionLimitSource.DispatchOverride : chosenKey.Contains("other") ? null : ExecutionLimitSource.Profile,
+            evidence.TimeoutSource);
+        Assert.Equal(expectedTokenSource, evidence.TokenBudgetSource);
+        Assert.Equal(expectedStepsSource, evidence.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Mismatched_resolved_identity_clears_profile_sources_even_with_matching_numbers()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30),
+            Model: "model", ModelResolved: "other", TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                "echo/model/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var evidence = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]).EffectiveLimitEvidence;
+        Assert.Null(evidence.ChosenKey);
+        Assert.Null(evidence.TimeoutSource);
+        Assert.Null(evidence.TokenBudgetSource);
+        Assert.Null(evidence.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Equal_values_do_not_preserve_a_profile_selected_for_another_model()
+    {
+        var resolution = new ExecutionLimitResolution(
+            "echo/model-a/architect/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+            ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10);
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30), Model: "model-b",
+            TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: resolution);
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Null(binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Null(binding.EffectiveLimitEvidence.TimeoutSource);
+        Assert.Null(binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.Null(binding.EffectiveLimitEvidence.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void Null_aggregate_key_without_selection_identity_fails_closed_even_when_numbers_match()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(30), Model: "model-b",
+            ModelResolved: "model-b", TokenBudget: 1000, MaxToolSteps: 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                null, ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10));
+
+        var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+
+        Assert.Null(binding.EffectiveLimitEvidence.ChosenKey);
+        Assert.Null(binding.EffectiveLimitEvidence.TimeoutSource);
+        Assert.Null(binding.EffectiveLimitEvidence.TokenBudgetSource);
+        Assert.Null(binding.EffectiveLimitEvidence.MaxToolStepsSource);
+    }
+
+    [Fact]
     public void Hand_authored_base_without_Baton_authority_does_not_enable_exact_file_restore()
     {
         var room = Path.Combine(Path.GetTempPath(), $"baton-hand-restore-{Guid.NewGuid():N}");

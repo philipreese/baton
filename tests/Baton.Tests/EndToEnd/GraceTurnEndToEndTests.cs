@@ -56,6 +56,9 @@ public sealed class GraceTurnEndToEndTests
             Assert.IsType<FlowEvent.ExecutionArrested>(executionEvents[1]);
 
             Assert.Equal(2, run.Dispatcher.CallCount);
+            Assert.Equal(2, run.Dispatcher.Requests.Count);
+            Assert.NotNull(run.Dispatcher.Requests[0].Limits);
+            Assert.Null(run.Dispatcher.Requests[1].Limits);
             Assert.True(RepositoryIsClean(run.Workspace));
         }
         finally
@@ -277,11 +280,13 @@ public sealed class GraceTurnEndToEndTests
         bool graceSpawnFails) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
+        public List<ExecutionRequest> Requests { get; } = [];
 
         public async Task<CoreDispatchResult> DispatchAsync(
             ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
         {
             CallCount++;
+            Requests.Add(request);
             if (CallCount == 1)
             {
                 File.WriteAllText(Path.Combine(workspace, "left-behind.txt"), "written, never committed before the arrest");

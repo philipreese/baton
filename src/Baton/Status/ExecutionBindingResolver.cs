@@ -16,7 +16,8 @@ public static class ExecutionBindingResolver
 {
     /// <param name="Adapter">Null when neither the accepted request nor any rebind ever recorded one.</param>
     /// <param name="Model">Null when neither the accepted request nor any rebind ever recorded one.</param>
-    public readonly record struct Binding(string? Adapter, string? Model);
+    /// <param name="Limits">Null for legacy/supplementary evidence that was never recorded.</param>
+    public readonly record struct Binding(string? Adapter, string? Model, ExecutionLimitEvidence? Limits = null);
 
     /// <summary>
     /// Adapter and Model are tracked independently, matching <see cref="FlowEvent.ExecutionRequestAccepted"/>'s
@@ -32,6 +33,7 @@ public static class ExecutionBindingResolver
 
         var adapterByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
         var modelByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var limitsByExecutionId = new Dictionary<string, ExecutionLimitEvidence?>(StringComparer.Ordinal);
         var executionIds = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
@@ -49,6 +51,8 @@ public static class ExecutionBindingResolver
                 {
                     modelByExecutionId[executionId] = model;
                 }
+
+                limitsByExecutionId[executionId] = accepted.Request.Limits;
             }
             else if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } })
             {
@@ -63,6 +67,8 @@ public static class ExecutionBindingResolver
                 {
                     modelByExecutionId[executionId] = model;
                 }
+
+                limitsByExecutionId[executionId] = checkpointRequest.Limits;
             }
             else if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.StepRebound rebound })
             {
@@ -85,6 +91,11 @@ public static class ExecutionBindingResolver
                 {
                     modelByExecutionId.Remove(executionId);
                 }
+
+                if (rebound.NewLimits is { } newLimits)
+                {
+                    limitsByExecutionId[executionId] = newLimits;
+                }
             }
         }
 
@@ -93,7 +104,8 @@ public static class ExecutionBindingResolver
         {
             adapterByExecutionId.TryGetValue(executionId, out var adapter);
             modelByExecutionId.TryGetValue(executionId, out var model);
-            result[executionId] = new Binding(adapter, model);
+            limitsByExecutionId.TryGetValue(executionId, out var limits);
+            result[executionId] = new Binding(adapter, model, limits);
         }
 
         return result;

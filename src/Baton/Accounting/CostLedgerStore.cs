@@ -354,7 +354,8 @@ public static partial class CostLedgerStore
                     : null,
                 ArrestReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
                     ? checkpointTerminal.ArrestReason
-                    : arrestReasonByExecutionId.GetValueOrDefault(executionId)));
+                    : arrestReasonByExecutionId.GetValueOrDefault(executionId),
+                Limits: binding.Limits));
         }
 
         return result;
@@ -628,7 +629,10 @@ public static partial class CostLedgerStore
             // Copied for a narrower reason than the fields above: this row's `repository` IS the
             // copied row's, so stating a different provenance -- or none -- would leave one of the two
             // rows keyed by an unexplained join key.
-            IdentitySource: last.IdentitySource);
+            IdentitySource: last.IdentitySource,
+            // #2449: a correction is still about the same execution snapshot; settings edits after
+            // settle must not erase or rewrite the evidence it corrects.
+            Limits: last.Limits);
     }
 
     /// <summary>

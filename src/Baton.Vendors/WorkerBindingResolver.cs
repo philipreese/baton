@@ -208,6 +208,10 @@ public static class WorkerBindingResolver
             ModelSource = modelSource,
             EffortResolved = effortResolved,
             EffortSource = effortSource,
+            // The primary profile key names the primary adapter/model and must not be presented as
+            // the fallback's selection provenance. The fallback's actual enforcement values remain
+            // carried on the resolved Process binding, but their source is unknown here.
+            ExecutionLimitResolution = null,
         };
     }
 
@@ -299,11 +303,52 @@ public static class WorkerBindingResolver
             target = target with { OnStdoutLine = line => onWorkerStdoutLine(capturedWorkerName, line) };
         }
 
+        var limitEvidence = entry.ExecutionLimitResolution is { } resolution
+            ? CreateLimitEvidence(entry, resolution)
+            : null;
+
         return new WorkerBinding.Process(
             entry.Contract, target, entry.Timeout, adapter, entry.GrantAuditMode, entry.Adapter, entry.Model, adapter,
             entry.VerifyPixiTask, entry.VerifyCommandOverride, entry.TokenBudget, entry.MaxToolSteps,
             entry.BilledRateLimit, entry.IsWorktree, entry.WorktreeBaseSha, entry.ChangesTree,
-            entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace);
+            entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace,
+            limitEvidence);
+    }
+
+    private static ExecutionLimitEvidence CreateLimitEvidence(
+        WorkerBindingConfigEntry entry, ExecutionLimitResolution resolution)
+    {
+        var resolvedModel = entry.ModelResolved ?? entry.Model;
+        var role = entry.Contract.WorkerName;
+        var size = entry.DeclaredTaskSize?.Size ?? DeclaredTaskSize.Unknown;
+        // OriginatingSelectionKey is the independent identity for a mixed redispatch snapshot.
+        // Older records have no such member, so a present ChosenKey is the only identity they may
+        // contribute; a null key must remain unverifiable rather than becoming a wildcard.
+        var selectionKey = resolution.OriginatingSelectionKey ?? resolution.ChosenKey;
+        var selectionMatches = selectionKey is not null
+            && ExecutionLimitProfileResolver.ChosenKeyMatchesSelection(
+                selectionKey, entry.Adapter, resolvedModel, role, size);
+        var chosenKeyMatches = resolution.ChosenKey is not null
+            && ExecutionLimitProfileResolver.ChosenKeyMatchesSelection(
+                resolution.ChosenKey, entry.Adapter, resolvedModel, role, size);
+        var timeoutMatches = entry.Timeout == resolution.Timeout;
+        var tokenBudgetMatches = entry.TokenBudget == resolution.TokenBudget;
+        var maxToolStepsMatches = entry.MaxToolSteps == resolution.MaxToolSteps;
+        var aggregateMatches = chosenKeyMatches && timeoutMatches && tokenBudgetMatches && maxToolStepsMatches;
+
+        return new ExecutionLimitEvidence(
+            entry.Timeout,
+            entry.TokenBudget,
+            entry.MaxToolSteps,
+            entry.BilledRateLimit,
+            aggregateMatches ? resolution.ChosenKey : null,
+            timeoutMatches && (selectionMatches || resolution.TimeoutSource == ExecutionLimitSource.DispatchOverride)
+                ? resolution.TimeoutSource : null,
+            tokenBudgetMatches && (selectionMatches || resolution.TokenBudgetSource == ExecutionLimitSource.DispatchOverride)
+                ? resolution.TokenBudgetSource : null,
+            maxToolStepsMatches && (selectionMatches || resolution.MaxToolStepsSource == ExecutionLimitSource.DispatchOverride)
+                ? resolution.MaxToolStepsSource : null,
+            MonitorInputsKnown: true);
     }
 
 

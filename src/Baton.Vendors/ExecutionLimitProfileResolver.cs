@@ -17,12 +17,13 @@ public sealed record ExecutionLimitProfile
 
 public sealed record ExecutionLimitResolution(
     string? ChosenKey,
-    string TimeoutSource,
-    string TokenBudgetSource,
-    string MaxToolStepsSource,
+    string? TimeoutSource,
+    string? TokenBudgetSource,
+    string? MaxToolStepsSource,
     TimeSpan Timeout,
     long? TokenBudget,
-    int? MaxToolSteps);
+    int? MaxToolSteps,
+    string? OriginatingSelectionKey = null);
 
 public static class ExecutionLimitSource
 {
@@ -62,15 +63,27 @@ public static class ExecutionLimitProfileResolver
         var profile = key is { } actualKey
             ? profiles?.FirstOrDefault(candidate => actualKey.Equals(candidate.ToKey()))
             : null;
+        var selectedKey = profile is null ? null : key!.Value.ToString();
         return new ExecutionLimitResolution(
-            profile is null ? null : key!.Value.ToString(),
+            selectedKey,
             timeoutOverride is not null ? ExecutionLimitSource.DispatchOverride : profile is not null ? ExecutionLimitSource.Profile : ExecutionLimitSource.RoleDefault,
             tokenBudgetOverride is not null ? ExecutionLimitSource.DispatchOverride : profile is not null ? ExecutionLimitSource.Profile : ExecutionLimitSource.RoleDefault,
             maxToolStepsOverride is not null ? ExecutionLimitSource.DispatchOverride : profile is not null ? ExecutionLimitSource.Profile : ExecutionLimitSource.RoleDefault,
             timeoutOverride ?? profile?.Timeout ?? roleTimeout,
             tokenBudgetOverride ?? profile?.TokenBudget ?? roleTokenBudget,
-            maxToolStepsOverride ?? profile?.MaxToolSteps ?? roleMaxToolSteps);
+            maxToolStepsOverride ?? profile?.MaxToolSteps ?? roleMaxToolSteps,
+            selectedKey);
     }
+
+    /// <summary>Check a recorded selection against the exact normalized key this resolver produces.</summary>
+    public static bool ChosenKeyMatchesSelection(
+        string? chosenKey, string adapter, string? model, string role, DeclaredTaskSize size) =>
+        chosenKey is not null
+        && model is { Length: > 0 }
+        && string.Equals(
+            chosenKey,
+            new ExecutionLimitProfileKey(adapter, model, role, size).ToString(),
+            StringComparison.Ordinal);
 
     public static void Validate(IReadOnlyList<ExecutionLimitProfile>? profiles)
     {

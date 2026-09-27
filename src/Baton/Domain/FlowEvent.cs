@@ -610,7 +610,11 @@ public abstract record FlowEvent
         string? PreviousModel = null,
         string? NewAdapter = null,
         string? NewModel = null,
-        string? Reason = null) : FlowEvent;
+        string? Reason = null,
+        // #2449: an ordinary recovery rebind can change monitor inputs without changing vendor/model.
+        // These are optional so older rebound lines remain readable and do not invent evidence.
+        ExecutionLimitEvidence? PreviousLimits = null,
+        ExecutionLimitEvidence? NewLimits = null) : FlowEvent;
 
     /// <summary>
     /// #1608: Flow has classified a completed execution as <see cref="Outcomes.OutcomeVerdict.Indeterminate"/>

@@ -476,7 +476,12 @@ public static class StateProjector
                 if (state.AcceptedRequestByExecutionId.TryGetValue(rebound.ForExecutionId, out var reboundRequest))
                 {
                     state.AcceptedRequestByExecutionId[rebound.ForExecutionId] =
-                        reboundRequest with { Adapter = rebound.NewAdapter, Model = rebound.NewModel };
+                        reboundRequest with
+                        {
+                            Adapter = rebound.NewAdapter,
+                            Model = rebound.NewModel,
+                            Limits = rebound.NewLimits ?? reboundRequest.Limits,
+                        };
                 }
 
                 break;

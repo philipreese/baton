@@ -375,7 +375,7 @@ public static class RedispatchCommand
             }
         }
 
-        return WithResolvedStamps(parentEntry with
+        var inherited = parentEntry with
         {
             Adapter = adapter,
             Model = model,
@@ -404,7 +404,68 @@ public static class RedispatchCommand
             // A redispatch is a fresh worker turn, never a continuation of the parent's own session.
             SessionId = null,
             ResumeSession = false,
-        }, parentEntry, options);
+        };
+
+        var stamped = WithResolvedStamps(inherited, parentEntry, options);
+        return stamped with
+        {
+            ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, stamped, options),
+        };
+    }
+
+    private static ExecutionLimitResolution? InheritExecutionLimitResolution(
+        WorkerBindingConfigEntry parentEntry,
+        WorkerBindingConfigEntry inherited,
+        RedispatchOptions options)
+    {
+        var parentResolution = parentEntry.ExecutionLimitResolution;
+        var hasOverride = options.Timeout is not null
+            || options.TokenBudget is not null
+            || options.MaxToolSteps is not null;
+        if (parentResolution is null && !hasOverride)
+        {
+            return null;
+        }
+
+        var selectionStillDescribesChild = string.Equals(
+                inherited.Adapter.Trim(), parentEntry.Adapter.Trim(), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                inherited.ModelResolved ?? inherited.Model,
+                parentEntry.ModelResolved ?? parentEntry.Model,
+                StringComparison.Ordinal);
+
+        string? InheritedSource(
+            string? parentSource,
+            object? inheritedValue,
+            object? parentResolutionValue)
+        {
+            if (!Equals(inheritedValue, parentResolutionValue))
+            {
+                return null;
+            }
+
+            return selectionStillDescribesChild || parentSource == ExecutionLimitSource.DispatchOverride
+                ? parentSource
+                : null;
+        }
+
+        return new ExecutionLimitResolution(
+            selectionStillDescribesChild && !hasOverride ? parentResolution?.ChosenKey : null,
+            options.Timeout is not null
+                ? ExecutionLimitSource.DispatchOverride
+                : InheritedSource(parentResolution?.TimeoutSource, inherited.Timeout, parentResolution?.Timeout),
+            options.TokenBudget is not null
+                ? ExecutionLimitSource.DispatchOverride
+                : InheritedSource(parentResolution?.TokenBudgetSource, inherited.TokenBudget, parentResolution?.TokenBudget),
+            options.MaxToolSteps is not null
+                ? ExecutionLimitSource.DispatchOverride
+                : InheritedSource(parentResolution?.MaxToolStepsSource, inherited.MaxToolSteps, parentResolution?.MaxToolSteps),
+            inherited.Timeout,
+            inherited.TokenBudget,
+            inherited.MaxToolSteps,
+            selectionStillDescribesChild
+                ? parentResolution?.OriginatingSelectionKey ?? parentResolution?.ChosenKey
+                : null);
     }
 
     /// <summary>
@@ -628,8 +689,13 @@ public static class RedispatchCommand
 
             // #1927 review HIGH: both paths re-resolve the display stamps through the same rule --
             // ToBinding stamped them from the inherited axes above, which reach it as overrides and so
-            // read as "requested" even when the child merely inherited them.
-            return (definition, WithResolvedStamps(bindings[role.Id], parentEntry, options));
+            // read as "requested" even when the child merely inherited them. Limit provenance follows
+            // the same rule: do not let this materialization select today's profile for an inherited axis.
+            var materialized = WithResolvedStamps(bindings[role.Id], parentEntry, options);
+            return (definition, materialized with
+            {
+                ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, materialized, options),
+            });
         }
         catch (Exception ex) when (ex is FileNotFoundException or JsonException or InvalidOperationException or KeyNotFoundException)
         {

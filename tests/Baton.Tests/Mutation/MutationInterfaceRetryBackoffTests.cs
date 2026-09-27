@@ -83,6 +83,9 @@ public class MutationInterfaceRetryBackoffTests
         var logPath = Path.Combine(roomDirectory, "flow.jsonl");
         var markerPath = Path.Combine(roomDirectory, "attempt-marker");
         var fakeTime = new FakeTimeProvider(new DateTimeOffset(2026, 7, 29, 12, 0, 0, TimeSpan.Zero));
+        var expectedLimits = new ExecutionLimitEvidence(
+            TimeSpan.FromSeconds(30), TokenBudget: 5000, MaxToolSteps: 25, BilledRateLimit: 1200,
+            ChosenKey: "template-retry-1/worker-a", MonitorInputsKnown: true);
 
         try
         {
@@ -106,7 +109,8 @@ public class MutationInterfaceRetryBackoffTests
                 ["worker-a"] = new WorkerBinding.Process(
                     new WorkerContract("worker-a", [], [new ProducedOutput("out.txt")], []),
                     FailOnFirstAttemptThenSucceed(markerPath, "out.txt", "content"),
-                    TimeSpan.FromSeconds(30))
+                    TimeSpan.FromSeconds(30),
+                    Adapter: "claude")
             };
 
             await using var writer = new FlowEventLogWriter(logPath);
@@ -114,6 +118,13 @@ public class MutationInterfaceRetryBackoffTests
             var dispatcher = new CoreDispatcher(writer, writer);
 
             // Run pump in background
+            bindings["worker-a"] = ((WorkerBinding.Process)bindings["worker-a"]) with
+            {
+                TokenBudget = 5000,
+                MaxToolSteps = 25,
+                BilledRateLimit = 1200,
+                LimitEvidence = expectedLimits,
+            };
             var pumpTask = MutationInterface.StartWorkflowAsync(
                 new WorkflowId("wf-1"),
                 roomDirectory,
@@ -154,6 +165,7 @@ public class MutationInterfaceRetryBackoffTests
             var eventsFinal = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
             var acceptedFinal = eventsFinal.OfType<FlowEvent.ExecutionRequestAccepted>().ToList();
             Assert.Equal(2, acceptedFinal.Count);
+            Assert.All(acceptedFinal, accepted => Assert.Equal(expectedLimits, accepted.Request.Limits));
         }
         finally
         {
