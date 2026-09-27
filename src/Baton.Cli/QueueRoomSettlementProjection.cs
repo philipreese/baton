@@ -19,7 +19,9 @@ internal static class QueueRoomSettlementProjection
 {
     private const string AwaitingResolutionMarker = "awaiting conductor resolution";
 
-    internal static async Task<string?> RenderAsync(
+    internal sealed record Observation(string Kind, string State, string? Reason);
+
+    internal static async Task<Observation?> ReadAsync(
         QueueItem item,
         CancellationToken cancellationToken)
     {
@@ -27,19 +29,32 @@ internal static class QueueRoomSettlementProjection
 
         if (item.Error is not { Length: > 0 } error
             || !error.Contains(AwaitingResolutionMarker, StringComparison.Ordinal)
-            || item.RoomDirectory is not { Length: > 0 } roomDirectory)
+            || item.RoomDirectory is not { Length: > 0 })
         {
             return null;
         }
 
-        var settlement = await ReadSettlementAsync(roomDirectory, cancellationToken).ConfigureAwait(false);
+        var settlement = await ReadSettlementAsync(item.RoomDirectory, cancellationToken).ConfigureAwait(false);
+        return settlement is null
+            ? null
+            : new Observation(
+                settlement.Kind.DisplayName(),
+                settlement.Terminal.State.ToString(),
+                settlement.Reason);
+    }
+
+    internal static async Task<string?> RenderAsync(
+        QueueItem item,
+        CancellationToken cancellationToken)
+    {
+        var settlement = await ReadAsync(item, cancellationToken).ConfigureAwait(false);
         if (settlement is null)
         {
             return null;
         }
 
         var reason = settlement.Reason is { Length: > 0 } detail ? $": {detail}" : string.Empty;
-        return $"  settlement: conductor {settlement.Kind.DisplayName()} ({settlement.Terminal.State}){reason}";
+        return $"  settlement: conductor {settlement.Kind} ({settlement.State}){reason}";
     }
 
     private static async Task<RoomSettlement?> ReadSettlementAsync(

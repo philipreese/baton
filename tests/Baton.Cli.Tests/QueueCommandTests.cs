@@ -664,6 +664,93 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task List_json_is_empty_and_bounded_by_default()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var output = new StringWriter();
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.List, ListFormat: QueueListOutputFormat.Json), output, Ct);
+
+            Assert.Equal(0, exit);
+            using var document = JsonDocument.Parse(output.ToString());
+            Assert.Equal(1, document.RootElement.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal(50, document.RootElement.GetProperty("pageSize").GetInt32());
+            Assert.False(document.RootElement.GetProperty("hasMore").GetBoolean());
+            Assert.Empty(document.RootElement.GetProperty("items").EnumerateArray());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_json_active_selection_and_history_paging_are_explicit()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    InspectionItem("active"),
+                    InspectionItem("retained", QueueItemState.Done),
+                    InspectionItem("lifecycle-failed", QueueItemState.Failed, WorkStage.Review),
+                ],
+            }, Ct);
+
+            var activeOutput = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.List, Active: true, ListFormat: QueueListOutputFormat.Json, PageSize: 1),
+                activeOutput,
+                Ct);
+            using var activeDocument = JsonDocument.Parse(activeOutput.ToString());
+            Assert.Equal("active", activeDocument.RootElement.GetProperty("items")[0].GetProperty("tag").GetString());
+            var cursor = activeDocument.RootElement.GetProperty("nextCursor").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(cursor));
+
+            var nextOutput = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.List, ListFormat: QueueListOutputFormat.Json, PageSize: 1, Cursor: cursor),
+                nextOutput,
+                Ct);
+            using var nextDocument = JsonDocument.Parse(nextOutput.ToString());
+            Assert.Equal("lifecycle-failed", nextDocument.RootElement.GetProperty("items")[0].GetProperty("tag").GetString());
+
+            var historyOutput = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.List, IncludeRetained: true, ListFormat: QueueListOutputFormat.Json),
+                historyOutput,
+                Ct);
+            using var historyDocument = JsonDocument.Parse(historyOutput.ToString());
+            Assert.Equal(3, historyDocument.RootElement.GetProperty("items").GetArrayLength());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    private static QueueItem InspectionItem(
+        string tag,
+        QueueItemState state = QueueItemState.Queued,
+        WorkStage? stage = null) => new()
+        {
+            Tag = tag,
+            Role = "implement",
+            Workspace = "C:\\workspace",
+            SpecFile = "C:\\spec.md",
+            State = state,
+            Stage = stage,
+            Requirements = [],
+        };
+
     private static string CreateTempHome()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_cmd_" + Guid.NewGuid().ToString("n"));

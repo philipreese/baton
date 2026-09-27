@@ -7501,6 +7501,23 @@ producer has been upgraded, `Queue.RequireDeclaredRequirements: true` fails an e
 legacy row closed; legacy read-only rows remain unknown. This switch is deliberately explicit: coverage
 is observable before the fail-closed transition rather than inferred from a date or a brief.
 
+`queue list --format json` is the bounded structured inspection surface. Its default selection is
+active items; `--active` states that selection explicitly, while `--history` explicitly includes
+retained one-lane and retired history. `--page-size <n>` defaults to 50 and accepts 1 through 200;
+`--cursor <opaque>` continues the stable queue-file order. Text output, including bare `list` and
+`list --active`, keeps its existing selection and wording contract. A JSON document has
+`schemaVersion`, `selection`, `snapshotFingerprint`, `pageSize`, `hasMore`, `nextCursor`, `held`,
+`observationConsistency`, and `items`; each item projects lifecycle (`stage`, `round`, `state`),
+room evidence, repository-qualified pull-request evidence, recorded routing, requirements,
+admission, and decision timestamps. Missing evidence is null/unknown and is never inferred.
+
+The cursor contains a deterministic fingerprint of the complete queue snapshot and its continuation
+position. Malformed cursors and fingerprints that no longer match refuse with a restart-required
+error, so continuation cannot silently skip or duplicate rows. The queue snapshot is one
+`QueueStore` read. Room settlement observations are subsequent independent reads and the JSON
+`observationConsistency` field makes that cross-store limit explicit; the inspection does not claim
+atomic consistency across those stores.
+
 **The fleet-event vocabulary and identity rule (#2140).** The closed vocabulary is `workQueued`,
 `admissionDecided`, `attemptStarted`, `attemptProgressed`, `attemptRefused`,
 `attemptRetryScheduled`, `attemptSettled`, `revisionProduced`, `reviewVerdictObserved`,
