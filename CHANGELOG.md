@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.57.0](https://github.com/philipreese/baton/compare/v0.56.0...v0.57.0) (2026-09-27)
+
+
+### Features
+
+* **vendors:** Refresh Sol 6, Luna 6 and Opus 5.5 support ([#2441](https://github.com/philipreese/baton/issues/2441)) ([78a2845](https://github.com/philipreese/baton/commit/78a2845209e5ece0dea1c3f6188d304b7eb5ae94))
+
 ## [0.56.0](https://github.com/philipreese/baton/compare/v0.55.0...v0.56.0) (2026-09-27)
 
 
