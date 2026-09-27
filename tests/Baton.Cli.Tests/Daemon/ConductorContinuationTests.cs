@@ -169,6 +169,7 @@ public sealed class ConductorContinuationTests
     [InlineData("adapter")]
     [InlineData("capability")]
     [InlineData("key")]
+    [InlineData("noncanonical-key")]
     public async Task Scheduler_blocks_malformed_queue_owned_obligations_without_action_proof(string malformedField)
     {
         var home = CreateTempHome();
@@ -183,9 +184,12 @@ public sealed class ConductorContinuationTests
                 AdapterCapability = malformedField == "capability"
                     ? "other-capability"
                     : ConductorContinuation.AdapterCapability,
-                IdempotencyKey = malformedField == "key"
-                    ? "continue:continue-tag:attempt-1:1:extra"
-                    : ConductorContinuation.IdempotencyKey("continue-tag", new FleetAttemptId("attempt-1"), 1),
+                IdempotencyKey = malformedField switch
+                {
+                    "key" => "continue:continue-tag:attempt-1:1:extra",
+                    "noncanonical-key" => "continue:continue-tag:attempt-1:01",
+                    _ => ConductorContinuation.IdempotencyKey("continue-tag", new FleetAttemptId("attempt-1"), 1),
+                },
             };
             var store = CreateStore();
             var retained = await store.EnqueueAsync(request, Ct);

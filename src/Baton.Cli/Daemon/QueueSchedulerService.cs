@@ -779,8 +779,9 @@ public sealed class QueueSchedulerService : BackgroundService
 
         foreach (var obligation in open)
         {
-            // Protected invariant: this consumer may mutate only its exact owner namespace, and only after
-            // the continuation payload and deterministic identity agree with the queue contract.
+            // Protected invariant: this consumer may mutate only its exact owner namespace. It may observe
+            // action only when the canonical continuation payload and deterministic key agree; malformed
+            // records owned by this consumer are blocked below.
             if (!string.Equals(obligation.Owner, ConductorContinuation.Owner, StringComparison.Ordinal))
             {
                 continue;
