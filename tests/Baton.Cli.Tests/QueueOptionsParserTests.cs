@@ -462,4 +462,25 @@ public sealed class QueueOptionsParserTests
         Assert.Equal(["file-write"], options.Requirements);
         Assert.Equal("engine", options.ScopeClass);
     }
+
+    [Fact]
+    public void List_parses_bounded_json_history_and_cursor_options()
+    {
+        var options = QueueOptionsParser.Parse([
+            "list", "--active", "--history", "--format", "json", "--page-size", "200", "--cursor", "opaque"]);
+
+        Assert.True(options.Active);
+        Assert.True(options.IncludeRetained);
+        Assert.Equal(QueueListOutputFormat.Json, options.ListFormat);
+        Assert.Equal(200, options.PageSize);
+        Assert.Equal("opaque", options.Cursor);
+    }
+
+    [Fact]
+    public void List_rejects_unbounded_or_text_paging_requests()
+    {
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--format", "json", "--page-size", "201"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--page-size", "10"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--cursor", "x"]));
+    }
 }

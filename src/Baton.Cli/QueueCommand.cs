@@ -99,7 +99,7 @@ public static class QueueCommand
         {
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
-            QueueVerb.List => ListAsync(options.Active, output, cancellationToken),
+            QueueVerb.List => ListAsync(options, output, cancellationToken),
             QueueVerb.Worktrees => WorktreesAsync(
                 options.Format, options.Apply, output, repositoryDirectory, cancellationToken, worktreeApplyTestHooks),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
@@ -956,10 +956,28 @@ public static class QueueCommand
         return string.Equals(identity?.Value, claim.Repository, StringComparison.Ordinal) ? checkout : null;
     }
 
-    private static async Task<int> ListAsync(bool active, TextWriter output, CancellationToken cancellationToken)
+    private static async Task<int> ListAsync(
+        QueueOptions options,
+        TextWriter output,
+        CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        var items = active ? snapshot.Items.Where(IsActive).ToList() : snapshot.Items;
+        var active = options.Active || options.ListFormat == QueueListOutputFormat.Json && !options.IncludeRetained;
+        var items = options.IncludeRetained
+            ? snapshot.Items
+            : active
+                ? snapshot.Items.Where(IsActive).ToList()
+                : snapshot.Items;
+        var decisions = await QueueDecisionLedgerStore
+            .ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+        if (options.ListFormat == QueueListOutputFormat.Json)
+        {
+            return await ListJsonAsync(options, snapshot, items, decisions, output, cancellationToken).ConfigureAwait(false);
+        }
+
+        var rows = await QueueInspectionProjection
+            .ProjectAsync(items, snapshot.PullRequestObservations, decisions, cancellationToken)
+            .ConfigureAwait(false);
         var settings = snapshot.Items.Any(i => i.Stage is not null)
             ? (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false)).Queue
             : null;
@@ -972,8 +990,6 @@ public static class QueueCommand
 
         if (settings is not null)
         {
-            var decisions = await QueueDecisionLedgerStore
-                .ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
             var recorded = decisions.LastOrDefault(entry => entry.Decision is
                 QueueDecisionEntry.Waited or QueueDecisionEntry.Launched);
             if (recorded is
@@ -1010,21 +1026,23 @@ public static class QueueCommand
             return 0;
         }
 
-        foreach (var item in items)
+        for (var index = 0; index < items.Count; index++)
         {
+            var item = items[index];
+            var row = rows[index];
             // `halted` in the status column: an item the queue has given up on and one that merely
             // failed its lane and is still an advance candidate otherwise print identically, and
             // halted is precisely the fact that tells the operator they must act — nothing in the
             // product clears it (QueueItem.Halted).
-            var state = item.State.ToString().ToLowerInvariant() + (item.Halted ? " halted" : string.Empty);
-            var where = item.RoomDirectory is { Length: > 0 } room ? $"  room: {room}" : string.Empty;
+            var state = row.Lifecycle.State + (row.Lifecycle.Halted ? " halted" : string.Empty);
+            var where = row.Room.Directory is { Length: > 0 } room ? $"  room: {room}" : string.Empty;
             var external = item.External ? "  (external — counted, never launched)" : string.Empty;
 
             // The stage, when there is one. A slice-1 dispatch request prints exactly what it printed
             // before -- the absence of a stage is the absence of a lifecycle, and inventing a word for
             // it ("none", "single") would read as a stage the product has.
-            var stage = item.Stage is { } workStage
-                ? $"  stage: {WorkStages.Token(workStage)}"
+            var stage = row.Lifecycle.Stage is { } workStage
+                ? $"  stage: {workStage}"
                     + (item.Round > 0 ? $" (round {item.Round})" : string.Empty)
                     + (item.PullRequest is { } pr ? $"  PR #{pr}" : string.Empty)
                 : string.Empty;
@@ -1037,22 +1055,23 @@ public static class QueueCommand
             {
                 output.WriteLine($"  effective stage plan: {DescribeStagePlan(item, settings)}");
             }
-            if (await QueueRoomSettlementProjection.RenderAsync(item, cancellationToken).ConfigureAwait(false) is { } settlement)
+            if (row.Room.Settlement is { } settlement)
             {
-                output.WriteLine(settlement);
+                var reason = settlement.Reason is { Length: > 0 } detail ? $": {detail}" : string.Empty;
+                output.WriteLine($"  settlement: conductor {settlement.Kind} ({settlement.State}){reason}");
             }
             else if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");
             }
-            output.WriteLine(item.Requirements is null
+            output.WriteLine(row.Requirements.Declared is null
                 ? "  requirements: unknown (legacy migration row)"
-                : $"  requirements: {(item.Requirements.Count == 0 ? "none" : string.Join(", ", item.Requirements))}");
-            if (item.WorkerAssignment is { } assignment)
+                : $"  requirements: {(row.Requirements.Declared.Count == 0 ? "none" : string.Join(", ", row.Requirements.Declared))}");
+            if (row.Routing.WorkerAssignment is { } assignment)
             {
                 output.WriteLine($"  assignment: {assignment.Adapter}/{assignment.Model ?? "role-default"}/{assignment.Effort ?? "role-default"} ({assignment.DecisionId}; {assignment.ClosedReason})");
             }
-            if (item.LastAdmission is { } admission)
+            if (row.Admission is { } admission)
             {
                 var missing = admission.Missing is { Count: > 0 }
                     ? $"; missing {string.Join(", ", admission.Missing)}"
@@ -1067,6 +1086,52 @@ public static class QueueCommand
             + (active ? " (selected)" : string.Empty) + "; "
             + $"{items.Count - known} unknown migration row(s).");
 
+        return 0;
+    }
+
+    private static async Task<int> ListJsonAsync(
+        QueueOptions options,
+        QueueSnapshot snapshot,
+        IReadOnlyList<QueueItem> items,
+        IReadOnlyList<QueueDecisionEntry> decisions,
+        TextWriter output,
+        CancellationToken cancellationToken)
+    {
+        var fingerprint = QueueInspectionProjection.Fingerprint(snapshot);
+        var pageSize = options.PageSize ?? QueueInspectionProjection.DefaultPageSize;
+        if (pageSize is < 1 or > QueueInspectionProjection.MaxPageSize)
+        {
+            throw new CliArgumentException(
+                $"'--page-size' must be between 1 and {QueueInspectionProjection.MaxPageSize}. {QueueOptionsParser.Usage}");
+        }
+        var activeSelection = !options.IncludeRetained;
+        var window = QueueInspectionProjection.PageItems(
+            items,
+            fingerprint,
+            activeSelection,
+            options.IncludeRetained,
+            pageSize,
+            options.Cursor);
+        var rows = await QueueInspectionProjection
+            .ProjectAsync(window.Items, snapshot.PullRequestObservations, decisions, cancellationToken)
+            .ConfigureAwait(false);
+        var document = new QueueInspectionDocument(
+            SchemaVersion: 1,
+            Selection: options.IncludeRetained ? "history" : "active",
+            SnapshotFingerprint: fingerprint,
+            PageSize: pageSize,
+            HasMore: window.NextCursor is not null,
+            NextCursor: window.NextCursor,
+            ObservationConsistency: "queue-snapshot; room observations are read separately and may not be atomic with it",
+            Held: snapshot.Held,
+            Items: rows);
+        await output.WriteLineAsync(JsonSerializer.Serialize(
+            document,
+            new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            })).ConfigureAwait(false);
         return 0;
     }
 

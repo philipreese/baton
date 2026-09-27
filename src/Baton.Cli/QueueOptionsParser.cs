@@ -20,7 +20,7 @@ public static class QueueOptionsParser
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] [--lifecycle-reason <why>] | " +
-        "baton queue list [--active] | baton queue worktrees [--apply] [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
+        "baton queue list [--active] [--history] [--format text|json] [--page-size <n>] [--cursor <opaque>] | baton queue worktrees [--apply] [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -60,18 +60,69 @@ public static class QueueOptionsParser
 
     private static QueueOptions ParseList(IReadOnlyList<string> args)
     {
-        if (args.Count == 1)
+        var active = false;
+        var includeRetained = false;
+        var format = QueueListOutputFormat.Text;
+        var formatSpecified = false;
+        int? pageSize = null;
+        string? cursor = null;
+
+        var i = 1;
+        while (i < args.Count)
         {
-            return new QueueOptions(QueueVerb.List);
+            switch (args[i])
+            {
+                case "--active" when !active:
+                    active = true;
+                    i++;
+                    break;
+                case "--history" when !includeRetained:
+                    includeRetained = true;
+                    i++;
+                    break;
+                case "--format" when !formatSpecified:
+                    formatSpecified = true;
+                    var rawFormat = TakeValue(args, ref i, "--format");
+                    format = rawFormat switch
+                    {
+                        "text" => QueueListOutputFormat.Text,
+                        "json" => QueueListOutputFormat.Json,
+                        _ => throw new CliArgumentException($"'--format' must be 'text' or 'json', got '{rawFormat}'. {Usage}"),
+                    };
+                    break;
+                case "--page-size" when pageSize is null:
+                    pageSize = TakeInt(args, ref i, "--page-size");
+                    if (pageSize is < 1 or > QueueInspectionProjection.MaxPageSize)
+                    {
+                        throw new CliArgumentException(
+                            $"'--page-size' must be between 1 and {QueueInspectionProjection.MaxPageSize}. {Usage}");
+                    }
+                    break;
+                case "--cursor" when cursor is null:
+                    cursor = TakeValue(args, ref i, "--cursor");
+                    if (string.IsNullOrWhiteSpace(cursor))
+                    {
+                        throw new CliArgumentException($"'--cursor' requires a nonblank opaque value. {Usage}");
+                    }
+                    break;
+                default:
+                    throw new CliArgumentException(
+                        $"'baton queue list' takes '--active', '--history', '--format text|json', '--page-size <n>', and '--cursor <opaque>'. {Usage}");
+            }
         }
 
-        if (args.Count == 2 && args[1] == "--active")
+        if (format == QueueListOutputFormat.Text && (pageSize is not null || cursor is not null))
         {
-            return new QueueOptions(QueueVerb.List, Active: true);
+            throw new CliArgumentException("'--page-size' and '--cursor' require '--format json'. " + Usage);
         }
 
-        throw new CliArgumentException(
-            $"'baton queue list' takes no arguments or '--active' (got '{args[1]}'). {Usage}");
+        return new QueueOptions(
+            QueueVerb.List,
+            Active: active,
+            IncludeRetained: includeRetained,
+            ListFormat: format,
+            PageSize: pageSize,
+            Cursor: cursor);
     }
 
     private static QueueOptions ParseImport(IReadOnlyList<string> args)

@@ -24,6 +24,13 @@ public enum QueueWorktreesOutputFormat
     Json,
 }
 
+/// <summary>Output format for <c>baton queue list</c>.</summary>
+public enum QueueListOutputFormat
+{
+    Text,
+    Json,
+}
+
 /// <summary>
 /// Parsed arguments for <c>baton queue</c> (#1934 slice 1). Just the inputs —
 /// <see cref="QueueCommand"/> does the work, and <see cref="QueueOptionsParser"/> does every
@@ -72,6 +79,10 @@ public enum QueueWorktreesOutputFormat
 /// no <c>--require</c> flag is supplied.</param>
 /// <param name="Active">Limits <c>list</c> to queued, launched, and lifecycle terminal work that still needs attention.</param>
 /// <param name="Format">The output format for <c>baton queue worktrees</c>.</param>
+/// <param name="IncludeRetained">Includes retained one-lane and retired history in a list inspection.</param>
+/// <param name="ListFormat">The output format for <c>baton queue list</c>.</param>
+/// <param name="PageSize">The bounded JSON inspection page size.</param>
+/// <param name="Cursor">The opaque JSON inspection continuation cursor.</param>
 /// <param name="Apply">Claims and removes static worktree candidates after a final recheck.</param>
 public sealed record QueueOptions(
     QueueVerb Verb,
@@ -100,4 +111,8 @@ public sealed record QueueOptions(
     TaskSizeDeclaration? DeclaredTaskSize = null,
     QueueWorktreesOutputFormat Format = QueueWorktreesOutputFormat.Text,
     int? MergedPullRequest = null,
-    bool Apply = false);
+    bool Apply = false,
+    bool IncludeRetained = false,
+    QueueListOutputFormat ListFormat = QueueListOutputFormat.Text,
+    int? PageSize = null,
+    string? Cursor = null);
