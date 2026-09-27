@@ -124,7 +124,7 @@ public static class QuotaLedgerStore
         var resolvedBindings = ExecutionBindingResolver.Resolve(entries);
         var outcomeByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
         var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
-        var checkpointTerminalByExecutionId = new Dictionary<string, FlowEvent.ArtifactCheckpointCompleted>(StringComparer.Ordinal);
+        var terminalByExecutionId = new Dictionary<string, (CoreExitReason ExitReason, ArrestReason? ArrestReason)>(StringComparer.Ordinal);
         var exitedAtByExecutionId = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
@@ -178,7 +178,7 @@ public static class QuotaLedgerStore
 
                 case FlowEvent.ArtifactCheckpointCompleted checkpoint:
                     outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.TerminalOutcome;
-                    checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint;
+                    terminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = (checkpoint.ExitReason, checkpoint.ArrestReason);
                     break;
 
                 case FlowEvent.GraceTurnCompleted graceCompletion:
@@ -191,6 +191,8 @@ public static class QuotaLedgerStore
                             CoreExitReason.CancelRequested => "CancelRequested",
                             _ => "UnknownExit",
                         };
+                    terminalByExecutionId[graceCompletion.GraceExecutionId.Value] =
+                        (graceCompletion.ExitReason, graceCompletion.ArrestReason);
                     break;
             }
         }
@@ -218,11 +220,11 @@ public static class QuotaLedgerStore
                 WallClockMs: usage.WallClockMs,
                 Outcome: outcome,
                 PredecessorExecution: checkpointPredecessorByExecutionId.GetValueOrDefault(executionId),
-                ExitReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out var checkpointTerminal)
-                    ? checkpointTerminal.ExitReason
+                ExitReason: terminalByExecutionId.TryGetValue(executionId, out var terminal)
+                    ? terminal.ExitReason
                     : null,
-                ArrestReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
-                    ? checkpointTerminal.ArrestReason
+                ArrestReason: terminalByExecutionId.TryGetValue(executionId, out terminal)
+                    ? terminal.ArrestReason
                     : null));
         }
 

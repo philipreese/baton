@@ -1045,6 +1045,13 @@ public static class MutationInterface
                 // M10 Phase 3's crash reconciliation from one pass, rather than reading and parsing the
                 // same file twice for no new information.
                 var log = await eventLogReader.ReadSnapshotFromOffsetAsync(currentCheckpoint?.ByteOffset ?? 0, ioCancellationToken).ConfigureAwait(false);
+                if (currentCheckpoint is { ByteOffset: > 0 } retainedCheckpoint
+                    && log.ByteOffset < retainedCheckpoint.ByteOffset)
+                {
+                    throw new FlowEventLogReadException(
+                        "Cannot resume from a missing or shortened flow.jsonl behind its saved projection checkpoint; preserve the journal and workspace for inspection.");
+                }
+
                 if (log.HasUnterminatedTail)
                 {
                     throw new FlowEventLogReadException(
@@ -1119,7 +1126,7 @@ public static class MutationInterface
                 if (graceEvents.OfType<FlowEvent.GraceTurnClaimed>().Any())
                 {
                     var reconciliation = await ReconcileGraceClaimsAsync(
-                            graceEvents, workerBindings, eventLogWriter, ioCancellationToken)
+                            graceEvents, workerBindings, registeredExecutionIds, eventLogWriter, ioCancellationToken)
                         .ConfigureAwait(false);
                     if (reconciliation == GraceReconciliationResult.Unresolved)
                     {
@@ -3025,9 +3032,10 @@ public static class MutationInterface
             workspaceChanged);
     }
 
-    private static async Task<GraceReconciliationResult> ReconcileGraceClaimsAsync(
+    internal static async Task<GraceReconciliationResult> ReconcileGraceClaimsAsync(
         IReadOnlyList<FlowEvent> events,
         IReadOnlyDictionary<string, WorkerBinding> workerBindings,
+        IReadOnlySet<ExecutionId> registeredExecutionIds,
         IEventLogWriter eventLogWriter,
         CancellationToken cancellationToken)
     {
@@ -3037,10 +3045,20 @@ public static class MutationInterface
             return GraceReconciliationResult.None;
         }
 
+        ValidateGraceClaimJoins(events, claims);
+
         foreach (var claim in claims)
         {
             var parentId = claim.ParentExecutionId;
             var childId = claim.GraceExecutionId;
+            if (registeredExecutionIds.Contains(parentId))
+            {
+                // The live dispatch owns both the child's safety append and the parent's terminal
+                // event. A sibling can complete while this child is still running, so a pump round
+                // must not mistake the live claim for a crashed orphan or finalize it concurrently.
+                continue;
+            }
+
             var completion = events.OfType<FlowEvent.GraceTurnCompleted>()
                 .LastOrDefault(item => item.GraceExecutionId == childId);
             if (completion is null)
@@ -3139,6 +3157,145 @@ public static class MutationInterface
         return GraceReconciliationResult.None;
     }
 
+    private static void ValidateGraceClaimJoins(
+        IReadOnlyList<FlowEvent> events,
+        IReadOnlyList<FlowEvent.GraceTurnClaimed> claims)
+    {
+        if (claims.Select(claim => claim.GraceExecutionId).Distinct().Count() != claims.Count
+            || claims.Select(claim => claim.ParentExecutionId).Distinct().Count() != claims.Count)
+        {
+            throw new FlowEventLogReadException("Grace claims contain a duplicate child or parent execution identity.");
+        }
+
+        var claimsByChild = claims.ToDictionary(claim => claim.GraceExecutionId);
+
+        var acceptedRequestGroups = events.OfType<FlowEvent.ExecutionRequestAccepted>()
+            .GroupBy(accepted => accepted.Request.ExecutionId)
+            .ToDictionary(group => group.Key, group => group.ToArray());
+        if (acceptedRequestGroups.Values.Any(group => group.Length > 1))
+        {
+            throw new FlowEventLogReadException("An execution has duplicate accepted request records while joining grace evidence.");
+        }
+
+        var acceptedRequests = acceptedRequestGroups.ToDictionary(pair => pair.Key, pair => pair.Value[0]);
+        var completions = events.OfType<FlowEvent.GraceTurnCompleted>().ToArray();
+        var safetyRecords = events.OfType<FlowEvent.GraceTurnSafetyRecorded>().ToArray();
+        if (completions.Any(completion => !claimsByChild.ContainsKey(completion.GraceExecutionId))
+            || safetyRecords.Any(safety => !claimsByChild.ContainsKey(safety.GraceExecutionId)))
+        {
+            throw new FlowEventLogReadException("A grace completion or safety record has no matching durable claim.");
+        }
+
+        if (completions.GroupBy(completion => completion.GraceExecutionId).Any(group => group.Count() > 1)
+            || safetyRecords.GroupBy(safety => safety.GraceExecutionId).Any(group => group.Count() > 1))
+        {
+            throw new FlowEventLogReadException("A grace child has duplicate completion or safety records.");
+        }
+
+        var eventPositions = events.Select((flowEvent, index) => (flowEvent, index)).ToArray();
+        foreach (var claim in claims)
+        {
+            var parentId = claim.ParentExecutionId;
+            var childId = claim.GraceExecutionId;
+            var childRequest = claim.Request;
+            if (parentId == childId
+                || childRequest.ExecutionId != childId
+                || !acceptedRequests.TryGetValue(parentId, out var acceptedParent))
+            {
+                throw new FlowEventLogReadException("A grace claim has an invalid parent/child execution join.");
+            }
+
+            var parentRequest = acceptedParent.Request;
+            if (childRequest.WorkflowId != parentRequest.WorkflowId
+                || childRequest.StepId != parentRequest.StepId
+                || !string.Equals(childRequest.Worker, parentRequest.Worker, StringComparison.Ordinal)
+                || !string.Equals(childRequest.Adapter, parentRequest.Adapter, StringComparison.Ordinal)
+                || !string.Equals(childRequest.Model, parentRequest.Model, StringComparison.Ordinal)
+                || !childRequest.Inputs.SequenceEqual(parentRequest.Inputs)
+                || !childRequest.Outputs.SequenceEqual(parentRequest.Outputs)
+                || childRequest.Limits is not { ChosenKey: null } limits
+                || limits != GraceTurn.CreateLimitEvidence(limits.MonitorInputsKnown)
+                || string.IsNullOrWhiteSpace(claim.Baseline.WorkspaceIdentityDigest)
+                || string.IsNullOrWhiteSpace(claim.Baseline.EndpointDigest)
+                || string.IsNullOrWhiteSpace(claim.Baseline.EndpointConfigurationDigest))
+            {
+                throw new FlowEventLogReadException("A grace child request does not match its accepted parent or fixed child-limit contract.");
+            }
+
+            if (claim.ParentEvidence.IsMonitorArrest)
+            {
+                if (claim.ParentEvidence.Arrested is not { } arrested
+                    || arrested.ExecutionId != parentId
+                    || arrested.Reason is null)
+                {
+                    throw new FlowEventLogReadException("A monitored grace claim lacks valid pending parent arrest evidence.");
+                }
+            }
+            else if (claim.ParentEvidence.ExitReason != CoreExitReason.TimedOut)
+            {
+                throw new FlowEventLogReadException("A non-monitor grace claim lacks its original timeout result.");
+            }
+
+            var parentTerminals = events.Where(flowEvent => HasTerminalExecution(flowEvent, parentId)).ToArray();
+            if (parentTerminals.Length > 1)
+            {
+                throw new FlowEventLogReadException("A parent with grace evidence has duplicate terminal records.");
+            }
+
+            if (claim.ParentEvidence.IsMonitorArrest && parentTerminals.Length == 1)
+            {
+                var pending = claim.ParentEvidence.Arrested!;
+                if (parentTerminals[0] is not FlowEvent.ExecutionArrested recordedArrest
+                    || !MatchesPendingArrest(pending, recordedArrest))
+                {
+                    throw new FlowEventLogReadException("A monitored grace claim conflicts with its recorded parent arrest.");
+                }
+            }
+
+            var claimIndex = eventPositions.Single(item => ReferenceEquals(item.flowEvent, claim)).index;
+            var completion = completions.SingleOrDefault(item => item.GraceExecutionId == childId);
+            if (completion is not null
+                && eventPositions.Single(item => ReferenceEquals(item.flowEvent, completion)).index <= claimIndex)
+            {
+                throw new FlowEventLogReadException("A grace completion appears before its durable claim.");
+            }
+
+            var safety = safetyRecords.SingleOrDefault(item => item.GraceExecutionId == childId);
+            if (safety is not null)
+            {
+                if (safety.ParentExecutionId != parentId
+                    || completion is null
+                    || eventPositions.Single(item => ReferenceEquals(item.flowEvent, safety)).index
+                        <= eventPositions.Single(item => ReferenceEquals(item.flowEvent, completion)).index)
+                {
+                    throw new FlowEventLogReadException("A grace safety record does not follow its matching child completion and parent claim.");
+                }
+            }
+        }
+    }
+
+    private static bool MatchesPendingArrest(
+        FlowEvent.ExecutionArrested pending,
+        FlowEvent.ExecutionArrested recorded)
+    {
+        static bool SameUsage(WorkerUsage? left, WorkerUsage? right) =>
+            left is null ? right is null
+            : right is not null
+                && (left with { ModelsObserved = null }) == (right with { ModelsObserved = null })
+                && (left.ModelsObserved ?? []).SequenceEqual(right.ModelsObserved ?? [], StringComparer.Ordinal);
+
+        return pending.ExecutionId == recorded.ExecutionId
+            && SameUsage(pending.Usage, recorded.Usage)
+            && (pending.LastToolNames ?? []).SequenceEqual(recorded.LastToolNames ?? [], StringComparer.Ordinal)
+            && pending.Reason == recorded.Reason
+            && pending.ToolStepCount == recorded.ToolStepCount
+            && pending.PeakBilledInWindow == recorded.PeakBilledInWindow
+            && pending.BilledRateLimit == recorded.BilledRateLimit
+            && string.Equals(pending.Adapter, recorded.Adapter, StringComparison.Ordinal)
+            && string.Equals(pending.DominantCommandShape, recorded.DominantCommandShape, StringComparison.Ordinal)
+            && pending.DominantCommandSharePercent == recorded.DominantCommandSharePercent;
+    }
+
     private static bool HasTerminalExecution(FlowEvent flowEvent, ExecutionId executionId) => flowEvent switch
     {
         FlowEvent.ExecutionSucceeded succeeded => succeeded.ExecutionId == executionId,
@@ -3150,7 +3307,7 @@ public static class MutationInterface
         _ => false,
     };
 
-    private enum GraceReconciliationResult
+    internal enum GraceReconciliationResult
     {
         None,
         Appended,
@@ -3359,7 +3516,23 @@ public static class MutationInterface
             parentResult.TerminalResultObserved,
             parentArrest,
             parentResult.StderrTail);
-        var baselineEvidence = Workspaces.WorktreeProvisioner.CreateGraceCheckpointEvidence(checkpoint);
+        GraceCheckpointEvidence baselineEvidence;
+        try
+        {
+            baselineEvidence = Workspaces.WorktreeProvisioner.CreateGraceCheckpointEvidence(workspacePath, checkpoint);
+        }
+        catch (Workspaces.WorktreeProvisioningException)
+        {
+            Console.Error.WriteLine(
+                $"Grace turn for execution '{prepared.Request.ExecutionId.Value}' did not start because its workspace identity could not be established.");
+            await eventLogWriter.AppendAsync(
+                    new FlowEvent.GraceTurnAttempted(
+                        prepared.Request.ExecutionId, WorkspaceCleanAfter: false, parentResult.Reason),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return (false, null);
+        }
+
         var integrity = await eventLogReader.ReadSnapshotAsync(CancellationToken.None).ConfigureAwait(false);
         if (integrity.HasUnterminatedTail)
         {

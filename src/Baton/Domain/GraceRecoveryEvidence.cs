@@ -8,7 +8,8 @@ public sealed record GraceCheckpointEvidence(
     string MergeRef,
     string RemoteTip,
     string EndpointDigest,
-    string EndpointConfigurationDigest);
+    string EndpointConfigurationDigest,
+    string WorkspaceIdentityDigest);
 
 /// <summary>Original parent facts held pending while a grace child may still be running.</summary>
 public sealed record GraceParentRecoveryEvidence(

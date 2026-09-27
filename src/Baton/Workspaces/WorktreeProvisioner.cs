@@ -281,6 +281,7 @@ public static class WorktreeProvisioner
 
         try
         {
+            var workspaceIdentityDigest = FingerprintStrings(ReadWorkspaceIdentity(worktreePath));
             var (headCode, headOut, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
             var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
             var head = headOut.Trim();
@@ -307,9 +308,13 @@ public static class WorktreeProvisioner
                     worktreePath, endpointConfiguration.Value.Endpoint, remoteConfiguration.Value.MergeRef, cancellationToken)
                 .ConfigureAwait(false);
             return remoteTip is not null
+                && string.Equals(
+                    workspaceIdentityDigest,
+                    FingerprintStrings(ReadWorkspaceIdentity(worktreePath)),
+                    StringComparison.Ordinal)
                 ? new GraceCheckpoint(
                     head, branch, remoteConfiguration.Value.Remote, remoteConfiguration.Value.MergeRef, remoteTip,
-                    endpointConfiguration.Value.Endpoint, endpointConfiguration.Value.Configuration)
+                    endpointConfiguration.Value.Endpoint, endpointConfiguration.Value.Configuration, workspaceIdentityDigest)
                 : null;
         }
         catch (WorktreeProvisioningException)
@@ -323,9 +328,17 @@ public static class WorktreeProvisioner
         CaptureGraceCheckpointAsync(worktreePath, CancellationToken.None).GetAwaiter().GetResult();
 
     /// <summary>Removes credential-bearing endpoint values while preserving exact replay identity.</summary>
-    public static GraceCheckpointEvidence CreateGraceCheckpointEvidence(GraceCheckpoint checkpoint)
+    public static GraceCheckpointEvidence CreateGraceCheckpointEvidence(string worktreePath, GraceCheckpoint checkpoint)
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
+        var workspaceIdentity = ReadWorkspaceIdentity(worktreePath);
+        var workspaceIdentityDigest = FingerprintStrings(workspaceIdentity);
+        if (checkpoint.WorkspaceIdentityDigest is null
+            || !string.Equals(checkpoint.WorkspaceIdentityDigest, workspaceIdentityDigest, StringComparison.Ordinal))
+        {
+            throw new WorktreeProvisioningException("The captured grace workspace identity changed before the spend claim.");
+        }
+
         return new GraceCheckpointEvidence(
             checkpoint.Head,
             checkpoint.BranchRef,
@@ -333,7 +346,8 @@ public static class WorktreeProvisioner
             checkpoint.MergeRef,
             checkpoint.RemoteTip,
             FingerprintStrings([checkpoint.Endpoint]),
-            FingerprintStrings(checkpoint.EndpointConfiguration));
+            FingerprintStrings(checkpoint.EndpointConfiguration),
+            checkpoint.WorkspaceIdentityDigest);
     }
 
     /// <summary>
@@ -351,6 +365,14 @@ public static class WorktreeProvisioner
 
         try
         {
+            if (!string.Equals(
+                    FingerprintStrings(ReadWorkspaceIdentity(worktreePath)),
+                    evidence.WorkspaceIdentityDigest,
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
             var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
             if (branchCode != 0 || !string.Equals(branchOut.Trim(), evidence.BranchRef, StringComparison.Ordinal))
             {
@@ -381,12 +403,37 @@ public static class WorktreeProvisioner
                 evidence.MergeRef,
                 evidence.RemoteTip,
                 endpointConfiguration.Value.Endpoint,
-                endpointConfiguration.Value.Configuration);
+                endpointConfiguration.Value.Configuration,
+                evidence.WorkspaceIdentityDigest);
         }
         catch (WorktreeProvisioningException)
         {
             return null;
         }
+    }
+
+    private static IReadOnlyList<string> ReadWorkspaceIdentity(string worktreePath)
+    {
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            throw new WorktreeProvisioningException("The captured grace workspace is unavailable.");
+        }
+
+        var (exitCode, stdout, _) = RunGit(worktreePath, "rev-parse", "--show-toplevel", "--git-dir");
+        if (exitCode != 0)
+        {
+            throw new WorktreeProvisioningException("Could not establish grace workspace identity.");
+        }
+
+        var lines = stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length != 2)
+        {
+            throw new WorktreeProvisioningException("Could not establish grace workspace identity.");
+        }
+
+        var root = Path.GetFullPath(lines[0]);
+        var gitDirectory = Path.GetFullPath(Path.Combine(root, lines[1]));
+        return [NormalizeForComparison(root), NormalizeForComparison(gitDirectory)];
     }
 
     private static string FingerprintStrings(IReadOnlyList<string> values)
@@ -1435,7 +1482,8 @@ public sealed record GraceCheckpoint(
     string MergeRef,
     string RemoteTip,
     string Endpoint,
-    IReadOnlyList<string> EndpointConfiguration);
+    IReadOnlyList<string> EndpointConfiguration,
+    string? WorkspaceIdentityDigest = null);
 
 /// <summary>
 /// A worktree provisioned for a run, held so <c>WorktreeProvisioner.Teardown</c> can be called on it

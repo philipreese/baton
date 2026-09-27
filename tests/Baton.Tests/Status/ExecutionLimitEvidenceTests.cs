@@ -156,7 +156,8 @@ public sealed class ExecutionLimitEvidenceTests
             var childId = new ExecutionId("grace-child");
             var parentRequest = Request(ExecutionId, parentLimits);
             var childRequest = Request(childId, GraceTurn.CreateLimitEvidence(monitorInputsKnown: true));
-            var baseline = new GraceCheckpointEvidence("head", "refs/heads/main", "origin", "refs/heads/main", "tip", "endpoint-hash", "config-hash");
+            var baseline = new GraceCheckpointEvidence(
+                "head", "refs/heads/main", "origin", "refs/heads/main", "tip", "endpoint-hash", "config-hash", "workspace-hash");
             var pendingParent = new GraceParentRecoveryEvidence(
                 true, -1, CoreExitReason.CancelRequested, false, false,
                 new FlowEvent.ExecutionArrested(ExecutionId, Reason: ArrestReason.TokenBudget));

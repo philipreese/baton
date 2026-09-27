@@ -19,6 +19,8 @@ namespace Baton.Tests.EndToEnd;
 public sealed class GraceTurnEndToEndTests
 {
     private static readonly StepId Implement = new("implement");
+    private static readonly StepId SiblingOne = new("sibling-one");
+    private static readonly StepId SiblingTwo = new("sibling-two");
 
     // #1706: the billed component on claude is cache_creation -- mirrors
     // MutationInterfaceTests.StartWorkflowAsync_arrests_an_execution_that_crosses_its_token_budget's own
@@ -160,6 +162,27 @@ public sealed class GraceTurnEndToEndTests
                     CoreExitedByExecutionId = exited,
                 },
             });
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            var completeJournal = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var newline = Array.IndexOf(completeJournal, (byte)'\n');
+            Assert.True(newline >= 0);
+            var shortenedJournal = completeJournal[..(newline + 1)];
+            await File.WriteAllBytesAsync(logPath, shortenedJournal, TestContext.Current.CancellationToken);
+            var shortenedBytesBeforeRefusal = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var shortenedWriter = new FlowEventLogWriter(logPath);
+            var shortenedDispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            await Assert.ThrowsAsync<FlowEventLogReadException>(() => MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), shortenedWriter, shortenedDispatcher,
+                cancellationToken: TestContext.Current.CancellationToken));
+            await shortenedWriter.DisposeAsync();
+            Assert.Equal(shortenedBytesBeforeRefusal,
+                await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.Equal(0, shortenedDispatcher.CallCount);
+            await File.WriteAllBytesAsync(logPath, completeJournal, TestContext.Current.CancellationToken);
+
             var recoveryWriter = new FlowEventLogWriter(Path.Combine(run.RoomDirectory, "flow.jsonl"));
             var recoveryDispatcher = new GraceTurnCoreDispatcher(
                 run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
@@ -193,6 +216,203 @@ public sealed class GraceTurnEndToEndTests
         finally
         {
             run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Live_grace_claim_does_not_end_the_pump_or_race_a_parent_arrest()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"task-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(roomDirectory, "lane");
+        var artifactsRoot = Path.Combine(roomDirectory, "artifacts");
+        var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+        Directory.CreateDirectory(workspace);
+        TempGitRepository.InitWithEverythingCommitted(workspace);
+        var remote = TempGitRepository.InitBareRepository(Path.Combine(roomDirectory, "origin.git"));
+        TempGitRepository.AddRemote(workspace, "origin", remote);
+        TempGitRepository.Push(workspace, "origin", "HEAD:refs/heads/main");
+        RunGit(workspace, "branch", "--set-upstream-to", "origin/main");
+        Assert.NotNull(await Baton.Workspaces.WorktreeProvisioner.CaptureGraceCheckpointAsync(
+            workspace, TestContext.Current.CancellationToken));
+
+        var snapshot = new WorkflowDefinitionSnapshot(
+            new WorkflowDefinitionSnapshotId("snapshot-grace-live"),
+            new WorkflowTemplateId("template-grace-live"),
+            WorkflowTemplateVersion: 1,
+            Steps:
+            [
+                new WorkflowStepDefinition(Implement, "implement", [], [], DependsOn: [], RetryPolicy: new RetryPolicy(1)),
+                new WorkflowStepDefinition(SiblingOne, "sibling-one", [], [], DependsOn: [], RetryPolicy: new RetryPolicy(1)),
+                new WorkflowStepDefinition(SiblingTwo, "sibling-two", [], [], DependsOn: [], RetryPolicy: new RetryPolicy(1)),
+            ]);
+        var bindings = new Dictionary<string, WorkerBinding>(StringComparer.Ordinal)
+        {
+            ["implement"] = new WorkerBinding.Process(
+                new WorkerContract("implement", [], [], []),
+                new CoreDispatchTarget("implement-cli", [], WorkingDirectory: workspace, PromptText: "original brief"),
+                TimeSpan.FromSeconds(30), Adapter: "claude", TokenBudget: 1000, MaxToolSteps: 1,
+                ChangesTree: true, VerifiesWorkspace: true),
+            ["sibling-one"] = ReadOnlySibling("sibling-one", workspace),
+            ["sibling-two"] = ReadOnlySibling("sibling-two", workspace),
+        };
+
+        var dispatcher = new LiveGraceConcurrencyDispatcher(workspace, PrimaryArrestingUsageLine);
+        await using var innerWriter = new FlowEventLogWriter(logPath);
+        var writer = new BlockingParentArrestWriter(innerWriter);
+        var reader = new FlowEventLogReader(logPath);
+        var registry = new InFlightExecutionRegistry();
+        try
+        {
+            var workflowTask = MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-grace-live"), roomDirectory, snapshot, bindings, artifactsRoot,
+                reader, writer, dispatcher, registry, cancellationToken: TestContext.Current.CancellationToken);
+
+            await dispatcher.PrimaryStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await dispatcher.SiblingOneStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await dispatcher.SiblingTwoStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            var graceOrClaimOrArrest = await Task.WhenAny(
+                    dispatcher.GraceStarted.Task, writer.GraceClaimWritten.Task,
+                    writer.ParentArrestBlocked.Task)
+                .WaitAsync(TimeSpan.FromSeconds(25), TestContext.Current.CancellationToken);
+            if (ReferenceEquals(graceOrClaimOrArrest, writer.ParentArrestBlocked.Task))
+            {
+                var earlyEvents = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+                Assert.Fail($"Parent terminal append began before grace claim; durable events: {string.Join(", ", earlyEvents.Select(item => item.GetType().Name))}.");
+            }
+            if (ReferenceEquals(graceOrClaimOrArrest, writer.GraceClaimWritten.Task))
+            {
+                await dispatcher.GraceStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            }
+
+            dispatcher.ReleaseSiblingOne.TrySetResult();
+            await writer.FirstSiblingSucceeded.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await Task.Delay(100, TestContext.Current.CancellationToken);
+            Assert.False(workflowTask.IsCompleted, "a live child claim must not return the pump while the child is blocked");
+            Assert.Equal(1, dispatcher.GraceCallCount);
+
+            dispatcher.ReleaseGrace.TrySetResult();
+            await writer.ParentArrestBlocked.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            dispatcher.ReleaseSiblingTwo.TrySetResult();
+            await writer.SecondSiblingSucceeded.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await Task.Delay(100, TestContext.Current.CancellationToken);
+            Assert.False(workflowTask.IsCompleted, "the live dispatch still owns its pending parent terminal append");
+            Assert.Equal(1, writer.ParentArrestAttempts);
+
+            writer.ReleaseParentArrest.TrySetResult();
+            var state = await workflowTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>(), item => item.ExecutionId == dispatcher.ParentExecutionId);
+            Assert.Equal(StepStatus.Succeeded, state.Steps.Single(step => step.StepId == SiblingOne).Status);
+            Assert.Equal(StepStatus.Succeeded, state.Steps.Single(step => step.StepId == SiblingTwo).Status);
+            Assert.Equal(1, dispatcher.GraceCallCount);
+        }
+        finally
+        {
+            writer.ReleaseParentArrest.TrySetResult();
+            dispatcher.ReleaseGrace.TrySetResult();
+            dispatcher.ReleaseSiblingOne.TrySetResult();
+            dispatcher.ReleaseSiblingTwo.TrySetResult();
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    private static WorkerBinding.Process ReadOnlySibling(string worker, string workspace) =>
+        new(new WorkerContract(worker, [], [], []), new CoreDispatchTarget(worker, [], WorkingDirectory: workspace),
+            TimeSpan.FromSeconds(30), VerifiesWorkspace: false);
+
+    private static async Task WaitForCancellationAsync(CancellationToken cancellationToken)
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(() => completion.TrySetResult());
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+    }
+
+    private sealed class LiveGraceConcurrencyDispatcher(string workspace, string primaryUsageLine) : ICoreDispatcher
+    {
+        private int graceCallCount;
+        public TaskCompletionSource PrimaryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource GraceStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SiblingOneStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SiblingTwoStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseGrace { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseSiblingOne { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseSiblingTwo { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ExecutionId ParentExecutionId { get; private set; }
+        public int GraceCallCount => Volatile.Read(ref graceCallCount);
+
+        public async Task<CoreDispatchResult> DispatchAsync(
+            ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
+        {
+            if (request.StepId == Implement)
+            {
+                if (request.ExecutionId.Value.StartsWith("grace-", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref graceCallCount);
+                    GraceStarted.TrySetResult();
+                    await ReleaseGrace.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+                    return new CoreDispatchResult(0, CoreExitReason.Natural);
+                }
+
+                ParentExecutionId = request.ExecutionId;
+                File.WriteAllText(Path.Combine(workspace, "left-behind.txt"), "unfinished parent work");
+                PrimaryStarted.TrySetResult();
+                target.OnStdoutLine?.Invoke(primaryUsageLine);
+                target.OnStdoutLine?.Invoke(
+                    """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Bash"}]}}""");
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new InvalidOperationException(
+                        $"The test usage stimulus did not arrest the live parent (adapter={request.Adapter ?? "null"}, limits={request.Limits}).");
+                }
+                await WaitForCancellationAsync(cancellationToken).ConfigureAwait(false);
+                return new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+            }
+
+            var release = request.StepId == SiblingOne ? ReleaseSiblingOne : ReleaseSiblingTwo;
+            (request.StepId == SiblingOne ? SiblingOneStarted : SiblingTwoStarted).TrySetResult();
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+            return new CoreDispatchResult(0, CoreExitReason.Natural);
+        }
+    }
+
+    private sealed class BlockingParentArrestWriter(IEventLogWriter inner) : IEventLogWriter
+    {
+        private int parentArrestAttempts;
+        private int siblingSuccesses;
+        public TaskCompletionSource ParentArrestBlocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource GraceClaimWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseParentArrest { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource FirstSiblingSucceeded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SecondSiblingSucceeded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int ParentArrestAttempts => Volatile.Read(ref parentArrestAttempts);
+
+        public async Task AppendAsync(FlowEvent flowEvent, CancellationToken cancellationToken = default)
+        {
+            if (flowEvent is FlowEvent.ExecutionArrested)
+            {
+                if (Interlocked.Increment(ref parentArrestAttempts) == 1)
+                {
+                    ParentArrestBlocked.TrySetResult();
+                    await ReleaseParentArrest.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+                }
+            }
+
+            await inner.AppendAsync(flowEvent, cancellationToken);
+            if (flowEvent is FlowEvent.GraceTurnClaimed)
+            {
+                GraceClaimWritten.TrySetResult();
+            }
+            if (flowEvent is FlowEvent.ExecutionSucceeded)
+            {
+                if (Interlocked.Increment(ref siblingSuccesses) == 1)
+                {
+                    FirstSiblingSucceeded.TrySetResult();
+                }
+                else
+                {
+                    SecondSiblingSucceeded.TrySetResult();
+                }
+            }
         }
     }
 

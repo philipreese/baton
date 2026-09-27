@@ -31,7 +31,7 @@ public sealed class GraceCheckpointRealGitTests
         fixture.Run("config", $"url.{localEndpoint}.insteadOf", secretEndpoint);
 
         var checkpoint = fixture.Capture();
-        var evidence = WorktreeProvisioner.CreateGraceCheckpointEvidence(checkpoint);
+        var evidence = WorktreeProvisioner.CreateGraceCheckpointEvidence(fixture.Repository, checkpoint);
         var json = JsonSerializer.Serialize(evidence);
 
         Assert.DoesNotContain("grace-user", json, StringComparison.Ordinal);
@@ -43,6 +43,19 @@ public sealed class GraceCheckpointRealGitTests
 
         fixture.Run("config", "--unset-all", $"url.{localEndpoint}.insteadOf");
         Assert.Null(WorktreeProvisioner.RehydrateGraceCheckpoint(fixture.Repository, evidence));
+    }
+
+    [Fact]
+    public void Replay_evidence_refuses_a_second_checkout_with_the_same_branch_and_remote()
+    {
+        using var fixture = new GraceRepository();
+        var checkpoint = fixture.Capture();
+        var evidence = WorktreeProvisioner.CreateGraceCheckpointEvidence(fixture.Repository, checkpoint);
+        var sibling = fixture.CreateSiblingCheckout();
+
+        Assert.Null(WorktreeProvisioner.RehydrateGraceCheckpoint(sibling, evidence));
+        Assert.Equal(checkpoint.Head, fixture.RevParse("HEAD"));
+        Assert.Equal(checkpoint.Head, fixture.RevParseAt(sibling, "HEAD"));
     }
 
     [Fact]
@@ -295,6 +308,14 @@ public sealed class GraceCheckpointRealGitTests
         public string BranchName => RunCapturing("branch", "--show-current").Trim();
         public string Head => RevParse("HEAD");
 
+        public string CreateSiblingCheckout()
+        {
+            var sibling = Path.Combine(root, "sibling");
+            Run("worktree", "add", "--detach", sibling, "HEAD");
+            RunAt(sibling, "symbolic-ref", "HEAD", $"refs/heads/{BranchName}");
+            return sibling;
+        }
+
         public GraceCheckpoint Capture() => Assert.IsType<GraceCheckpoint>(WorktreeProvisioner.CaptureGraceCheckpoint(Repository));
 
         public void Commit(string message)
@@ -310,12 +331,18 @@ public sealed class GraceCheckpointRealGitTests
         public string ReadRemoteReference(string reference) =>
             RunCapturing("--git-dir", Remote, "rev-parse", "--verify", $"{reference}^{{commit}}").Trim();
         public string RevParse(string reference) => RunCapturing("rev-parse", "--verify", $"{reference}^{{commit}}").Trim();
+        public string RevParseAt(string directory, string reference) => RunCapturingAt(directory, "rev-parse", "--verify", $"{reference}^{{commit}}").Trim();
         public bool IsAncestor(string ancestor, string descendant) => RunExitCode("merge-base", "--is-ancestor", ancestor, descendant) == 0;
 
         public void Run(params string[] arguments)
         {
             var output = RunCapturing(arguments);
             _ = output;
+        }
+
+        private void RunAt(string directory, params string[] arguments)
+        {
+            _ = RunCapturingAt(directory, arguments);
         }
 
         public void Dispose() => DirectoryCleanup.DeleteRecursively(root);
@@ -341,11 +368,25 @@ public sealed class GraceCheckpointRealGitTests
             return stdout;
         }
 
-        private Process Start(IEnumerable<string> arguments)
+        private string RunCapturingAt(string directory, params string[] arguments)
+        {
+            using var process = Start(arguments, directory);
+            var stdout = process.StandardOutput.ReadToEnd();
+            var stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"git {string.Join(' ', arguments)} exited {process.ExitCode}: {stderr}");
+            }
+
+            return stdout;
+        }
+
+        private Process Start(IEnumerable<string> arguments, string? workingDirectory = null)
         {
             var startInfo = new ProcessStartInfo("git")
             {
-                WorkingDirectory = Repository,
+                WorkingDirectory = workingDirectory ?? Repository,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
