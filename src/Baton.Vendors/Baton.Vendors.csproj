@@ -49,6 +49,7 @@
          validation table rests on. -->
     <EmbeddedResource Include="codex-model-list-2026-09-04.jsonl" />
     <EmbeddedResource Include="codex-model-list-2026-09-08.jsonl" />
+    <EmbeddedResource Include="codex-model-list-2026-09-27.jsonl" />
   </ItemGroup>
 
   <PropertyGroup>

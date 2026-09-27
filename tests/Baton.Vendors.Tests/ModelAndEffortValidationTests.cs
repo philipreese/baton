@@ -42,6 +42,15 @@ public class ModelAndEffortValidationTests
     }
 
     [Fact]
+    public void Claude_passes_the_measured_opus_5_5_full_id_through_verbatim()
+    {
+        var target = Resolve(new ClaudeWorkerAdapter(), model: "claude-opus-5-5");
+        Assert.Contains(
+            target.Args.Zip(target.Args.Skip(1)),
+            p => p.First == "--model" && p.Second == "claude-opus-5-5");
+    }
+
+    [Fact]
     public void Claude_leaves_an_alias_untouched()
     {
         // Aliases carry no dot, so the typo check must not fire on them.
