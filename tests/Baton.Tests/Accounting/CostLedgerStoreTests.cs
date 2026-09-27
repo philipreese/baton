@@ -116,6 +116,83 @@ public sealed class CostLedgerStoreTests
         new LogEntry.FlowLogEntry(new FlowEvent.ExecutionSucceeded(executionId)),
     ];
 
+    private static List<LogEntry> ArrestedExecution(
+        ExecutionId executionId, ArrestReason? reason, DateTime start = default, string worker = "implement") =>
+    [
+        new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(
+            AcceptedRequest(executionId, worker, "claude", "claude-opus-5"))),
+        new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(executionId, Pid: 1), start == default ? Start : start),
+        new LogEntry.CoreLogEntry(
+            new CoreEvent.ExecutionExited(executionId, 0, CoreExitReason.TimedOut),
+            (start == default ? Start : start).AddSeconds(2)),
+        new LogEntry.FlowLogEntry(new FlowEvent.ExecutionArrested(
+            executionId,
+            Usage: new WorkerUsage(TokensIn: 1),
+            Reason: reason)),
+    ];
+
+    [Fact]
+    public void Ordinary_execution_arrest_reasons_are_keyed_by_exact_execution_and_keep_legacy_nulls()
+    {
+        var room = NewRoom();
+        try
+        {
+            var entries = new List<LogEntry>();
+            foreach (var (executionId, reason) in new[]
+            {
+                (new ExecutionId("arrest-token"), (ArrestReason?)ArrestReason.TokenBudget),
+                (new ExecutionId("arrest-tool"), (ArrestReason?)ArrestReason.ToolStepCap),
+                (new ExecutionId("arrest-rate"), (ArrestReason?)ArrestReason.BilledRate),
+                (new ExecutionId("arrest-legacy"), (ArrestReason?)null),
+            })
+            {
+                entries.AddRange(ArrestedExecution(executionId, reason));
+            }
+
+            var successful = new ExecutionId("ordinary-success");
+            entries.AddRange(SettledExecution(successful, "claude", "claude-opus-5", Start));
+
+            var rows = CostLedgerStore.BuildEntries(entries, room, Repository).ToDictionary(row => row.Execution!);
+
+            Assert.Equal(ArrestReason.TokenBudget, rows["arrest-token"].ArrestReason);
+            Assert.Equal(ArrestReason.ToolStepCap, rows["arrest-tool"].ArrestReason);
+            Assert.Equal(ArrestReason.BilledRate, rows["arrest-rate"].ArrestReason);
+            Assert.Null(rows["arrest-legacy"].ArrestReason);
+            Assert.Null(rows[successful.Value].ArrestReason);
+            Assert.All(rows.Values.Where(row => row.Outcome == "Arrested"), row => Assert.Equal("Arrested", row.Outcome));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public async Task An_ordinary_arrest_reason_survives_cost_ledger_serialization_and_read_back()
+    {
+        var room = NewRoom();
+        var ledgerPath = NewLedgerPath();
+        try
+        {
+            var executionId = new ExecutionId("arrest-round-trip");
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                ArrestedExecution(executionId, ArrestReason.ToolStepCap), room, Repository));
+
+            await CostLedgerStore.AppendAsync([row], ledgerPath, TestContext.Current.CancellationToken);
+
+            var json = await File.ReadAllTextAsync(ledgerPath, TestContext.Current.CancellationToken);
+            Assert.Contains("\"arrestReason\":\"ToolStepCap\"", json, StringComparison.Ordinal);
+            Assert.Equal(
+                ArrestReason.ToolStepCap,
+                Assert.Single(await CostLedgerStore.ReadAllAsync(ledgerPath, TestContext.Current.CancellationToken)).ArrestReason);
+        }
+        finally
+        {
+            FileCleanup.Delete(ledgerPath);
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
     [Fact]
     public void Artifact_checkpoint_has_its_own_attributable_row_without_repricing_its_predecessor()
     {
@@ -167,6 +244,7 @@ public sealed class CostLedgerStoreTests
             var cancelled = new ExecutionId("checkpoint-cancelled");
             var arrested = new ExecutionId("checkpoint-arrested");
             var entries = new List<LogEntry>();
+            entries.AddRange(ArrestedExecution(predecessor, ArrestReason.TokenBudget));
             foreach (var (checkpoint, exitReason, arrestReason) in new[]
             {
                 (cancelled, CoreExitReason.CancelRequested, (ArrestReason?)null),
@@ -183,10 +261,14 @@ public sealed class CostLedgerStoreTests
 
             var rows = CostLedgerStore.BuildEntries(entries, room, Repository).ToDictionary(row => row.Execution!);
 
-            Assert.Equal(2, rows.Count);
+            Assert.Equal(3, rows.Count);
+            Assert.Equal("Arrested", rows[predecessor.Value].Outcome);
+            Assert.Equal(ArrestReason.TokenBudget, rows[predecessor.Value].ArrestReason);
             Assert.Equal("Cancelled", rows[cancelled.Value].Outcome);
             Assert.Equal("Arrested", rows[arrested.Value].Outcome);
-            Assert.All(rows.Values, row => Assert.Equal(predecessor.Value, row.PredecessorExecution));
+            Assert.All(
+                rows.Values.Where(row => row.Execution != predecessor.Value),
+                row => Assert.Equal(predecessor.Value, row.PredecessorExecution));
             Assert.Equal(CoreExitReason.CancelRequested, rows[cancelled.Value].ExitReason);
             Assert.Equal(ArrestReason.ToolStepCap, rows[arrested.Value].ArrestReason);
         }
@@ -1780,8 +1862,13 @@ public sealed class CostLedgerStoreTests
         {
             var executionId = new ExecutionId("exec-resolved");
             WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var settled = SettledExecution(executionId, "claude", "claude-opus-5", Start);
+            settled[^1] = new LogEntry.FlowLogEntry(new FlowEvent.ExecutionArrested(
+                executionId,
+                Usage: new WorkerUsage(TokensIn: 1),
+                Reason: ArrestReason.TokenBudget));
             var rows = CostLedgerStore.BuildEntries(
-                SettledExecution(executionId, "claude", "claude-opus-5", Start), room, Repository,
+                settled, room, Repository,
                 deliveryByWorker: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
                 {
                     ["implement"] = new(Issue: "1901", PullRequest: "1907"),
@@ -1797,6 +1884,7 @@ public sealed class CostLedgerStoreTests
             Assert.Equal("1901", resolution.Issue);
             Assert.Equal("1907", resolution.PullRequest);
             Assert.Equal("implement", resolution.Role);
+            Assert.Equal(ArrestReason.TokenBudget, resolution.ArrestReason);
 
             // No spend on a correcting row -- spec/baton.md §7 states the reading that buys.
             Assert.Null(resolution.TokensIn);

@@ -127,6 +127,7 @@ public static partial class CostLedgerStore
         var requestByExecutionId = new Dictionary<string, ExecutionRequest>(StringComparer.Ordinal);
         var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
         var checkpointTerminalByExecutionId = new Dictionary<string, (CoreExitReason ExitReason, ArrestReason? ArrestReason)>(StringComparer.Ordinal);
+        var arrestReasonByExecutionId = new Dictionary<string, ArrestReason?>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
         {
@@ -196,6 +197,7 @@ public static partial class CostLedgerStore
 
                 case FlowEvent.ExecutionArrested arrested:
                     outcomeByExecutionId[arrested.ExecutionId.Value] = "Arrested";
+                    arrestReasonByExecutionId[arrested.ExecutionId.Value] = arrested.Reason;
                     break;
 
                 case FlowEvent.ArtifactCheckpointCompleted checkpoint:
@@ -352,7 +354,7 @@ public static partial class CostLedgerStore
                     : null,
                 ArrestReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
                     ? checkpointTerminal.ArrestReason
-                    : null));
+                    : arrestReasonByExecutionId.GetValueOrDefault(executionId)));
         }
 
         return result;
@@ -618,6 +620,7 @@ public static partial class CostLedgerStore
             EndedAt: LedgerQuery.ToUtc(resolvedAt ?? DateTime.UtcNow),
             Resolution: resolution,
             ResolutionReason: reason is { Length: > 0 } ? reason : null,
+            ArrestReason: last.ArrestReason,
             // #1901 C2: copied for the same reason issue/pr/role/outcome above are -- it is an
             // identity of the work, not a dimension of the spend, and an arm reading filtered to one
             // --label would otherwise miss the interventions on that arm entirely.
