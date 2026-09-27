@@ -630,7 +630,8 @@ public sealed class ExactFileRestoreToolTests
                 .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
 
             Assert.True(result.IsError);
-            Assert.Contains(field, result.Text, StringComparison.Ordinal);
+            Assert.True(result.Text.Contains(field, StringComparison.Ordinal),
+                $"Expected required field '{field}' in refusal. Actual refusal: {result.Text}");
             Assert.Equal("damaged\n", await File.ReadAllTextAsync(target, Ct));
         }
         finally
