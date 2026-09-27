@@ -11,6 +11,18 @@ namespace Baton.Vendors.Tests;
 public sealed class CodexWorkerAdapterTests
 {
     [Fact]
+    public void Raw_codex_permission_scope_refuses_attachments_it_cannot_deliver_exactly()
+    {
+        var invocation = new WorkerInvocation("Read evidence.", PermissionScope: "read-only",
+            AttachmentPaths: [Path.Combine(Path.GetTempPath(), "evidence.txt")]);
+
+        var exception = Assert.Throws<PermissionGrantUnsupportedException>(
+            () => new CodexWorkerAdapter().Resolve(invocation, NoOutputContract));
+
+        Assert.Contains("app-server broker", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Role_binding_reaches_broker_policy_with_exact_attachment_read_authority()
     {
         var root = Path.Combine(Path.GetTempPath(), $"baton-dispatch-attachment-{Guid.NewGuid():N}");

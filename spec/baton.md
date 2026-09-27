@@ -417,7 +417,9 @@ change DAG `RequiredInputs` or their numbering. Codex's broker admits these as e
 `baton_read_text` only; disappearance, directory substitution and links do not turn a file into a
 directory grant. Codex attachment reads require `ReadFiles`; an independently available DAG input
 read tool does not open attachments on a read-withheld role, and an artifact-only checkpoint exposes
-only its output tools. The attachment list does not enable a role-withheld read tool and adds no search,
+only its output tools. Codex's legacy raw `PermissionScope` direct CLI path cannot carry exact
+attachment reads and refuses a binding that declares them; the structured-grant broker is the
+supported Codex path. The attachment list does not enable a role-withheld read tool and adds no search,
 directory, shell or write authority. Claude and AGY already add `BATON_ARTIFACTS_ROOT` to their vendor
 directory list and their read-category hooks permit read tools when `ReadFiles` is granted; they do
 not have Codex's workspace-only read-root policy, so independently granted sibling reads may remain
