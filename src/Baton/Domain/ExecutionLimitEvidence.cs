@@ -3,10 +3,10 @@ using System.Text.Json.Serialization;
 namespace Baton.Domain;
 
 /// <summary>
-/// The enforcement inputs applied to one ordinary execution. Timeout is recorded whenever evidence
+/// The enforcement inputs recorded for one execution. Timeout is recorded whenever evidence
 /// exists. Null monitor brakes mean unlimited only when MonitorInputsKnown is true; otherwise
 /// they are unknown because no parser could supply the monitor. A null evidence value on an
-/// older request means the journal predates limit evidence (or the execution is supplementary).
+/// older request means the journal predates limit evidence, or that execution path did not record it.
 /// </summary>
 public sealed record ExecutionLimitEvidence(
     TimeSpan? Timeout,

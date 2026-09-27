@@ -205,7 +205,7 @@ public sealed class CostLedgerStoreTests
     }
 
     [Fact]
-    public void Artifact_checkpoint_has_its_own_attributable_row_without_repricing_its_predecessor()
+    public async Task Artifact_checkpoint_has_its_own_attributable_row_without_repricing_its_predecessor()
     {
         var room = NewRoom();
         Directory.CreateDirectory(room);
@@ -219,7 +219,11 @@ public sealed class CostLedgerStoreTests
                 MaxToolSteps: 10,
                 BilledRateLimit: 500,
                 ChosenKey: "review/profile", MonitorInputsKnown: true);
-            var checkpointRequest = AcceptedRequest(checkpoint, "review", "claude", "claude-opus-5", limits: null);
+            var checkpointLimits = ArtifactCheckpoint.CreateLimitEvidence(monitorInputsKnown: true);
+            var checkpointRequest = AcceptedRequest(checkpoint, "review", "claude", "claude-opus-5", checkpointLimits) with
+            {
+                Timeout = ArtifactCheckpoint.WallClockTimeout,
+            };
             var entries = SettledExecution(original, "claude", "claude-opus-5", Start, "review", limits: originalLimits);
             entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
                 checkpoint, original, ["report.md"], checkpointRequest)));
@@ -240,10 +244,21 @@ public sealed class CostLedgerStoreTests
             Assert.Equal(CoreExitReason.Natural, checkpointRow.ExitReason);
             Assert.Equal(7, checkpointRow.TokensIn);
             Assert.Equal(3, checkpointRow.TokensOut);
-            Assert.Null(checkpointRow.Limits);
+            Assert.Equal(checkpointLimits, checkpointRow.Limits);
 
             var originalRow = Assert.Single(rows, row => row.Execution == original.Value);
             Assert.Equal(originalLimits, originalRow.Limits);
+            Assert.Equal(original.Value, originalRow.Execution);
+
+            var ledgerPath = Path.Combine(room, "ledger.jsonl");
+            await CostLedgerStore.AppendAsync(rows, ledgerPath, TestContext.Current.CancellationToken);
+            var storedCheckpoint = Assert.Single(
+                await CostLedgerStore.ReadAllAsync(ledgerPath, TestContext.Current.CancellationToken),
+                row => row.Execution == checkpoint.Value);
+            Assert.Equal(checkpointLimits, storedCheckpoint.Limits);
+
+            var resolution = CostLedgerStore.BuildResolutionRow([checkpointRow], BatonPaths.RecordKey(room), ConductorResolution.Reject, "checkpoint review");
+            Assert.Equal(checkpointLimits, resolution!.Limits);
         }
         finally
         {

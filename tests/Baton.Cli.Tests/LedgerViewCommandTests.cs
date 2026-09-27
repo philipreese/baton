@@ -256,8 +256,22 @@ public sealed class LedgerViewCommandTests : IDisposable
                 new CostLedgerEntry(
                     CostSourceKind.BatonExecution,
                     Room: _roomA,
-                    Execution: "legacy-null",
-                    Adapter: "claude",
+                    Execution: "checkpoint-with-limits",
+                    PredecessorExecution: "checkpoint-parent",
+                    Adapter: "codex",
+                    EndedAt: Sep4.AddHours(10).AddMinutes(30),
+                    Limits: new ExecutionLimitEvidence(
+                        TimeSpan.FromMinutes(1), 8000, 3, null,
+                        TimeoutSource: "artifact-checkpoint",
+                        TokenBudgetSource: "artifact-checkpoint",
+                        MaxToolStepsSource: "artifact-checkpoint",
+                        MonitorInputsKnown: true)),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "checkpoint-legacy-null",
+                    PredecessorExecution: "checkpoint-parent",
+                    Adapter: "codex",
                     EndedAt: Sep4.AddHours(11)),
                 new CostLedgerEntry(
                     CostSourceKind.BatonExecution,
@@ -283,18 +297,30 @@ public sealed class LedgerViewCommandTests : IDisposable
             .Split('\n', StringSplitOptions.RemoveEmptyEntries);
         var limitsColumn = LedgerCsv.Columns.ToList().IndexOf("limits");
         var populated = ParseCsvLine(lines[1]);
-        var legacy = ParseCsvLine(lines[2]);
-        var unavailable = ParseCsvLine(lines[3]);
-        var olderWire = ParseCsvLine(lines[4]);
+        var checkpoint = ParseCsvLine(lines[2]);
+        var historicalCheckpoint = ParseCsvLine(lines[3]);
+        var unavailable = ParseCsvLine(lines[4]);
+        var olderWire = ParseCsvLine(lines[5]);
 
         Assert.Equal(LedgerCsv.Columns.Count, populated.Count);
-        Assert.Equal(LedgerCsv.Columns.Count, legacy.Count);
+        Assert.Equal(LedgerCsv.Columns.Count, checkpoint.Count);
+        Assert.Equal(LedgerCsv.Columns.Count, historicalCheckpoint.Count);
         Assert.Contains("\"\"TokenBudget\"\"", lines[1], StringComparison.Ordinal);
         using var serialized = JsonDocument.Parse(populated[limitsColumn]);
         Assert.Equal(4321, serialized.RootElement.GetProperty("TokenBudget").GetInt64());
         Assert.Equal(17, serialized.RootElement.GetProperty("MaxToolSteps").GetInt32());
         Assert.True(serialized.RootElement.GetProperty("MonitorInputsKnown").GetBoolean());
-        Assert.Equal(string.Empty, legacy[limitsColumn]);
+        using var checkpointLimits = JsonDocument.Parse(checkpoint[limitsColumn]);
+        Assert.Equal("checkpoint-with-limits", checkpoint[LedgerCsv.Columns.ToList().IndexOf("execution")]);
+        Assert.Equal("checkpoint-parent", checkpoint[LedgerCsv.Columns.ToList().IndexOf("predecessorExecution")]);
+        Assert.Equal("00:01:00", checkpointLimits.RootElement.GetProperty("Timeout").GetString());
+        Assert.Equal(8000, checkpointLimits.RootElement.GetProperty("TokenBudget").GetInt64());
+        Assert.Equal(3, checkpointLimits.RootElement.GetProperty("MaxToolSteps").GetInt32());
+        Assert.Equal("artifact-checkpoint", checkpointLimits.RootElement.GetProperty("TimeoutSource").GetString());
+        Assert.Equal("artifact-checkpoint", checkpointLimits.RootElement.GetProperty("TokenBudgetSource").GetString());
+        Assert.Equal("artifact-checkpoint", checkpointLimits.RootElement.GetProperty("MaxToolStepsSource").GetString());
+        Assert.True(checkpointLimits.RootElement.GetProperty("MonitorInputsKnown").GetBoolean());
+        Assert.Equal(string.Empty, historicalCheckpoint[limitsColumn]);
         using var unavailableJson = JsonDocument.Parse(unavailable[limitsColumn]);
         Assert.False(unavailableJson.RootElement.GetProperty("MonitorInputsKnown").GetBoolean());
         using var olderWireJson = JsonDocument.Parse(olderWire[limitsColumn]);

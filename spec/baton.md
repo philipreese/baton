@@ -330,11 +330,12 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   clears that aggregate key but carries a separate originating selection identity only through
   legitimate same-identity inheritance. Consumers validate that identity against the resolved
   adapter, model, role, and size. Legacy records may use a valid existing aggregate key, but a null
-  key does not authorize inventing profile identity. An absent value remains unknown for legacy and supplementary
-  executions. A crash-recovery resubmit keeps the accepted timeout provenance while recording changed
+  key does not authorize inventing profile identity. An absent value remains unknown for legacy requests
+  and supplementary paths that do not record it. Artifact-checkpoint child evidence follows the
+  checkpoint contract below; grace evidence remains unknown. A
+  crash-recovery resubmit keeps the accepted timeout provenance while recording changed
   current monitor inputs in `StepRebound` before spawn. Status and the cost ledger project that latest
   applied snapshot from the journal, so settings or binding edits cannot rewrite settled history.
-  Checkpoint and grace controls remain explicitly unknown child evidence.
 
   `--workstream` (#1619, rung 1 of #1614's ruling) is a **grouping key, not a title** —
   a room keeps its generated hex identity on disk; the slug only makes several rooms (e.g. an
@@ -2482,8 +2483,13 @@ receives at most one engine-owned checkpoint only when one or more declared outp
 checkpoint has an independent execution id and records the original id as its predecessor in both
 `ArtifactCheckpointAttempted` and status usage; its usage, exit reason, and any checkpoint arrest precede
 the authoritative `ExecutionArrested` line, so status/ledger shows both the original truthful cap and the
-smaller recovery spend. Its fixed
-`Mutation.ArtifactCheckpoint` caps are separate from the ordinary role budget. The dispatch replaces
+smaller recovery spend. Its fixed `Mutation.ArtifactCheckpoint` caps are separate from the ordinary
+role budget. The attempted request records this child's applied timeout and actual monitor inputs
+before dispatch, sourced by `Mutation.ArtifactCheckpoint.LimitSource`; it never inherits the ordinary
+predecessor's profile evidence. `MonitorInputsKnown` is true only when the actual checkpoint monitor
+exists, recording its token/tool brakes and known-unlimited absent billed-rate brake. Otherwise the
+monitor axes and their source stamps remain unknown while timeout evidence is retained.
+Older attempted requests without limit evidence remain unknown. The dispatch replaces
 the prompt and exposes only `artifact:<name>` tools for the still-missing declared names: no repository
 read, shell, network, workspace mutation, commit, push, or ordinary role tool survives. It is not a
 second investigation budget. After it returns, a read-shaped role whose complete contract now validates

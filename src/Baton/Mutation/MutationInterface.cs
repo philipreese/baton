@@ -3036,11 +3036,13 @@ public static class MutationInterface
             target = target with { OnStdoutLine = line => { prior?.Invoke(line); monitor.OnStdoutLine(line); } };
         }
 
+        // The durable child claim must contain only this checkpoint's applied policy, never
+        // inherited parent/profile evidence; capture it before the attempted append and dispatch.
         var request = prepared.Request with
         {
             ExecutionId = checkpointExecutionId,
             Timeout = ArtifactCheckpoint.WallClockTimeout,
-            Limits = null,
+            Limits = ArtifactCheckpoint.CreateLimitEvidence(monitor is not null),
         };
         using var checkpointCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hostCancellationToken);
         using var linked = monitor is null ? null : CancellationTokenSource.CreateLinkedTokenSource(checkpointCancellation.Token, monitor.ArrestRequested);

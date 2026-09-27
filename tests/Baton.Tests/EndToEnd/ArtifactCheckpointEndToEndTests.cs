@@ -130,8 +130,27 @@ public sealed class ArtifactCheckpointEndToEndTests
             var target = CheckpointTarget(workspace);
             var binding = new WorkerBinding.Process(
                 new WorkerContract("review", [], [new ProducedOutput("report.md"), new ProducedOutput("verdict.json")], []),
-                target, TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
-            var dispatcher = new CheckpointDispatcher(artifacts);
+                target, TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false,
+                LimitEvidence: new ExecutionLimitEvidence(
+                    TimeSpan.FromSeconds(30), 100, 9, 700, ChosenKey: "parent-profile",
+                    TimeoutSource: "profile", TokenBudgetSource: "profile", MaxToolStepsSource: "profile",
+                    MonitorInputsKnown: true));
+            FlowEvent.ArtifactCheckpointAttempted? attemptedBeforeDispatch = null;
+            ExecutionRequest? acceptedParent = null;
+            var attemptedCountBeforeDispatch = -1;
+            var checkpointDispatchObserved = false;
+            var dispatcher = new CheckpointDispatcher(
+                artifacts,
+                beforeCheckpointDispatch: async request =>
+            {
+                checkpointDispatchObserved = true;
+                var journal = await new FlowEventLogReader(log).ReadAllAsync(TestContext.Current.CancellationToken);
+                var attempts = journal.OfType<FlowEvent.ArtifactCheckpointAttempted>().ToArray();
+                attemptedBeforeDispatch = attempts.SingleOrDefault();
+                attemptedCountBeforeDispatch = attempts.Length;
+                acceptedParent = journal.OfType<FlowEvent.ExecutionRequestAccepted>().SingleOrDefault()?.Request;
+            },
+                checkpointStdoutLine: """{"type":"turn.usage","usage":{"input_tokens":9000,"cached_input_tokens":0,"output_tokens":1,"round_trip":1}}""");
             await using var writer = new FlowEventLogWriter(log);
             var reader = new FlowEventLogReader(log);
 
@@ -145,7 +164,29 @@ public sealed class ArtifactCheckpointEndToEndTests
             Assert.Equal(2, dispatcher.CallCount);
             Assert.Equal(2, dispatcher.Requests.Count);
             Assert.NotNull(dispatcher.Requests[0].Limits);
-            Assert.Null(dispatcher.Requests[1].Limits);
+            Assert.True(checkpointDispatchObserved);
+            var checkpointRequest = dispatcher.Requests[1];
+            Assert.Equal(1, attemptedCountBeforeDispatch);
+            var attempted = Assert.IsType<FlowEvent.ArtifactCheckpointAttempted>(attemptedBeforeDispatch);
+            var attemptedRequest = Assert.IsType<ExecutionRequest>(attempted.Request);
+            var acceptedParentRequest = Assert.IsType<ExecutionRequest>(acceptedParent);
+            Assert.Equal(checkpointRequest.ExecutionId, attempted.CheckpointExecutionId);
+            Assert.Equal(acceptedParentRequest.ExecutionId, attempted.PredecessorExecutionId);
+            Assert.Equal(checkpointRequest.ExecutionId, attemptedRequest.ExecutionId);
+            Assert.Equal(checkpointRequest.Timeout, attemptedRequest.Timeout);
+            Assert.Equal(checkpointRequest.Limits, attemptedRequest.Limits);
+            Assert.Equal(ArtifactCheckpoint.WallClockTimeout, checkpointRequest.Timeout);
+            Assert.Equal(TimeSpan.FromSeconds(30), acceptedParentRequest.Timeout);
+            Assert.NotEqual(acceptedParentRequest.Limits, checkpointRequest.Limits);
+            var evidence = Assert.IsType<ExecutionLimitEvidence>(checkpointRequest.Limits);
+            Assert.Equal(ArtifactCheckpoint.TokenBudget, evidence.TokenBudget);
+            Assert.Equal(ArtifactCheckpoint.MaxToolSteps, evidence.MaxToolSteps);
+            Assert.Null(evidence.BilledRateLimit);
+            Assert.Null(evidence.ChosenKey);
+            Assert.Equal(ArtifactCheckpoint.LimitSource, evidence.TimeoutSource);
+            Assert.Equal(ArtifactCheckpoint.LimitSource, evidence.TokenBudgetSource);
+            Assert.Equal(ArtifactCheckpoint.LimitSource, evidence.MaxToolStepsSource);
+            Assert.True(evidence.MonitorInputsKnown);
             Assert.Equal(["report.md", "verdict.json"], dispatcher.CheckpointTarget!.ArtifactOnlyOutputNames);
             Assert.Equal(ArtifactCheckpoint.PromptText, dispatcher.CheckpointTarget.PromptText);
             Assert.NotNull(dispatcher.CheckpointTarget.CaptureDirectory);
@@ -157,6 +198,7 @@ public sealed class ArtifactCheckpointEndToEndTests
             Assert.NotEqual(checkpoint.PredecessorExecutionId, checkpoint.CheckpointExecutionId);
             var completion = Assert.Single(events.OfType<FlowEvent.ArtifactCheckpointCompleted>());
             Assert.Equal(checkpoint.CheckpointExecutionId, completion.CheckpointExecutionId);
+            Assert.Equal(ArrestReason.TokenBudget, completion.ArrestReason);
             var ordered = events.Where(e => e is FlowEvent.ArtifactCheckpointAttempted or FlowEvent.ExecutionArrested).ToArray();
             Assert.IsType<FlowEvent.ArtifactCheckpointAttempted>(ordered[0]);
             Assert.IsType<FlowEvent.ExecutionArrested>(ordered[1]);
@@ -409,7 +451,9 @@ public sealed class ArtifactCheckpointEndToEndTests
         Action? cancelAfterCap = null,
         Action<string>? writeAtCap = null,
         Action<string>? writeAtCheckpoint = null,
-        bool finishAtCap = false) : ICoreDispatcher
+        bool finishAtCap = false,
+        Func<ExecutionRequest, Task>? beforeCheckpointDispatch = null,
+        string? checkpointStdoutLine = null) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
         public List<ExecutionRequest> Requests { get; } = [];
@@ -445,6 +489,14 @@ public sealed class ArtifactCheckpointEndToEndTests
             }
 
             CheckpointTarget = target;
+            if (beforeCheckpointDispatch is not null)
+            {
+                await beforeCheckpointDispatch(request);
+            }
+            if (checkpointStdoutLine is not null)
+            {
+                target.OnStdoutLine?.Invoke(checkpointStdoutLine);
+            }
             var outputDirectory = request.Environment
                 .OfType<EnvironmentVariable.BatonComputed>()
                 .Single(variable => variable.Name == "BATON_OUTPUT_DIR")
