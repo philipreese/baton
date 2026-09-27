@@ -116,6 +116,7 @@ class Deps:
     nuget_packages_root: str = ""
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
+    clock: Callable[[], float] = time.time
     out: "Sequence[str]" = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -537,11 +538,20 @@ def _parse_timestamp(value: object) -> Optional[float]:
         return base.replace(tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
 
 
+def _canonical_timestamp(value: object) -> Optional[str]:
+    """Returns the millisecond UTC spelling used to compare CIM and heartbeat start times."""
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return None
+    instant = dt.datetime.fromtimestamp(parsed, tz=dt.timezone.utc)
+    return instant.strftime("%Y-%m-%dT%H:%M:%S.") + f"{instant.microsecond // 1000:03d}Z"
+
+
 DAEMON_HEARTBEAT_MAX_AGE_S = 120.0
 
 
 def daemon_health_probe(deps: Deps, identity: DaemonIdentity) -> bool:
-    """Reads the daemon-owned heartbeat, proving a healthy loop rather than mere process liveness."""
+    """Reads a fresh heartbeat that proves the exact candidate daemon is turning over."""
     heartbeat_path = os.path.join(deps.baton_home, "fleet", "heartbeat.json")
     try:
         with open(heartbeat_path, "r", encoding="utf-8") as f:
@@ -549,11 +559,34 @@ def daemon_health_probe(deps: Deps, identity: DaemonIdentity) -> bool:
         started_at = _parse_timestamp(heartbeat.get("startedAt"))
         tick_completed_at = _parse_timestamp(heartbeat.get("tickCompletedAt"))
         process_started_at = _parse_timestamp(identity.creation_time)
-        if started_at is None or tick_completed_at is None:
+        heartbeat_identity = heartbeat.get("identity")
+        if started_at is None or tick_completed_at is None or process_started_at is None:
             return False
-        if process_started_at is not None and started_at + 5.0 < process_started_at:
+        if not isinstance(heartbeat_identity, dict):
             return False
-        now = time.time()
+        if heartbeat_identity.get("pid") != identity.pid:
+            return False
+        if _canonical_timestamp(heartbeat_identity.get("processStartTime")) != _canonical_timestamp(
+            identity.creation_time
+        ):
+            return False
+        heartbeat_path = heartbeat_identity.get("executablePath")
+        heartbeat_version = heartbeat_identity.get("version")
+        if not isinstance(heartbeat_path, str) or not heartbeat_path.strip():
+            return False
+        if not isinstance(heartbeat_version, str) or not heartbeat_version.strip():
+            return False
+        if (
+            os.path.normcase(os.path.normpath(heartbeat_path))
+            != os.path.normcase(os.path.normpath(identity.executable_path))
+            or heartbeat_version != identity.version
+        ):
+            return False
+        if started_at > tick_completed_at:
+            return False
+        if started_at + 5.0 < process_started_at:
+            return False
+        now = deps.clock()
         return tick_completed_at <= now + 5.0 and now - tick_completed_at <= DAEMON_HEARTBEAT_MAX_AGE_S
     except (OSError, ValueError, TypeError, AttributeError):
         return False
@@ -565,19 +598,54 @@ def path_is_under(path: str, directory: str) -> bool:
     return path_norm.startswith(directory_norm + os.sep)
 
 
+TASK_NOT_FOUND_MARKER = "BATON_TASK_NOT_FOUND"
+TASK_ERROR_MARKER = "BATON_TASK_ERROR"
+TASK_STATE_PREFIX = "BATON_TASK_STATE="
+TASK_STATES = frozenset({"disabled", "ready", "running", "queued"})
+
+
+def daemon_task_query_cmd() -> List[str]:
+    """Uses a strict PowerShell protocol so query errors cannot look like task absence."""
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "try { "
+        "$tasks = @(Get-ScheduledTask -TaskName 'baton-daemon' -ErrorAction Stop); "
+        "if ($tasks.Count -eq 0) { [Console]::WriteLine('BATON_TASK_NOT_FOUND'); exit 0 }; "
+        "if ($tasks.Count -ne 1) { [Console]::WriteLine('BATON_TASK_ERROR'); exit 2 }; "
+        "$state = [string]$tasks[0].State; "
+        "if ([string]::IsNullOrWhiteSpace($state)) { [Console]::WriteLine('BATON_TASK_ERROR'); exit 2 }; "
+        "[Console]::WriteLine('BATON_TASK_STATE=' + $state); exit 0 "
+        "} catch { "
+        "if ($_.CategoryInfo.Category -eq 'ObjectNotFound' -and "
+        "($_.FullyQualifiedErrorId -match 'ObjectNotFound|NoMatching' -or "
+        "$_.Exception.Message -match 'No MSFT_ScheduledTask objects found')) { "
+        "[Console]::WriteLine('BATON_TASK_NOT_FOUND'); exit 0 }; "
+        "[Console]::WriteLine('BATON_TASK_ERROR'); "
+        "[Console]::Error.WriteLine($_.Exception.Message); exit 1 "
+        "}"
+    )
+    return ["powershell", "-NoProfile", "-Command", script]
+
+
 def daemon_task_state(deps: Deps) -> DaemonTaskState:
-    """Classifies task query failure, absence, disabled state, and an active task separately."""
+    """Classifies only the strict query protocol; every other result fails closed."""
     result = deps.run([
-        "powershell", "-NoProfile", "-Command",
-        "Get-ScheduledTask -TaskName baton-daemon -ErrorAction SilentlyContinue | "
-        "Select-Object -ExpandProperty State",
+        *daemon_task_query_cmd(),
     ])
-    if result.returncode != 0:
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(lines) != 1:
         return DaemonTaskState.QUERY_FAILED
-    state = result.stdout.strip()
-    if not state:
+    marker = lines[0]
+    if marker == TASK_NOT_FOUND_MARKER:
         return DaemonTaskState.ABSENT
-    if state.casefold() == "disabled":
+    if marker == TASK_ERROR_MARKER:
+        return DaemonTaskState.QUERY_FAILED
+    if not marker.startswith(TASK_STATE_PREFIX):
+        return DaemonTaskState.QUERY_FAILED
+    state = marker[len(TASK_STATE_PREFIX):].strip().casefold()
+    if state not in TASK_STATES:
+        return DaemonTaskState.QUERY_FAILED
+    if state == "disabled":
         return DaemonTaskState.DISABLED
     return DaemonTaskState.ACTIVE
 
@@ -1074,13 +1142,32 @@ def _fixture_repo(td: str, version: str) -> str:
     return td
 
 
-def _write_test_heartbeat(baton_home: str, started_at: Optional[str] = None) -> None:
-    """Fixture helper for the daemon's existing heartbeat health surface."""
+def _write_test_heartbeat(
+    baton_home: str,
+    started_at: Optional[str] = None,
+    identity: Optional[DaemonIdentity] = None,
+    tick_completed_at: Optional[str] = None,
+) -> None:
+    """Fixture helper for the daemon heartbeat contract, including replacement identity."""
     now = dt.datetime.now(dt.timezone.utc).isoformat()
+    identity = identity or DaemonIdentity(4243, now, r"C:\baton\tools\new\baton.exe", "2.3.4")
     heartbeat_path = os.path.join(baton_home, "fleet", "heartbeat.json")
     os.makedirs(os.path.dirname(heartbeat_path), exist_ok=True)
     with open(heartbeat_path, "w", encoding="utf-8") as f:
-        json.dump({"startedAt": started_at or now, "tickCompletedAt": now, "services": {}}, f)
+        json.dump(
+            {
+                "startedAt": started_at or now,
+                "tickCompletedAt": tick_completed_at or now,
+                "identity": {
+                    "pid": identity.pid,
+                    "processStartTime": identity.creation_time,
+                    "executablePath": identity.executable_path,
+                    "version": identity.version,
+                },
+                "services": {},
+            },
+            f,
+        )
 
 
 def _make_room(rooms_root: str, name: str, terminal: bool, tool_sha: Optional[str] = None) -> str:
@@ -1339,14 +1426,14 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
             if cmd[:3] == ["dotnet", "build", "src/Baton.Cli"]:
                 return CommandResult(0)
             if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
-                return CommandResult(0, "Ready\n")
+                return CommandResult(0, "BATON_TASK_STATE=Ready\n")
             if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
                 return CommandResult(0, "4243\n" if daemon_state["phase"] == "new" else "")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                 if daemon_state["phase"] == "old":
-                    return CommandResult(0, f"4242|legacy-selftest|{old_exe}\n")
+                    return CommandResult(0, f"4242|2026-01-01T00:00:00.000Z|{old_exe}\n")
                 if daemon_state["phase"] == "new":
-                    return CommandResult(0, f"4243|legacy-selftest|{new_exe}\n")
+                    return CommandResult(0, f"4243|2026-01-01T00:01:00.000Z|{new_exe}\n")
                 return CommandResult(0, "")
             if cmd[0] == "powershell" and "Stop-ScheduledTask" in cmd[3]:
                 daemon_state["phase"] = "stopped"
@@ -1355,7 +1442,10 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
                 daemon_state["start_calls"] += 1
                 if daemon_state["start_calls"] > 1:
                     daemon_state["phase"] = "new"
-                    _write_test_heartbeat(baton_home)
+                    _write_test_heartbeat(
+                        baton_home,
+                        identity=DaemonIdentity(4243, "2026-01-01T00:01:00.000Z", new_exe, "2.3.4"),
+                    )
                 return CommandResult(0)
             if cmd[0] == "powershell":
                 return CommandResult(0)
@@ -1491,7 +1581,7 @@ def _selftest_fail_closed_on_daemon_verify_failure() -> bool:
             if cmd[:3] == ["dotnet", "build", "src/Baton.Cli"]:
                 return CommandResult(0)
             if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
-                return CommandResult(0, "Ready\n")
+                return CommandResult(0, "BATON_TASK_STATE=Ready\n")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                 # No matching process ever reports back -- e.g. the task never actually launched it.
                 return CommandResult(0, "")
@@ -1557,7 +1647,7 @@ def _selftest_daemon_verify_waits_for_a_slow_launch() -> bool:
             if cmd[:3] == ["dotnet", "build", "src/Baton.Cli"]:
                 return CommandResult(0)
             if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
-                return CommandResult(0, "Ready\n")
+                return CommandResult(0, "BATON_TASK_STATE=Ready\n")
             if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
                 return CommandResult(0, "4243\n" if queries["n"] >= appear_on_query else "")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
@@ -1813,10 +1903,10 @@ def _selftest_rerefresh_skips_reinstall_when_sha_already_verified() -> bool:
             if cmd[:3] == ["dotnet", "build", "src/Baton.Cli"]:
                 return CommandResult(0)
             if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
-                return CommandResult(0, "Ready\n")
+                return CommandResult(0, "BATON_TASK_STATE=Ready\n")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                 exe_path = os.path.join(tools_root, "deadbeef", "baton.exe")
-                return CommandResult(0, f"{daemon_state['pid']}|legacy-selftest|{exe_path}\n" if daemon_state["running"] else "")
+                return CommandResult(0, f"{daemon_state['pid']}|2026-01-01T00:00:00.000Z|{exe_path}\n" if daemon_state["running"] else "")
             if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
                 return CommandResult(0, f"{daemon_state['pid']}\n" if daemon_state["running"] else "")
             if cmd[0] == "powershell" and "Stop-ScheduledTask" in cmd[3]:
@@ -1825,7 +1915,15 @@ def _selftest_rerefresh_skips_reinstall_when_sha_already_verified() -> bool:
             if cmd[0] == "powershell" and "Start-ScheduledTask" in cmd[3]:
                 daemon_state["pid"] += 1
                 daemon_state["running"] = True
-                _write_test_heartbeat(baton_home)
+                _write_test_heartbeat(
+                    baton_home,
+                    identity=DaemonIdentity(
+                        daemon_state["pid"],
+                        "2026-01-01T00:00:00.000Z",
+                        os.path.join(tools_root, "deadbeef", "baton.exe"),
+                        "7.7.7",
+                    ),
+                )
                 return CommandResult(0)
             if cmd[0] == "powershell":
                 return CommandResult(0)
@@ -1926,10 +2024,10 @@ def _selftest_rerefresh_sidepaths_when_live_and_broken() -> bool:
             if cmd[:3] == ["dotnet", "build", "src/Baton.Cli"]:
                 return CommandResult(0)
             if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
-                return CommandResult(0, "Ready\n")
+                return CommandResult(0, "BATON_TASK_STATE=Ready\n")
             if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                 exe_path = os.path.join(installed_dirs[-1], "baton.exe") if installed_dirs else ""
-                return CommandResult(0, f"{daemon_state['pid']}|legacy-selftest|{exe_path}\n" if exe_path and daemon_state["running"] else "")
+                return CommandResult(0, f"{daemon_state['pid']}|2026-01-01T00:00:00.000Z|{exe_path}\n" if exe_path and daemon_state["running"] else "")
             if cmd[0] == "powershell" and "Get-Process -Id" in cmd[3]:
                 return CommandResult(0, f"{daemon_state['pid']}\n" if daemon_state["running"] else "")
             if cmd[0] == "powershell" and "Stop-ScheduledTask" in cmd[3]:
@@ -1938,7 +2036,15 @@ def _selftest_rerefresh_sidepaths_when_live_and_broken() -> bool:
             if cmd[0] == "powershell" and "Start-ScheduledTask" in cmd[3]:
                 daemon_state["pid"] += 1
                 daemon_state["running"] = True
-                _write_test_heartbeat(baton_home)
+                _write_test_heartbeat(
+                    baton_home,
+                    identity=DaemonIdentity(
+                        daemon_state["pid"],
+                        "2026-01-01T00:00:00.000Z",
+                        os.path.join(installed_dirs[-1], "baton.exe"),
+                        "8.8.8",
+                    ),
+                )
                 return CommandResult(0)
             if cmd[0] == "powershell":
                 return CommandResult(0)
@@ -2102,7 +2208,10 @@ def _selftest_daemon_task_absent_or_disabled_skips_restart_and_verify() -> bool:
     import tempfile
 
     ok = True
-    for label, task_stdout in [("absent", ""), ("Disabled", "Disabled\n")]:
+    for label, task_stdout in [
+        ("absent", "BATON_TASK_NOT_FOUND\n"),
+        ("Disabled", "BATON_TASK_STATE=Disabled\n"),
+    ]:
         with tempfile.TemporaryDirectory() as td:
             baton_home = os.path.join(td, "baton")
             tools_root = os.path.join(baton_home, "tools")
@@ -2297,7 +2406,10 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
                 if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
                     if outcome == "query-failure":
                         return CommandResult(1, "", "query failed")
-                    task_state = {"absent": "", "disabled": "Disabled\n"}.get(outcome, "Ready\n")
+                    task_state = {
+                        "absent": "BATON_TASK_NOT_FOUND\n",
+                        "disabled": "BATON_TASK_STATE=Disabled\n",
+                    }.get(outcome, "BATON_TASK_STATE=Ready\n")
                     return CommandResult(0, task_state)
                 if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
                     state["process_queries"] += 1
@@ -2315,7 +2427,11 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
                     else:
                         state["phase"] = "new"
                         if outcome != "unhealthy":
-                            _write_test_heartbeat(baton_home, new_creation)
+                            _write_test_heartbeat(
+                                baton_home,
+                                new_creation,
+                                DaemonIdentity(200, new_creation, new_path, "1.0.0"),
+                            )
                     return CommandResult(0)
                 if cmd[0] == "powershell":
                     return CommandResult(0)
@@ -2394,6 +2510,79 @@ def _selftest_daemon_query_matches_verb_position_not_anywhere() -> bool:
     return ok
 
 
+def _selftest_scheduler_protocol_and_heartbeat_identity() -> bool:
+    """Cover the fail-closed scheduler protocol and every replacement-heartbeat polarity."""
+    import tempfile
+
+    ok = True
+    expected_query = daemon_task_query_cmd()
+    if "-ErrorAction Stop" not in expected_query[3] or "SilentlyContinue" in expected_query[3]:
+        print(f"  FAILED: scheduled-task query is not an explicit fail-closed protocol: {expected_query}")
+        ok = False
+
+    scheduler_cases = [
+        ("provider/access failure", CommandResult(1, TASK_ERROR_MARKER + "\n", "access denied"), DaemonTaskState.QUERY_FAILED),
+        ("explicit absence", CommandResult(0, TASK_NOT_FOUND_MARKER + "\n"), DaemonTaskState.ABSENT),
+        ("disabled", CommandResult(0, TASK_STATE_PREFIX + "Disabled\n"), DaemonTaskState.DISABLED),
+        ("ready", CommandResult(0, TASK_STATE_PREFIX + "Ready\n"), DaemonTaskState.ACTIVE),
+        ("unknown state", CommandResult(0, TASK_STATE_PREFIX + "Mystery\n"), DaemonTaskState.QUERY_FAILED),
+        ("malformed", CommandResult(0, "Ready\n"), DaemonTaskState.QUERY_FAILED),
+        ("multiple states", CommandResult(0, TASK_STATE_PREFIX + "Ready\n" + TASK_STATE_PREFIX + "Running\n"), DaemonTaskState.QUERY_FAILED),
+        ("suppressed error", CommandResult(0, ""), DaemonTaskState.QUERY_FAILED),
+    ]
+    for label, result, expected in scheduler_cases:
+        calls: List[List[str]] = []
+
+        def run(_cmd: List[str], result: CommandResult = result) -> CommandResult:
+            calls.append(_cmd)
+            return result
+
+        state = daemon_task_state(Deps(run=run, baton_home="scheduler-fixture"))
+        if state != expected or calls != [expected_query]:
+            print(f"  FAILED ({label}): state={state!r}, calls={calls!r}, want {expected!r} and one exact query")
+            ok = False
+
+    now = dt.datetime(2026, 9, 26, 16, 0, tzinfo=dt.timezone.utc)
+    candidate = DaemonIdentity(4243, "2026-09-26T15:58:00.000Z", r"C:\baton\tools\new\baton.exe", "2.0.0")
+    base = {
+        "startedAt": "2026-09-26T15:58:00.000Z",
+        "tickCompletedAt": "2026-09-26T15:59:30.000Z",
+        "identity": {
+            "pid": candidate.pid,
+            "processStartTime": candidate.creation_time,
+            "executablePath": candidate.executable_path,
+            "version": candidate.version,
+        },
+        "services": {},
+    }
+
+    def probe(body: dict) -> bool:
+        with tempfile.TemporaryDirectory() as td:
+            heartbeat_path = os.path.join(td, "fleet", "heartbeat.json")
+            os.makedirs(os.path.dirname(heartbeat_path), exist_ok=True)
+            with open(heartbeat_path, "w", encoding="utf-8") as f:
+                json.dump(body, f)
+            return daemon_health_probe(
+                Deps(baton_home=td, clock=lambda: now.timestamp()), candidate
+            )
+
+    cases = [
+        ("correct replacement heartbeat", base, True),
+        ("old but recent heartbeat", {**base, "identity": {**base["identity"], "pid": 4242}}, False),
+        ("stale heartbeat", {**base, "tickCompletedAt": "2026-09-26T15:57:59.000Z"}, False),
+        ("future clock skew", {**base, "tickCompletedAt": "2026-09-26T16:00:06.000Z"}, False),
+        ("malformed times", {**base, "startedAt": "not-a-time"}, False),
+        ("candidate identity mismatch", {**base, "identity": {**base["identity"], "version": "1.0.0"}}, False),
+        ("invalid ordering", {**base, "startedAt": "2026-09-26T16:00:01.000Z"}, False),
+        ("malformed identity time", {**base, "identity": {**base["identity"], "processStartTime": "bad"}}, False),
+    ]
+    for label, body, expected in cases:
+        if probe(body) != expected:
+            print(f"  FAILED ({label}): heartbeat acceptance polarity was wrong")
+            ok = False
+    return ok
+
+
 def selftest() -> int:
     arms = [
         ("version compare", _selftest_version_compare),
@@ -2410,6 +2599,7 @@ def selftest() -> int:
         ("install_launcher fails closed on a stale exe", _selftest_install_launcher_fails_closed_on_stale_exe),
         ("full refresh daemon outcomes are bounded and classified", _selftest_full_refresh_daemon_outcomes),
         ("daemon process query anchors on the verb position, not '*daemon*' anywhere", _selftest_daemon_query_matches_verb_position_not_anywhere),
+        ("scheduler protocol and heartbeat identity are fail closed", _selftest_scheduler_protocol_and_heartbeat_identity),
     ]
     ok = True
     for name, fn in arms:

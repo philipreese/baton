@@ -4293,7 +4293,8 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   in-memory samples ride the tick's eventual log and heartbeat; the watchdog performs no extra
   healthy-pass console or filesystem write that could itself wedge supervision.
   **The heartbeat's schema, stated here once:** `tickCompletedAt` (newest completion across
-  services), `startedAt` (process start), `services` (per service: `lastTickMs`, `completedAt`,
+  services), `startedAt` (process start), `identity` (the daemon's `pid`, `processStartTime`,
+  `executablePath`, and `version`), `services` (per service: `lastTickMs`, `completedAt`,
   `intervalMs`, and, only when that tick exceeded its interval, bounded aggregated `latePhases`
   entries with `name`, total `elapsedMs`, and `count`, plus bounded `lateSamples` entries with
   `sampledAt`, current `phase`, `phaseElapsedMs`, and that sample's `hostLoad`), `hostLoad` (#2082:
@@ -4307,6 +4308,10 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   independent driver continuations both miss cadence, retain separate phase attribution, and recover
   on the next tick after the pool is released; real registry-lock and child-process controls produce
   the narrower one-loop signature.
+  An outside replacement verifier accepts freshness only when `identity` matches the candidate PID,
+  process creation time, executable path, and version exactly; an old daemon's recent heartbeat is
+  therefore not evidence for its replacement. It rejects unparseable identity or timestamps and
+  requires `startedAt <= tickCompletedAt` before applying the existing freshness tolerance.
   A service's `lastTickMs` against its `intervalMs` is the host-load signal that predates the freeze:
   on 2026-09-08 `FleetProjectionWriter` had reached 10.97 s against 30 s in the last body written
   before every loop stopped. The watchdog's verdict line (`{Root}/fleet/watchdog.txt`) carries a

@@ -441,7 +441,9 @@ public class DaemonWatchdogTests
     public void TheHeartbeatBody_CarriesTickCompletedAt_AndEveryServicesLastDuration()
     {
         var clock = new FixtureClock(T0);
-        var ledger = new DaemonTickLedger(() => clock.Now);
+        var identity = new DaemonTickLedger.DaemonHeartbeatIdentity(
+            4242, T0.AddSeconds(-2), @"C:\baton\tools\current\baton.exe", "0.54.5");
+        var ledger = new DaemonTickLedger(() => clock.Now, identity: identity);
 
         clock.Advance(TimeSpan.FromSeconds(10));
         ledger.RecordTick(nameof(WatchSweep), TimeSpan.FromMilliseconds(412.5), TimeSpan.FromSeconds(15));
@@ -455,6 +457,10 @@ public class DaemonWatchdogTests
         // which services exist (DaemonTickLedger's doc has why that field is shaped that way).
         Assert.Equal(T0.AddSeconds(15).ToString("O"), root["tickCompletedAt"]!.GetValue<string>());
         Assert.Equal(T0.ToString("O"), root["startedAt"]!.GetValue<string>());
+        Assert.Equal(4242, root["identity"]!["pid"]!.GetValue<int>());
+        Assert.Equal(T0.AddSeconds(-2).ToString("O"), root["identity"]!["processStartTime"]!.GetValue<string>());
+        Assert.Equal(@"C:\baton\tools\current\baton.exe", root["identity"]!["executablePath"]!.GetValue<string>());
+        Assert.Equal("0.54.5", root["identity"]!["version"]!.GetValue<string>());
 
         var services = root["services"]!.AsObject();
         Assert.Equal(412.5, services[nameof(WatchSweep)]!["lastTickMs"]!.GetValue<double>());
