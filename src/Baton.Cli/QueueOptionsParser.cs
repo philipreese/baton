@@ -19,7 +19,7 @@ public static class QueueOptionsParser
         "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
-        "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
+        "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] [--lifecycle-reason <why>] | " +
         "baton queue list [--active] | baton queue worktrees [--apply] [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
@@ -184,7 +184,7 @@ public static class QueueOptionsParser
     {
         string? tag = null;
         string? role = null, spec = null, workspace = null, scope = null;
-        string? adapter = null, model = null, effort = null, overrideRunway = null, reason = null;
+        string? adapter = null, model = null, effort = null, overrideRunway = null, reason = null, lifecycleReason = null;
         string? declaredSize = null, sizeRationale = null;
         int? issue = null, timeout = null, maxToolSteps = null;
         long? tokenBudget = null;
@@ -230,6 +230,14 @@ public static class QueueOptionsParser
                     continue;
                 case "--reason":
                     SetReason(selectedStage, stageSelections, TakeValue(args, ref i, "--reason"), ref reason);
+                    continue;
+                case "--lifecycle-reason":
+                    if (lifecycleReason is not null)
+                    {
+                        throw new CliArgumentException("'--lifecycle-reason' may be supplied only once; name a stage with '--stage' and use '--reason' for a stage-specific rationale.");
+                    }
+
+                    lifecycleReason = TakeValue(args, ref i, "--lifecycle-reason");
                     continue;
                 case "--skill":
                     skills.Add(TakeValue(args, ref i, "--skill"));
@@ -321,6 +329,16 @@ public static class QueueOptionsParser
         if (selectedStage is not null && !lifecycle)
         {
             throw new CliArgumentException("'--stage' selects lifecycle-stage axes, so it requires '--lifecycle'.");
+        }
+
+        if (!lifecycle && lifecycleReason is not null)
+        {
+            throw new CliArgumentException("'--lifecycle-reason' requires '--lifecycle'; lifecycle-wide rationale has no meaning for an ordinary one-stage queue item.");
+        }
+
+        if (lifecycleReason is not null && string.IsNullOrWhiteSpace(lifecycleReason))
+        {
+            throw new CliArgumentException("'--lifecycle-reason' requires a non-blank rationale.");
         }
 
         if (lifecyclePin && !lifecycle)
@@ -433,7 +451,9 @@ public static class QueueOptionsParser
         // without a tier there is no departure to justify -- an item that simply names its axes is
         // not overriding anything.
         var overridesAnAxis = adapter is not null || model is not null || effort is not null;
-        if (scope is not null && overridesAnAxis && string.IsNullOrWhiteSpace(reason))
+        if (scope is not null && overridesAnAxis
+            && string.IsNullOrWhiteSpace(reason)
+            && string.IsNullOrWhiteSpace(lifecycleReason))
         {
             throw new CliArgumentException(
                 "An item that overrides its tier's adapter, model or effort must say why: pass "
@@ -458,6 +478,7 @@ public static class QueueOptionsParser
             }
         }).ToList();
 
+        var stagesMissingRationale = new List<string>();
         foreach (var selection in normalizedStageSelections)
         {
             if (selection.Adapter is null && selection.Model is null && selection.Effort is null
@@ -470,11 +491,19 @@ public static class QueueOptionsParser
             var selectionOverridesAnAxis = selection.Adapter is not null
                 || selection.Model is not null
                 || selection.Effort is not null;
-            if (scope is not null && selectionOverridesAnAxis && string.IsNullOrWhiteSpace(selection.Reason))
+            if (scope is not null && selectionOverridesAnAxis
+                && string.IsNullOrWhiteSpace(selection.Reason)
+                && string.IsNullOrWhiteSpace(lifecycleReason))
             {
-                throw new CliArgumentException(
-                    $"A '{WorkStages.Token(selection.Stage)}' stage selection that overrides its tier needs '--reason <why>'.");
+                stagesMissingRationale.Add(WorkStages.Token(selection.Stage));
             }
+        }
+
+        if (stagesMissingRationale.Count > 0)
+        {
+            throw new CliArgumentException(
+                $"Explicit lifecycle routing for stage(s) {string.Join(", ", stagesMissingRationale)} needs a rationale. "
+                + "Pass '--lifecycle-reason <why>' once, or pass '--reason <why>' while naming each stage with '--stage'.");
         }
 
         if (overrideRunway is not null && string.IsNullOrWhiteSpace(overrideRunway))
@@ -517,6 +546,7 @@ public static class QueueOptionsParser
         return new QueueOptions(
             QueueVerb.Add, tag, role, spec, issue, workspace, scope, adapter, model, effort,
             timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle,
+            LifecycleReason: lifecycleReason,
             StageSelections: lifecycle ? normalizedStageSelections : null, LifecyclePin: lifecyclePin,
             Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements,
             DeclaredTaskSize: DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale));
