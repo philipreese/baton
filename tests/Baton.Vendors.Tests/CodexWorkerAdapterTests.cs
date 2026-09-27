@@ -470,13 +470,13 @@ public sealed class CodexWorkerAdapterTests
     }
 
     [Fact]
-    public void Ultra_is_refused_for_codex_spark_which_only_advertises_through_xhigh()
+    public void Ultra_is_refused_for_gpt_5_5_which_only_advertises_through_xhigh()
     {
         var exception = Assert.Throws<IncoherentVendorEffortException>(
             () => new CodexWorkerAdapter().Resolve(
                 new WorkerInvocation(
                     "Conduct.",
-                    Model: "gpt-5.3-codex-spark",
+                    Model: "gpt-5.5",
                     Effort: "ultra",
                     AllowsSubagents: true),
                 NoOutputContract));
@@ -953,10 +953,10 @@ public sealed class CodexWorkerAdapterTests
         Assert.Equal(
             [
                 "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
-                "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark",
+                "gpt-5.6-luna", "gpt-5.5",
             ],
             capabilities.Models);
-        Assert.Equal(42, capabilities.Items.Count);
+        Assert.Equal(38, capabilities.Items.Count);
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-astra[ultra]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-sol[ultra]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-luna[max]" && item.Kind == "mode");
