@@ -3074,6 +3074,133 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task Incomplete_review_verdict_on_open_ready_pr_restores_draft_before_empty_check_waiting()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string incompleteVerdict = """
+                {"reviewedRef":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","completion":"in_progress","decision":"approve","summary":"still running","findings":[]}
+                """;
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, incompleteVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+            var isDraft = false;
+            var calls = new List<string[]>();
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                calls.Add(args.ToArray());
+                if (args is ["pr", "checks", ..])
+                {
+                    return Task.FromResult(new GhCliResult(true, 0, "[]", string.Empty));
+                }
+
+                if (args is ["pr", "ready", ..])
+                {
+                    if (args.Contains("--undo", StringComparer.Ordinal))
+                    {
+                        isDraft = true;
+                    }
+
+                    return Task.FromResult(new GhCliResult(true, 0, "ok", string.Empty));
+                }
+
+                return Task.FromResult(new GhCliResult(true, 0, args is ["pr", "view", ..]
+                    ? PrObject(77, FullPushedSha, isDraft)
+                    : PrJson(77, FullPushedSha, isDraft), string.Empty));
+            });
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(FullPushedSha));
+
+            var facts = await advancer.AdvanceAsync(Now, Ct);
+            var fact = Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Contains("does not assert completed review work", item.Error!, StringComparison.Ordinal);
+            Assert.Null(item.RequiredCheckEvidenceWait);
+            Assert.True(isDraft);
+            Assert.Contains(calls, args => args is ["pr", "ready", "77", "--undo", "--repo", Repository]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Persisted_ready_item_with_incomplete_verdict_restores_draft_when_checks_are_empty()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string incompleteVerdict = """
+                {"reviewedRef":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","completion":"in_progress","decision":"approve","summary":"still running","findings":[]}
+                """;
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, incompleteVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, QueueItemState.Queued);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items =
+                    [
+                        seeded with
+                        {
+                            Stage = WorkStage.Ready,
+                            PullRequest = 77,
+                            LastVerdict = Path.Combine(room, "verdict.json"),
+                            RoomDirectory = null,
+                        },
+                    ],
+                },
+                Ct);
+
+            var isDraft = false;
+            var calls = new List<string[]>();
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                calls.Add(args.ToArray());
+                if (args is ["pr", "checks", ..])
+                {
+                    return Task.FromResult(new GhCliResult(true, 0, "[]", string.Empty));
+                }
+
+                if (args is ["pr", "ready", ..])
+                {
+                    if (args.Contains("--undo", StringComparer.Ordinal))
+                    {
+                        isDraft = true;
+                    }
+
+                    return Task.FromResult(new GhCliResult(true, 0, "ok", string.Empty));
+                }
+
+                return Task.FromResult(new GhCliResult(true, 0, args is ["pr", "view", ..]
+                    ? PrObject(77, FullPushedSha, isDraft)
+                    : PrJson(77, FullPushedSha, isDraft), string.Empty));
+            });
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(FullPushedSha));
+
+            var facts = await advancer.AdvanceAsync(Now, Ct);
+            var fact = Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Contains("no completed review assertion", item.Error!, StringComparison.Ordinal);
+            Assert.Null(item.RequiredCheckEvidenceWait);
+            Assert.True(isDraft);
+            Assert.Contains(calls, args => args is ["pr", "ready", "77", "--undo", "--repo", Repository]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Observation_refresh_attempts_one_qualified_PR_per_poll_and_rotates_the_remainder()
     {
         var home = CreateTempHome();

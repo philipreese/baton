@@ -10,10 +10,10 @@ namespace Baton.Domain;
 /// ended; a <see cref="ReviewVerdict"/> is content a worker wrote, and per decision 0043 the engine
 /// only ever checks that it <i>parses</i> — severity and status are evidence surfaced to a person,
 /// never inputs to routing (Architecture Rule 1, decision 0038) — a rule about Flow's routing, which
-/// spec/baton.md §13 carves the conductor queue out of: <c>WorkItemLifecycle</c> reads
-/// <see cref="Decision"/>, the field the reviewer wrote its own APPROVE/BLOCK into. That carve-out,
-/// and what it does not license, is stated there — severity and status remain evidence for a person
-/// and route nothing.
+/// spec/baton.md §13 carves the conductor queue out of: <c>WorkItemLifecycle</c> gates on
+/// <see cref="Completion"/> and branches on <see cref="Decision"/>, the field the reviewer wrote its
+/// own APPROVE/BLOCK into. That carve-out, and what it does not license, is stated there — severity
+/// and status remain evidence for a person and route nothing.
 /// </summary>
 /// <param name="ReviewedRef">
 /// What was reviewed — a branch, commit, or PR reference. Required: an unanchored verdict cannot
@@ -30,13 +30,14 @@ namespace Baton.Domain;
 /// instrument it did not have" true rather than merely asked for.
 /// </param>
 /// <param name="Decision">
-/// <b>The reviewer's own APPROVE/BLOCK, and the only thing the conductor queue routes on</b>
+/// <b>The reviewer's own APPROVE/BLOCK branch for routing once review completion is verified</b>
 /// (operator ruling, spec/baton.md §13). <b>Optional on the wire, required by the conductor queue to
 /// advance</b>: nothing about a review room's output contract asks for it, so a verdict without one
 /// still settles its room succeeded-shaped and is still readable by the ledger and by a person — and
-/// <c>Baton.Queue.WorkItemLifecycle</c> is the one place that requires it, routing a decision-less
-/// verdict to the operator with "carries no decision" rather than being handed a guess. Null when the
-/// document names no decision or names one this enum does not have.
+/// <c>Baton.Queue.WorkItemLifecycle</c> is the one place that requires it after gating on
+/// <see cref="Completion"/>, routing a decision-less verdict to the operator with "carries no decision"
+/// rather than being handed a guess. Null when the document names no decision or names one this enum
+/// does not have.
 /// </param>
 /// <param name="Completion">
 /// The reviewer's assertion that review work is complete. Optional on the wire so legacy and custom
@@ -128,25 +129,6 @@ internal sealed class TolerantReviewDecisionConverter : JsonConverter<ReviewDeci
 }
 
 /// <summary>
-/// Reads <c>instruments</c> as null rather than throwing whenever it is not a well-formed array of
-/// <see cref="VerifyInstrument"/> — including when it is a string, a number, an object, or an array
-/// of any of those.
-/// <para>
-/// Why a converter rather than the plain binding: declaring the property at all is what would
-/// otherwise turn a previously-TOLERATED unknown field into a hard parse failure, and
-/// <see cref="ReviewVerdictSchema"/> is the single definition of "valid verdict" whose failure mode
-/// is a contract-not-satisfied and a retried frontier review. Nothing in the prompt asks a model for
-/// this field — the paragraph <c>RoleDispatch.VerifyResultsParagraph</c> adds never names it, and
-/// <c>WorkerRoles.json</c>'s verdict example does not carry it — but a field a model invents unasked
-/// is exactly the failure the engine's overwrite exists for, so the parse must survive it in whatever
-/// shape it was guessed. Nothing is lost by dropping it here:
-/// <c>Mutation.VerifyStep.InjectInstrumentsAsync</c> runs on every dispatch or redispatch (#1895)
-/// that produced a verdict
-/// and either writes the engine's rows or removes the key, so the model's version is never the one a
-/// reader sees.
-/// </para>
-/// </summary>
-/// <summary>
 /// Reads <c>completion</c> as <see langword="null"/> for anything other than the two explicit review
 /// completion tokens. Tolerance preserves otherwise readable legacy/custom verdict evidence while
 /// keeping lifecycle routing fail-closed.
@@ -182,6 +164,25 @@ internal sealed class TolerantReviewCompletionConverter : JsonConverter<ReviewCo
     }
 }
 
+/// <summary>
+/// Reads <c>instruments</c> as null rather than throwing whenever it is not a well-formed array of
+/// <see cref="VerifyInstrument"/> — including when it is a string, a number, an object, or an array
+/// of any of those.
+/// <para>
+/// Why a converter rather than the plain binding: declaring the property at all is what would
+/// otherwise turn a previously-TOLERATED unknown field into a hard parse failure, and
+/// <see cref="ReviewVerdictSchema"/> is the single definition of "valid verdict" whose failure mode
+/// is a contract-not-satisfied and a retried frontier review. Nothing in the prompt asks a model for
+/// this field — the paragraph <c>RoleDispatch.VerifyResultsParagraph</c> adds never names it, and
+/// <c>WorkerRoles.json</c>'s verdict example does not carry it — but a field a model invents unasked
+/// is exactly the failure the engine's overwrite exists for, so the parse must survive it in whatever
+/// shape it was guessed. Nothing is lost by dropping it here:
+/// <c>Mutation.VerifyStep.InjectInstrumentsAsync</c> runs on every dispatch or redispatch (#1895)
+/// that produced a verdict
+/// and either writes the engine's rows or removes the key, so the model's version is never the one a
+/// reader sees.
+/// </para>
+/// </summary>
 internal sealed class TolerantVerifyInstrumentListConverter : JsonConverter<IReadOnlyList<VerifyInstrument>?>
 {
     public override IReadOnlyList<VerifyInstrument>? Read(

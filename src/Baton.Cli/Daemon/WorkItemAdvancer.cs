@@ -330,10 +330,15 @@ public sealed class WorkItemAdvancer
         }
 
         // An empty required set for this exact open head is neither green nor a failed worker.
-        // Exception: a verified open draft resolves the one halted no-PR delivery identity. Review
-        // may proceed without required-check evidence; trapping this recovery in the readiness wait
-        // would overwrite its original halt and eventually emit a second failure fact.
+        // Exceptions:
+        // - A requested draft restoration has precedence over waiting for check evidence: an open
+        //   non-draft PR with incomplete review evidence or a blocking verdict must be restored to
+        //   draft immediately, not left visibly ready while waiting for empty checks (#2457).
+        // - A verified open draft resolves the one halted no-PR delivery identity. Review
+        //   may proceed without required-check evidence; trapping this recovery in the readiness wait
+        //   would overwrite its original halt and eventually emit a second failure fact.
         if (!awaitingMissingPullRequest
+            && transition.PullRequestAction != PullRequestReadinessAction.MarkDraft
             && pr is { Succeeded: true, Number: { } number, HeadSha: { Length: > 0 } headSha, IsOpen: true }
             && pr.RequiredChecks == PullRequestChecks.None)
         {
