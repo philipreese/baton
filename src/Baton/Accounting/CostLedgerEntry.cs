@@ -650,4 +650,9 @@ public sealed record CostLedgerEntry(
     CoreExitReason? ExitReason = null,
     [property: JsonPropertyName("arrestReason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ArrestReason? ArrestReason = null);
+    ArrestReason? ArrestReason = null,
+    // #2449: immutable enforcement inputs, projected from the accepted request and any applied
+    // StepRebound. Null remains explicit unknown evidence for legacy/supplementary rows.
+    [property: JsonPropertyName("limits")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ExecutionLimitEvidence? Limits = null);

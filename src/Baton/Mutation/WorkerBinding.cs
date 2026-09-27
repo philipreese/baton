@@ -111,8 +111,16 @@ public abstract record WorkerBinding(WorkerContract Contract, GrantAuditMode Gra
         // Default TRUE, unlike every flag above: "no verify at all" is the direction that silently
         // skips a gate, so a binding built by anything other than RoleDispatch.ToBinding keeps the
         // pre-#2029 behaviour rather than opting itself out.
-        bool VerifiesWorkspace = true)
-        : WorkerBinding(Contract, GrantAuditMode);
+        bool VerifiesWorkspace = true,
+        // #2449: profile provenance is optional because hand-authored/legacy bindings have no
+        // selection record. The enforcement values themselves remain known from this binding.
+        ExecutionLimitEvidence? LimitEvidence = null)
+        : WorkerBinding(Contract, GrantAuditMode)
+    {
+        public ExecutionLimitEvidence EffectiveLimitEvidence =>
+            LimitEvidence ?? new ExecutionLimitEvidence(
+                Timeout, TokenBudget, MaxToolSteps, BilledRateLimit);
+    }
 
     /// <summary>
     /// A non-process external party — a human, or any other worker tier whose

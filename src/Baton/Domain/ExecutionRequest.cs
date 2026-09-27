@@ -112,4 +112,7 @@ public sealed record ExecutionRequest(
     IReadOnlyList<ProducedOutput>? ProducedOutputs = null,
     // #2414: retain producer-owned delivery inventory and exact-path exceptions for recovery.
     IReadOnlyList<DeliveryArtifactPath>? DeliveryGeneratedPaths = null,
-    IReadOnlyList<string>? DeliveryAuthorizedPaths = null);
+    IReadOnlyList<string>? DeliveryAuthorizedPaths = null,
+    // #2449: immutable ordinary-execution enforcement inputs. Null is explicit legacy/supplementary
+    // unknown evidence; a non-null value preserves null brakes as known unlimited inputs.
+    ExecutionLimitEvidence? Limits = null);

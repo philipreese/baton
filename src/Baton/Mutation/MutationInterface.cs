@@ -621,7 +621,8 @@ public static class MutationInterface
             environment,
             UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
             GrantAuditMode: nonProcess.GrantAuditMode,
-            ProducedOutputs: nonProcess.Contract.ProducedOutputs);
+            ProducedOutputs: nonProcess.Contract.ProducedOutputs,
+            Limits: null);
 
 
         // The write-sequence discipline still applies: appended and fsync'd before this method
@@ -924,7 +925,8 @@ public static class MutationInterface
             DeliversBranch: processBinding.DeliversBranch,
             ProducedOutputs: processBinding.Contract.ProducedOutputs,
             DeliveryGeneratedPaths: deliveryGeneratedPaths,
-            DeliveryAuthorizedPaths: deliveryAuthorizedPaths);
+            DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
+            Limits: processBinding.EffectiveLimitEvidence);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -1681,8 +1683,13 @@ public static class MutationInterface
                     // a pre-#1567 line has neither field recorded, so require both null before treating the
                     // absence as "no prior binding recorded" rather than a divergence to journal.
                     var isLegacyUnrecordedBinding = request.Adapter is null && request.Model is null;
+                    var appliedLimits = processBinding.EffectiveLimitEvidence with { Timeout = request.Timeout };
+                    // A legacy request has no baseline to compare. Keep that evidence explicitly
+                    // unknown rather than manufacturing a rebind from today's settings.
+                    var limitsChanged = request.Limits is { } recordedLimits
+                        && recordedLimits.HasDifferentEnforcementInputs(appliedLimits);
                     if (!isLegacyUnrecordedBinding
-                        && (request.Adapter != processBinding.Adapter || request.Model != processBinding.Model))
+                        && (request.Adapter != processBinding.Adapter || request.Model != processBinding.Model || limitsChanged))
                     {
                         var stepId = request.StepId
                             ?? throw new InvalidRoomMutationException(
@@ -1695,13 +1702,16 @@ public static class MutationInterface
                                 PreviousModel: request.Model,
                                 NewAdapter: processBinding.Adapter,
                                 NewModel: processBinding.Model,
-                                Reason: "crash-recovery resubmit: binding changed since accept"),
+                                Reason: "crash-recovery resubmit: binding changed since accept",
+                                PreviousLimits: request.Limits,
+                                NewLimits: appliedLimits),
                             ioCancellationToken).ConfigureAwait(false);
 
                         request = request with
                         {
                             Adapter = processBinding.Adapter,
                             Model = processBinding.Model,
+                            Limits = appliedLimits,
                         };
                         acceptedRequestByExecutionId[executionId] = request;
                     }
@@ -2084,7 +2094,8 @@ public static class MutationInterface
             DeliversBranch: processBindingForRequest?.DeliversBranch,
             ProducedOutputs: binding.Contract.ProducedOutputs,
             DeliveryGeneratedPaths: deliveryGeneratedPaths,
-            DeliveryAuthorizedPaths: deliveryAuthorizedPaths);
+            DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
+            Limits: processBindingForRequest?.EffectiveLimitEvidence);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what

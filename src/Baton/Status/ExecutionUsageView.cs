@@ -191,7 +191,12 @@ public sealed record ExecutionUsageView(
     CoreExitReason? ExitReason = null,
     [property: JsonPropertyName("arrestReason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ArrestReason? ArrestReason = null)
+    ArrestReason? ArrestReason = null,
+    // #2449: the same immutable enforcement snapshot exposed by the cost ledger. Null is legacy or
+    // supplementary unknown evidence; null brakes inside a snapshot mean known unlimited.
+    [property: JsonPropertyName("limits")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ExecutionLimitEvidence? Limits = null)
 {
     /// <summary>The capture is provably not the whole stream — <see cref="Dispatch.ExecutionStreamLogger.StdoutTruncationMarkerFileName"/>.</summary>
     public const string StreamTruncatedByRolloverReason = "stream-truncated-by-rollover";
@@ -521,7 +526,8 @@ public static class ExecutionUsageProjector
                     : null,
                 checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
                     ? checkpointTerminal.ArrestReason
-                    : null);
+                    : null,
+                resolvedBinding.Limits);
         }
 
         return result;

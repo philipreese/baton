@@ -208,6 +208,10 @@ public static class WorkerBindingResolver
             ModelSource = modelSource,
             EffortResolved = effortResolved,
             EffortSource = effortSource,
+            // The primary profile key names the primary adapter/model and must not be presented as
+            // the fallback's selection provenance. The fallback's actual enforcement values remain
+            // carried on the resolved Process binding, but their source is unknown here.
+            ExecutionLimitResolution = null,
         };
     }
 
@@ -303,7 +307,18 @@ public static class WorkerBindingResolver
             entry.Contract, target, entry.Timeout, adapter, entry.GrantAuditMode, entry.Adapter, entry.Model, adapter,
             entry.VerifyPixiTask, entry.VerifyCommandOverride, entry.TokenBudget, entry.MaxToolSteps,
             entry.BilledRateLimit, entry.IsWorktree, entry.WorktreeBaseSha, entry.ChangesTree,
-            entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace);
+            entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace,
+            entry.ExecutionLimitResolution is { } resolution
+                ? new ExecutionLimitEvidence(
+                    resolution.Timeout,
+                    resolution.TokenBudget,
+                    resolution.MaxToolSteps,
+                    entry.BilledRateLimit,
+                    resolution.ChosenKey,
+                    resolution.TimeoutSource,
+                    resolution.TokenBudgetSource,
+                    resolution.MaxToolStepsSource)
+                : null);
     }
 
 
