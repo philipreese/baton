@@ -926,7 +926,7 @@ public static class MutationInterface
             ProducedOutputs: processBinding.Contract.ProducedOutputs,
             DeliveryGeneratedPaths: deliveryGeneratedPaths,
             DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
-            Limits: processBinding.EffectiveLimitEvidence);
+            Limits: CaptureAppliedLimitEvidence(processBinding));
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -1643,8 +1643,8 @@ public static class MutationInterface
                                     Reason: "vendor-exhaustion fallback: "
                                         + $"{previousProcess.Adapter} parked until "
                                         + $"{stepStateForDispatch.LatestExecutionFailedRetryNotBefore?.ToString("O") ?? "unknown"}",
-                                    PreviousLimits: previousProcess.EffectiveLimitEvidence,
-                                    NewLimits: fallbackBinding.EffectiveLimitEvidence),
+                                    PreviousLimits: CaptureAppliedLimitEvidence(previousProcess),
+                                    NewLimits: CaptureAppliedLimitEvidence(fallbackBinding)),
                                 ioCancellationToken)
                             .ConfigureAwait(false);
                     }
@@ -1685,11 +1685,12 @@ public static class MutationInterface
                     // a pre-#1567 line has neither field recorded, so require both null before treating the
                     // absence as "no prior binding recorded" rather than a divergence to journal.
                     var isLegacyUnrecordedBinding = request.Adapter is null && request.Model is null;
-                    var appliedLimits = processBinding.EffectiveLimitEvidence with { Timeout = request.Timeout };
+                    var appliedLimits = MergeCrashRecoveryLimitEvidence(request, processBinding);
                     // A legacy request has no baseline to compare. Keep that evidence explicitly
                     // unknown rather than manufacturing a rebind from today's settings.
                     var limitsChanged = request.Limits is { } recordedLimits
-                        && recordedLimits.HasDifferentEnforcementInputs(appliedLimits);
+                        && appliedLimits is { } currentLimits
+                        && recordedLimits.HasDifferentEnforcementInputs(currentLimits);
                     if (!isLegacyUnrecordedBinding
                         && (request.Adapter != processBinding.Adapter || request.Model != processBinding.Model || limitsChanged))
                     {
@@ -2097,7 +2098,9 @@ public static class MutationInterface
             ProducedOutputs: binding.Contract.ProducedOutputs,
             DeliveryGeneratedPaths: deliveryGeneratedPaths,
             DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
-            Limits: processBindingForRequest?.EffectiveLimitEvidence);
+            Limits: processBindingForRequest is { } processBinding
+                ? CaptureAppliedLimitEvidence(processBinding)
+                : null);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -2127,6 +2130,56 @@ public static class MutationInterface
     private static (bool? HookCanaryArmed, string? HookVerdictLedgerFileName) CaptureHookCanaryArmingFields(
         WorkerBinding.Process? processBinding) =>
         (processBinding?.Target.CountHookVerdicts is not null, processBinding?.Target.HookVerdictLedgerFileName);
+
+    // The dispatch path constructs TokenBudgetMonitor only when the same adapter parser is available.
+    // Accepted evidence must describe that applied monitor, not merely the configured brake fields.
+    private static ExecutionLimitEvidence CaptureAppliedLimitEvidence(WorkerBinding.Process processBinding)
+    {
+        var evidence = processBinding.EffectiveLimitEvidence;
+        var usageParser = processBinding.Adapter is { } adapter
+            ? StandardWorkerUsageParsers.Default.GetValueOrDefault(adapter)
+            : null;
+        var monitorWasConfigured = processBinding.TokenBudget is not null
+            || processBinding.MaxToolSteps is not null
+            || processBinding.BilledRateLimit is not null;
+        return usageParser is not null || !monitorWasConfigured
+            ? evidence
+            : evidence with
+            {
+                TokenBudget = null,
+                MaxToolSteps = null,
+                BilledRateLimit = null,
+                ChosenKey = null,
+                TokenBudgetSource = null,
+                MaxToolStepsSource = null,
+            };
+    }
+
+    private static ExecutionLimitEvidence? MergeCrashRecoveryLimitEvidence(
+        ExecutionRequest request, WorkerBinding.Process processBinding)
+    {
+        if (request.Limits is not { } acceptedLimits)
+        {
+            return null;
+        }
+
+        var currentLimits = CaptureAppliedLimitEvidence(processBinding);
+        var sameSnapshot = acceptedLimits.Timeout == currentLimits.Timeout
+            && acceptedLimits.TokenBudget == currentLimits.TokenBudget
+            && acceptedLimits.MaxToolSteps == currentLimits.MaxToolSteps
+            && acceptedLimits.BilledRateLimit == currentLimits.BilledRateLimit
+            && acceptedLimits.ChosenKey == currentLimits.ChosenKey
+            && acceptedLimits.TimeoutSource == currentLimits.TimeoutSource
+            && acceptedLimits.TokenBudgetSource == currentLimits.TokenBudgetSource
+            && acceptedLimits.MaxToolStepsSource == currentLimits.MaxToolStepsSource;
+
+        return currentLimits with
+        {
+            Timeout = request.Timeout,
+            TimeoutSource = acceptedLimits.TimeoutSource,
+            ChosenKey = sameSnapshot ? acceptedLimits.ChosenKey : null,
+        };
+    }
 
     private static (int Pid, DateTimeOffset StartTime) GetCurrentEngineIdentity()
     {

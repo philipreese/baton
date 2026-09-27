@@ -303,22 +303,35 @@ public static class WorkerBindingResolver
             target = target with { OnStdoutLine = line => onWorkerStdoutLine(capturedWorkerName, line) };
         }
 
+        var limitEvidence = entry.ExecutionLimitResolution is { } resolution
+            ? CreateLimitEvidence(entry, resolution)
+            : null;
+
         return new WorkerBinding.Process(
             entry.Contract, target, entry.Timeout, adapter, entry.GrantAuditMode, entry.Adapter, entry.Model, adapter,
             entry.VerifyPixiTask, entry.VerifyCommandOverride, entry.TokenBudget, entry.MaxToolSteps,
             entry.BilledRateLimit, entry.IsWorktree, entry.WorktreeBaseSha, entry.ChangesTree,
             entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace,
-            entry.ExecutionLimitResolution is { } resolution
-                ? new ExecutionLimitEvidence(
-                    entry.Timeout,
-                    entry.TokenBudget,
-                    entry.MaxToolSteps,
-                    entry.BilledRateLimit,
-                    resolution.ChosenKey,
-                    resolution.TimeoutSource,
-                    resolution.TokenBudgetSource,
-                    resolution.MaxToolStepsSource)
-                : null);
+            limitEvidence);
+    }
+
+    private static ExecutionLimitEvidence CreateLimitEvidence(
+        WorkerBindingConfigEntry entry, ExecutionLimitResolution resolution)
+    {
+        var timeoutMatches = entry.Timeout == resolution.Timeout;
+        var tokenBudgetMatches = entry.TokenBudget == resolution.TokenBudget;
+        var maxToolStepsMatches = entry.MaxToolSteps == resolution.MaxToolSteps;
+        var aggregateMatches = timeoutMatches && tokenBudgetMatches && maxToolStepsMatches;
+
+        return new ExecutionLimitEvidence(
+            entry.Timeout,
+            entry.TokenBudget,
+            entry.MaxToolSteps,
+            entry.BilledRateLimit,
+            aggregateMatches ? resolution.ChosenKey : null,
+            timeoutMatches ? resolution.TimeoutSource : null,
+            tokenBudgetMatches ? resolution.TokenBudgetSource : null,
+            maxToolStepsMatches ? resolution.MaxToolStepsSource : null);
     }
 
 

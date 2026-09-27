@@ -109,7 +109,8 @@ public class MutationInterfaceRetryBackoffTests
                 ["worker-a"] = new WorkerBinding.Process(
                     new WorkerContract("worker-a", [], [new ProducedOutput("out.txt")], []),
                     FailOnFirstAttemptThenSucceed(markerPath, "out.txt", "content"),
-                    TimeSpan.FromSeconds(30))
+                    TimeSpan.FromSeconds(30),
+                    Adapter: "claude")
             };
 
             await using var writer = new FlowEventLogWriter(logPath);

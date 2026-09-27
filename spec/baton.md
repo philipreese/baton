@@ -320,13 +320,16 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   template phases, and finite fallback policy remain outside this slice and belong to #2416.
 
   **Ordinary execution limit evidence (#2449).** Before an ordinary process spawn, the accepted
-  request records the timeout and the monitor's token, tool-step, and billed-rate inputs in one
-  vendor-neutral optional value. A non-null value records null brakes as known unlimited and carries
-  the profile key and available source stamps; an absent value remains unknown for legacy and
-  supplementary executions. A crash-recovery resubmit keeps the accepted timeout while recording
-  changed current monitor inputs in `StepRebound` before spawn. Status and the cost ledger project
-  that latest applied snapshot from the journal, so settings or binding edits cannot rewrite settled
-  history. Checkpoint and grace controls remain explicitly unknown child evidence.
+  request records the timeout and, when the dispatch monitor is actually available, its token,
+  tool-step, and billed-rate inputs in one vendor-neutral optional value. A non-null value records
+  null brakes as known unlimited only when the monitor predicate was available; an unavailable parser
+  leaves those monitor axes unknown while genuine timeout evidence remains. It carries only profile
+  and per-axis source stamps that describe the whole recorded snapshot; an aggregate profile key is
+  cleared for a mixed snapshot. An absent value remains unknown for legacy and supplementary
+  executions. A crash-recovery resubmit keeps the accepted timeout provenance while recording changed
+  current monitor inputs in `StepRebound` before spawn. Status and the cost ledger project that latest
+  applied snapshot from the journal, so settings or binding edits cannot rewrite settled history.
+  Checkpoint and grace controls remain explicitly unknown child evidence.
 
   `--workstream` (#1619, rung 1 of #1614's ruling) is a **grouping key, not a title** —
   a room keeps its generated hex identity on disk; the slug only makes several rooms (e.g. an

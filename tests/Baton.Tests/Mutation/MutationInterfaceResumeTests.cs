@@ -89,6 +89,7 @@ public class MutationInterfaceResumeTests
                     TokenBudget: 5000,
                     MaxToolSteps: 25,
                     BilledRateLimit: 1200,
+                    Adapter: "claude",
                     LimitEvidence: expectedLimits),
             };
 

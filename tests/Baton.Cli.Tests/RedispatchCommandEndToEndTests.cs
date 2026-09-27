@@ -121,11 +121,11 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
                 .Select(entry => entry.Event)
                 .OfType<FlowEvent.ExecutionRequestAccepted>());
             var expectedLimits = new ExecutionLimitEvidence(
-                TimeSpan.FromMinutes(60), 2000, 20, child.BilledRateLimit,
-                child.ExecutionLimitResolution?.ChosenKey,
-                child.ExecutionLimitResolution?.TimeoutSource,
-                child.ExecutionLimitResolution?.TokenBudgetSource,
-                child.ExecutionLimitResolution?.MaxToolStepsSource);
+                TimeSpan.FromMinutes(60), null, null, null,
+                ChosenKey: null,
+                TimeoutSource: child.ExecutionLimitResolution?.TimeoutSource,
+                TokenBudgetSource: null,
+                MaxToolStepsSource: null);
             Assert.Equal(expectedLimits, accepted.Request.Limits);
 
             var status = WorkflowStatusProjector.Project(
@@ -133,6 +133,74 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             Assert.Equal(expectedLimits, Assert.Single(status.Steps).Usage?.Limits);
 
             var repository = RepositoryIdentity.From("https://github.com/example/redispatch-limits.git", null)!;
+            var ledgerRow = Assert.Single(CostLedgerStore.BuildEntries(entries, childRoom, repository));
+            Assert.Equal(expectedLimits, ledgerRow.Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Amended_spec_redispatch_preserves_mixed_limit_provenance_through_status_and_ledger()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-amended-limits-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Continue the limit-evidence repair.");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            var parent = parentBindings["advise"] with
+            {
+                Timeout = TimeSpan.FromMinutes(30),
+                TokenBudget = 1000,
+                MaxToolSteps = 10,
+                ExecutionLimitResolution = new ExecutionLimitResolution(
+                    "fake/parent-model/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                    ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10),
+            };
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry> { ["advise"] = parent },
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            var amendedSpecPath = await WriteSpecAsync(testRoot, "Use the amended brief.");
+            var childRoom = Path.Combine(testRoot, "child");
+
+            var childResult = await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(
+                    parentRoom, childRoom, SpecFilePath: amendedSpecPath, Adapter: "fake", TokenBudget: 2000),
+                Adapters, TestContext.Current.CancellationToken);
+            var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var child = childBindings["advise"];
+
+            Assert.Equal(TimeSpan.FromMinutes(30), child.Timeout);
+            Assert.Equal(2000, child.TokenBudget);
+            Assert.Equal(10, child.MaxToolSteps);
+            Assert.Equal(ExecutionLimitSource.Profile, child.ExecutionLimitResolution?.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.DispatchOverride, child.ExecutionLimitResolution?.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.Profile, child.ExecutionLimitResolution?.MaxToolStepsSource);
+            Assert.Equal("fake/parent-model/advise/small", child.ExecutionLimitResolution?.ChosenKey);
+
+            var entries = await new FlowEventLogReader(
+                Path.Combine(childRoom, BatonPaths.FlowLogFileName)).ReadAllEntriesWithTimestampsAsync(
+                    TestContext.Current.CancellationToken);
+            var accepted = Assert.Single(entries.OfType<LogEntry.FlowLogEntry>()
+                .Select(entry => entry.Event)
+                .OfType<FlowEvent.ExecutionRequestAccepted>());
+            var expectedLimits = new ExecutionLimitEvidence(
+                TimeSpan.FromMinutes(30), null, null, null,
+                ChosenKey: null,
+                TimeoutSource: ExecutionLimitSource.Profile,
+                TokenBudgetSource: null,
+                MaxToolStepsSource: null);
+            Assert.Equal(expectedLimits, accepted.Request.Limits);
+
+            var status = WorkflowStatusProjector.Project(
+                childResult.State, childResult.Snapshot, childRoom, entries);
+            Assert.Equal(expectedLimits, Assert.Single(status.Steps).Usage?.Limits);
+            var repository = RepositoryIdentity.From("https://github.com/example/redispatch-amended.git", null)!;
             var ledgerRow = Assert.Single(CostLedgerStore.BuildEntries(entries, childRoom, repository));
             Assert.Equal(expectedLimits, ledgerRow.Limits);
         }

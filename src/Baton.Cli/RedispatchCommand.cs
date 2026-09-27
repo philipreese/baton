@@ -670,8 +670,13 @@ public static class RedispatchCommand
 
             // #1927 review HIGH: both paths re-resolve the display stamps through the same rule --
             // ToBinding stamped them from the inherited axes above, which reach it as overrides and so
-            // read as "requested" even when the child merely inherited them.
-            return (definition, WithResolvedStamps(bindings[role.Id], parentEntry, options));
+            // read as "requested" even when the child merely inherited them. Limit provenance follows
+            // the same rule: do not let this materialization select today's profile for an inherited axis.
+            var materialized = bindings[role.Id] with
+            {
+                ExecutionLimitResolution = InheritExecutionLimitResolution(parentEntry, bindings[role.Id], options),
+            };
+            return (definition, WithResolvedStamps(materialized, parentEntry, options));
         }
         catch (Exception ex) when (ex is FileNotFoundException or JsonException or InvalidOperationException or KeyNotFoundException)
         {
