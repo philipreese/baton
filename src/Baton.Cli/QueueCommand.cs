@@ -1113,7 +1113,9 @@ public static class QueueCommand
             pageSize,
             options.Cursor);
         var rows = await QueueInspectionProjection
-            .ProjectAsync(window.Items, snapshot.PullRequestObservations, decisions, cancellationToken)
+            .ProjectAsync(
+                window.Items, snapshot.PullRequestObservations, decisions, cancellationToken,
+                captureUnavailableRoomEvidence: true)
             .ConfigureAwait(false);
         var document = new QueueInspectionDocument(
             SchemaVersion: 1,
