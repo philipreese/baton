@@ -51,4 +51,5 @@ public sealed record EventLogSnapshot(
     IReadOnlyList<FlowEvent> FlowEvents,
     IReadOnlyList<CoreEvent> CoreEvents,
     long ByteOffset = 0,
-    bool IsFallbackToFull = false);
+    bool IsFallbackToFull = false,
+    bool HasUnterminatedTail = false);

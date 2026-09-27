@@ -1,6 +1,8 @@
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Outcomes;
+using Baton.Projection;
 using Baton.Status;
 using Baton.Store;
 using Baton.Tests.TestSupport;
@@ -43,22 +45,26 @@ public sealed class GraceTurnEndToEndTests
             Assert.Empty(run.Events.OfType<FlowEvent.ExecutionSucceeded>());
             Assert.Single(run.Events.OfType<FlowEvent.ExecutionArrested>());
 
-            var grace = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
-            Assert.True(grace.WorkspaceCleanAfter);
-            Assert.Equal(CoreExitReason.Natural, grace.ExitReason);
-            Assert.Null(grace.ArrestReason);
-
-            // GraceTurnAttempted is journaled before ExecutionArrested for the same execution -- a
-            // reader replaying the ledger sees the courtesy turn's own outcome before the arrest that
-            // follows it.
-            var executionEvents = run.Events.Where(e => e is FlowEvent.GraceTurnAttempted or FlowEvent.ExecutionArrested).ToList();
-            Assert.IsType<FlowEvent.GraceTurnAttempted>(executionEvents[0]);
-            Assert.IsType<FlowEvent.ExecutionArrested>(executionEvents[1]);
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var completion = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnCompleted>());
+            var safety = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnSafetyRecorded>());
+            Assert.True(safety.WorkspaceCleanAfter);
+            Assert.Equal(CoreExitReason.Natural, completion.ExitReason);
+            Assert.Null(completion.ArrestReason);
+            Assert.Equal(claim.GraceExecutionId, completion.GraceExecutionId);
+            Assert.Equal(claim.GraceExecutionId, safety.GraceExecutionId);
+            Assert.NotEqual(claim.ParentExecutionId, claim.GraceExecutionId);
+            Assert.Equal("grace-turn", claim.Request.Limits?.TimeoutSource);
+            var orderedEvents = run.Events.ToList();
+            Assert.True(orderedEvents.IndexOf(claim) < orderedEvents.IndexOf(completion));
+            Assert.True(orderedEvents.IndexOf(completion) < orderedEvents.IndexOf(safety));
+            Assert.True(orderedEvents.IndexOf(safety) < orderedEvents.FindIndex(e => e is FlowEvent.ExecutionArrested));
 
             Assert.Equal(2, run.Dispatcher.CallCount);
             Assert.Equal(2, run.Dispatcher.Requests.Count);
             Assert.NotNull(run.Dispatcher.Requests[0].Limits);
-            Assert.Null(run.Dispatcher.Requests[1].Limits);
+            Assert.NotEqual(run.Dispatcher.Requests[0].ExecutionId, run.Dispatcher.Requests[1].ExecutionId);
+            Assert.NotNull(run.Dispatcher.Requests[1].Limits);
             Assert.True(RepositoryIsClean(run.Workspace));
         }
         finally
@@ -79,10 +85,13 @@ public sealed class GraceTurnEndToEndTests
             Assert.Empty(run.Events.OfType<FlowEvent.ExecutionSucceeded>());
             Assert.Single(run.Events.OfType<FlowEvent.ExecutionArrested>());
 
-            var grace = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
-            Assert.False(grace.WorkspaceCleanAfter);
-            Assert.Equal(CoreExitReason.CancelRequested, grace.ExitReason);
-            Assert.Equal(ArrestReason.TokenBudget, grace.ArrestReason);
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var completion = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnCompleted>());
+            var safety = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnSafetyRecorded>());
+            Assert.False(safety.WorkspaceCleanAfter);
+            Assert.Equal(CoreExitReason.CancelRequested, completion.ExitReason);
+            Assert.Equal(ArrestReason.TokenBudget, completion.ArrestReason);
+            Assert.Equal(claim.GraceExecutionId, completion.GraceExecutionId);
 
             Assert.Equal(2, run.Dispatcher.CallCount);
             Assert.False(RepositoryIsClean(run.Workspace));
@@ -101,7 +110,7 @@ public sealed class GraceTurnEndToEndTests
         var run = await RunArrestedLaneAsync(graceShouldCommit: true, verifiesWorkspace: false);
         try
         {
-            Assert.Empty(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
+            Assert.Empty(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
             Assert.Single(run.Events.OfType<FlowEvent.ExecutionArrested>());
             // The fake dispatcher's second call is what a grace turn would have made -- it never came.
             Assert.Equal(1, run.Dispatcher.CallCount);
@@ -114,21 +123,72 @@ public sealed class GraceTurnEndToEndTests
     }
 
     [Fact]
-    public async Task A_grace_turn_spawn_failure_is_recorded_and_the_room_still_settles_Indeterminate()
+    public async Task A_grace_turn_spawn_failure_is_unresolved_and_is_never_retried()
     {
         var run = await RunArrestedLaneAsync(graceShouldCommit: false, graceSpawnFails: true);
         try
         {
-            Assert.Equal(WorkflowOutcome.Indeterminate, WorkflowOutcome.Describe(run.FinalState));
-            Assert.Single(run.Events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Equal(WorkflowOutcome.Running, WorkflowOutcome.Describe(run.FinalState));
+            Assert.Empty(run.Events.OfType<FlowEvent.ExecutionArrested>());
 
-            var grace = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
-            Assert.False(grace.WorkspaceCleanAfter);
-            Assert.Equal(CoreExitReason.CancelRequested, grace.ExitReason);
-            Assert.Null(grace.ArrestReason);
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            Assert.Empty(run.Events.OfType<FlowEvent.GraceTurnCompleted>());
+            Assert.Empty(run.Events.OfType<FlowEvent.GraceTurnSafetyRecorded>());
+            Assert.NotEqual(claim.ParentExecutionId, claim.GraceExecutionId);
+            Assert.Equal("grace-turn", claim.Request.Limits?.TimeoutSource);
 
             Assert.Equal(2, run.Dispatcher.CallCount);
             Assert.False(RepositoryIsClean(run.Workspace));
+
+            // Restart must discover the durable spend claim even though no Core lifecycle was
+            // recorded for the child. A missing child completion is unresolved spend, not permission
+            // to launch the original parent or another grace child.
+            var durableSnapshot = await new FlowEventLogReader(Path.Combine(run.RoomDirectory, "flow.jsonl"))
+                .ReadSnapshotAsync(TestContext.Current.CancellationToken);
+            var projection = StateProjector.ProjectAndCheckpoint(
+                durableSnapshot.FlowEvents, run.Snapshot, logByteOffset: durableSnapshot.ByteOffset);
+            var (started, exited) = CoreEventAggregation.Merge(
+                projection.Checkpoint.State.CoreStartedExecutionIds,
+                projection.Checkpoint.State.CoreExitedByExecutionId,
+                durableSnapshot.CoreEvents);
+            ProjectionCheckpointStore.Save(run.RoomDirectory, projection.Checkpoint with
+            {
+                ByteOffset = durableSnapshot.ByteOffset,
+                State = projection.Checkpoint.State with
+                {
+                    CoreStartedExecutionIds = started,
+                    CoreExitedByExecutionId = exited,
+                },
+            });
+            var recoveryWriter = new FlowEventLogWriter(Path.Combine(run.RoomDirectory, "flow.jsonl"));
+            var recoveryDispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            var recoveredState = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                new FlowEventLogReader(Path.Combine(run.RoomDirectory, "flow.jsonl")), recoveryWriter, recoveryDispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+            await recoveryWriter.DisposeAsync();
+            Assert.Equal(WorkflowOutcome.Running, WorkflowOutcome.Describe(recoveredState));
+            Assert.Equal(0, recoveryDispatcher.CallCount);
+
+            var tornCompletion = "{\"eventType\":\"graceTurnCompleted\"";
+            await File.AppendAllTextAsync(Path.Combine(run.RoomDirectory, "flow.jsonl"), tornCompletion,
+                TestContext.Current.CancellationToken);
+            var bytesBeforeRejectedReplay = await File.ReadAllBytesAsync(
+                Path.Combine(run.RoomDirectory, "flow.jsonl"), TestContext.Current.CancellationToken);
+            var rejectedWriter = new FlowEventLogWriter(Path.Combine(run.RoomDirectory, "flow.jsonl"));
+            var rejectedDispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            await Assert.ThrowsAsync<FlowEventLogReadException>(() => MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                new FlowEventLogReader(Path.Combine(run.RoomDirectory, "flow.jsonl")), rejectedWriter, rejectedDispatcher,
+                cancellationToken: TestContext.Current.CancellationToken));
+            await rejectedWriter.DisposeAsync();
+            Assert.Equal(bytesBeforeRejectedReplay, await File.ReadAllBytesAsync(
+                Path.Combine(run.RoomDirectory, "flow.jsonl"), TestContext.Current.CancellationToken));
+            Assert.Equal(0, rejectedDispatcher.CallCount);
         }
         finally
         {
@@ -157,6 +217,10 @@ public sealed class GraceTurnEndToEndTests
         FlowState FinalState,
         IReadOnlyList<FlowEvent> Events,
         string Workspace,
+        string RoomDirectory,
+        string ArtifactsRoot,
+        WorkflowDefinitionSnapshot Snapshot,
+        IReadOnlyDictionary<string, WorkerBinding> Bindings,
         GraceTurnCoreDispatcher Dispatcher,
         Action Cleanup);
 
@@ -210,7 +274,8 @@ public sealed class GraceTurnEndToEndTests
 
         var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
 
-        return new LaneRun(finalState, events, workspace, dispatcher, () => DirectoryCleanup.DeleteRecursively(roomDirectory));
+        return new LaneRun(finalState, events, workspace, roomDirectory, artifactsRoot, snapshot, bindings, dispatcher,
+            () => DirectoryCleanup.DeleteRecursively(roomDirectory));
     }
 
     private static bool RepositoryIsClean(string workspace) =>

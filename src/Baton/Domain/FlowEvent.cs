@@ -44,6 +44,9 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(StreamLogLossDeclared), "streamLogLossDeclared")]
 [JsonDerivedType(typeof(EngineFilesPlaced), "engineFilesPlaced")]
 [JsonDerivedType(typeof(GraceTurnAttempted), "graceTurnAttempted")]
+[JsonDerivedType(typeof(GraceTurnClaimed), "graceTurnClaimed")]
+[JsonDerivedType(typeof(GraceTurnCompleted), "graceTurnCompleted")]
+[JsonDerivedType(typeof(GraceTurnSafetyRecorded), "graceTurnSafetyRecorded")]
 [JsonDerivedType(typeof(ArtifactCheckpointAttempted), "artifactCheckpointAttempted")]
 [JsonDerivedType(typeof(ArtifactCheckpointCompleted), "artifactCheckpointCompleted")]
 public abstract record FlowEvent
@@ -564,6 +567,31 @@ public abstract record FlowEvent
         bool WorkspaceCleanAfter,
         CoreExitReason ExitReason,
         ArrestReason? ArrestReason = null) : FlowEvent;
+
+    /// <summary>Durable spend claim and pending parent outcome for one bounded grace child.</summary>
+    public sealed record GraceTurnClaimed(
+        ExecutionId ParentExecutionId,
+        ExecutionId GraceExecutionId,
+        ExecutionRequest Request,
+        GraceCheckpointEvidence Baseline,
+        GraceParentRecoveryEvidence ParentEvidence) : FlowEvent;
+
+    /// <summary>The observed result of a claimed grace child; written before workspace safety evaluation.</summary>
+    public sealed record GraceTurnCompleted(
+        ExecutionId GraceExecutionId,
+        CoreExitReason ExitReason,
+        WorkerUsage? Usage,
+        ArrestReason? ArrestReason = null,
+        int ExitCode = 0,
+        bool TerminalSuccessObserved = false,
+        bool TerminalResultObserved = false) : FlowEvent;
+
+    /// <summary>Parent safety result after the independently-accounted grace child completed.</summary>
+    public sealed record GraceTurnSafetyRecorded(
+        ExecutionId ParentExecutionId,
+        ExecutionId GraceExecutionId,
+        bool WorkspaceCleanAfter,
+        bool? ParentWorkspaceChanged = null) : FlowEvent;
 
     /// <summary>A durable claim of the one bounded, artifact-only follow-up to an ordinary budget arrest.</summary>
     public sealed record ArtifactCheckpointAttempted(

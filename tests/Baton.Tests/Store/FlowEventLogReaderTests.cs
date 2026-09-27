@@ -47,20 +47,25 @@ public class FlowEventLogReaderTests
         }
     }
 
-    [Fact]
-    public async Task ReadAllAsync_excludes_a_trailing_line_with_no_newline_terminator()
+    [Theory]
+    [InlineData("{\"eventType\":\"graceTurnClaimed\"")]
+    [InlineData("{\"eventType\":\"graceTurnCompleted\"")]
+    public async Task ReadAllAsync_excludes_a_trailing_grace_claim_or_completion_without_newline_terminator(string tornLine)
     {
         var path = Path.Combine(Path.GetTempPath(), $"flow-{Guid.NewGuid():N}.jsonl");
         try
         {
             var completeLine = JsonSerializer.Serialize(new LogEntry.FlowLogEntry(MakeEvent("exec-1")), typeof(LogEntry), FlowEventLogJson.Options);
-            var tornLine = JsonSerializer.Serialize(new LogEntry.FlowLogEntry(MakeEvent("exec-2")), typeof(LogEntry), FlowEventLogJson.Options)[..5];
             await File.WriteAllTextAsync(path, $"{completeLine}\n{tornLine}", Encoding.UTF8, TestContext.Current.CancellationToken);
 
             var events = await new FlowEventLogReader(path).ReadAllAsync(TestContext.Current.CancellationToken);
 
             var succeeded = Assert.Single(events);
             Assert.Equal("exec-1", Assert.IsType<FlowEvent.ExecutionSucceeded>(succeeded).ExecutionId.Value);
+
+            var snapshot = await new FlowEventLogReader(path).ReadSnapshotAsync(TestContext.Current.CancellationToken);
+            Assert.True(snapshot.HasUnterminatedTail);
+            Assert.Equal(Encoding.UTF8.GetByteCount(completeLine + "\n"), snapshot.ByteOffset);
         }
         finally
         {

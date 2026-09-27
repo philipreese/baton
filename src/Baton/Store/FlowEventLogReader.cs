@@ -104,6 +104,7 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
             // terminator is a write still in flight (or a crash mid-append) and is not yet observable.
             var lastNewline = text.LastIndexOf('\n');
             var completeText = lastNewline >= 0 ? text[..(lastNewline + 1)] : string.Empty;
+            var hasUnterminatedTail = completeText.Length != text.Length;
             var completeByteCount = Encoding.UTF8.GetByteCount(completeText);
             var lines = completeText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
@@ -146,7 +147,8 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
 
             ReportUnknownKinds(unknownCount, firstUnknownKind);
 
-            return new EventLogSnapshot(flowEvents, coreEvents, seekByteOffset + completeByteCount);
+            return new EventLogSnapshot(
+                flowEvents, coreEvents, seekByteOffset + completeByteCount, HasUnterminatedTail: hasUnterminatedTail);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not FlowJournalHeldException)
         {
@@ -271,6 +273,7 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
 
         var lastNewline = text.LastIndexOf('\n');
         var completeText = lastNewline >= 0 ? text[..(lastNewline + 1)] : string.Empty;
+        var hasUnterminatedTail = completeText.Length != text.Length;
         var completeByteCount = Encoding.UTF8.GetByteCount(completeText);
         var lines = completeText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
@@ -311,7 +314,8 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
 
         ReportUnknownKinds(unknownCount, firstUnknownKind);
 
-        return new EventLogSnapshot(flowEvents, coreEvents, completeByteCount, IsFallbackToFull: true);
+        return new EventLogSnapshot(
+            flowEvents, coreEvents, completeByteCount, IsFallbackToFull: true, HasUnterminatedTail: hasUnterminatedTail);
     }
 
     private static FileStream OpenReadStream(string logFilePath)

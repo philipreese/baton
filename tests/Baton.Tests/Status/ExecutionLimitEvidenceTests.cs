@@ -33,6 +33,24 @@ public sealed class ExecutionLimitEvidenceTests
         Assert.Equal(monitorInputsKnown ? ArtifactCheckpoint.LimitSource : null, evidence.MaxToolStepsSource);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Grace_factory_records_only_its_fixed_policy_and_actual_monitor_availability(bool monitorInputsKnown)
+    {
+        var evidence = GraceTurn.CreateLimitEvidence(monitorInputsKnown);
+
+        Assert.Equal(GraceTurn.WallClockTimeout, evidence.Timeout);
+        Assert.Equal(GraceTurn.LimitSource, evidence.TimeoutSource);
+        Assert.Null(evidence.ChosenKey);
+        Assert.Null(evidence.BilledRateLimit);
+        Assert.Equal(monitorInputsKnown, evidence.MonitorInputsKnown);
+        Assert.Equal(monitorInputsKnown ? GraceTurn.TokenBudget : null, evidence.TokenBudget);
+        Assert.Equal(monitorInputsKnown ? GraceTurn.MaxToolSteps : null, evidence.MaxToolSteps);
+        Assert.Equal(monitorInputsKnown ? GraceTurn.LimitSource : null, evidence.TokenBudgetSource);
+        Assert.Equal(monitorInputsKnown ? GraceTurn.LimitSource : null, evidence.MaxToolStepsSource);
+    }
+
     [Fact]
     public void Accepted_event_round_trip_preserves_known_unlimited_brakes_and_sources()
     {
@@ -121,6 +139,65 @@ public sealed class ExecutionLimitEvidenceTests
         Assert.NotEqual(
             new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: true),
             accepted.Request.Limits);
+    }
+
+    [Fact]
+    public void Grace_child_status_and_cost_keep_claim_limits_and_parent_link_after_parent_rebound()
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"grace-limits-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var parentLimits = new ExecutionLimitEvidence(
+                TimeSpan.FromMinutes(2), 1000, 10, null, ChosenKey: "profile-a",
+                TimeoutSource: "profile", TokenBudgetSource: "profile",
+                MaxToolStepsSource: "profile", MonitorInputsKnown: true);
+            var changedParentLimits = parentLimits with { TokenBudget = 9999, ChosenKey = "profile-b" };
+            var childId = new ExecutionId("grace-child");
+            var parentRequest = Request(ExecutionId, parentLimits);
+            var childRequest = Request(childId, GraceTurn.CreateLimitEvidence(monitorInputsKnown: true));
+            var baseline = new GraceCheckpointEvidence("head", "refs/heads/main", "origin", "refs/heads/main", "tip", "endpoint-hash", "config-hash");
+            var pendingParent = new GraceParentRecoveryEvidence(
+                true, -1, CoreExitReason.CancelRequested, false, false,
+                new FlowEvent.ExecutionArrested(ExecutionId, Reason: ArrestReason.TokenBudget));
+            var startedAt = DateTime.UtcNow;
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(parentRequest)),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(ExecutionId, 1), startedAt),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(ExecutionId, -1, CoreExitReason.CancelRequested), startedAt.AddMilliseconds(500)),
+                new LogEntry.FlowLogEntry(new FlowEvent.GraceTurnClaimed(ExecutionId, childId, childRequest, baseline, pendingParent)),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(childId, 2), startedAt),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(childId, 0, CoreExitReason.Natural), startedAt.AddSeconds(1)),
+                new LogEntry.FlowLogEntry(new FlowEvent.GraceTurnCompleted(childId, CoreExitReason.Natural, null)),
+                new LogEntry.FlowLogEntry(new FlowEvent.GraceTurnSafetyRecorded(ExecutionId, childId, true)),
+                new LogEntry.FlowLogEntry(new FlowEvent.StepRebound(
+                    StepId, ExecutionId, "worker", "sonnet", "worker", "sonnet",
+                    "later parent binding", parentLimits, changedParentLimits)),
+            };
+
+            var status = ExecutionUsageProjector.BuildByExecutionId(entries, room);
+            Assert.Equal(changedParentLimits, status[ExecutionId.Value].Limits);
+            Assert.Equal(childRequest.Limits, status[childId.Value].Limits);
+            Assert.Equal(ExecutionId.Value, status[childId.Value].PredecessorExecutionId);
+            Assert.Equal("NaturalExit", status[childId.Value].Outcome);
+
+            var repository = RepositoryIdentity.From("https://github.com/example/grace.git", null)!;
+            var cost = Assert.Single(CostLedgerStore.BuildEntries(entries, room, repository),
+                entry => entry.Execution == childId.Value);
+            Assert.Equal(childId.Value, cost.Execution);
+            Assert.Equal(ExecutionId.Value, cost.PredecessorExecution);
+            Assert.Equal(childRequest.Limits, cost.Limits);
+            Assert.Equal("NaturalExit", cost.Outcome);
+
+            var resolved = ExecutionBindingResolver.Resolve(entries);
+            Assert.Equal(changedParentLimits, resolved[ExecutionId.Value].Limits);
+            Assert.Equal(childRequest.Limits, resolved[childId.Value].Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
     }
 
     [Fact]

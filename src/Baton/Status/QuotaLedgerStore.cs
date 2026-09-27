@@ -141,6 +141,10 @@ public static class QuotaLedgerStore
 
             switch (flowEntry.Event)
             {
+                case FlowEvent.GraceTurnClaimed graceClaim:
+                    checkpointPredecessorByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.ParentExecutionId.Value;
+                    break;
+
                 case FlowEvent.ArtifactCheckpointAttempted checkpoint:
                     checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
                     break;
@@ -175,6 +179,18 @@ public static class QuotaLedgerStore
                 case FlowEvent.ArtifactCheckpointCompleted checkpoint:
                     outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.TerminalOutcome;
                     checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint;
+                    break;
+
+                case FlowEvent.GraceTurnCompleted graceCompletion:
+                    outcomeByExecutionId[graceCompletion.GraceExecutionId.Value] = graceCompletion.ArrestReason is not null
+                        ? "Arrested"
+                        : graceCompletion.ExitReason switch
+                        {
+                            CoreExitReason.Natural => "NaturalExit",
+                            CoreExitReason.TimedOut => "TimedOut",
+                            CoreExitReason.CancelRequested => "CancelRequested",
+                            _ => "UnknownExit",
+                        };
                     break;
             }
         }

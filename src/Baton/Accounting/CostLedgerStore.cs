@@ -155,6 +155,11 @@ public static partial class CostLedgerStore
                     requestByExecutionId[accepted.Request.ExecutionId.Value] = accepted.Request;
                     break;
 
+                case FlowEvent.GraceTurnClaimed graceClaim:
+                    requestByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.Request;
+                    checkpointPredecessorByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.ParentExecutionId.Value;
+                    break;
+
                 case FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } checkpoint:
                     requestByExecutionId[checkpointRequest.ExecutionId.Value] = checkpointRequest;
                     checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
@@ -203,6 +208,20 @@ public static partial class CostLedgerStore
                 case FlowEvent.ArtifactCheckpointCompleted checkpoint:
                     outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.TerminalOutcome;
                     checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = (checkpoint.ExitReason, checkpoint.ArrestReason);
+                    break;
+
+                case FlowEvent.GraceTurnCompleted graceCompletion:
+                    outcomeByExecutionId[graceCompletion.GraceExecutionId.Value] = graceCompletion.ArrestReason is not null
+                        ? "Arrested"
+                        : graceCompletion.ExitReason switch
+                        {
+                            CoreExitReason.Natural => "NaturalExit",
+                            CoreExitReason.TimedOut => "TimedOut",
+                            CoreExitReason.CancelRequested => "CancelRequested",
+                            _ => "UnknownExit",
+                        };
+                    checkpointTerminalByExecutionId[graceCompletion.GraceExecutionId.Value] =
+                        (graceCompletion.ExitReason, graceCompletion.ArrestReason);
                     break;
             }
         }

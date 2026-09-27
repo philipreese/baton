@@ -1,3 +1,5 @@
+using Baton.Domain;
+
 namespace Baton.Mutation;
 
 /// <summary>
@@ -8,6 +10,8 @@ namespace Baton.Mutation;
 /// </summary>
 public static class GraceTurn
 {
+    public const string LimitSource = "grace-turn";
+
     /// <summary>
     /// The grace dispatch's own <see cref="TokenBudgetMonitor"/> ceiling — independent of, and far
     /// below, whatever budget the arrested execution itself just crossed. One bounded reply on an
@@ -20,6 +24,18 @@ public static class GraceTurn
 
     /// <summary>The grace dispatch's own wall-clock ceiling.</summary>
     public static readonly TimeSpan WallClockTimeout = TimeSpan.FromMinutes(3);
+
+    /// <summary>Records only fixed grace policy and whether its actual usage monitor exists.</summary>
+    public static ExecutionLimitEvidence CreateLimitEvidence(bool monitorInputsKnown) =>
+        new(
+            WallClockTimeout,
+            monitorInputsKnown ? TokenBudget : null,
+            monitorInputsKnown ? MaxToolSteps : null,
+            BilledRateLimit: null,
+            TimeoutSource: LimitSource,
+            TokenBudgetSource: monitorInputsKnown ? LimitSource : null,
+            MaxToolStepsSource: monitorInputsKnown ? LimitSource : null,
+            MonitorInputsKnown: monitorInputsKnown);
 
     /// <summary>The exact instruction the grace dispatch is spawned with — see `spec/baton.md` §3 for why it needs no session resume.</summary>
     public const string PromptText =

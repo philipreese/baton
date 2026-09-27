@@ -331,8 +331,9 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   legitimate same-identity inheritance. Consumers validate that identity against the resolved
   adapter, model, role, and size. Legacy records may use a valid existing aggregate key, but a null
   key does not authorize inventing profile identity. An absent value remains unknown for legacy requests
-  and supplementary paths that do not record it. Artifact-checkpoint child evidence follows the
-  checkpoint contract below; grace evidence remains unknown. A
+  and supplementary paths that do not record it. Artifact-checkpoint and grace-child requests each
+  record their own execution-limit evidence; grace limits come only from the fixed grace policy and
+  actual monitor availability, never the parent's selected profile. A
   crash-recovery resubmit keeps the accepted timeout provenance while recording changed
   current monitor inputs in `StepRebound` before spawn. Status and the cost ledger project that latest
   applied snapshot from the journal, so settings or binding edits cannot rewrite settled history.
@@ -2531,12 +2532,17 @@ false`; it never uses reset or another destructive repair to make the workspace 
 
 The prompt is self-contained on purpose — it names no prior turn — so no vendor session resume is
 needed to make it actionable: the workspace on disk already carries whatever the arrested execution
-left behind. `MutationInterface.RunGraceTurnAsync` journals exactly one `FlowEvent.GraceTurnAttempted`
-(`WorkspaceCleanAfter`, `ExitReason`, and — non-null only when the grace dispatch's OWN bounded monitor
-arrested IT in turn, the "exceeded its own cap" shape — `ArrestReason`) before the `ExecutionArrested`
-line for the same execution, and never throws a grace-turn spawn failure out of the arrest path: a
-courtesy turn that could not even start is recorded `WorkspaceCleanAfter: false` rather than orphaning
-the arrest append that follows it.
+left behind. Before spawning, `MutationInterface.RunGraceTurnAsync` writes one durable
+`GraceTurnClaimed` with a distinct child execution ID, its own request/limit snapshot, the parent's
+already-observed result (or pending monitor arrest), and a secret-free workspace baseline whose
+endpoint/configuration identities are digests. The exact captured endpoint and applicable URL rewrite
+configuration are rederived from the room's bindings before a replayed safety query; drift or a torn
+journal tail fails closed before a recovery append. After Core returns, `GraceTurnCompleted` is durable
+before safety validation, followed by `GraceTurnSafetyRecorded`. The child is independently attributed
+in status and the quota/cost ledgers under its own ID, linked to its parent, and counted once. A claim
+without completion is unresolved spend, not zero spend or permission to spawn again; recovery checks
+claims from the full journal before generic parent crash classification. Historical
+`GraceTurnAttempted` records remain readable, but do not gain fabricated child limits or identity.
 
 **A grace turn never turns an arrest into a `Succeeded` room.** It runs entirely inside the same
 `budgetMonitor is { Arrested: true }` block that already returns without ever reaching
@@ -2556,9 +2562,10 @@ the workspace.
 producers enter through `budgetMonitor is { Arrested: true }`; a role's ordinary wall-clock `Timeout`
 instead returns `CoreExitReason.TimedOut`. Both shapes receive the same one bounded grace dispatch when
 the role verifies its workspace and `Workspaces.WorktreeProvisioner.Audit` finds it genuinely dirty.
-After a timeout's grace dispatch, the primary timeout still falls through to
-`OutcomeClassifier.Classify` and #1373's timeout/retry accounting — the courtesy turn never replaces its
-classification. `TimeoutOnMutatedWorkspaceEndToEndTests` covers that dirty-timeout shape; clean and
+After a completed timeout grace dispatch, the primary timeout still falls through to
+`OutcomeClassifier.Classify` and #1373's timeout/retry accounting — including the existing
+`FinishedDuringTeardown` success polarity — the courtesy turn never replaces its classification. A
+monitor arrest likewise retains its original arrest evidence after child safety is recorded. Clean and
 read-shaped workspaces receive no grace dispatch.
 
 ### Exit codes

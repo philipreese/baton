@@ -101,9 +101,13 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
             // returns TimedOut in this fixture too, but its result never replaces the primary timeout
             // classification above.
             Assert.Equal(2, run.DispatchedTargets.Count);
-            var grace = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
-            Assert.False(grace.WorkspaceCleanAfter);
-            Assert.Equal(CoreExitReason.TimedOut, grace.ExitReason);
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var completion = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnCompleted>());
+            var safety = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnSafetyRecorded>());
+            Assert.False(safety.WorkspaceCleanAfter);
+            Assert.Equal(CoreExitReason.TimedOut, completion.ExitReason);
+            Assert.Equal("grace-turn", claim.Request.Limits?.TimeoutSource);
+            Assert.NotEqual(claim.ParentExecutionId, claim.GraceExecutionId);
         }
         finally
         {

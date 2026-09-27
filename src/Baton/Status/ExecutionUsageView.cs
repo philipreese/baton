@@ -292,6 +292,8 @@ public static class ExecutionUsageProjector
         var checkpointUsageByExecutionId = new Dictionary<string, WorkerUsage>(StringComparer.Ordinal);
         var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
         var checkpointTerminalByExecutionId = new Dictionary<string, FlowEvent.ArtifactCheckpointCompleted>(StringComparer.Ordinal);
+        var gracePredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var graceTerminalByExecutionId = new Dictionary<string, FlowEvent.GraceTurnCompleted>(StringComparer.Ordinal);
         // #1885: the JOURNALLED half of the loss announcement, filtered to the one stream that bears on
         // a billed reconciliation -- spec/baton.md §3 is where that scoping is ruled. Last one wins,
         // which is the terminal re-announcement when there is one; the reason is identical either way,
@@ -308,6 +310,12 @@ public static class ExecutionUsageProjector
             if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } })
             {
                 workerNameByExecutionId[checkpointRequest.ExecutionId.Value] = checkpointRequest.Worker;
+            }
+
+            if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.GraceTurnClaimed graceClaim })
+            {
+                workerNameByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.Request.Worker;
+                gracePredecessorByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.ParentExecutionId.Value;
             }
 
             if (entry is LogEntry.FlowLogEntry flowEntry)
@@ -344,6 +352,11 @@ public static class ExecutionUsageProjector
                     {
                         checkpointUsageByExecutionId[checkpointCompletion.CheckpointExecutionId.Value] = checkpointUsage;
                     }
+                }
+
+                if (flowEntry.Event is FlowEvent.GraceTurnCompleted graceCompletion)
+                {
+                    graceTerminalByExecutionId[graceCompletion.GraceExecutionId.Value] = graceCompletion;
                 }
 
                 if (flowEntry.Event is FlowEvent.StreamLogLossDeclared loss
@@ -441,7 +454,8 @@ public static class ExecutionUsageProjector
             // withheld and the reason string stays whatever it already was.
             var dimensions = usage
                 ?? (arrestedUsageByExecutionId.TryGetValue(executionId, out var fromArrest) ? fromArrest : null)
-                ?? (checkpointUsageByExecutionId.TryGetValue(executionId, out var fromCheckpoint) ? fromCheckpoint : null);
+                ?? (checkpointUsageByExecutionId.TryGetValue(executionId, out var fromCheckpoint) ? fromCheckpoint : null)
+                ?? (graceTerminalByExecutionId.TryGetValue(executionId, out var fromGrace) ? fromGrace.Usage : null);
 
             // #1885: the other channel, read FIRST (spec/baton.md §3). A journalled loss must SUPPRESS
             // the reconciliation, not merely fill a reason string that happened to be empty -- so the
@@ -517,21 +531,38 @@ public static class ExecutionUsageProjector
                 reading?.ToolStepCounts?.Refused,
                 reading?.ToolStepCounts?.Repeated,
                 reading?.ToolStepCounts?.EmptyResults,
-                checkpointPredecessorByExecutionId.GetValueOrDefault(executionId),
+                checkpointPredecessorByExecutionId.GetValueOrDefault(executionId)
+                    ?? gracePredecessorByExecutionId.GetValueOrDefault(executionId),
                 checkpointTerminalByExecutionId.TryGetValue(executionId, out var checkpointTerminal)
                     ? checkpointTerminal.TerminalOutcome
-                    : null,
+                    : graceTerminalByExecutionId.TryGetValue(executionId, out var graceTerminal)
+                        ? GraceTerminalOutcome(graceTerminal)
+                        : null,
                 checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
                     ? checkpointTerminal.ExitReason
-                    : null,
+                    : graceTerminalByExecutionId.TryGetValue(executionId, out graceTerminal)
+                        ? graceTerminal.ExitReason
+                        : null,
                 checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
                     ? checkpointTerminal.ArrestReason
-                    : null,
+                    : graceTerminalByExecutionId.TryGetValue(executionId, out graceTerminal)
+                        ? graceTerminal.ArrestReason
+                        : null,
                 resolvedBinding.Limits);
         }
 
         return result;
     }
+
+    private static string GraceTerminalOutcome(FlowEvent.GraceTurnCompleted completion) =>
+        completion.ArrestReason is not null ? "Arrested"
+        : completion.ExitReason switch
+        {
+            CoreExitReason.Natural => "NaturalExit",
+            CoreExitReason.TimedOut => "TimedOut",
+            CoreExitReason.CancelRequested => "CancelRequested",
+            _ => "UnknownExit",
+        };
 
     /// <summary>
     /// #1885: <c>spec/baton.md</c> §3's agreement rule, enforced. The two channels announce one

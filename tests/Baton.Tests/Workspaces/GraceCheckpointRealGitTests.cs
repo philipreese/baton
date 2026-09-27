@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Baton.Tests.Shared;
 using Baton.Tests.TestSupport;
 using Baton.Workspaces;
@@ -18,6 +19,30 @@ public sealed class GraceCheckpointRealGitTests
         fixture.Push();
 
         Assert.True(WorktreeProvisioner.IsSafeGraceCheckpoint(fixture.Repository, checkpoint));
+    }
+
+    [Fact]
+    public void Replay_evidence_is_secret_free_and_refuses_endpoint_configuration_drift()
+    {
+        using var fixture = new GraceRepository();
+        const string secretEndpoint = "https://grace-user:grace-secret@example.invalid/repository.git";
+        var localEndpoint = new Uri(fixture.Remote).AbsoluteUri;
+        fixture.Run("config", "remote.origin.url", secretEndpoint);
+        fixture.Run("config", $"url.{localEndpoint}.insteadOf", secretEndpoint);
+
+        var checkpoint = fixture.Capture();
+        var evidence = WorktreeProvisioner.CreateGraceCheckpointEvidence(checkpoint);
+        var json = JsonSerializer.Serialize(evidence);
+
+        Assert.DoesNotContain("grace-user", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("grace-secret", json, StringComparison.Ordinal);
+        var replayed = WorktreeProvisioner.RehydrateGraceCheckpoint(fixture.Repository, evidence);
+        Assert.NotNull(replayed);
+        Assert.Equal(checkpoint.Head, replayed.Head);
+        Assert.Equal(checkpoint.RemoteTip, replayed.RemoteTip);
+
+        fixture.Run("config", "--unset-all", $"url.{localEndpoint}.insteadOf");
+        Assert.Null(WorktreeProvisioner.RehydrateGraceCheckpoint(fixture.Repository, evidence));
     }
 
     [Fact]
