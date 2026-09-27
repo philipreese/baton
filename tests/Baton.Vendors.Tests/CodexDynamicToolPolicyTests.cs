@@ -48,7 +48,7 @@ public sealed class CodexDynamicToolPolicyTests
                 JsonSerializer.SerializeToElement(new { path = attached, content = "overwrite" }),
                 TestContext.Current.CancellationToken)).Rule);
             Assert.Equal("unique attachment bytes 2442", File.ReadAllText(attached));
-            File.Delete(attached);
+            FileCleanup.Delete(attached);
             Assert.Equal(GrantRules.PathOutsideRoots, (await Read(attached)).Rule);
             Directory.CreateDirectory(attached);
             File.WriteAllText(Path.Combine(attached, "child.txt"), "child bytes");
