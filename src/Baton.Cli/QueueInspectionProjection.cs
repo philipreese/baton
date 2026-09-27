@@ -18,6 +18,8 @@ internal static class QueueInspectionProjection
         "Queue list cursor is malformed; restart the inspection without --cursor.";
     internal const string ChangedSnapshotMessage =
         "Queue list cursor is no longer valid because the queue snapshot changed; restart the inspection without --cursor.";
+    internal const string ChangedSelectionMessage =
+        "Queue list cursor is no longer valid because the queue selection changed; restart the inspection without --cursor.";
 
     private static readonly JsonSerializerOptions FingerprintJsonOptions = new()
     {
@@ -135,11 +137,14 @@ internal static class QueueInspectionProjection
         if (cursor is not null)
         {
             var decoded = DecodeCursor(cursor);
-            if (!string.Equals(decoded.Fingerprint, fingerprint, StringComparison.Ordinal)
-                || decoded.Active != active
-                || decoded.IncludeRetained != includeRetained)
+            if (!string.Equals(decoded.Fingerprint, fingerprint, StringComparison.Ordinal))
             {
                 throw new CliArgumentException(ChangedSnapshotMessage);
+            }
+
+            if (decoded.Active != active || decoded.IncludeRetained != includeRetained)
+            {
+                throw new CliArgumentException(ChangedSelectionMessage);
             }
 
             start = decoded.Offset;
@@ -267,7 +272,7 @@ internal sealed record QueueInspectionDecisionTimestamps(
             At(QueueDecisionEntry.Advanced),
             At(QueueDecisionEntry.Failed),
             item.CancelledAt ?? At(QueueDecisionEntry.Cancelled),
-            At(QueueDecisionEntry.Retired),
+            At(QueueDecisionEntry.Retired) ?? item.Retirement?.At,
             At(QueueDecisionEntry.Restored));
     }
 }

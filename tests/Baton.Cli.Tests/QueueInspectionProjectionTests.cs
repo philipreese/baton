@@ -55,6 +55,37 @@ public sealed class QueueInspectionProjectionTests
     }
 
     [Fact]
+    public async Task Projection_uses_durable_retirement_when_ledger_timestamp_is_missing()
+    {
+        var retiredAt = new DateTimeOffset(2026, 9, 27, 12, 34, 56, TimeSpan.Zero);
+        var item = Item("retired") with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, retiredAt, "handled"),
+        };
+
+        var row = Assert.Single(await QueueInspectionProjection.ProjectAsync(
+            [item],
+            observations: null,
+            decisions: [],
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(retiredAt, row.DecisionTimestamps.RetiredAt);
+    }
+
+    [Fact]
+    public void Paging_rejects_changed_selection_flags_with_a_selection_message()
+    {
+        var items = new[] { Item("one"), Item("two") };
+        var fingerprint = QueueInspectionProjection.Fingerprint(new QueueSnapshot(items));
+        var first = QueueInspectionProjection.PageItems(items, fingerprint, true, false, 1, null);
+
+        var refusal = Assert.Throws<CliArgumentException>(() => QueueInspectionProjection.PageItems(
+            items, fingerprint, false, false, 1, first.NextCursor));
+
+        Assert.Equal(QueueInspectionProjection.ChangedSelectionMessage, refusal.Message);
+    }
+
+    [Fact]
     public void Malformed_cursor_has_a_restart_required_operator_message()
     {
         var refusal = Assert.Throws<CliArgumentException>(() => QueueInspectionProjection.PageItems(
