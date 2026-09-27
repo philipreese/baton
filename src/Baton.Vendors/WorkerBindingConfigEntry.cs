@@ -298,7 +298,8 @@ public sealed record WorkerBindingConfigEntry(
     TaskSizeDeclaration? DeclaredTaskSize = null,
     // #2100: present only on a queue-materialized room; absent is no authority.
     MemoryAddDispatchGrant? MemoryAddGrant = null,
-    string? ExactFileRestoreBaseSha = null);
+    string? ExactFileRestoreBaseSha = null,
+    ExecutionLimitResolution? ExecutionLimitResolution = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

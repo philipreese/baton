@@ -84,6 +84,9 @@ public sealed record DaemonSettings
     /// </summary>
     public CodexPlanCeilingSettings? CodexPlanCeiling { get; init; }
 
+    /// <summary>Exact adapter/model/role/declared-size execution-limit rows.</summary>
+    public IReadOnlyList<ExecutionLimitProfile>? ExecutionLimitProfiles { get; init; }
+
     /// <summary>
     /// #1934 slice 1 — see <see cref="QueueSettings"/> for what it holds. Never null, and by exactly
     /// the mechanism <see cref="RunwayHold"/> uses above: read-through nullable backing field,
@@ -277,12 +280,28 @@ public static class DaemonSettingsStore
             return new DaemonSettings();
         }
 
+        var hasExecutionLimitProfiles = false;
         try
         {
-            await using var stream = File.OpenRead(path);
+            var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+            using var document = JsonDocument.Parse(json);
+            hasExecutionLimitProfiles = document.RootElement.TryGetProperty("ExecutionLimitProfiles", out _);
+            ExecutionLimitProfileResolver.ValidateJson(document.RootElement);
+            await using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json));
             var settings = await JsonSerializer.DeserializeAsync<DaemonSettings>(stream, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
-            return settings ?? new DaemonSettings();
+            settings ??= new DaemonSettings();
+            ExecutionLimitProfileResolver.Validate(settings.ExecutionLimitProfiles);
+            return settings;
+        }
+        catch (ExecutionLimitProfileConfigurationException)
+        {
+            throw;
+        }
+        catch (JsonException ex) when (hasExecutionLimitProfiles)
+        {
+            throw new ExecutionLimitProfileConfigurationException(
+                $"ExecutionLimitProfiles is malformed and must contain complete profile rows: {ex.Message}");
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {

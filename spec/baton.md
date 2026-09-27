@@ -306,7 +306,21 @@ one-shot boundary and keep their distinct lifetime and output contracts.
 
   `--token-budget` (#1623) overrides the dispatched role's own default per-execution
   token ceiling — §3's "Engine-run verify and the token budget" subsection is the full contract; this
-  entry only names the flag. `--workstream` (#1619, rung 1 of #1614's ruling) is a **grouping key, not a title** —
+  entry only names the flag.
+
+  **Exact execution-limit profiles (#2440).** `DaemonSettingsStore` accepts optional
+  `ExecutionLimitProfiles` rows keyed exactly by adapter, the resolved model, role, and declared task
+  size (including `unknown`). Every row supplies finite positive `Timeout`, `TokenBudget`, and
+  `MaxToolSteps`; duplicate normalized keys, incomplete rows, invalid types, and invalid ranges refuse
+  the dispatch before a worker launches. A matching row supplies each brake independently, while the
+  corresponding dispatch flag wins for that brake. A missing row preserves the role default and records
+  `role-default`; the selected key, each source, and effective values are written to `bindings.json`.
+  This is applied once to a fresh direct role dispatch, including queue-launched dispatches. A
+  continuation carries the saved binding snapshot and does not re-read mutable settings. Templates,
+  fallback-vendor resolution, template phases, finite fallback policy, and execution-specific ledger or
+  status provenance remain outside this slice and belong to #2416.
+
+  `--workstream` (#1619, rung 1 of #1614's ruling) is a **grouping key, not a title** —
   a room keeps its generated hex identity on disk; the slug only makes several rooms (e.g. an
   implement lane and its review redispatch) read as one workstream in Fleet Glass. Do not conflate it
   with `--label`: a label is 60-char free display text never written into a path

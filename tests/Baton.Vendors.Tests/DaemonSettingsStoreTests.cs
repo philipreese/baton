@@ -180,4 +180,46 @@ public class DaemonSettingsStoreTests
             DirectoryCleanup.DeleteRecursively(directory);
         }
     }
+
+    [Fact]
+    public async Task Execution_limit_profiles_round_trip_and_reject_incomplete_rows()
+    {
+        var path = TempPath();
+        try
+        {
+            var original = new DaemonSettings
+            {
+                ExecutionLimitProfiles =
+                [
+                    new ExecutionLimitProfile
+                    {
+                        Adapter = "claude",
+                        Model = "sonnet",
+                        Role = "review",
+                        DeclaredTaskSize = "unknown",
+                        Timeout = TimeSpan.FromMinutes(10),
+                        TokenBudget = 1000,
+                        MaxToolSteps = 10,
+                    },
+                ],
+            };
+
+            await DaemonSettingsStore.SaveAsync(original, path, TestContext.Current.CancellationToken);
+            var loaded = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Equal(original.ExecutionLimitProfiles, loaded.ExecutionLimitProfiles);
+
+            await File.WriteAllTextAsync(
+                path,
+                "{\"ExecutionLimitProfiles\":[{\"Adapter\":\"claude\",\"Model\":\"sonnet\",\"Role\":\"review\",\"DeclaredTaskSize\":\"unknown\",\"Timeout\":\"00:10:00\",\"TokenBudget\":0,\"MaxToolSteps\":10}]}",
+                TestContext.Current.CancellationToken);
+
+            await Assert.ThrowsAsync<ExecutionLimitProfileConfigurationException>(
+                () => DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
 }
