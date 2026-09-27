@@ -14,6 +14,7 @@ internal static class QueueInspectionProjection
 {
     internal const int DefaultPageSize = 50;
     internal const int MaxPageSize = 200;
+    private const int MaxObservationErrorLength = 1024;
     internal const string MalformedCursorMessage =
         "Queue list cursor is malformed; restart the inspection without --cursor.";
     internal const string ChangedSnapshotMessage =
@@ -66,7 +67,8 @@ internal static class QueueInspectionProjection
         IReadOnlyList<QueueItem> items,
         IReadOnlyList<QueuePullRequestObservation>? observations,
         IReadOnlyList<QueueDecisionEntry> decisions,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool captureUnavailableRoomEvidence = false)
     {
         ArgumentNullException.ThrowIfNull(items);
         ArgumentNullException.ThrowIfNull(decisions);
@@ -86,7 +88,18 @@ internal static class QueueInspectionProjection
                 $"{item.Repository}\0{item.PullRequest}",
                 out var pullRequestObservation);
             decisionsByTag.TryGetValue(item.Tag, out var itemDecisions);
-            var settlement = await QueueRoomSettlementProjection.ReadAsync(item, cancellationToken).ConfigureAwait(false);
+            QueueRoomSettlementProjection.Observation? settlement = null;
+            string? observationError = null;
+            try
+            {
+                settlement = await QueueRoomSettlementProjection.ReadAsync(item, cancellationToken).ConfigureAwait(false);
+            }
+            catch (QueueStoreException ex) when (captureUnavailableRoomEvidence)
+            {
+                observationError = ex.Message.Length <= MaxObservationErrorLength
+                    ? ex.Message
+                    : ex.Message[..MaxObservationErrorLength];
+            }
 
             rows.Add(new QueueInspectionRow(
                 item.Tag,
@@ -96,7 +109,7 @@ internal static class QueueInspectionProjection
                     item.State.ToString().ToLowerInvariant(),
                     item.Halted,
                     item.Retirement is not null),
-                new QueueInspectionRoomEvidence(item.RoomDirectory, settlement),
+                new QueueInspectionRoomEvidence(item.RoomDirectory, settlement, observationError),
                 item.PullRequest is { } pullRequest
                     ? new QueueInspectionPullRequestEvidence(
                         item.Repository,
@@ -218,7 +231,8 @@ internal sealed record QueueInspectionLifecycle(
 
 internal sealed record QueueInspectionRoomEvidence(
     string? Directory,
-    QueueRoomSettlementProjection.Observation? Settlement);
+    QueueRoomSettlementProjection.Observation? Settlement,
+    string? ObservationError);
 
 internal sealed record QueueInspectionPullRequestEvidence(
     string? Repository,

@@ -7524,6 +7524,10 @@ retained one-lane and retired history. `--page-size <n>` defaults to 50 and acce
 `observationConsistency`, and `items`; each item projects lifecycle (`stage`, `round`, `state`),
 room evidence, repository-qualified pull-request evidence, recorded routing, requirements,
 admission, and decision timestamps. Missing evidence is null/unknown and is never inferred.
+If a JSON room observation raises the typed `QueueStoreException` used for unavailable room
+evidence, that row retains its directory and queue facts with `settlement: null` and a bounded
+`observationError` diagnostic of at most 1024 characters; healthy and non-applicable rows have no
+fabricated error, and text inspection keeps its existing failure behavior.
 
 The cursor contains a deterministic fingerprint of the complete queue snapshot and its continuation
 position. Malformed cursors and fingerprints that no longer match refuse with a restart-required

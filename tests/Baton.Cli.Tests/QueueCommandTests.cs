@@ -737,6 +737,164 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task List_json_preserves_history_when_room_evidence_is_unavailable()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string stale = "settled indeterminate — awaiting conductor resolution";
+            var missingRoom = Path.Combine(home, "missing-room");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    SettlementQueueItem("healthy", roomDirectory: null, error: "ordinary historical failure"),
+                    SettlementQueueItem("missing-room", missingRoom, stale),
+                ],
+            }, Ct);
+
+            var firstOutput = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.List, IncludeRetained: true, ListFormat: QueueListOutputFormat.Json, PageSize: 1),
+                firstOutput,
+                Ct);
+            using var firstDocument = JsonDocument.Parse(firstOutput.ToString());
+            Assert.Equal("healthy", firstDocument.RootElement.GetProperty("items")[0].GetProperty("tag").GetString());
+            Assert.True(firstDocument.RootElement.GetProperty("hasMore").GetBoolean());
+            Assert.Equal("history", firstDocument.RootElement.GetProperty("selection").GetString());
+            var firstFingerprint = firstDocument.RootElement.GetProperty("snapshotFingerprint").GetString();
+            var healthyRoom = firstDocument.RootElement.GetProperty("items")[0].GetProperty("room");
+            Assert.Equal(JsonValueKind.Null, healthyRoom.GetProperty("settlement").ValueKind);
+            Assert.Equal(JsonValueKind.Null, healthyRoom.GetProperty("observationError").ValueKind);
+            var cursor = firstDocument.RootElement.GetProperty("nextCursor").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(cursor));
+
+            var secondOutput = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.List, IncludeRetained: true, ListFormat: QueueListOutputFormat.Json,
+                    PageSize: 1, Cursor: cursor),
+                secondOutput,
+                Ct);
+            using var secondDocument = JsonDocument.Parse(secondOutput.ToString());
+            Assert.Equal(firstFingerprint, secondDocument.RootElement.GetProperty("snapshotFingerprint").GetString());
+            Assert.False(secondDocument.RootElement.GetProperty("hasMore").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, secondDocument.RootElement.GetProperty("nextCursor").ValueKind);
+            var missing = secondDocument.RootElement.GetProperty("items")[0];
+            Assert.Equal("missing-room", missing.GetProperty("tag").GetString());
+            Assert.Equal(missingRoom, missing.GetProperty("room").GetProperty("directory").GetString());
+            Assert.Equal(JsonValueKind.Null, missing.GetProperty("room").GetProperty("settlement").ValueKind);
+            Assert.Contains("Could not read durable terminal state", missing.GetProperty("room")
+                .GetProperty("observationError").GetString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_json_preserves_healthy_settlements_and_non_applicable_room_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var acceptedRoom = await CreateCaptureRoomAsync(home, "accepted-json", accepted: true);
+            var rejectedRoom = await CreateCaptureRoomAsync(home, "rejected-json", accepted: false);
+            var closedRoom = await CreateCaptureRoomAsync(home, "closed-json", accepted: false, includeIndeterminate: false);
+            var unresolvedRoom = await CreateCaptureRoomAsync(home, "unresolved-json", accepted: null);
+            const string stale = "settled indeterminate — resolve it; awaiting conductor resolution";
+
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    SettlementQueueItem("accepted-json", acceptedRoom, stale),
+                    SettlementQueueItem("rejected-json", rejectedRoom, stale),
+                    SettlementQueueItem("closed-json", closedRoom, stale),
+                    SettlementQueueItem("unresolved-json", unresolvedRoom, stale),
+                    SettlementQueueItem("ordinary-json", roomDirectory: null, error: "ordinary historical failure"),
+                ],
+            }, Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.List, IncludeRetained: true, ListFormat: QueueListOutputFormat.Json),
+                output,
+                Ct);
+            using var document = JsonDocument.Parse(output.ToString());
+            var items = document.RootElement.GetProperty("items");
+            JsonElement Item(string tag) => items.EnumerateArray()
+                .Single(item => item.GetProperty("tag").GetString() == tag);
+            JsonElement Room(string tag) => Item(tag).GetProperty("room");
+
+            Assert.Equal("accepted capture", Room("accepted-json").GetProperty("settlement").GetProperty("kind").GetString());
+            Assert.Equal("rejected capture", Room("rejected-json").GetProperty("settlement").GetProperty("kind").GetString());
+            Assert.Equal("closed", Room("closed-json").GetProperty("settlement").GetProperty("kind").GetString());
+            Assert.Equal(JsonValueKind.Null, Room("unresolved-json").GetProperty("settlement").ValueKind);
+            Assert.Equal(JsonValueKind.Null, Room("unresolved-json").GetProperty("observationError").ValueKind);
+            Assert.Equal(JsonValueKind.Null, Room("ordinary-json").GetProperty("settlement").ValueKind);
+            Assert.Equal(JsonValueKind.Null, Room("ordinary-json").GetProperty("observationError").ValueKind);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("missing-snapshot")]
+    [InlineData("corrupt-snapshot")]
+    [InlineData("corrupt-ledger")]
+    public async Task List_json_marks_corrupt_or_missing_room_evidence_unavailable(string evidence)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await CreateCaptureRoomAsync(home, evidence, accepted: true);
+            if (evidence == "missing-snapshot")
+            {
+                FileCleanup.EnsureDeleted(Path.Combine(room, BatonPaths.SnapshotFileName));
+            }
+            else if (evidence == "corrupt-snapshot")
+            {
+                await File.WriteAllTextAsync(Path.Combine(room, BatonPaths.SnapshotFileName), "{broken", Ct);
+            }
+            else
+            {
+                await File.AppendAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{broken\n", Ct);
+            }
+
+            const string stale = "settled indeterminate — awaiting conductor resolution";
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [SettlementQueueItem(evidence, room, stale)],
+            }, Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.List, IncludeRetained: true, ListFormat: QueueListOutputFormat.Json),
+                output,
+                Ct);
+            using var document = JsonDocument.Parse(output.ToString());
+            var roomEvidence = document.RootElement.GetProperty("items")[0].GetProperty("room");
+            Assert.Equal(JsonValueKind.Null, roomEvidence.GetProperty("settlement").ValueKind);
+            var observationError = roomEvidence.GetProperty("observationError").GetString();
+            Assert.NotNull(observationError);
+            Assert.InRange(observationError!.Length, 1, 1024);
+            Assert.Contains("Could not read durable terminal state", observationError, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     private static QueueItem InspectionItem(
         string tag,
         QueueItemState state = QueueItemState.Queued,
@@ -3507,7 +3665,8 @@ public sealed class QueueCommandTests
         Error = error,
     };
 
-    private static async Task<string> CreateCaptureRoomAsync(string home, string name, bool? accepted)
+    private static async Task<string> CreateCaptureRoomAsync(
+        string home, string name, bool? accepted, bool includeIndeterminate = true)
     {
         var room = Path.Combine(home, name);
         var workflowPath = Path.Combine(home, $"{name}-workflow.json");
@@ -3524,17 +3683,24 @@ public sealed class QueueCommandTests
 
         var run = await RunCommand.ExecuteAsync(new RunOptions(workflowPath, bindingsPath, room), Adapters, cancellationToken: Ct);
         var executionId = Assert.Single(run.State.Steps).LatestExecutionId!.Value;
-        await using (var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName)))
+        if (includeIndeterminate)
         {
+            await using var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
             await writer.AppendAsync(new FlowEvent.ExecutionIndeterminate(
                 executionId, "captured; awaiting conductor resolution", ".captured-response.md", ["advice.md"]), Ct);
+        }
+        else if (accepted is false)
+        {
+            await using var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+            await writer.AppendAsync(new FlowEvent.CaptureResolved(
+                new StepId("a"), executionId, Accepted: false, "capture closed", ["advice.md"]), Ct);
         }
 
         var artifacts = Path.Combine(room, "artifacts", $"execution_{executionId.Value}");
         Directory.CreateDirectory(artifacts);
         await File.WriteAllTextAsync(Path.Combine(artifacts, ".captured-response.md"),
             "# Captured response\n\nanswer", Ct);
-        if (accepted is { } decision)
+        if (includeIndeterminate && accepted is { } decision)
         {
             await ResolveCommand.ExecuteAsync(new ResolveOptions(
                 room, executionId.Value, decision, decision ? null : "capture rejected"), Ct);
