@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Baton.Cli.Daemon;
-using Baton.Conductor;
 using Baton.CrashTestHost;
 using Baton.Dispatch;
 using Baton.Domain;
@@ -103,48 +102,10 @@ if (args is ["exec", ..] && File.Exists(Path.Combine(Environment.CurrentDirector
     return 0;
 }
 
-// #2484: pause the real readiness store at a durability boundary. The parent test kills this
-// process, then starts a new controller; the provider itself is a counted, local fake.
-if (args is ["readiness-decide", var readinessRoot, var readinessKey, var cutName,
-    var cutSignal, var cutRelease, var launchesFile])
-{
-    var store = new ConductorObligationStore(new FleetEventLog(
-        Path.Combine(readinessRoot, "events.jsonl"), Path.Combine(readinessRoot, "events.1.jsonl"), 1_000_000),
-        Path.Combine(readinessRoot, "conductor-obligations.json"));
-    if (cutName != "None")
-    {
-        var cut = Enum.Parse<ReadinessDurabilityPoint>(cutName);
-        store.ReadinessDurabilityObserver = point =>
-        {
-            if (point != cut) return;
-            File.WriteAllText(cutSignal, point.ToString());
-            var deadline = DateTime.UtcNow.AddSeconds(45);
-            while (!File.Exists(cutRelease) && DateTime.UtcNow < deadline)
-                Thread.Sleep(10); // wait-ok: parent releases or kills this bounded crash probe
-            if (!File.Exists(cutRelease)) throw new TimeoutException("Readiness crash cut was not released.");
-        };
-    }
-
-    File.WriteAllText(cutSignal + ".ready", "ready");
-    var result = await store.DecideReadinessOnceAsync(readinessKey, (obligation, _) =>
-    {
-        using (var launchRecord = new FileStream(launchesFile, FileMode.Append, FileAccess.Write,
-            FileShare.Read, 4096, FileOptions.WriteThrough))
-        {
-            launchRecord.WriteByte((byte)'x');
-            launchRecord.Flush(flushToDisk: true);
-        }
-
-        return Task.FromResult(new RetainedReadinessResponse(
-            new ReadinessDecision(obligation.ObligationId, obligation.TargetProject,
-                obligation.TargetRevision!, obligation.ContextSha256!, ReadinessChoice.Hold,
-                "Fake provider held for crash-window proof."),
-            new ReadinessUsage(1, 1, 0), "codex-subscription-cli", "gpt-5.6-luna", "low",
-            DateTimeOffset.UtcNow));
-    });
-    await Console.Out.WriteLineAsync(result.Obligation.Status.ToString());
-    return 0;
-}
+// Keep the readiness-only Baton.Cli dependency in a separately JIT-compiled method. Historical
+// git/gh fixture copies intentionally omit Baton.Cli.dll and must still start without loading it.
+if (args is ["readiness-decide", ..])
+    return await ReadinessCrashProcessMode.RunAsync(args);
 
 // #2482: cross-process reservation probe. The gate makes two independent OS processes race on
 // the same room-owned message ID, not merely two store instances in one test process.
