@@ -9,6 +9,8 @@ public enum ConductorVerb
     List,
     Release,
     Takeover,
+    Prepare,
+    Decide,
 }
 
 /// <summary>
@@ -19,4 +21,7 @@ public sealed record ConductorOptions(
     string? Holder = null,
     string? Workspace = null,
     string? Reason = null,
-    bool Json = false);
+    bool Json = false,
+    string? RequestFile = null,
+    string? ObligationKey = null,
+    string? ContextFile = null);

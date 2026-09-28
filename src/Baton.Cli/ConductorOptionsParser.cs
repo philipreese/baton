@@ -8,7 +8,9 @@ public static class ConductorOptionsParser
     public const string Usage = "Usage: baton conductor claim <holder> [--workspace <dir>]\n" +
                                 "       baton conductor list [--json]\n" +
                                 "       baton conductor release <holder> [--workspace <dir>] --reason <text>\n" +
-                                "       baton conductor takeover <holder> [--workspace <dir>] --reason <text>";
+                                "       baton conductor takeover <holder> [--workspace <dir>] --reason <text>\n" +
+                                "       baton conductor prepare --request <file>\n" +
+                                "       baton conductor decide --obligation <key> --context <file>";
 
     public static ConductorOptions Parse(string[] args)
     {
@@ -16,7 +18,7 @@ public static class ConductorOptionsParser
 
         if (args.Length == 0)
         {
-            throw new CliArgumentException($"'baton conductor' requires a sub-verb (claim, list, release, takeover).\n{Usage}");
+            throw new CliArgumentException($"'baton conductor' requires a sub-verb.\n{Usage}");
         }
 
         var subverb = args[0].ToLowerInvariant();
@@ -26,8 +28,43 @@ public static class ConductorOptionsParser
             "list" => ParseList(args[1..]),
             "release" => ParseRelease(args[1..]),
             "takeover" => ParseTakeover(args[1..]),
+            "prepare" => ParseReadiness(args[1..], ConductorVerb.Prepare),
+            "decide" => ParseReadiness(args[1..], ConductorVerb.Decide),
             _ => throw new CliArgumentException($"Unknown 'baton conductor' sub-verb '{args[0]}'.\n{Usage}"),
         };
+    }
+
+    private static ConductorOptions ParseReadiness(string[] args, ConductorVerb verb)
+    {
+        string? request = null;
+        string? obligation = null;
+        string? context = null;
+        for (var i = 0; i < args.Length; i++)
+        {
+            var option = args[i];
+            if (option is not ("--request" or "--obligation" or "--context")
+                || i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                throw new CliArgumentException($"Invalid conductor readiness arguments.\n{Usage}");
+            }
+
+            var value = args[++i];
+            if (string.IsNullOrWhiteSpace(value))
+                throw new CliArgumentException($"'{option}' requires a non-blank value.\n{Usage}");
+            switch (option)
+            {
+                case "--request" when request is null: request = value; break;
+                case "--obligation" when obligation is null: obligation = value; break;
+                case "--context" when context is null: context = value; break;
+                default: throw new CliArgumentException($"Duplicate option '{option}'.\n{Usage}");
+            }
+        }
+
+        if (verb == ConductorVerb.Prepare && request is not null && obligation is null && context is null)
+            return new(verb, RequestFile: request);
+        if (verb == ConductorVerb.Decide && request is null && obligation is not null && context is not null)
+            return new(verb, ObligationKey: obligation, ContextFile: context);
+        throw new CliArgumentException($"Invalid conductor readiness arguments.\n{Usage}");
     }
 
     private static ConductorOptions ParseClaim(string[] args)

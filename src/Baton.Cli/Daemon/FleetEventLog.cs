@@ -237,7 +237,10 @@ public sealed record FleetEventDraft(
     bool? ObligationAdapterSupported = null,
     string? ObligationReason = null,
     string? ObligationTransportReceipt = null,
-    string? ObligationActionProof = null);
+    string? ObligationActionProof = null,
+    string? ObligationTargetWorkspace = null,
+    string? ObligationTargetRevision = null,
+    string? ObligationContextSha256 = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -340,7 +343,13 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("obligationTransportReceipt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationTransportReceipt = null,
     [property: JsonPropertyName("obligationActionProof")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationActionProof = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationActionProof = null,
+    [property: JsonPropertyName("obligationTargetWorkspace")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationTargetWorkspace = null,
+    [property: JsonPropertyName("obligationTargetRevision")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationTargetRevision = null,
+    [property: JsonPropertyName("obligationContextSha256")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ObligationContextSha256 = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -356,7 +365,8 @@ public sealed record FleetEvent(
         draft.ObligationPullRequestHead, draft.ObligationRequestedAction, draft.ObligationOwner,
         draft.ObligationCreatedAt?.ToUniversalTime(), draft.ObligationAdapter,
         draft.ObligationAdapterCapability, draft.ObligationAdapterSupported, draft.ObligationReason,
-        draft.ObligationTransportReceipt, draft.ObligationActionProof);
+        draft.ObligationTransportReceipt, draft.ObligationActionProof, draft.ObligationTargetWorkspace,
+        draft.ObligationTargetRevision, draft.ObligationContextSha256);
 }
 
 /// <summary>
