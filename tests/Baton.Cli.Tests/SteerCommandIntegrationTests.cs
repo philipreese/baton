@@ -12,6 +12,7 @@ using Baton.Domain;
 using Baton.Status;
 using Baton.Steering;
 using Baton.Store;
+using Baton.Tests.Shared;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
@@ -64,7 +65,7 @@ public sealed class SteerCommandIntegrationTests
             Assert.Equal(0, await broker);
             Assert.Null(CodexSteeringEndpoint.TryRead(room, "execution-1"));
         }
-        finally { Directory.Delete(room, recursive: true); }
+        finally { DirectoryCleanup.DeleteRecursively(room); }
     }
 
     [Fact]
@@ -142,7 +143,7 @@ public sealed class SteerCommandIntegrationTests
         }
         finally
         {
-            Directory.Delete(room, recursive: true);
+            DirectoryCleanup.DeleteRecursively(room);
         }
     }
 
@@ -162,7 +163,7 @@ public sealed class SteerCommandIntegrationTests
             Assert.Contains("unsupported", result.ToString());
             Assert.Empty(nativeInput.Snapshot());
         }
-        finally { Directory.Delete(unsupportedRoom, recursive: true); }
+        finally { DirectoryCleanup.DeleteRecursively(unsupportedRoom); }
 
         var (room, output, file) = await SetUpRoomAsync("codex");
         try
@@ -177,7 +178,7 @@ public sealed class SteerCommandIntegrationTests
             Assert.Contains("rejected", result.ToString());
             Assert.Empty(nativeInput.Snapshot());
         }
-        finally { Directory.Delete(room, recursive: true); }
+        finally { DirectoryCleanup.DeleteRecursively(room); }
     }
 
     [Fact]
@@ -203,7 +204,7 @@ public sealed class SteerCommandIntegrationTests
             Assert.Equal(1, await SteerCommand.ExecuteAsync(options, duplicate, TestContext.Current.CancellationToken));
             Assert.Equal(1, nativeInput.Attempts);
         }
-        finally { Directory.Delete(room, recursive: true); }
+        finally { DirectoryCleanup.DeleteRecursively(room); }
     }
 
     [Fact]
@@ -239,7 +240,7 @@ public sealed class SteerCommandIntegrationTests
             Assert.Equal(0, await send);
             Assert.Contains("transportAcknowledged", result.ToString());
         }
-        finally { Directory.Delete(room, recursive: true); }
+        finally { DirectoryCleanup.DeleteRecursively(room); }
     }
 
     [Fact]
@@ -295,7 +296,7 @@ public sealed class SteerCommandIntegrationTests
             Assert.Equal(0, await send);
             Assert.Contains("transportAcknowledged", result.ToString());
         }
-        finally { Directory.Delete(room, recursive: true); }
+        finally { DirectoryCleanup.DeleteRecursively(room); }
     }
 
     private static async Task<(string Room, string Output, string TextFile)> SetUpRoomAsync(string adapter)

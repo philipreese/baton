@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Baton.Domain;
 using Baton.Status;
 using Baton.Store;
+using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests;
 
@@ -42,7 +43,7 @@ public sealed class SteerCrossProcessTests
                 if (process is { HasExited: false }) process.Kill();
                 process?.Dispose();
             }
-            Directory.Delete(room, recursive: true);
+            DirectoryCleanup.DeleteRecursively(room);
         }
     }
 
