@@ -80,6 +80,9 @@ internal static class ReadinessConductorCommand
         if (obligation.Adapter != CodexReadinessDecisionAdapter.AdapterName
             || obligation.AdapterCapability != "one-shot-readiness" || !obligation.AdapterSupported)
             throw new ConductorObligationStoreException("Only Codex subscription readiness decisions are supported.");
+        // Reject deterministic provider input limits before the durable launch marker. After that
+        // marker, a failure may mean a charged attempt and must remain uncertain until recovery.
+        CodexReadinessDecisionAdapter.ValidatePrelaunch(obligation.ObligationId, request, context);
         var invoke = launch ?? new CodexReadinessDecisionAdapter().DecideAsync;
         var result = await obligations.DecideReadinessOnceAsync(key,
             async (item, token) =>

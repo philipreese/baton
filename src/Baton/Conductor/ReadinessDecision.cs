@@ -52,5 +52,10 @@ public sealed record ReadinessUsage(long? InputTokens, long? OutputTokens, long?
 
 /// <summary>Complete accepted response, retained before a transport acknowledgement.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record RetainedReadinessResponse(ReadinessDecision Decision, ReadinessUsage? Usage, string Adapter,
-    string Model, string Effort, DateTimeOffset CompletedAt);
+public sealed record RetainedReadinessResponse(
+    [property: JsonRequired] ReadinessDecision Decision,
+    [property: JsonRequired] ReadinessUsage? Usage,
+    [property: JsonRequired] string Adapter,
+    [property: JsonRequired] string Model,
+    [property: JsonRequired] string Effort,
+    [property: JsonRequired] DateTimeOffset CompletedAt);

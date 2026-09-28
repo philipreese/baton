@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Baton.Cli;
 using Baton.Cli.Daemon;
@@ -177,6 +178,31 @@ public sealed class OwnedReadinessDecisionTests : IDisposable
         Assert.Equal(ConductorObligationStatus.Submitted, retained!.Status);
         Assert.Null(retained.TransportReceipt);
         Assert.False(File.Exists(Path.Combine(EvidenceDirectory(), "response.json")));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Retained_response_without_real_completion_time_cannot_be_receipted_after_restart(bool omit)
+    {
+        var store = Store();
+        await store.EnqueueAsync(Request(), Ct);
+        await Assert.ThrowsAsync<ConductorObligationStoreException>(() =>
+            store.DecideReadinessOnceAsync(Key, (item, _) =>
+            {
+                var node = JsonNode.Parse(JsonSerializer.Serialize(Response(item), Json))!.AsObject();
+                if (omit) Assert.True(node.Remove("completedAt"));
+                else node["completedAt"] = JsonValue.Create(DateTimeOffset.MinValue);
+                File.WriteAllText(Path.Combine(EvidenceDirectory(), "response.json"), node.ToJsonString(Json));
+                throw new IOException("injected controller crash after malformed response");
+            }, Ct));
+
+        var error = await Assert.ThrowsAsync<ConductorObligationStoreException>(() =>
+            Store().DecideReadinessOnceAsync(Key, (_, _) =>
+                throw new InvalidOperationException("must not launch"), Ct));
+        Assert.Contains("incomplete or invalid", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(Path.Combine(EvidenceDirectory(), "receipt.json")));
+        Assert.Equal(ConductorObligationStatus.Submitted, (await Store().ReadAsync(Key, Ct))!.Status);
     }
 
     private string EvidenceDirectory() => Path.Combine(_root, "readiness-decisions",

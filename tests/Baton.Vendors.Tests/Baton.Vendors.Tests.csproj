@@ -34,6 +34,9 @@
          not this one); this is a test-only dependency to exercise the real artifact, the same
          reason a test project routinely needs more than its production project under test does. -->
     <ProjectReference Include="..\..\src\Baton.Cli\Baton.Cli.csproj" />
+    <!-- #2484: adapter failure tests run the existing source-built crash host as an inert
+         Codex-shaped executable. This test-only edge does not alter production references. -->
+    <ProjectReference Include="..\Baton.CrashTestHost\Baton.CrashTestHost.csproj" />
   </ItemGroup>
 
 </Project>

@@ -7,8 +7,20 @@ using Baton.Status;
 
 namespace Baton.Cli.Daemon;
 
+internal enum ReadinessDurabilityPoint
+{
+    BeforeLaunchMarker,
+    AfterLaunchMarker,
+    AfterResponse,
+    AfterAcknowledgement,
+}
+
 public sealed partial class ConductorObligationStore
 {
+    // Test-only crash seam: the crash host pauses a real OS process at each durable boundary.
+    // No production caller sets this observer; it never changes the obligation protocol.
+    internal Action<ReadinessDurabilityPoint>? ReadinessDurabilityObserver { get; set; }
+
     private static readonly JsonSerializerOptions ReadinessJson = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -84,6 +96,7 @@ public sealed partial class ConductorObligationStore
                     $"Readiness obligation '{key}' has response/acknowledgement without launch marker; operator recovery required.");
             }
 
+            ReadinessDurabilityObserver?.Invoke(ReadinessDurabilityPoint.BeforeLaunchMarker);
             WriteNewDurable(marker, JsonSerializer.Serialize(new ReadinessLaunchMarker(
                 obligation.ObligationId, obligation.TargetRevision!, obligation.ContextSha256!,
                 _now().ToUniversalTime()), ReadinessJson));
@@ -109,11 +122,13 @@ public sealed partial class ConductorObligationStore
 
         if (started)
         {
+            ReadinessDurabilityObserver?.Invoke(ReadinessDurabilityPoint.AfterLaunchMarker);
             try
             {
                 var response = await launch(obligation, cancellationToken).ConfigureAwait(false);
                 ValidateReadinessResponse(obligation, response);
                 WriteNewDurable(responsePath, JsonSerializer.Serialize(response, ReadinessJson));
+                ReadinessDurabilityObserver?.Invoke(ReadinessDurabilityPoint.AfterResponse);
             }
             catch (Exception ex)
             {
@@ -177,6 +192,8 @@ public sealed partial class ConductorObligationStore
                 $"Readiness obligation '{key}' did not retain its transport acknowledgement.");
         }
 
+        ReadinessDurabilityObserver?.Invoke(ReadinessDurabilityPoint.AfterAcknowledgement);
+
         return (acknowledged, retained);
     }
 
@@ -217,7 +234,8 @@ public sealed partial class ConductorObligationStore
             || string.IsNullOrWhiteSpace(response.Decision.Explanation)
             || response.Decision.Explanation.Length > 4096
             || response.Adapter != "codex-subscription-cli"
-            || response.Model != "gpt-5.6-luna" || response.Effort != "low")
+            || response.Model != "gpt-5.6-luna" || response.Effort != "low"
+            || response.CompletedAt == default)
         {
             throw new ConductorObligationStoreException("Readiness response identity, schema or pinned adapter is invalid.");
         }

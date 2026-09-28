@@ -3,6 +3,7 @@ using Baton.Accounting;
 using Baton.Cli;
 using Baton.Cli.Daemon;
 using Baton.Conductor;
+using Baton.Status;
 using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests;
@@ -95,6 +96,50 @@ public sealed class ReadinessConductorCommandTests : IDisposable
         await ReadinessConductorCommand.DecideAsync(key, contextFile, TextWriter.Null, _root,
             launch: (_, _, _, _, _) => throw new InvalidOperationException("must replay"), cancellationToken: Ct);
         Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task Oversized_but_bounded_context_is_refused_before_launch_marker()
+    {
+        var workspace = Path.Combine(_root, "workspace");
+        Directory.CreateDirectory(workspace);
+        await GitAsync(workspace, "init");
+        await GitAsync(workspace, "remote", "add", "origin", "https://github.com/test/readiness.git");
+        await GitAsync(workspace, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit", "--allow-empty", "-m", "fixture");
+        var revision = await GitAsync(workspace, "rev-parse", "HEAD");
+        var identity = RepositoryIdentity.From("https://github.com/test/readiness.git", null)!;
+        await ConductorClaimStore.ClaimAsync(identity, "conductor-one", _root, cancellationToken: Ct);
+        var context = new ReadinessContext(1, "large-context", identity.Value, workspace, revision,
+            DateTimeOffset.Parse("2026-09-28T14:00:00Z"), Enumerable.Range(0, 28)
+                .Select(i => new ReadinessEvidence($"check-{i}", "green", new string('x', 1024))).ToArray());
+        var contextBytes = JsonSerializer.SerializeToUtf8Bytes(context, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.InRange(contextBytes.Length, 24 * 1024 + 1, 64 * 1024);
+        var contextFile = Path.Combine(_root, "large-context.json");
+        await File.WriteAllBytesAsync(contextFile, contextBytes, Ct);
+        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(contextBytes)).ToLowerInvariant();
+        var request = new ReadinessRequest(1, context.Key, identity.Value, workspace, revision,
+            "conductor-one", context.ObservedAt, digest, "codex-subscription-cli", "gpt-5.6-luna", "low");
+        var requestFile = Path.Combine(_root, "large-request.json");
+        await File.WriteAllTextAsync(requestFile, JsonSerializer.Serialize(request,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)), Ct);
+        await ReadinessConductorCommand.PrepareAsync(requestFile, TextWriter.Null, _root, cancellationToken: Ct);
+
+        var launches = 0;
+        var key = "owned-readiness:" + context.Key;
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ReadinessConductorCommand.DecideAsync(key, contextFile, TextWriter.Null, _root,
+                launch: (_, _, _, _, _) =>
+                {
+                    launches++;
+                    throw new InvalidOperationException("must not launch");
+                }, cancellationToken: Ct));
+        Assert.Equal(0, launches);
+        var store = new ConductorObligationStore(new FleetEventLog(Path.Combine(_root, "fleet", "events.jsonl"),
+            Path.Combine(_root, "fleet", "events.1.jsonl"), 16 * 1024 * 1024),
+            Path.Combine(_root, "fleet", BatonPaths.ConductorObligationsFileName));
+        Assert.Equal(ConductorObligationStatus.Pending, (await store.ReadAsync(key, Ct))!.Status);
+        Assert.False(File.Exists(Path.Combine(store.GetReadinessEvidenceDirectory(key), "launch.json")));
     }
 
     private static async Task<string> GitAsync(string workspace, params string[] args)

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Baton.Cli.Daemon;
+using Baton.Conductor;
 using Baton.CrashTestHost;
 using Baton.Dispatch;
 using Baton.Domain;
@@ -8,6 +9,142 @@ using Baton.Mutation;
 using Baton.Status;
 using Baton.Steering;
 using Baton.Store;
+
+// #2484: the vendor test project runs this existing apphost as an inert fake Codex executable.
+// All output goes to the private test directory; no installed vendor CLI or credential is touched.
+if (args is ["exec", ..] && File.Exists(Path.Combine(Environment.CurrentDirectory, "mode.txt")))
+{
+    var cwd = Environment.CurrentDirectory;
+    File.WriteAllText(Path.Combine(cwd, "fake.pid"), Environment.ProcessId.ToString());
+    var mode = File.ReadAllText(Path.Combine(cwd, "mode.txt")).Trim();
+    var answerIndex = Array.IndexOf(args, "--output-last-message");
+    if (answerIndex < 0 || answerIndex + 1 >= args.Length) return 21;
+    var answer = args[answerIndex + 1];
+    using var promptDocument = JsonDocument.Parse(args[^1].Split('\n').Last());
+    var prompt = promptDocument.RootElement;
+    var obligationId = prompt.GetProperty("obligationId").GetString()!;
+    var repository = prompt.GetProperty("repository").GetString()!;
+    var revision = prompt.GetProperty("revision").GetString()!;
+    var contextSha256 = prompt.GetProperty("contextSha256").GetString()!;
+    if (mode == "identity")
+    {
+        File.WriteAllText(answer, JsonSerializer.Serialize(new
+        {
+            obligationId = "wrong-obligation",
+            repository,
+            revision,
+            contextSha256,
+            decision = "recommend",
+            explanation = "wrong identity",
+        }));
+    }
+    else if (mode == "schema")
+    {
+        File.WriteAllText(answer, JsonSerializer.Serialize(new
+        {
+            obligationId,
+            repository,
+            revision,
+            contextSha256,
+            decision = "recommend",
+        }));
+    }
+    else if (mode == "tool")
+    {
+        Console.WriteLine("""{"type":"item.started","item":{"type":"mcp_tool_call"}}""");
+        return 0;
+    }
+    else if (mode == "stdout-overflow")
+    {
+        Console.Out.Write(new string('x', 1048577));
+        Console.Out.Flush();
+        await Task.Delay(TimeSpan.FromMinutes(1));
+        return 0;
+    }
+    else if (mode == "stderr-overflow")
+    {
+        Console.Error.Write(new string('x', 1048577));
+        Console.Error.Flush();
+        await Task.Delay(TimeSpan.FromMinutes(1));
+        return 0;
+    }
+    else if (mode == "nonzero")
+    {
+        Console.Error.WriteLine("nonzero diagnostic");
+        return 7;
+    }
+    else if (mode == "timeout")
+    {
+        Console.WriteLine("""{"type":"thread.started"}""");
+        Console.Out.Flush();
+        Console.Error.WriteLine("timeout diagnostic");
+        Console.Error.Flush();
+        await Task.Delay(TimeSpan.FromMinutes(1));
+        return 0;
+    }
+    else
+    {
+        File.WriteAllText(answer, JsonSerializer.Serialize(new
+        {
+            obligationId,
+            repository,
+            revision,
+            contextSha256,
+            decision = "recommend",
+            explanation = "valid decision",
+        }));
+    }
+
+    Console.WriteLine("""{"type":"thread.started"}""");
+    Console.WriteLine("""{"type":"turn.started"}""");
+    Console.WriteLine("""{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40,"cached_input_tokens":10}}""");
+    Console.Out.Flush();
+    if (mode == "valid") Console.Error.WriteLine("diagnostic stderr");
+    return 0;
+}
+
+// #2484: pause the real readiness store at a durability boundary. The parent test kills this
+// process, then starts a new controller; the provider itself is a counted, local fake.
+if (args is ["readiness-decide", var readinessRoot, var readinessKey, var cutName,
+    var cutSignal, var cutRelease, var launchesFile])
+{
+    var store = new ConductorObligationStore(new FleetEventLog(
+        Path.Combine(readinessRoot, "events.jsonl"), Path.Combine(readinessRoot, "events.1.jsonl"), 1_000_000),
+        Path.Combine(readinessRoot, "conductor-obligations.json"));
+    if (cutName != "None")
+    {
+        var cut = Enum.Parse<ReadinessDurabilityPoint>(cutName);
+        store.ReadinessDurabilityObserver = point =>
+        {
+            if (point != cut) return;
+            File.WriteAllText(cutSignal, point.ToString());
+            var deadline = DateTime.UtcNow.AddSeconds(45);
+            while (!File.Exists(cutRelease) && DateTime.UtcNow < deadline)
+                Thread.Sleep(10); // wait-ok: parent releases or kills this bounded crash probe
+            if (!File.Exists(cutRelease)) throw new TimeoutException("Readiness crash cut was not released.");
+        };
+    }
+
+    File.WriteAllText(cutSignal + ".ready", "ready");
+    var result = await store.DecideReadinessOnceAsync(readinessKey, (obligation, _) =>
+    {
+        using (var launchRecord = new FileStream(launchesFile, FileMode.Append, FileAccess.Write,
+            FileShare.Read, 4096, FileOptions.WriteThrough))
+        {
+            launchRecord.WriteByte((byte)'x');
+            launchRecord.Flush(flushToDisk: true);
+        }
+
+        return Task.FromResult(new RetainedReadinessResponse(
+            new ReadinessDecision(obligation.ObligationId, obligation.TargetProject,
+                obligation.TargetRevision!, obligation.ContextSha256!, ReadinessChoice.Hold,
+                "Fake provider held for crash-window proof."),
+            new ReadinessUsage(1, 1, 0), "codex-subscription-cli", "gpt-5.6-luna", "low",
+            DateTimeOffset.UtcNow));
+    });
+    await Console.Out.WriteLineAsync(result.Obligation.Status.ToString());
+    return 0;
+}
 
 // #2482: cross-process reservation probe. The gate makes two independent OS processes race on
 // the same room-owned message ID, not merely two store instances in one test process.
