@@ -739,10 +739,19 @@ public static class StateProjector
         return arrested.Reason switch
         {
             ArrestReason.ToolStepCap => DescribeToolStepCapArrest(arrested),
+            ArrestReason.RepeatedToolCallCap => DescribeRepeatedToolCallCapArrest(arrested),
             ArrestReason.BilledRate => DescribeBilledRateArrest(arrested),
             ArrestReason.TokenBudget or null => DescribeTokenBudgetArrest(arrested),
             _ => throw new ArgumentOutOfRangeException(nameof(arrested), arrested.Reason, "Unknown ArrestReason."),
         };
+    }
+
+    private static string DescribeRepeatedToolCallCapArrest(FlowEvent.ExecutionArrested arrested)
+    {
+        var count = arrested.RepeatedToolStepCount is { } repeated
+            ? $" ({repeated} repeated tool calls measured)"
+            : string.Empty;
+        return $"Execution arrested: repeated tool-call cap exceeded{count} — awaiting conductor resolution.";
     }
 
     /// <summary>

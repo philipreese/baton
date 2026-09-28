@@ -20,6 +20,9 @@ public enum ArrestReason
     /// <summary>The running count of tool-step lines crossed the role's <c>MaxToolSteps</c>, independent of whether usage parsed at all.</summary>
     ToolStepCap,
 
+    /// <summary>The count of repeated tool+arguments calls exceeded the explicitly selected per-execution cap.</summary>
+    RepeatedToolCallCap,
+
     /// <summary>
     /// #1691: Σ billed tokens inside the trailing <c>TokenBudgetMonitor.BilledRateWindow</c> crossed
     /// the execution's <c>BilledRateLimit</c>. No role sets one (spec/baton.md §3 — no measured value

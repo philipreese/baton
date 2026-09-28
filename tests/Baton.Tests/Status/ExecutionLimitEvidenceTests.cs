@@ -63,7 +63,9 @@ public sealed class ExecutionLimitEvidenceTests
             TimeoutSource: "profile",
             TokenBudgetSource: "role-default",
             MaxToolStepsSource: "role-default",
-            MonitorInputsKnown: true);
+            MonitorInputsKnown: true,
+            MaxRepeatedToolSteps: 7,
+            MaxRepeatedToolStepsSource: "profile");
         var original = new FlowEvent.ExecutionRequestAccepted(Request(evidence));
 
         var json = JsonSerializer.Serialize<FlowEvent>(original, FlowEventLogJson.Options);
@@ -73,6 +75,7 @@ public sealed class ExecutionLimitEvidenceTests
         Assert.Equal(evidence, roundTripped.Request.Limits);
         Assert.Contains("TokenBudget", json, StringComparison.Ordinal);
         Assert.Contains("MaxToolSteps", json, StringComparison.Ordinal);
+        Assert.Contains("maxRepeatedToolSteps", json, StringComparison.Ordinal);
         Assert.Contains("MonitorInputsKnown", json, StringComparison.Ordinal);
     }
 
@@ -139,6 +142,49 @@ public sealed class ExecutionLimitEvidenceTests
         Assert.NotEqual(
             new ExecutionLimitEvidence(TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: true),
             accepted.Request.Limits);
+    }
+
+    [Fact]
+    public async Task Explicit_repeat_cap_and_source_survive_status_and_cost_ledger_round_trip()
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"repeat-limit-wire-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var limits = new ExecutionLimitEvidence(
+                TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: true,
+                MaxRepeatedToolSteps: 7, MaxRepeatedToolStepsSource: "profile");
+            var accepted = new FlowEvent.ExecutionRequestAccepted(Request(limits));
+            var acceptedJson = JsonSerializer.Serialize<FlowEvent>(accepted, FlowEventLogJson.Options);
+            var restored = Assert.IsType<FlowEvent.ExecutionRequestAccepted>(
+                JsonSerializer.Deserialize<FlowEvent>(acceptedJson, FlowEventLogJson.Options));
+            Assert.Equal(limits, restored.Request.Limits);
+
+            var now = DateTime.UtcNow;
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(restored),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(ExecutionId, 1), now),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(ExecutionId, 0, CoreExitReason.Natural), now.AddSeconds(1)),
+            };
+            var usage = ExecutionUsageProjector.BuildByExecutionId(entries, room)[ExecutionId.Value];
+            Assert.Equal(7, usage.Limits!.MaxRepeatedToolSteps);
+            Assert.Equal("profile", usage.Limits.MaxRepeatedToolStepsSource);
+
+            var repository = RepositoryIdentity.From("https://github.com/example/limits.git", null)!;
+            var row = Assert.Single(CostLedgerStore.BuildEntries(entries, room, repository));
+            Assert.Equal(7, row.Limits!.MaxRepeatedToolSteps);
+            Assert.Equal("profile", row.Limits.MaxRepeatedToolStepsSource);
+            var ledgerPath = Path.Combine(room, "ledger.jsonl");
+            await CostLedgerStore.AppendAsync([row], ledgerPath, TestContext.Current.CancellationToken);
+            var ledgerRow = Assert.Single(await CostLedgerStore.ReadAllAsync(ledgerPath, TestContext.Current.CancellationToken));
+            Assert.Equal(7, ledgerRow.Limits!.MaxRepeatedToolSteps);
+            Assert.Equal("profile", ledgerRow.Limits.MaxRepeatedToolStepsSource);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
     }
 
     [Fact]

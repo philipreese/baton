@@ -358,6 +358,10 @@ public sealed record CostLedgerEntry(
     [property: JsonPropertyName("repeatedToolSteps")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? RepeatedToolSteps = null,
+    /// <summary>Subset of tool steps with parser-provided keys; denominator context for repeat coverage.</summary>
+    [property: JsonPropertyName("keyableToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? KeyableToolSteps = null,
 
     /// <summary>
     /// #1882's two non-token dimensions, carried through from <c>ExecutionUsageView</c> under the same

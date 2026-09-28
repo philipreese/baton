@@ -14,6 +14,21 @@ namespace Baton.Vendors.Tests;
 public class WorkerBindingResolverTests
 {
     [Fact]
+    public void Resolver_refuses_a_nonpositive_explicit_repeat_cap()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "echo", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(5),
+            MaxRepeatedToolSteps: -1);
+
+        var exception = Assert.Throws<WorkerBindingConfigException>(() => WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() }));
+
+        Assert.Contains("MaxRepeatedToolSteps", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("positive integer", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Attachment_resolution_uses_only_the_current_rooms_regular_files()
     {
         var root = Path.Combine(Path.GetTempPath(), $"baton-binding-attachments-{Guid.NewGuid():N}");

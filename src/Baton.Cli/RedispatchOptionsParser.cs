@@ -14,7 +14,7 @@ public static class RedispatchOptionsParser
     public const string Usage =
         "Usage: baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] "
         + "[--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] "
-        + $"[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--originating-pr <owner/repo#number>] [--label <text>] [--workstream <slug>] [--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>] [--size-rationale <clause>]";
+        + $"[--token-budget <n>] [--max-tool-steps <n>] [--max-repeated-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--originating-pr <owner/repo#number>] [--label <text>] [--workstream <slug>] [--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>] [--size-rationale <clause>]";
 
     public static RedispatchOptions Parse(IReadOnlyList<string> args)
     {
@@ -28,6 +28,7 @@ public static class RedispatchOptionsParser
         TimeSpan? timeout = null;
         long? tokenBudget = null;
         int? maxToolSteps = null;
+        int? maxRepeatedToolSteps = null;
         long? billedRateLimit = null;
         string? verifyCommand = null;
         string? label = null;
@@ -93,6 +94,9 @@ public static class RedispatchOptionsParser
                 case "--max-tool-steps":
                     maxToolSteps = ParseMaxToolSteps(RequireValue(args, ref i, arg));
                     break;
+                case "--max-repeated-tool-steps":
+                    maxRepeatedToolSteps = ParseMaxRepeatedToolSteps(RequireValue(args, ref i, arg));
+                    break;
                 case "--billed-rate-limit":
                     billedRateLimit = ParseBilledRateLimit(RequireValue(args, ref i, arg));
                     break;
@@ -153,7 +157,8 @@ public static class RedispatchOptionsParser
             timeout, label, labelSpecified, tokenBudget, workstream, workstreamSpecified,
             attachments.Count > 0 ? attachments : null, maxToolSteps, billedRateLimit, verifyCommand,
             DispatchOptionsParser.NormalizeSkills(skills), skillsSpecified, noDefaultSkills,
-            DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale), originatingPullRequest);
+            DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale), originatingPullRequest,
+            maxRepeatedToolSteps);
     }
 
     /// <summary>Same shape and rationale as <see cref="DispatchOptionsParser"/>'s own <c>--token-budget</c> (#1623).</summary>
@@ -177,6 +182,18 @@ public static class RedispatchOptionsParser
             throw new CliArgumentException(
                 $"'--max-tool-steps {rawValue}' is not a non-negative whole number of tool calls. {Usage}",
                 "pass a non-negative integer, e.g. --max-tool-steps 0.");
+        }
+
+        return steps;
+    }
+
+    private static int ParseMaxRepeatedToolSteps(string rawValue)
+    {
+        if (!int.TryParse(rawValue, out var steps) || steps <= 0)
+        {
+            throw new CliArgumentException(
+                $"'--max-repeated-tool-steps {rawValue}' is not a positive whole number. {Usage}",
+                "pass a positive integer, e.g. --max-repeated-tool-steps 12.");
         }
 
         return steps;

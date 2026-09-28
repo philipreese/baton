@@ -134,6 +134,12 @@ public static class QueueImport
                     + "nothing, because a worktree for an item the runner already launched exists already.");
             }
 
+            if (entry.MaxRepeatedToolSteps is <= 0)
+            {
+                throw new QueueStoreException(
+                    $"Import refused: item '{entry.Tag}' has a nonpositive maxRepeatedToolSteps cap.");
+            }
+
             items.Add(new QueueItem
             {
                 Tag = entry.Tag!,
@@ -146,6 +152,7 @@ public static class QueueImport
                 Skills = entry.Skills,
                 TimeoutMinutes = entry.Timeout,
                 MaxToolSteps = entry.MaxToolSteps,
+                MaxRepeatedToolSteps = entry.MaxRepeatedToolSteps,
                 TokenBudget = entry.TokenBudget,
                 OverrideRunwayReason = Trimmed(entry.OverrideRunway),
                 Reason = Trimmed(entry.Reason),
@@ -188,6 +195,7 @@ public static class QueueImport
         public int? Issue { get; init; }
         public string? Adapter { get; init; }
         public int? MaxToolSteps { get; init; }
+        public int? MaxRepeatedToolSteps { get; init; }
         public long? TokenBudget { get; init; }
         public string? OverrideRunway { get; init; }
         public string? Reason { get; init; }

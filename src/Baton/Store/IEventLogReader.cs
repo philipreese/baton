@@ -46,10 +46,16 @@ public interface IEventLogReader
     Task<EventLogSnapshot> ReadSnapshotFromOffsetAsync(long seekByteOffset, CancellationToken cancellationToken = default);
 }
 
-/// <summary>The joined contents of a single log read (its two logical halves), from <see cref="IEventLogReader.ReadSnapshotAsync"/> or <see cref="IEventLogReader.ReadSnapshotFromOffsetAsync"/>.</summary>
+/// <summary>
+/// The joined contents of a single log read (its two logical halves), from
+/// <see cref="IEventLogReader.ReadSnapshotAsync"/> or <see cref="IEventLogReader.ReadSnapshotFromOffsetAsync"/>.
+/// <see cref="UnknownEventCount"/> counts newer event kinds intentionally skipped by the tolerant
+/// reader; fail-closed consumers can refuse to infer absence from an incomplete understood-event view.
+/// </summary>
 public sealed record EventLogSnapshot(
     IReadOnlyList<FlowEvent> FlowEvents,
     IReadOnlyList<CoreEvent> CoreEvents,
     long ByteOffset = 0,
     bool IsFallbackToFull = false,
-    bool HasUnterminatedTail = false);
+    bool HasUnterminatedTail = false,
+    int UnknownEventCount = 0);

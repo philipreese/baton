@@ -1779,12 +1779,30 @@ public static class MutationInterface
                     // a pre-#1567 line has neither field recorded, so require both null before treating the
                     // absence as "no prior binding recorded" rather than a divergence to journal.
                     var isLegacyUnrecordedBinding = request.Adapter is null && request.Model is null;
+                    if (isLegacyUnrecordedBinding && processBinding.MaxRepeatedToolSteps is not null)
+                    {
+                        throw new InvalidRoomMutationException(
+                            $"Crash-recovery resubmit for execution {executionId} cannot apply a repeated-call cap "
+                            + "because the legacy request did not record its adapter or model; refusing rather "
+                            + "than inventing a binding change or launching without durable cap evidence.");
+                    }
+
                     var appliedLimits = MergeCrashRecoveryLimitEvidence(request, processBinding);
+                    if (processBinding.MaxRepeatedToolSteps is not null)
+                    {
+                        // The counter belongs to this ExecutionId, so a capped pre-spawn resubmit may
+                        // restart it only when the durable journal and captured streams prove no
+                        // output escaped before Core started. This runs before StepRebound and before
+                        // the dispatcher can launch the same ID again.
+                        await RequireZeroOutputForCappedResubmitAsync(
+                            executionId, artifactsRootPath, eventLogReader, ioCancellationToken).ConfigureAwait(false);
+                    }
                     // A legacy request has no baseline to compare. Keep that evidence explicitly
                     // unknown rather than manufacturing a rebind from today's settings.
                     var limitsChanged = request.Limits is { } recordedLimits
-                        && appliedLimits is { } currentLimits
-                        && recordedLimits.HasDifferentEnforcementInputs(currentLimits);
+                        ? appliedLimits is { } currentLimits
+                            && recordedLimits.HasDifferentEnforcementInputs(currentLimits)
+                        : appliedLimits?.MaxRepeatedToolSteps is not null;
                     if (!isLegacyUnrecordedBinding
                         && (request.Adapter != processBinding.Adapter || request.Model != processBinding.Model || limitsChanged))
                     {
@@ -2230,19 +2248,33 @@ public static class MutationInterface
     private static ExecutionLimitEvidence CaptureAppliedLimitEvidence(WorkerBinding.Process processBinding)
     {
         var evidence = processBinding.EffectiveLimitEvidence;
+        if (evidence.MaxRepeatedToolSteps is <= 0)
+        {
+            throw new InvalidRoomMutationException(
+                "An explicit repeated-call cap must be a positive integer.");
+        }
+
         var usageParser = processBinding.Adapter is { } adapter
             ? StandardWorkerUsageParsers.Default.GetValueOrDefault(adapter)
             : null;
+        if (evidence.MaxRepeatedToolSteps is not null && usageParser is null)
+        {
+            throw new InvalidRoomMutationException(
+                $"Worker adapter '{processBinding.Adapter ?? "unknown"}' has no tool-identity parser; "
+                + "an explicit repeated-call cap cannot be enforced.");
+        }
         return usageParser is not null
             ? evidence
             : evidence with
             {
                 TokenBudget = null,
                 MaxToolSteps = null,
+                MaxRepeatedToolSteps = null,
                 BilledRateLimit = null,
                 ChosenKey = null,
                 TokenBudgetSource = null,
                 MaxToolStepsSource = null,
+                MaxRepeatedToolStepsSource = null,
                 MonitorInputsKnown = false,
             };
     }
@@ -2252,18 +2284,36 @@ public static class MutationInterface
     {
         if (request.Limits is not { } acceptedLimits)
         {
-            return null;
+            // A legacy request has no old limits to inherit. If a supported explicit cap is now
+            // applied to a known binding, record only that cap; the older monitor axes remain unknown
+            // rather than being filled from today's mutable settings.
+            if (processBinding.MaxRepeatedToolSteps is null) return null;
+            var currentCapLimits = CaptureAppliedLimitEvidence(processBinding);
+            return new ExecutionLimitEvidence(
+                request.Timeout,
+                TokenBudget: null,
+                MaxToolSteps: null,
+                BilledRateLimit: null,
+                ChosenKey: null,
+                TimeoutSource: null,
+                TokenBudgetSource: null,
+                MaxToolStepsSource: null,
+                MonitorInputsKnown: false,
+                MaxRepeatedToolSteps: currentCapLimits.MaxRepeatedToolSteps,
+                MaxRepeatedToolStepsSource: currentCapLimits.MaxRepeatedToolStepsSource);
         }
 
         var currentLimits = CaptureAppliedLimitEvidence(processBinding);
         var sameSnapshot = acceptedLimits.Timeout == currentLimits.Timeout
             && acceptedLimits.TokenBudget == currentLimits.TokenBudget
             && acceptedLimits.MaxToolSteps == currentLimits.MaxToolSteps
+            && acceptedLimits.MaxRepeatedToolSteps == currentLimits.MaxRepeatedToolSteps
             && acceptedLimits.BilledRateLimit == currentLimits.BilledRateLimit
             && acceptedLimits.ChosenKey == currentLimits.ChosenKey
             && acceptedLimits.TimeoutSource == currentLimits.TimeoutSource
             && acceptedLimits.TokenBudgetSource == currentLimits.TokenBudgetSource
             && acceptedLimits.MaxToolStepsSource == currentLimits.MaxToolStepsSource
+            && acceptedLimits.MaxRepeatedToolStepsSource == currentLimits.MaxRepeatedToolStepsSource
             && acceptedLimits.MonitorInputsKnown == currentLimits.MonitorInputsKnown;
 
         return currentLimits with
@@ -2351,11 +2401,13 @@ public static class MutationInterface
             // monitor to be constructed at all.
             // #1691: the billed-rate trigger joins the same disjunction -- a dispatch carrying only
             // --billed-rate-limit still watches.
-            if ((binding.TokenBudget is not null || binding.MaxToolSteps is not null || binding.BilledRateLimit is not null)
+            if ((binding.TokenBudget is not null || binding.MaxToolSteps is not null || binding.BilledRateLimit is not null
+                 || binding.MaxRepeatedToolSteps is not null)
                 && usageParser is not null)
             {
                 budgetMonitor = new TokenBudgetMonitor(
-                    binding.TokenBudget, binding.MaxToolSteps, binding.BilledRateLimit, usageParser);
+                    binding.TokenBudget, binding.MaxToolSteps, binding.BilledRateLimit, usageParser,
+                    maxRepeatedToolSteps: binding.MaxRepeatedToolSteps);
                 var innerOnStdoutLine = target.OnStdoutLine;
                 target = target with
                 {
@@ -3085,7 +3137,102 @@ public static class MutationInterface
             prepared.Request.Adapter,
             dominantCommand?.Shape,
             dominantCommand?.Percent,
-            workspaceChanged);
+            workspaceChanged,
+            budgetMonitor.SnapshotRepeatedToolStepCount(),
+            budgetMonitor.SnapshotKeyableToolStepCount());
+    }
+
+    private static async Task RequireZeroOutputForCappedResubmitAsync(
+        ExecutionId executionId,
+        string artifactsRootPath,
+        IEventLogReader eventLogReader,
+        CancellationToken cancellationToken)
+    {
+        var refusal = $"Cannot resubmit capped execution {executionId}: prior output is not provably absent; preserve the journal and artifacts for inspection.";
+        EventLogSnapshot journal;
+        try
+        {
+            journal = await eventLogReader.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is FlowEventLogReadException or IOException or UnauthorizedAccessException)
+        {
+            throw new FlowEventLogReadException(refusal);
+        }
+
+        if (journal.HasUnterminatedTail
+            || journal.UnknownEventCount != 0
+            || journal.FlowEvents.OfType<FlowEvent.ExecutionRequestAccepted>()
+                .Count(accepted => accepted.Request.ExecutionId == executionId) != 1
+            || journal.CoreEvents.Any(core => core switch
+            {
+                CoreEvent.ExecutionStarted started => started.ExecutionId == executionId,
+                CoreEvent.ExecutionExited exited => exited.ExecutionId == executionId,
+                _ => false,
+            })
+            || journal.FlowEvents.OfType<FlowEvent.StreamLogLossDeclared>()
+                .Any(loss => loss.ExecutionId == executionId))
+        {
+            throw new FlowEventLogReadException(refusal);
+        }
+
+        var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRootPath, executionId);
+        string[] captures =
+        [
+            ExecutionStreamLogger.StdoutRolloverFileName,
+            ExecutionStreamLogger.StdoutLogFileName,
+            ExecutionStreamLogger.StderrRolloverFileName,
+            ExecutionStreamLogger.StderrLogFileName,
+        ];
+        string[] lossMarkers =
+        [
+            ExecutionStreamLogger.StdoutTruncationMarkerFileName,
+            ExecutionStreamLogger.StdoutWriteFailureMarkerFileName,
+            ExecutionStreamLogger.StderrTruncationMarkerFileName,
+            ExecutionStreamLogger.StderrWriteFailureMarkerFileName,
+        ];
+
+        try
+        {
+            foreach (var marker in lossMarkers)
+            {
+                if (TryReadCapturedLength(Path.Combine(outputDirectory, marker), out _))
+                {
+                    throw new FlowEventLogReadException(refusal);
+                }
+            }
+
+            foreach (var capture in captures)
+            {
+                if (TryReadCapturedLength(Path.Combine(outputDirectory, capture), out var length) && length != 0)
+                {
+                    throw new FlowEventLogReadException(refusal);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            throw new FlowEventLogReadException(refusal);
+        }
+    }
+
+    private static bool TryReadCapturedLength(string path, out long length)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            length = stream.Length;
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            length = 0;
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            length = 0;
+            return false;
+        }
     }
 
     internal static async Task<GraceReconciliationResult> ReconcileGraceClaimsAsync(

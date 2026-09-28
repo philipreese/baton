@@ -297,6 +297,7 @@ public static class QueueCommand
             LifecycleReason = options.LifecycleReason,
             TimeoutMinutes = options.TimeoutMinutes,
             MaxToolSteps = options.MaxToolSteps,
+            MaxRepeatedToolSteps = options.MaxRepeatedToolSteps,
             TokenBudget = options.TokenBudget,
             OverrideRunwayReason = options.OverrideRunwayReason,
             Reason = options.Reason,

@@ -61,6 +61,26 @@ public sealed class QueueStoreTests
     }
 
     [Fact]
+    public async Task Explicit_repeat_cap_survives_queue_storage_round_trip()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            await QueueStore.MutateAsync(path, snapshot => snapshot with
+            {
+                Items = [Item("capped") with { MaxRepeatedToolSteps = 75 }],
+            }, Ct);
+
+            var read = await QueueStore.LoadAsync(path, Ct);
+            Assert.Equal(75, Assert.Single(read.Items).MaxRepeatedToolSteps);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
     public async Task Worktree_cleanup_claim_is_exact_path_exclusive_and_receipted()
     {
         var path = TempQueuePath();

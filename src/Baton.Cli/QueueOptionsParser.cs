@@ -19,7 +19,7 @@ public static class QueueOptionsParser
         "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
-        "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] [--lifecycle-reason <why>] | " +
+        "[--max-tool-steps <n>] [--max-repeated-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] [--lifecycle-reason <why>] | " +
         "baton queue list [--recovery] [--active] [--history] [--format text|json] [--page-size <n>] [--cursor <opaque>] | baton queue worktrees [--apply] [--format text|json] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire <tag> --reason <text> [--merged-pr <n>] | baton queue restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
@@ -243,7 +243,7 @@ public static class QueueOptionsParser
         string? role = null, spec = null, workspace = null, scope = null;
         string? adapter = null, model = null, effort = null, overrideRunway = null, reason = null, lifecycleReason = null;
         string? declaredSize = null, sizeRationale = null;
-        int? issue = null, timeout = null, maxToolSteps = null;
+        int? issue = null, timeout = null, maxToolSteps = null, maxRepeatedToolSteps = null;
         long? tokenBudget = null;
         var lifecycle = false;
         var lifecyclePin = false;
@@ -321,6 +321,9 @@ public static class QueueOptionsParser
                     continue;
                 case "--max-tool-steps":
                     maxToolSteps = TakeInt(args, ref i, "--max-tool-steps");
+                    continue;
+                case "--max-repeated-tool-steps":
+                    maxRepeatedToolSteps = TakeInt(args, ref i, "--max-repeated-tool-steps");
                     continue;
                 case "--token-budget":
                     tokenBudget = TakeLong(args, ref i, "--token-budget");
@@ -580,6 +583,11 @@ public static class QueueOptionsParser
             throw new CliArgumentException($"'--max-tool-steps' must be a non-negative whole number. {Usage}");
         }
 
+        if (maxRepeatedToolSteps is <= 0)
+        {
+            throw new CliArgumentException($"'--max-repeated-tool-steps' must be a positive whole number. {Usage}");
+        }
+
         if (tokenBudget is <= 0)
         {
             throw new CliArgumentException($"'--token-budget' must be positive. {Usage}");
@@ -606,7 +614,8 @@ public static class QueueOptionsParser
             LifecycleReason: lifecycleReason,
             StageSelections: lifecycle ? normalizedStageSelections : null, LifecyclePin: lifecyclePin,
             Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements,
-            DeclaredTaskSize: DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale));
+            DeclaredTaskSize: DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale),
+            MaxRepeatedToolSteps: maxRepeatedToolSteps);
     }
 
     private static void SetRequirement(

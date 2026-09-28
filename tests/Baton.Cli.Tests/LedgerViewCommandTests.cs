@@ -582,7 +582,8 @@ public sealed class LedgerViewCommandTests : IDisposable
                     EndedAt: Sep4.AddHours(10),
                     ToolSteps: 12,
                     RefusedToolSteps: 0,
-                    RepeatedToolSteps: 3),
+                    RepeatedToolSteps: 3,
+                    KeyableToolSteps: 9),
                 new CostLedgerEntry(
                     CostSourceKind.BatonExecution,
                     Room: _roomA,
@@ -601,6 +602,7 @@ public sealed class LedgerViewCommandTests : IDisposable
         foreach (var (name, expected) in new[]
         {
             ("toolSteps", "12"), ("refusedToolSteps", "0"), ("repeatedToolSteps", "3"),
+            ("keyableToolSteps", "9"),
         })
         {
             var column = columns.IndexOf(name);

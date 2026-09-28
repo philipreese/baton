@@ -432,6 +432,26 @@ public class DispatchOptionsParserTests
     }
 
     [Fact]
+    public void The_max_repeated_tool_steps_option_requires_a_positive_int()
+    {
+        var options = DispatchOptionsParser.Parse(["implement", "--spec", "t.md", "--max-repeated-tool-steps", "12"]);
+
+        Assert.Equal(12, options.MaxRepeatedToolSteps);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("not-a-number")]
+    public void Max_repeated_tool_steps_rejects_nonpositive_or_invalid_values(string value)
+    {
+        var exception = Assert.Throws<CliArgumentException>(() =>
+            DispatchOptionsParser.Parse(["implement", "--spec", "t.md", "--max-repeated-tool-steps", value]));
+
+        Assert.Contains("--max-repeated-tool-steps", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Omitting_max_tool_steps_leaves_it_null()
     {
         var options = DispatchOptionsParser.Parse(["implement", "--spec", "t.md"]);

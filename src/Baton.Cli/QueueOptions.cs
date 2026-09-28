@@ -117,4 +117,5 @@ public sealed record QueueOptions(
     QueueListOutputFormat ListFormat = QueueListOutputFormat.Text,
     int? PageSize = null,
     string? Cursor = null,
-    bool Recovery = false);
+    bool Recovery = false,
+    int? MaxRepeatedToolSteps = null);

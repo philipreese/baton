@@ -47,6 +47,7 @@ public sealed class TokenBudgetMonitor
 
     private readonly long? _budget;
     private readonly int? _maxToolSteps;
+    private readonly int? _maxRepeatedToolSteps;
     private readonly long? _billedRateLimit;
     private readonly TimeProvider _timeProvider;
     private readonly IWorkerUsageParser _usageParser;
@@ -97,6 +98,9 @@ public sealed class TokenBudgetMonitor
     // from "the monitor watched and genuinely measured a zero peak."
     private long? _peakBilledInWindow;
     private int _toolStepCount;
+    private int _repeatedToolStepCount;
+    private int _keyableToolStepCount;
+    private readonly Dictionary<string, int> _toolInvocationCounts = new(StringComparer.Ordinal);
     // #2002 rule 3: how many shell commands this stream announced, and how many of each SHAPE
     // (Status.CommandShape). Bounded by the number of DISTINCT shapes rather than by the step count --
     // the room this was measured on held 8 shapes across 207 run_command steps -- so the pathological
@@ -135,11 +139,13 @@ public sealed class TokenBudgetMonitor
         int? maxToolSteps,
         long? billedRateLimit,
         IWorkerUsageParser usageParser,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        int? maxRepeatedToolSteps = null)
     {
         _budget = budget;
         _maxToolSteps = maxToolSteps;
         _billedRateLimit = billedRateLimit;
+        _maxRepeatedToolSteps = maxRepeatedToolSteps;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _usageParser = usageParser ?? throw new ArgumentNullException(nameof(usageParser));
     }
@@ -184,6 +190,7 @@ public sealed class TokenBudgetMonitor
         // it — the cap's whole reason for existing is to arrest a stream with malformed or absent
         // usage lines, the same pattern the incremental usage parse cannot see at all.
         var toolStepDelta = _usageParser.CountToolSteps(line);
+        var invocationKeys = _usageParser.ToolInvocationKeys(line);
         var usageParsed = _usageParser.TryParseIncrementalUsage(line, out var usage) && usage is not null;
         // #2002: read off every line for the same reason the tool-step count above is, and outside the
         // lock because normalising is pure string work.
@@ -195,6 +202,14 @@ public sealed class TokenBudgetMonitor
             if (toolStepDelta > 0)
             {
                 _toolStepCount += toolStepDelta;
+            }
+
+            foreach (var key in invocationKeys)
+            {
+                _keyableToolStepCount++;
+                var seen = _toolInvocationCounts.TryGetValue(key, out var count) ? count : 0;
+                if (seen > 0) _repeatedToolStepCount++;
+                _toolInvocationCounts[key] = seen + 1;
             }
 
             foreach (var commandLine in shellCommands)
@@ -303,6 +318,10 @@ public sealed class TokenBudgetMonitor
             {
                 newlyArmed = ArrestReason.ToolStepCap;
             }
+            else if (!_arrested && _maxRepeatedToolSteps is { } repeatedCap && _repeatedToolStepCount > repeatedCap)
+            {
+                newlyArmed = ArrestReason.RepeatedToolCallCap;
+            }
             else if (!_arrested && _billedRateLimit is { } rateLimit && _rateWindowSum >= rateLimit)
             {
                 newlyArmed = ArrestReason.BilledRate;
@@ -403,6 +422,18 @@ public sealed class TokenBudgetMonitor
     public int SnapshotToolStepCount()
     {
         lock (_lock) { return _toolStepCount; }
+    }
+
+    /// <summary>Number of tool calls for which the usage parser produced a stable identity key.</summary>
+    public int SnapshotKeyableToolStepCount()
+    {
+        lock (_lock) { return _keyableToolStepCount; }
+    }
+
+    /// <summary>Occurrences beyond the first for an identical tool + arguments identity.</summary>
+    public int SnapshotRepeatedToolStepCount()
+    {
+        lock (_lock) { return _repeatedToolStepCount; }
     }
 
     /// <summary>

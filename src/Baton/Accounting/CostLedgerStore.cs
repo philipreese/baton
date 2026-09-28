@@ -327,6 +327,7 @@ public static partial class CostLedgerStore
                 ToolSteps: usage.ToolSteps,
                 RefusedToolSteps: usage.RefusedToolSteps,
                 RepeatedToolSteps: usage.RepeatedToolSteps,
+                KeyableToolSteps: usage.KeyableToolSteps,
                 // #1882: carried through as the projector attributed them -- one execution's row gets
                 // both, every other row gets neither. No arithmetic here on purpose.
                 VerifyStepMs: usage.VerifyStepMs,

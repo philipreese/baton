@@ -73,12 +73,14 @@ public class RedispatchOptionsParserTests
             [
                 "parent-room", "--spec", "amended.md", "--attach", "context.txt",
                 "--max-tool-steps", "200", "--billed-rate-limit", "250000",
+                "--max-repeated-tool-steps", "17",
                 "--verify", "pixi run gates-quiet",
             ]);
 
         Assert.Equal("amended.md", options.SpecFilePath);
         Assert.Equal(new[] { "context.txt" }, options.Attachments);
         Assert.Equal(200, options.MaxToolSteps);
+        Assert.Equal(17, options.MaxRepeatedToolSteps);
         Assert.Equal(250_000, options.BilledRateLimit);
         Assert.Equal("pixi run gates-quiet", options.VerifyCommand);
     }
@@ -257,6 +259,18 @@ public class RedispatchOptionsParserTests
             () => RedispatchOptionsParser.Parse(["parent-room", "--billed-rate-limit", rawValue]));
 
         Assert.Contains("--billed-rate-limit", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("nonsense")]
+    public void A_non_positive_or_non_numeric_repeat_cap_is_a_typed_argument_error(string rawValue)
+    {
+        var ex = Assert.Throws<CliArgumentException>(
+            () => RedispatchOptionsParser.Parse(["parent-room", "--max-repeated-tool-steps", rawValue]));
+
+        Assert.Contains("--max-repeated-tool-steps", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

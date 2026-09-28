@@ -224,6 +224,13 @@ public static class WorkerBindingResolver
         Action<string, string>? onWorkerStdoutLine,
         string? roomDirectory)
     {
+        if (entry.MaxRepeatedToolSteps is <= 0)
+        {
+            throw new WorkerBindingConfigException(
+                $"Worker-binding config entry for '{workerName}' has a 'MaxRepeatedToolSteps' value "
+                + "that must be a positive integer.");
+        }
+
         if (!adapters.TryGetValue(entry.Adapter, out var adapter))
         {
             throw new UnknownWorkerAdapterException(entry.Adapter, adapters.Keys);
@@ -312,7 +319,7 @@ public static class WorkerBindingResolver
             entry.VerifyPixiTask, entry.VerifyCommandOverride, entry.TokenBudget, entry.MaxToolSteps,
             entry.BilledRateLimit, entry.IsWorktree, entry.WorktreeBaseSha, entry.ChangesTree,
             entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace,
-            limitEvidence);
+            limitEvidence, entry.MaxRepeatedToolSteps);
     }
 
     private static ExecutionLimitEvidence CreateLimitEvidence(
@@ -334,7 +341,8 @@ public static class WorkerBindingResolver
         var timeoutMatches = entry.Timeout == resolution.Timeout;
         var tokenBudgetMatches = entry.TokenBudget == resolution.TokenBudget;
         var maxToolStepsMatches = entry.MaxToolSteps == resolution.MaxToolSteps;
-        var aggregateMatches = chosenKeyMatches && timeoutMatches && tokenBudgetMatches && maxToolStepsMatches;
+        var maxRepeatedToolStepsMatches = entry.MaxRepeatedToolSteps == resolution.MaxRepeatedToolSteps;
+        var aggregateMatches = chosenKeyMatches && timeoutMatches && tokenBudgetMatches && maxToolStepsMatches && maxRepeatedToolStepsMatches;
 
         return new ExecutionLimitEvidence(
             entry.Timeout,
@@ -348,7 +356,10 @@ public static class WorkerBindingResolver
                 ? resolution.TokenBudgetSource : null,
             maxToolStepsMatches && (selectionMatches || resolution.MaxToolStepsSource == ExecutionLimitSource.DispatchOverride)
                 ? resolution.MaxToolStepsSource : null,
-            MonitorInputsKnown: true);
+            MonitorInputsKnown: true,
+            MaxRepeatedToolSteps: entry.MaxRepeatedToolSteps,
+            MaxRepeatedToolStepsSource: maxRepeatedToolStepsMatches && (selectionMatches || resolution.MaxRepeatedToolStepsSource == ExecutionLimitSource.DispatchOverride)
+                ? resolution.MaxRepeatedToolStepsSource : null);
     }
 
 

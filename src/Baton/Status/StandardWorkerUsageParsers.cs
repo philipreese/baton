@@ -513,9 +513,9 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
         CountToolResults(rawLine, static text => string.IsNullOrWhiteSpace(text));
 
     /// <summary>
-    /// #1921. One key per <c>tool_use</c> block of an assistant turn — the same blocks
-    /// <see cref="CountToolSteps"/> counts, so on this vendor the repeat count is measured over exactly
-    /// the population the step count reports.
+    /// #1921. One key per <c>tool_use</c> block of an assistant turn that carries a non-null
+    /// <c>input</c> — the same blocks <see cref="CountToolSteps"/> counts, except calls with absent
+    /// arguments remain unkeyable rather than receiving a fabricated name-only identity.
     /// <para>
     /// <b>The key is <c>name</c> plus BYTE-IDENTICAL arguments as the vendor serialized them</b> — the
     /// block's <c>input</c> raw text, with <b>no normalisation applied</b>, here or on the other two
@@ -551,10 +551,11 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             {
                 if (block.ValueKind == JsonValueKind.Object
                     && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
-                    && block.TryGetProperty("name", out var nameProp) && nameProp.GetString() is { Length: > 0 } name)
+                    && block.TryGetProperty("name", out var nameProp) && nameProp.GetString() is { Length: > 0 } name
+                    && block.TryGetProperty("input", out var inputProp)
+                    && inputProp.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
                 {
-                    var input = block.TryGetProperty("input", out var inputProp) ? inputProp.GetRawText() : string.Empty;
-                    keys.Add(name + " " + input);
+                    keys.Add(name + " " + inputProp.GetRawText());
                 }
             }
 
