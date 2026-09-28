@@ -52,6 +52,7 @@ public sealed class GraceClaimValidationTests
 
         var result = await MutationInterface.ReconcileGraceClaimsAsync(
             [new FlowEvent.ExecutionRequestAccepted(CreateRequest(ParentId, limits: null)), claim],
+            [],
             new Dictionary<string, WorkerBinding>(StringComparer.Ordinal),
             registered,
             writer,
@@ -70,7 +71,7 @@ public sealed class GraceClaimValidationTests
         var orphan = new List<FlowEvent> { accepted, claim };
 
         var first = await MutationInterface.ReconcileGraceClaimsAsync(
-            orphan, new Dictionary<string, WorkerBinding>(StringComparer.Ordinal),
+            orphan, [], new Dictionary<string, WorkerBinding>(StringComparer.Ordinal),
             new HashSet<ExecutionId>(), writer, TestContext.Current.CancellationToken);
 
         Assert.Equal(MutationInterface.GraceReconciliationResult.Appended, first);
@@ -80,7 +81,7 @@ public sealed class GraceClaimValidationTests
 
         orphan.Add(unresolved);
         var repeated = await MutationInterface.ReconcileGraceClaimsAsync(
-            orphan, new Dictionary<string, WorkerBinding>(StringComparer.Ordinal),
+            orphan, [], new Dictionary<string, WorkerBinding>(StringComparer.Ordinal),
             new HashSet<ExecutionId>(), writer, TestContext.Current.CancellationToken);
 
         Assert.Equal(MutationInterface.GraceReconciliationResult.Unresolved, repeated);
@@ -94,6 +95,7 @@ public sealed class GraceClaimValidationTests
 
         await Assert.ThrowsAsync<FlowEventLogReadException>(() => MutationInterface.ReconcileGraceClaimsAsync(
             [new FlowEvent.GraceTurnSpendUnresolved(ParentId, ChildId)],
+            [],
             new Dictionary<string, WorkerBinding>(StringComparer.Ordinal),
             new HashSet<ExecutionId>(), writer, TestContext.Current.CancellationToken));
 
@@ -121,6 +123,7 @@ public sealed class GraceClaimValidationTests
 
         await Assert.ThrowsAsync<FlowEventLogReadException>(() => MutationInterface.ReconcileGraceClaimsAsync(
             events,
+            [],
             new Dictionary<string, WorkerBinding>(StringComparer.Ordinal),
             new HashSet<ExecutionId>(),
             writer,

@@ -1127,7 +1127,8 @@ public static class MutationInterface
                     or FlowEvent.GraceTurnSpendUnresolved))
                 {
                     var reconciliation = await ReconcileGraceClaimsAsync(
-                            graceEvents, workerBindings, registeredExecutionIds, eventLogWriter, ioCancellationToken)
+                            graceEvents, graceSnapshot.CoreEvents, workerBindings, registeredExecutionIds,
+                            eventLogWriter, ioCancellationToken)
                         .ConfigureAwait(false);
                     if (reconciliation == GraceReconciliationResult.Unresolved)
                     {
@@ -1171,7 +1172,15 @@ public static class MutationInterface
                         }
 
                         var request = acceptedRequestByExecutionId[executionId];
-                        var contract = GetContractForClassification(request, workerBindings);
+                        var graceTimeoutClaim = graceEvents.OfType<FlowEvent.GraceTurnClaimed>()
+                            .SingleOrDefault(claim => claim.ParentExecutionId == executionId
+                                && !claim.ParentEvidence.IsMonitorArrest
+                                && graceEvents.OfType<FlowEvent.GraceTurnSafetyRecorded>()
+                                    .Any(safety => safety.GraceExecutionId == claim.GraceExecutionId));
+                        var timeoutGrading = graceTimeoutClaim?.ParentEvidence.TimeoutGrading;
+                        var contract = timeoutGrading is null
+                            ? GetContractForClassification(request, workerBindings)
+                            : new WorkerContract(request.Worker, [], timeoutGrading.ProducedOutputs, timeoutGrading.OptionalMetadata);
                         var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRootPath, executionId);
                         // The recorded request is the durable truth: a pre-#901 line carries no
                         // GrantAuditMode, which means no audit was promised for that execution —
@@ -1239,6 +1248,28 @@ public static class MutationInterface
                             // a line that already recorded arming.
                         }
 
+                        // A timeout grace claim holds the original classification inputs. Once its
+                        // child safety fact is durable, replay must not grade the parent's already-run
+                        // timeout from a newer binding. Ordinary crash candidates still use the live
+                        // binding path above.
+                        if (timeoutGrading is not null)
+                        {
+                            changesTree = timeoutGrading.ChangesTree;
+                            verifiesWorkspace = timeoutGrading.VerifiesWorkspace;
+                            worktreePath = timeoutGrading.IsWorktree ? timeoutGrading.WorkspacePath : null;
+                            worktreeBaseRef = timeoutGrading.WorktreeBaseRef;
+                            changesTreeWorkingDirectory = timeoutGrading.ChangesTree
+                                ? timeoutGrading.WorkspacePath
+                                : null;
+                            // Vendor parsers/classifiers are executable binding behavior, not durable
+                            // claim-time facts. The timeout arms used here need no response parser;
+                            // do not let a replacement binding inject new failure/retry semantics.
+                            responseParser = null;
+                            failureClassifier = timeoutGrading.TimeoutFailure is { } timeoutFailure
+                                ? new RecordedTimeoutFailureClassifier(timeoutFailure)
+                                : null;
+                        }
+
                         // #1586 S1: the same recorded-adapter preference ExecutionUsageProjector's own
                         // #1567 comment explains — the durable request, not the binding's current
                         // resolution, since this is the crash-recovery path classifying from recorded
@@ -1293,14 +1324,36 @@ public static class MutationInterface
                         var priorRecoveryOccurrence = request.StepId is { } recoveryStepIdForOccurrence
                             ? latestCheckpoint.State.RecoveryOccurrenceByStepId.GetValueOrDefault(recoveryStepIdForOccurrence)
                             : 0;
+                        var classificationResult = new CoreDispatchResult(
+                            exit.ExitCode,
+                            exit.Reason,
+                            exit.StderrTail,
+                            exit.TerminalSuccessObserved,
+                            TerminalResultObserved: exit.TerminalResultObserved,
+                            EnginePlacedFiles: enginePlacedFiles);
+                        if (timeoutGrading is not null && graceTimeoutClaim is not null)
+                        {
+                            var pending = graceTimeoutClaim.ParentEvidence;
+                            if (pending.ExitCode != exit.ExitCode
+                                || pending.ExitReason != exit.Reason
+                                || pending.TerminalSuccessObserved != exit.TerminalSuccessObserved
+                                || pending.TerminalResultObserved != exit.TerminalResultObserved)
+                            {
+                                throw new FlowEventLogReadException(
+                                    $"Timeout grace claim for parent '{executionId.Value}' conflicts with its recorded Core exit.");
+                            }
+
+                            classificationResult = new CoreDispatchResult(
+                                pending.ExitCode,
+                                pending.ExitReason,
+                                pending.StderrTail,
+                                pending.TerminalSuccessObserved,
+                                TerminalResultObserved: pending.TerminalResultObserved,
+                                EnginePlacedFiles: enginePlacedFiles);
+                        }
+
                         var classification = OutcomeClassifier.Classify(
-                            new CoreDispatchResult(
-                                exit.ExitCode,
-                                exit.Reason,
-                                exit.StderrTail,
-                                exit.TerminalSuccessObserved,
-                                TerminalResultObserved: exit.TerminalResultObserved,
-                                EnginePlacedFiles: enginePlacedFiles),
+                            classificationResult,
                             contract, outputDirectory,
                             failureClassifier: failureClassifier,
                             grantAuditMode: grantAuditMode, worktreePath: worktreePath, responseParser: responseParser,
@@ -2485,7 +2538,8 @@ public static class MutationInterface
                 {
                     var grace = await RunGraceTurnAsync(
                             prepared, binding, mutationProbePath, dispatcher, eventLogReader, eventLogWriter,
-                            dispatchResult, budgetMonitor, workspaceHeadShaAtStart, enginePlacedFiles, dispatchCancellationToken)
+                            dispatchResult, budgetMonitor, workspaceHeadShaAtStart, enginePlacedFiles,
+                            dispatchCancellationToken, timeProvider ?? TimeProvider.System)
                         .ConfigureAwait(false);
                     if (grace.Claimed && grace.Safety is null)
                     {
@@ -2529,7 +2583,8 @@ public static class MutationInterface
             {
                 var grace = await RunGraceTurnAsync(
                         prepared, binding, mutationProbePath, dispatcher, eventLogReader, eventLogWriter,
-                        dispatchResult, parentMonitor: null, workspaceHeadShaAtStart, enginePlacedFiles, dispatchCancellationToken)
+                        dispatchResult, parentMonitor: null, workspaceHeadShaAtStart, enginePlacedFiles,
+                        dispatchCancellationToken, timeProvider ?? TimeProvider.System)
                     .ConfigureAwait(false);
                 if (grace.Claimed && grace.Safety is null)
                 {
@@ -3035,6 +3090,7 @@ public static class MutationInterface
 
     internal static async Task<GraceReconciliationResult> ReconcileGraceClaimsAsync(
         IReadOnlyList<FlowEvent> events,
+        IReadOnlyList<CoreEvent> coreEvents,
         IReadOnlyDictionary<string, WorkerBinding> workerBindings,
         IReadOnlySet<ExecutionId> registeredExecutionIds,
         IEventLogWriter eventLogWriter,
@@ -3047,6 +3103,15 @@ public static class MutationInterface
         }
 
         ValidateGraceClaimJoins(events, claims);
+        // Integrity admission covers every orphan timeout claim before either an unresolved-spend
+        // marker or child-safety marker can be appended. A claim-only orphan is still spending a
+        // real parent timeout and must join that timeout to exactly one Core exit first.
+        var orphanTimeoutClaims = claims
+            .Where(claim => !claim.ParentEvidence.IsMonitorArrest)
+            .Where(claim => !registeredExecutionIds.Contains(claim.ParentExecutionId)
+                && !registeredExecutionIds.Contains(claim.GraceExecutionId))
+            .ToArray();
+        ValidateGraceTimeoutCoreExits(coreEvents, orphanTimeoutClaims);
 
         foreach (var claim in claims)
         {
@@ -3262,6 +3327,25 @@ public static class MutationInterface
             {
                 throw new FlowEventLogReadException("A non-monitor grace claim lacks its original timeout result.");
             }
+            else
+            {
+                var timeoutGrading = claim.ParentEvidence.TimeoutGrading;
+                var recordedOutputs = parentRequest.ProducedOutputs
+                    ?? [.. parentRequest.Outputs.Select(output => new ProducedOutput(output))];
+                if (timeoutGrading is null
+                    || timeoutGrading.ProducedOutputs is null
+                    || !timeoutGrading.ProducedOutputs.SequenceEqual(recordedOutputs)
+                    || timeoutGrading.OptionalMetadata is null
+                    || timeoutGrading.OptionalMetadata.Any(name => !IsSafeOptionalMetadataPath(name))
+                    || timeoutGrading.TimeoutFailure is { Matched: false, Classification: not null }
+                    || timeoutGrading.TimeoutFailure is { Matched: false, RetryNotBefore: not null }
+                    || string.IsNullOrWhiteSpace(timeoutGrading.WorkspacePath)
+                    || !Path.IsPathFullyQualified(timeoutGrading.WorkspacePath))
+                {
+                    throw new FlowEventLogReadException(
+                        "A timeout grace claim lacks valid claim-time grading inputs for parent replay.");
+                }
+            }
 
             var parentTerminals = events.Where(flowEvent => HasTerminalExecution(flowEvent, parentId)).ToArray();
             if (parentTerminals.Length > 1)
@@ -3307,6 +3391,78 @@ public static class MutationInterface
         }
     }
 
+    private static void ValidateGraceTimeoutCoreExits(
+        IReadOnlyList<CoreEvent> coreEvents,
+        IReadOnlyList<FlowEvent.GraceTurnClaimed> claims)
+    {
+        foreach (var claim in claims.Where(item => !item.ParentEvidence.IsMonitorArrest))
+        {
+            var exits = coreEvents.OfType<CoreEvent.ExecutionExited>()
+                .Where(item => item.ExecutionId == claim.ParentExecutionId)
+                .ToArray();
+            if (exits.Length != 1)
+            {
+                throw new FlowEventLogReadException(
+                    $"Timeout grace claim for parent '{claim.ParentExecutionId.Value}' must join exactly one recorded Core exit before recovery.");
+            }
+
+            var exit = exits[0];
+            var pending = claim.ParentEvidence;
+            if (pending.ExitCode != exit.ExitCode
+                || pending.ExitReason != exit.Reason
+                || pending.StderrTail != exit.StderrTail
+                || pending.TerminalSuccessObserved != exit.TerminalSuccessObserved
+                || pending.TerminalResultObserved != exit.TerminalResultObserved)
+            {
+                throw new FlowEventLogReadException(
+                    $"Timeout grace claim for parent '{claim.ParentExecutionId.Value}' conflicts with its recorded Core exit.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Metadata declarations are relative output paths, not necessarily basenames. Preserve safe
+    /// nested declarations accepted by WorkerContract while refusing rooted paths and traversal;
+    /// this makes replay validation no stricter than the classifier's output-directory lookup.
+    /// </summary>
+    private static bool IsSafeOptionalMetadataPath(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)
+            || Path.IsPathRooted(name)
+            || name.Contains(':'))
+        {
+            return false;
+        }
+
+        // `.` is a safe relative alias (`./meta/x` and `meta/./x` are both consumed by
+        // Path.Combine exactly within the output directory). Reject only parent traversal;
+        // empty/repeated separators are likewise harmless relative aliases.
+        var segments = name.Replace('\\', '/').Split('/');
+        return segments.All(segment => segment != "..");
+    }
+
+    private static GraceTimeoutFailureEvidence? CaptureGraceTimeoutFailureEvidence(
+        WorkerBinding.Process binding,
+        CoreDispatchResult parentResult,
+        TimeProvider timeProvider)
+    {
+        if (binding.FailureClassifier is not { } classifier)
+        {
+            return null;
+        }
+
+        var matched = classifier.TryClassifyFailure(
+            parentResult.StderrTail,
+            parentResult.StdoutTail,
+            timeProvider,
+            out var classification,
+            out var retryNotBefore);
+        return new GraceTimeoutFailureEvidence(
+            matched,
+            matched ? classification : null,
+            matched ? retryNotBefore : null);
+    }
+
     private static bool MatchesPendingArrest(
         FlowEvent.ExecutionArrested pending,
         FlowEvent.ExecutionArrested recorded)
@@ -3345,6 +3501,21 @@ public static class MutationInterface
         None,
         Appended,
         Unresolved,
+    }
+
+    private sealed class RecordedTimeoutFailureClassifier(GraceTimeoutFailureEvidence evidence)
+        : Outcomes.IFailureClassifier
+    {
+        public bool TryClassifyFailure(
+            string? stderrTail,
+            TimeProvider timeProvider,
+            out FailureClassification? classification,
+            out DateTimeOffset? retryNotBefore)
+        {
+            classification = evidence.Classification;
+            retryNotBefore = evidence.RetryNotBefore;
+            return evidence.Matched;
+        }
     }
 
     /// <summary>
@@ -3454,7 +3625,8 @@ public static class MutationInterface
         TokenBudgetMonitor? parentMonitor,
         string? workspaceHeadShaAtStart,
         IReadOnlyCollection<EnginePlacedFile>? enginePlacedFiles,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeProvider timeProvider)
     {
         if (binding.Target.PromptText is null)
         {
@@ -3548,7 +3720,18 @@ public static class MutationInterface
             parentResult.TerminalSuccessObserved,
             parentResult.TerminalResultObserved,
             parentArrest,
-            parentResult.StderrTail);
+            parentResult.StderrTail,
+            parentIsMonitorArrest
+                ? null
+                : new GraceTimeoutGradingEvidence(
+                    [.. binding.Contract.ProducedOutputs],
+                    [.. binding.Contract.OptionalMetadata],
+                    binding.ChangesTree,
+                    binding.VerifiesWorkspace,
+                    Path.GetFullPath(workspacePath),
+                    binding.IsWorktree,
+                    binding.WorktreeBaseSha,
+                    CaptureGraceTimeoutFailureEvidence(binding, parentResult, timeProvider)));
         GraceCheckpointEvidence baselineEvidence;
         try
         {

@@ -448,6 +448,237 @@ public sealed class GraceTurnEndToEndTests
         }
     }
 
+    [Theory]
+    [InlineData(true, WorkflowOutcome.FinishedDuringTeardown)]
+    [InlineData(false, WorkflowOutcome.Indeterminate)]
+    public async Task Timeout_grace_replay_uses_claim_time_grading_after_binding_changes(
+        bool graceShouldCommit, string expectedOutcome)
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit, primaryTimesOut: true);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var timeoutGrading = Assert.IsType<GraceTimeoutGradingEvidence>(claim.ParentEvidence.TimeoutGrading);
+            Assert.Equal("pr.md", Assert.Single(timeoutGrading.ProducedOutputs).Name);
+            Assert.True(timeoutGrading.ChangesTree);
+            Assert.True(timeoutGrading.VerifiesWorkspace);
+            Assert.Equal(Path.GetFullPath(run.Workspace), timeoutGrading.WorkspacePath);
+            Assert.Single(run.Events.OfType<FlowEvent.GraceTurnCompleted>());
+            Assert.Single(run.Events.OfType<FlowEvent.GraceTurnSafetyRecorded>());
+            await RewriteWithoutParentTerminalsAsync(run, claim.ParentExecutionId);
+            var coreEvents = await new FlowEventLogReader(Path.Combine(run.RoomDirectory, "flow.jsonl"))
+                .ReadAllCoreEventsAsync(TestContext.Current.CancellationToken);
+            Assert.Contains(coreEvents, coreEvent => coreEvent is CoreEvent.ExecutionExited exited
+                && exited.ExecutionId == claim.ParentExecutionId
+                && exited.Reason == CoreExitReason.TimedOut);
+
+            var originalBinding = Assert.IsType<WorkerBinding.Process>(run.Bindings["implement"]);
+            var changedBindings = new Dictionary<string, WorkerBinding>(run.Bindings, StringComparer.Ordinal)
+            {
+                ["implement"] = originalBinding with
+                {
+                    Contract = new WorkerContract("implement", [], [new ProducedOutput("different-output.md")], []),
+                    ChangesTree = false,
+                    VerifiesWorkspace = false,
+                },
+            };
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            var dispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            await using var writer = new FlowEventLogWriter(logPath);
+            var replayedState = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, changedBindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+            var replayed = await new FlowEventLogReader(logPath)
+                .ReadAllAsync(TestContext.Current.CancellationToken);
+
+            Assert.Equal(expectedOutcome, WorkflowOutcome.Describe(replayedState));
+            Assert.Single(replayed, flowEvent => flowEvent switch
+            {
+                FlowEvent.ExecutionSucceeded item => item.ExecutionId == claim.ParentExecutionId,
+                FlowEvent.ExecutionSucceededWithLateFailure item => item.ExecutionId == claim.ParentExecutionId,
+                FlowEvent.ExecutionFailed item => item.ExecutionId == claim.ParentExecutionId,
+                FlowEvent.ExecutionIndeterminate item => item.ExecutionId == claim.ParentExecutionId,
+                FlowEvent.ExecutionCancelled item => item.ExecutionId == claim.ParentExecutionId,
+                FlowEvent.ExecutionArrested item => item.ExecutionId == claim.ParentExecutionId,
+                _ => false,
+            });
+            Assert.Equal(0, dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Timeout_grace_replay_preserves_optional_metadata_classification_after_binding_changes()
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: false,
+            primaryTimesOut: true,
+            optionalMetadata: ["./meta/outcome.json"],
+            metadataJson: "{\"FailureClassification\":\"Permanent\"}");
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var grading = Assert.IsType<GraceTimeoutGradingEvidence>(claim.ParentEvidence.TimeoutGrading);
+            Assert.Equal("./meta/outcome.json", Assert.Single(grading.OptionalMetadata));
+            await RewriteWithoutParentTerminalsAsync(run, claim.ParentExecutionId);
+            File.Delete(Path.Combine(run.Workspace, "left-behind.txt"));
+            Assert.True(RepositoryIsClean(run.Workspace));
+            var original = Assert.IsType<WorkerBinding.Process>(run.Bindings["implement"]);
+            var replacement = original with
+            {
+                Contract = original.Contract with { OptionalMetadata = [] },
+                FailureClassifier = null,
+                ChangesTree = false,
+            };
+            var changedBindings = new Dictionary<string, WorkerBinding>(run.Bindings, StringComparer.Ordinal)
+            {
+                ["implement"] = replacement,
+            };
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            await using var writer = new FlowEventLogWriter(logPath);
+            var dispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            var state = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, changedBindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+            var replayed = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var parentFailure = Assert.Single(replayed.OfType<FlowEvent.ExecutionFailed>(), item => item.ExecutionId == claim.ParentExecutionId);
+
+            Assert.Equal(WorkflowOutcome.Failed, WorkflowOutcome.Describe(state));
+            Assert.Equal(FailureClassification.Permanent, parentFailure.FailureClassification);
+            Assert.Null(parentFailure.RetryNotBefore);
+            Assert.Equal(0, dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Timeout_grace_replay_preserves_claim_time_adapter_quota_classification_and_reset()
+    {
+        var retryNotBefore = DateTimeOffset.UtcNow.AddDays(2);
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: false,
+            primaryTimesOut: true,
+            failureClassifier: new FixedTimeoutFailureClassifier(FailureClassification.ExhaustedUntil, retryNotBefore),
+            settleOnVendorExhaustion: true);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var grading = Assert.IsType<GraceTimeoutGradingEvidence>(claim.ParentEvidence.TimeoutGrading);
+            Assert.Equal(FailureClassification.ExhaustedUntil, grading.TimeoutFailure?.Classification);
+            Assert.Equal(retryNotBefore, grading.TimeoutFailure?.RetryNotBefore);
+            await RewriteWithoutParentTerminalsAsync(run, claim.ParentExecutionId);
+            File.Delete(Path.Combine(run.Workspace, "left-behind.txt"));
+            Assert.True(RepositoryIsClean(run.Workspace));
+            var original = Assert.IsType<WorkerBinding.Process>(run.Bindings["implement"]);
+            var changedBindings = new Dictionary<string, WorkerBinding>(run.Bindings, StringComparer.Ordinal)
+            {
+                ["implement"] = original with { FailureClassifier = null, ChangesTree = false },
+            };
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            await using var writer = new FlowEventLogWriter(logPath);
+            var dispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            var state = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, changedBindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken,
+                settleOnVendorExhaustion: true);
+            var replayed = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            var parentFailure = Assert.Single(replayed.OfType<FlowEvent.ExecutionFailed>(), item => item.ExecutionId == claim.ParentExecutionId);
+
+            Assert.Equal(FailureClassification.ExhaustedUntil, parentFailure.FailureClassification);
+            Assert.Equal(retryNotBefore, parentFailure.RetryNotBefore);
+            Assert.Equal(retryNotBefore, Assert.Single(state.Steps).LatestExecutionFailedRetryNotBefore);
+            Assert.Equal(0, dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Timeout_grace_claim_conflicting_core_exit_refuses_before_missing_safety_append()
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit: false, primaryTimesOut: true);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            await RewriteWithoutParentTerminalsAsync(
+                run, claim.ParentExecutionId, includeSafety: false, parentCoreExitOverride: CoreExitReason.Natural);
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            var before = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var writer = new FlowEventLogWriter(logPath);
+            var dispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+
+            await Assert.ThrowsAsync<FlowEventLogReadException>(() => MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken));
+            await writer.DisposeAsync();
+
+            Assert.Equal(before, await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.Equal(0, dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Timeout_grace_orphan_claim_conflicting_core_exit_refuses_before_unresolved_spend_append()
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit: false, primaryTimesOut: true);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            await RewriteWithoutParentTerminalsAsync(
+                run, claim.ParentExecutionId, includeSafety: false,
+                includeCompletion: false, parentCoreExitOverride: CoreExitReason.Natural);
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            var before = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var writer = new FlowEventLogWriter(logPath);
+            var dispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+
+            try
+            {
+                await Assert.ThrowsAsync<FlowEventLogReadException>(() => MutationInterface.StartWorkflowAsync(
+                    new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                    new FlowEventLogReader(logPath), writer, dispatcher,
+                    cancellationToken: TestContext.Current.CancellationToken));
+            }
+            finally
+            {
+                await writer.DisposeAsync();
+            }
+
+            Assert.Equal(before, await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.Equal(0, dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
     [Fact]
     public async Task Replay_after_grace_completion_without_safety_records_safety_without_redispatch()
     {
@@ -800,7 +1031,12 @@ public sealed class GraceTurnEndToEndTests
         bool verifiesWorkspace = true,
         bool graceSpawnFails = false,
         Action<string>? onStdoutLine = null,
-        bool primaryTimesOut = false)
+        bool primaryTimesOut = false,
+        bool primaryMutatesWorkspace = true,
+        Baton.Outcomes.IFailureClassifier? failureClassifier = null,
+        IReadOnlyList<string>? optionalMetadata = null,
+        string? metadataJson = null,
+        bool settleOnVendorExhaustion = false)
     {
         var roomDirectory = Path.Combine(Path.GetTempPath(), $"task-{Guid.NewGuid():N}");
         var workspace = Path.Combine(roomDirectory, "lane");
@@ -823,27 +1059,29 @@ public sealed class GraceTurnEndToEndTests
         var bindings = new Dictionary<string, WorkerBinding>
         {
             ["implement"] = new WorkerBinding.Process(
-                new WorkerContract("implement", [], [new ProducedOutput("pr.md")], []),
+                new WorkerContract("implement", [], [new ProducedOutput("pr.md")], optionalMetadata ?? []),
                 new CoreDispatchTarget(
                     "vendor-cli", ["-p", "ORIGINAL BRIEF"], WorkingDirectory: workspace,
                     OnStdoutLine: onStdoutLine, PromptText: "ORIGINAL BRIEF"),
                 TimeSpan.FromSeconds(30),
+                FailureClassifier: failureClassifier,
                 Adapter: "claude",
                 TokenBudget: 1000,
                 ChangesTree: true,
                 VerifiesWorkspace: verifiesWorkspace),
         };
 
+        await using var writer = new FlowEventLogWriter(logPath);
         var dispatcher = new GraceTurnCoreDispatcher(
             workspace, PrimaryArrestingUsageLine, graceShouldCommit, GraceExceedingUsageLine, graceSpawnFails,
-            artifactsRoot, primaryTimesOut);
+            artifactsRoot, primaryTimesOut, primaryMutatesWorkspace, optionalMetadata, metadataJson, writer);
 
-        await using var writer = new FlowEventLogWriter(logPath);
         var reader = new FlowEventLogReader(logPath);
 
         var finalState = await MutationInterface.StartWorkflowAsync(
             new WorkflowId("wf-2134"), roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, dispatcher,
-            cancellationToken: TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken,
+            settleOnVendorExhaustion: settleOnVendorExhaustion);
 
         var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
 
@@ -879,6 +1117,84 @@ public sealed class GraceTurnEndToEndTests
             },
         });
     }
+
+    private static async Task RewriteWithoutParentTerminalsAsync(
+        LaneRun run,
+        ExecutionId parentExecutionId,
+        bool includeSafety = true,
+        bool includeCompletion = true,
+        CoreExitReason? parentCoreExitOverride = null)
+    {
+        var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+        var entries = await new FlowEventLogReader(logPath)
+            .ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(logPath, [], TestContext.Current.CancellationToken);
+        await using (var writer = new FlowEventLogWriter(logPath))
+        {
+            foreach (var entry in entries)
+            {
+                switch (entry)
+                {
+                    case LogEntry.FlowLogEntry flow when !IsParentTerminal(flow.Event, parentExecutionId)
+                        && (includeSafety || flow.Event is not FlowEvent.GraceTurnSafetyRecorded safety
+                            || safety.ParentExecutionId != parentExecutionId)
+                        && (includeCompletion || flow.Event is not FlowEvent.GraceTurnCompleted completion
+                            || completion.GraceExecutionId != run.Events.OfType<FlowEvent.GraceTurnClaimed>()
+                                .Single(claim => claim.ParentExecutionId == parentExecutionId).GraceExecutionId):
+                        await writer.AppendAsync(flow.Event, TestContext.Current.CancellationToken);
+                        break;
+                    case LogEntry.CoreLogEntry core when (core.Event is not CoreEvent.ExecutionExited parentExitEvent
+                            || parentExitEvent.ExecutionId != parentExecutionId)
+                        && (core.Event is not CoreEvent.ExecutionStarted parentStartEvent
+                            || parentStartEvent.ExecutionId != parentExecutionId):
+                        await writer.AppendAsync(core.Event, TestContext.Current.CancellationToken);
+                        break;
+                }
+            }
+
+            var parentEvidence = run.Events.OfType<FlowEvent.GraceTurnClaimed>()
+                .Single(claim => claim.ParentExecutionId == parentExecutionId).ParentEvidence;
+            await writer.AppendAsync(
+                new CoreEvent.ExecutionStarted(parentExecutionId, Pid: 1), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(
+                new CoreEvent.ExecutionExited(
+                    parentExecutionId,
+                    parentEvidence.ExitCode,
+                    parentCoreExitOverride ?? parentEvidence.ExitReason,
+                    parentEvidence.StderrTail,
+                    parentEvidence.TerminalSuccessObserved,
+                    parentEvidence.TerminalResultObserved),
+                TestContext.Current.CancellationToken);
+        }
+
+        var durable = await new FlowEventLogReader(logPath).ReadSnapshotAsync(TestContext.Current.CancellationToken);
+        var projection = StateProjector.ProjectAndCheckpoint(
+            durable.FlowEvents, run.Snapshot, logByteOffset: durable.ByteOffset);
+        var (started, exited) = CoreEventAggregation.Merge(
+            projection.Checkpoint.State.CoreStartedExecutionIds,
+            projection.Checkpoint.State.CoreExitedByExecutionId,
+            durable.CoreEvents);
+        ProjectionCheckpointStore.Save(run.RoomDirectory, projection.Checkpoint with
+        {
+            ByteOffset = durable.ByteOffset,
+            State = projection.Checkpoint.State with
+            {
+                CoreStartedExecutionIds = started,
+                CoreExitedByExecutionId = exited,
+            },
+        });
+    }
+
+    private static bool IsParentTerminal(FlowEvent flowEvent, ExecutionId parentExecutionId) => flowEvent switch
+    {
+        FlowEvent.ExecutionSucceeded succeeded => succeeded.ExecutionId == parentExecutionId,
+        FlowEvent.ExecutionSucceededWithLateFailure lateFailure => lateFailure.ExecutionId == parentExecutionId,
+        FlowEvent.ExecutionFailed failed => failed.ExecutionId == parentExecutionId,
+        FlowEvent.ExecutionIndeterminate indeterminate => indeterminate.ExecutionId == parentExecutionId,
+        FlowEvent.ExecutionCancelled cancelled => cancelled.ExecutionId == parentExecutionId,
+        FlowEvent.ExecutionArrested arrested => arrested.ExecutionId == parentExecutionId,
+        _ => false,
+    };
 
     private static bool RepositoryIsClean(string workspace) =>
         string.IsNullOrWhiteSpace(RunGitCapturingOutput(workspace, "status", "--porcelain"));
@@ -946,7 +1262,11 @@ public sealed class GraceTurnEndToEndTests
         string graceExceedingUsageLine,
         bool graceSpawnFails,
         string? artifactsRoot = null,
-        bool primaryTimesOut = false) : ICoreDispatcher
+        bool primaryTimesOut = false,
+        bool primaryMutatesWorkspace = true,
+        IReadOnlyList<string>? optionalMetadata = null,
+        string? metadataJson = null,
+        ICoreEventLogWriter? coreEventLogWriter = null) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
         public List<ExecutionRequest> Requests { get; } = [];
@@ -956,9 +1276,19 @@ public sealed class GraceTurnEndToEndTests
         {
             CallCount++;
             Requests.Add(request);
+            if (coreEventLogWriter is not null && (CallCount == 1 || !graceSpawnFails))
+            {
+                await coreEventLogWriter.AppendAsync(
+                    new CoreEvent.ExecutionStarted(request.ExecutionId, Pid: 1), CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
             if (CallCount == 1)
             {
-                File.WriteAllText(Path.Combine(workspace, "left-behind.txt"), "written, never committed before the arrest");
+                if (primaryMutatesWorkspace)
+                {
+                    File.WriteAllText(Path.Combine(workspace, "left-behind.txt"), "written, never committed before the arrest");
+                }
                 if (primaryTimesOut)
                 {
                     var outputDirectory = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
@@ -966,12 +1296,22 @@ public sealed class GraceTurnEndToEndTests
                         request.ExecutionId);
                     Directory.CreateDirectory(outputDirectory);
                     File.WriteAllText(Path.Combine(outputDirectory, "pr.md"), "declared output was written before teardown");
-                    return new CoreDispatchResult(-1, CoreExitReason.TimedOut);
+                    if (metadataJson is not null && optionalMetadata is { Count: > 0 })
+                    {
+                        var metadataPath = Path.Combine(outputDirectory, optionalMetadata[0]);
+                        Directory.CreateDirectory(Path.GetDirectoryName(metadataPath)!);
+                        File.WriteAllText(metadataPath, metadataJson);
+                    }
+                    var timeout = new CoreDispatchResult(-1, CoreExitReason.TimedOut);
+                    await RecordExitAsync(request, timeout, cancellationToken).ConfigureAwait(false);
+                    return timeout;
                 }
 
                 target.OnStdoutLine?.Invoke(primaryUsageLine);
                 await WaitForCancellationAsync(cancellationToken).ConfigureAwait(false);
-                return new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+                var cancelled = new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+                await RecordExitAsync(request, cancelled, cancellationToken).ConfigureAwait(false);
+                return cancelled;
             }
 
             if (graceSpawnFails)
@@ -985,12 +1325,35 @@ public sealed class GraceTurnEndToEndTests
                 RunGit(workspace, "add", ".");
                 RunGit(workspace, "commit", "-m", "fix: commit incomplete work under grace turn");
                 RunGit(workspace, "push", "origin", "HEAD:refs/heads/main");
-                return new CoreDispatchResult(0, CoreExitReason.Natural);
+                var succeeded = new CoreDispatchResult(0, CoreExitReason.Natural);
+                await RecordExitAsync(request, succeeded, cancellationToken).ConfigureAwait(false);
+                return succeeded;
             }
 
             target.OnStdoutLine?.Invoke(graceExceedingUsageLine);
             await WaitForCancellationAsync(cancellationToken).ConfigureAwait(false);
-            return new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+            var graceCancelled = new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+            await RecordExitAsync(request, graceCancelled, cancellationToken).ConfigureAwait(false);
+            return graceCancelled;
+        }
+
+        private async Task RecordExitAsync(
+            ExecutionRequest request,
+            CoreDispatchResult result,
+            CancellationToken cancellationToken)
+        {
+            if (coreEventLogWriter is not null)
+            {
+                await coreEventLogWriter.AppendAsync(
+                    new CoreEvent.ExecutionExited(
+                        request.ExecutionId,
+                        result.ExitCode,
+                        result.Reason,
+                        result.StderrTail,
+                        result.TerminalSuccessObserved,
+                        result.TerminalResultObserved),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
         }
 
         private static async Task WaitForCancellationAsync(CancellationToken cancellationToken)
@@ -999,6 +1362,22 @@ public sealed class GraceTurnEndToEndTests
             await using var registration = cancellationToken.Register(() => tcs.TrySetResult());
             // Not a timing expectation -- the ceiling only stops a regression from hanging the suite.
             await tcs.Task.WaitAsync(TimeSpan.FromSeconds(120), cancellationToken: CancellationToken.None);
+        }
+    }
+
+    private sealed class FixedTimeoutFailureClassifier(
+        FailureClassification classification,
+        DateTimeOffset retryNotBefore) : Baton.Outcomes.IFailureClassifier
+    {
+        public bool TryClassifyFailure(
+            string? stderrTail,
+            TimeProvider timeProvider,
+            out FailureClassification? result,
+            out DateTimeOffset? retry)
+        {
+            result = classification;
+            retry = retryNotBefore;
+            return true;
         }
     }
 }
