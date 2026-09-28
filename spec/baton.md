@@ -6434,7 +6434,8 @@ and for which realization does what to a package's bytes.
   desktop-session injection, phone/Glass writes, and automatic continuation remain out of scope.
   A conductor may query `baton steer <room-dir> --execution <id> --message-id <id> --receipt`.
   The room journal owns immutable request, write-ahead send-started, and semantic transport-response
-  facts under a separate cross-process steering lock. Send-started is fsynced before native bytes;
+  facts under the cross-process room-events lock, distinct from flow.lock and shared with room
+  compaction. Send-started is fsynced before native bytes;
   it can only become `inFlight` while the exact broker turn is live, then `outcomeUnknown` without
   a retained response. It must never be blindly resent. A durable native ACK is
   `transportAcknowledged`, **not proof that the worker read or applied the correction**. A queued

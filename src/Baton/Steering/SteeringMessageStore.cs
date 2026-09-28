@@ -1,4 +1,5 @@
 using Baton.Domain;
+using Baton.Concurrency;
 using Baton.Status;
 using Baton.Store;
 
@@ -10,11 +11,14 @@ public enum SteeringReceiptState { Queued, InFlight, TransportAcknowledged, Reje
 public sealed record SteeringReceipt(RoomEvent.SteeringRequested Request, SteeringReceiptState State,
     string? Receipt = null, string? Reason = null);
 
-/// <summary>Room-owned steering transitions under one cross-process lock, distinct from flow.lock.</summary>
+/// <summary>
+/// Room-owned steering transitions under room-events.lock, distinct from flow.lock. Sharing the
+/// compactor's lock is essential: an append between its read and replace would lose send-started.
+/// </summary>
 public sealed class SteeringMessageStore
 {
-    private const string LockPrefix = "baton-room-steering";
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(10);
+    private readonly string _roomPath;
     private readonly string _logPath;
 
     public SteeringMessageStore(string roomDirectoryPath)
@@ -24,6 +28,7 @@ public sealed class SteeringMessageStore
         {
             throw new DirectoryNotFoundException($"Steering room '{room}' does not exist.");
         }
+        _roomPath = room;
         _logPath = Path.Combine(room, BatonPaths.RoomLogFileName);
     }
 
@@ -126,8 +131,15 @@ public sealed class SteeringMessageStore
             && other.ThreadId == request.ThreadId && other.TurnId == request.TurnId);
     }
 
-    private T UnderLock<T>(Func<T> action) =>
-        MutexGuardedFileLock.RunUnderLock(_logPath, LockPrefix, LockTimeout, action);
+    private T UnderLock<T>(Func<T> action)
+    {
+        // This cross-process room-events lock spans replay/check/append, not just the append.
+        // RoomMutationInterface and RoomJournalCompactor use the same lock; flow.lock remains
+        // entirely separate. No caller may hold room-events.lock when entering this store.
+        using var guard = ConcurrencyGuard.AcquireRoomEventsWithin(
+            _roomPath, LockTimeout, "steering message");
+        return action();
+    }
 
     private IReadOnlyList<RoomEvent> ReadEvents() =>
         new RoomEventLogReader(_logPath).ReadAllRoomEventsAsync().GetAwaiter().GetResult();
