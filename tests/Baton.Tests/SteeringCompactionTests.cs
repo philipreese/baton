@@ -45,7 +45,7 @@ public sealed class SteeringCompactionTests
                 // The compactor already read the journal and wrote its replacement file. Holding
                 // here creates the exact window in which an uncoordinated append would be erased.
                 compactorReachedReplace.TrySetResult(true);
-                await allowReplace.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                await allowReplace.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); // wait-ok: fixture release is guaranteed in finally
             });
 
             var requestDuringCompaction = Request("steer-during-compaction");
@@ -54,28 +54,28 @@ public sealed class SteeringCompactionTests
             var completedWhileCompactorHeld = false;
             try
             {
-                await compactorReachedReplace.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                await compactorReachedReplace.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); // wait-ok: deterministic fixture barrier
                 reserveTask = Task.Factory.StartNew(() =>
                 {
                     mutationStarted.TrySetResult(true);
                     return new SteeringMessageStore(room).Reserve(requestDuringCompaction, targetLive: true);
                 }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-                await mutationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                await mutationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); // wait-ok: deterministic fixture barrier
 
                 // The barrier above guarantees the compactor holds room-events.lock at the
                 // read/replace seam, and the long-running task has started the store call. The
                 // bounded window lets an unguarded append finish here while a guarded one waits.
                 completedWhileCompactorHeld = await Task.WhenAny(
-                    reserveTask, Task.Delay(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken)) == reserveTask;
+                    reserveTask, Task.Delay(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken)) == reserveTask; // wait-ok: short negative-observation window, then release in finally
             }
             finally
             {
                 allowReplace.TrySetResult(true);
             }
 
-            Assert.True(await compaction.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            Assert.True(await compaction.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)); // wait-ok: fixture completion after release
             Assert.NotNull(reserveTask);
-            var duringReservation = await reserveTask.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            var duringReservation = await reserveTask.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); // wait-ok: fixture completion after release
             Assert.False(completedWhileCompactorHeld,
                 "The steering append must wait until compaction has replaced the room journal and released its shared lock.");
             Assert.Equal(SteeringReceiptState.Queued, duringReservation.State);

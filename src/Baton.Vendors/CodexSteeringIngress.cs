@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Baton.Artifacts;
+using Baton.Concurrency;
 using Baton.Core.Internal;
 using Baton.Outcomes;
 using Baton.Status;
@@ -289,8 +290,21 @@ internal sealed class CodexSteeringIngress : IAsyncDisposable
                         return new(SteeringReceiptState.Queued,
                             Reason: "Another native steering RPC is unresolved; this request has not been sent.");
                 }
-                if (!_store.TryStartSend(request.MessageId, digest, request.ExecutionId,
-                        request.BrokerIncarnation, request.ThreadId, request.TurnId))
+                bool acquiredSend;
+                try
+                {
+                    acquiredSend = _store.TryStartSend(request.MessageId, digest, request.ExecutionId,
+                        request.BrokerIncarnation, request.ThreadId, request.TurnId);
+                }
+                catch (WorkflowLockedException)
+                {
+                    // No send-started fact or native byte was written by this connection. Compaction
+                    // or another room writer may hold room-events.lock; keep the listener available
+                    // and let the same immutable queued request retry when that lock clears.
+                    return new(SteeringReceiptState.Queued,
+                        Reason: "Room journal is temporarily busy before native send; retry the same message ID.");
+                }
+                if (!acquiredSend)
                 {
                     var prior = _store.Query(request.MessageId, _active)!;
                     return new(prior.State, prior.Receipt, prior.Reason);

@@ -61,7 +61,7 @@ public sealed class SteerCrossProcessTests
         var deadline = DateTime.UtcNow.AddSeconds(15);
         while (Directory.GetFiles(Path.GetDirectoryName(gate)!, "go.*.ready").Length < count
                && DateTime.UtcNow < deadline)
-            await Task.Delay(20, TestContext.Current.CancellationToken);
+            await Task.Delay(20, TestContext.Current.CancellationToken); // wait-ok: bounded process rendezvous poll within 15s deadline
         Assert.Equal(count, Directory.GetFiles(Path.GetDirectoryName(gate)!, "go.*.ready").Length);
     }
 

@@ -16,7 +16,7 @@ if (args is ["steering-reserve", var steeringRoom, var steeringGate, var steerin
     await File.WriteAllTextAsync(steeringGate + $".{Environment.ProcessId}.ready", "ready");
     var deadline = DateTime.UtcNow.AddSeconds(15);
     while (!File.Exists(steeringGate) && DateTime.UtcNow < deadline)
-        await Task.Delay(10);
+        await Task.Delay(10); // wait-ok: bounded child-process rendezvous poll within 15s deadline
     if (!File.Exists(steeringGate)) return 3;
     try
     {

@@ -3,9 +3,11 @@ using System.IO.Pipes;
 using System.Security.Principal;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Baton.Cli;
+using Baton.Concurrency;
 using Baton.Domain;
 using Baton.Status;
 using Baton.Steering;
@@ -240,6 +242,62 @@ public sealed class SteerCommandIntegrationTests
         finally { Directory.Delete(room, recursive: true); }
     }
 
+    [Fact]
+    public async Task Busy_room_journal_returns_queued_without_disabling_ingress_then_same_id_sends()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var (room, output, textFile) = await SetUpRoomAsync("codex");
+        try
+        {
+            using var nativeInput = new ConcurrentTextWriter();
+            await using var ingress = CodexSteeringIngress.Start(output, "thread-1", "turn-1", nativeInput)!;
+            var endpoint = CodexSteeringEndpoint.TryRead(room, "execution-1")!;
+            var text = await File.ReadAllTextAsync(textFile, TestContext.Current.CancellationToken);
+            var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+            var principal = WindowsIdentity.GetCurrent().User!.Value;
+            var messageId = "busy-journal";
+            var store = new SteeringMessageStore(room);
+            store.Reserve(new RoomEvent.SteeringRequested(messageId, "execution-1", digest,
+                endpoint.BrokerIncarnation, endpoint.ThreadId, endpoint.TurnId, principal,
+                DateTimeOffset.UtcNow), targetLive: true);
+
+            using (ConcurrencyGuard.AcquireRoomEvents(room, "held by steering test"))
+            using (var pipe = new NamedPipeClientStream(".", endpoint.PipeName, PipeDirection.InOut,
+                       PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, TokenImpersonationLevel.Impersonation))
+            {
+                await pipe.ConnectAsync(TestContext.Current.CancellationToken);
+                using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
+                await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true)
+                { AutoFlush = true };
+                await writer.WriteLineAsync(JsonSerializer.Serialize(new CodexSteeringPipeRequest(
+                    room, "execution-1", endpoint.BrokerIncarnation, endpoint.ThreadId, endpoint.TurnId,
+                    messageId, text)));
+                var response = await reader.ReadLineAsync(TestContext.Current.CancellationToken);
+                Assert.NotNull(response);
+                Assert.Equal((int)SteeringReceiptState.Queued,
+                    JsonNode.Parse(response)!["State"]!.GetValue<int>());
+                Assert.Empty(nativeInput.Snapshot());
+                Assert.NotNull(CodexSteeringEndpoint.TryRead(room, "execution-1"));
+            }
+
+            using var result = new StringWriter();
+            var send = SteerCommand.ExecuteAsync(
+                new SteerOptions(room, "execution-1", messageId, textFile, false),
+                result, TestContext.Current.CancellationToken);
+            await WaitForAsync(() => nativeInput.Snapshot().Contains("turn/steer", StringComparison.Ordinal));
+            var native = JsonNode.Parse(nativeInput.Snapshot().Split('\n',
+                StringSplitOptions.RemoveEmptyEntries).Single())!;
+            Assert.True(await ingress.TryHandleNativeResponseAsync(new JsonObject
+            {
+                ["id"] = native["id"]!.GetValue<int>(),
+                ["result"] = new JsonObject { ["turnId"] = "turn-1" },
+            }));
+            Assert.Equal(0, await send);
+            Assert.Contains("transportAcknowledged", result.ToString());
+        }
+        finally { Directory.Delete(room, recursive: true); }
+    }
+
     private static async Task<(string Room, string Output, string TextFile)> SetUpRoomAsync(string adapter)
     {
         var room = Path.Combine(Path.GetTempPath(), $"baton-steer-{Guid.NewGuid():N}");
@@ -263,7 +321,7 @@ public sealed class SteerCommandIntegrationTests
     {
         var deadline = DateTime.UtcNow.AddSeconds(5);
         while (!condition() && DateTime.UtcNow < deadline)
-            await Task.Delay(20, TestContext.Current.CancellationToken);
+            await Task.Delay(20, TestContext.Current.CancellationToken); // wait-ok: bounded poll within the 5s test deadline
         Assert.True(condition(), "Expected native steering request was not written.");
     }
 
