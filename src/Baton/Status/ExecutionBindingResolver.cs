@@ -70,6 +70,22 @@ public static class ExecutionBindingResolver
 
                 limitsByExecutionId[executionId] = checkpointRequest.Limits;
             }
+            else if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.GraceTurnClaimed { Request: { } graceRequest } })
+            {
+                var executionId = graceRequest.ExecutionId.Value;
+                executionIds.Add(executionId);
+                if (graceRequest.Adapter is { Length: > 0 } adapter)
+                {
+                    adapterByExecutionId[executionId] = adapter;
+                }
+
+                if (graceRequest.Model is { Length: > 0 } model)
+                {
+                    modelByExecutionId[executionId] = model;
+                }
+
+                limitsByExecutionId[executionId] = graceRequest.Limits;
+            }
             else if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.StepRebound rebound })
             {
                 var executionId = rebound.ForExecutionId.Value;

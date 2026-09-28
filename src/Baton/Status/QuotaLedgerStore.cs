@@ -56,7 +56,8 @@ public sealed record QuotaLedgerEntry(
     long? WallClockMs = null,
     // The closed token set: FailureClassification's four member names verbatim (Retryable, Permanent,
     // ExhaustedUntil, ToolDenied), or one of Succeeded/Failed/Cancelled/Indeterminate/Arrested for an
-    // execution whose terminal event carries no classification -- see QuotaLedgerStore.BuildEntries.
+    // execution whose terminal event carries no classification, or Unresolved for a recovered grace
+    // claim without observed completion -- see QuotaLedgerStore.BuildEntries.
     // Display/grouping only, like WorkflowStatusStepView.FailureKind; nothing parses it back.
     [property: JsonPropertyName("outcome")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -102,13 +103,11 @@ public static class QuotaLedgerStore
         new("baton-quota-ledger", "quota ledger", entry => entry.Execution);
 
     /// <summary>
-    /// Builds one <see cref="QuotaLedgerEntry"/> per execution in <paramref name="entries"/> that has
-    /// both a recorded start and exit — the same population
-    /// <see cref="ExecutionUsageProjector.BuildByExecutionId"/> yields, reused rather than re-derived
-    /// (Architecture Rule 2: no second vendor-envelope reader). An execution missing either lifecycle
-    /// event (still running, or Flow crashed before Core recorded one) is entirely absent, same as
-    /// there: the accepted loss spec/baton.md §7 documents — "a lane that dies before settling" — is
-    /// this same gap, not a second one.
+    /// Builds one <see cref="QuotaLedgerEntry"/> for each row in the shared
+    /// <see cref="ExecutionUsageProjector.BuildByExecutionId"/> population (Architecture Rule 2: no
+    /// second vendor-envelope reader). Ordinarily that requires a Core start/exit pair; the one
+    /// exception is the projector's orphaned-child row. Its measurements stay unknown, and an
+    /// in-flight child is not a ledger entry.
     /// </summary>
     public static IReadOnlyList<QuotaLedgerEntry> BuildEntries(IReadOnlyList<LogEntry> entries, string roomDirectoryPath)
     {
@@ -124,7 +123,7 @@ public static class QuotaLedgerStore
         var resolvedBindings = ExecutionBindingResolver.Resolve(entries);
         var outcomeByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
         var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
-        var checkpointTerminalByExecutionId = new Dictionary<string, FlowEvent.ArtifactCheckpointCompleted>(StringComparer.Ordinal);
+        var terminalByExecutionId = new Dictionary<string, (CoreExitReason ExitReason, ArrestReason? ArrestReason)>(StringComparer.Ordinal);
         var exitedAtByExecutionId = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
@@ -141,6 +140,10 @@ public static class QuotaLedgerStore
 
             switch (flowEntry.Event)
             {
+                case FlowEvent.GraceTurnClaimed graceClaim:
+                    checkpointPredecessorByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.ParentExecutionId.Value;
+                    break;
+
                 case FlowEvent.ArtifactCheckpointAttempted checkpoint:
                     checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
                     break;
@@ -174,7 +177,25 @@ public static class QuotaLedgerStore
 
                 case FlowEvent.ArtifactCheckpointCompleted checkpoint:
                     outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.TerminalOutcome;
-                    checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint;
+                    terminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = (checkpoint.ExitReason, checkpoint.ArrestReason);
+                    break;
+
+                case FlowEvent.GraceTurnCompleted graceCompletion:
+                    outcomeByExecutionId[graceCompletion.GraceExecutionId.Value] = graceCompletion.ArrestReason is not null
+                        ? "Arrested"
+                        : graceCompletion.ExitReason switch
+                        {
+                            CoreExitReason.Natural => "NaturalExit",
+                            CoreExitReason.TimedOut => "TimedOut",
+                            CoreExitReason.CancelRequested => "CancelRequested",
+                            _ => "UnknownExit",
+                        };
+                    terminalByExecutionId[graceCompletion.GraceExecutionId.Value] =
+                        (graceCompletion.ExitReason, graceCompletion.ArrestReason);
+                    break;
+
+                case FlowEvent.GraceTurnSpendUnresolved unresolvedGrace:
+                    outcomeByExecutionId[unresolvedGrace.GraceExecutionId.Value] = "Unresolved";
                     break;
             }
         }
@@ -202,11 +223,11 @@ public static class QuotaLedgerStore
                 WallClockMs: usage.WallClockMs,
                 Outcome: outcome,
                 PredecessorExecution: checkpointPredecessorByExecutionId.GetValueOrDefault(executionId),
-                ExitReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out var checkpointTerminal)
-                    ? checkpointTerminal.ExitReason
+                ExitReason: terminalByExecutionId.TryGetValue(executionId, out var terminal)
+                    ? terminal.ExitReason
                     : null,
-                ArrestReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
-                    ? checkpointTerminal.ArrestReason
+                ArrestReason: terminalByExecutionId.TryGetValue(executionId, out terminal)
+                    ? terminal.ArrestReason
                     : null));
         }
 

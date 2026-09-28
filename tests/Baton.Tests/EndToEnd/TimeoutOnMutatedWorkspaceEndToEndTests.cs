@@ -101,9 +101,13 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
             // returns TimedOut in this fixture too, but its result never replaces the primary timeout
             // classification above.
             Assert.Equal(2, run.DispatchedTargets.Count);
-            var grace = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
-            Assert.False(grace.WorkspaceCleanAfter);
-            Assert.Equal(CoreExitReason.TimedOut, grace.ExitReason);
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var completion = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnCompleted>());
+            var safety = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnSafetyRecorded>());
+            Assert.False(safety.WorkspaceCleanAfter);
+            Assert.Equal(CoreExitReason.TimedOut, completion.ExitReason);
+            Assert.Equal("grace-turn", claim.Request.Limits?.TimeoutSource);
+            Assert.NotEqual(claim.ParentExecutionId, claim.GraceExecutionId);
         }
         finally
         {
@@ -282,13 +286,13 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
                 DeliversBranch: deliversBranch),
         };
 
+        await using var writer = new FlowEventLogWriter(logPath);
+        var reader = new FlowEventLogReader(logPath);
         var dispatcher = new TimingOutCoreDispatcher(
             workspace,
             mutateWorkspace,
-            satisfyContract ? artifactsRoot : null);
-
-        await using var writer = new FlowEventLogWriter(logPath);
-        var reader = new FlowEventLogReader(logPath);
+            satisfyContract ? artifactsRoot : null,
+            writer);
 
         // The fake `gh` lives OUTSIDE the workspace: a .cmd dropped inside it would be one more
         // untracked path and would move the count this test asserts on.
@@ -331,15 +335,23 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
     private sealed class TimingOutCoreDispatcher(
         string workspace,
         Action<string>? mutateOnFirstDispatch,
-        string? artifactsRootForDeclaredOutput = null) : ICoreDispatcher
+        string? artifactsRootForDeclaredOutput,
+        ICoreEventLogWriter coreEventLogWriter) : ICoreDispatcher
     {
         private readonly List<CoreDispatchTarget> _targets = [];
 
         public IReadOnlyList<CoreDispatchTarget> DispatchedTargets => _targets;
 
-        public Task<CoreDispatchResult> DispatchAsync(
+        public async Task<CoreDispatchResult> DispatchAsync(
             ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
         {
+            // CoreDispatcher durably records the process start before worker activity and its exit
+            // before DispatchAsync returns. Recovery uses these Core-owned facts to validate a
+            // timeout grace claim; returning a timeout result without them is not a faithful fake.
+            await coreEventLogWriter.AppendAsync(
+                new CoreEvent.ExecutionStarted(request.ExecutionId, Pid: 1), CancellationToken.None)
+                .ConfigureAwait(false);
+
             if (_targets.Count == 0)
             {
                 mutateOnFirstDispatch?.Invoke(workspace);
@@ -353,7 +365,17 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
             }
 
             _targets.Add(target);
-            return Task.FromResult(new CoreDispatchResult(0, CoreExitReason.TimedOut));
+            var result = new CoreDispatchResult(0, CoreExitReason.TimedOut);
+            await coreEventLogWriter.AppendAsync(
+                new CoreEvent.ExecutionExited(
+                    request.ExecutionId,
+                    result.ExitCode,
+                    result.Reason,
+                    result.StderrTail,
+                    result.TerminalSuccessObserved,
+                    result.TerminalResultObserved),
+                CancellationToken.None).ConfigureAwait(false);
+            return result;
         }
     }
 

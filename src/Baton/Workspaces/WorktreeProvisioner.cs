@@ -1,5 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
 using System.Linq;
 using Baton.Domain;
 
@@ -278,6 +281,7 @@ public static class WorktreeProvisioner
 
         try
         {
+            var workspaceIdentityDigest = FingerprintStrings(ReadWorkspaceIdentity(worktreePath));
             var (headCode, headOut, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
             var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
             var head = headOut.Trim();
@@ -304,9 +308,13 @@ public static class WorktreeProvisioner
                     worktreePath, endpointConfiguration.Value.Endpoint, remoteConfiguration.Value.MergeRef, cancellationToken)
                 .ConfigureAwait(false);
             return remoteTip is not null
+                && string.Equals(
+                    workspaceIdentityDigest,
+                    FingerprintStrings(ReadWorkspaceIdentity(worktreePath)),
+                    StringComparison.Ordinal)
                 ? new GraceCheckpoint(
                     head, branch, remoteConfiguration.Value.Remote, remoteConfiguration.Value.MergeRef, remoteTip,
-                    endpointConfiguration.Value.Endpoint, endpointConfiguration.Value.Configuration)
+                    endpointConfiguration.Value.Endpoint, endpointConfiguration.Value.Configuration, workspaceIdentityDigest)
                 : null;
         }
         catch (WorktreeProvisioningException)
@@ -318,6 +326,132 @@ public static class WorktreeProvisioner
     /// <summary>Compatibility entry point for callers that cannot carry cancellation.</summary>
     public static GraceCheckpoint? CaptureGraceCheckpoint(string? worktreePath) =>
         CaptureGraceCheckpointAsync(worktreePath, CancellationToken.None).GetAwaiter().GetResult();
+
+    /// <summary>Removes credential-bearing endpoint values while preserving exact replay identity.</summary>
+    public static GraceCheckpointEvidence CreateGraceCheckpointEvidence(string worktreePath, GraceCheckpoint checkpoint)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        var workspaceIdentity = ReadWorkspaceIdentity(worktreePath);
+        var workspaceIdentityDigest = FingerprintStrings(workspaceIdentity);
+        if (checkpoint.WorkspaceIdentityDigest is null
+            || !string.Equals(checkpoint.WorkspaceIdentityDigest, workspaceIdentityDigest, StringComparison.Ordinal))
+        {
+            throw new WorktreeProvisioningException("The captured grace workspace identity changed before the spend claim.");
+        }
+
+        return new GraceCheckpointEvidence(
+            checkpoint.Head,
+            checkpoint.BranchRef,
+            checkpoint.Remote,
+            checkpoint.MergeRef,
+            checkpoint.RemoteTip,
+            FingerprintStrings([checkpoint.Endpoint]),
+            FingerprintStrings(checkpoint.EndpointConfiguration),
+            checkpoint.WorkspaceIdentityDigest);
+    }
+
+    /// <summary>
+    /// Rebuilds the in-memory safety checkpoint only when local endpoint configuration still hashes
+    /// to the captured values. This performs no remote query; callers may probe the endpoint only
+    /// after this comparison succeeds.
+    /// </summary>
+    public static GraceCheckpoint? RehydrateGraceCheckpoint(string? worktreePath, GraceCheckpointEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!string.Equals(
+                    FingerprintStrings(ReadWorkspaceIdentity(worktreePath)),
+                    evidence.WorkspaceIdentityDigest,
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
+            if (branchCode != 0 || !string.Equals(branchOut.Trim(), evidence.BranchRef, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var remoteConfiguration = ReadBranchRemoteConfiguration(worktreePath, evidence.BranchRef);
+            if (remoteConfiguration is null
+                || !string.Equals(remoteConfiguration.Value.Remote, evidence.Remote, StringComparison.Ordinal)
+                || !string.Equals(remoteConfiguration.Value.MergeRef, evidence.MergeRef, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var endpointConfiguration = ReadFetchEndpointConfiguration(worktreePath, evidence.Remote);
+            if (endpointConfiguration is null
+                || !string.Equals(FingerprintStrings([endpointConfiguration.Value.Endpoint]), evidence.EndpointDigest, StringComparison.Ordinal)
+                || !string.Equals(FingerprintStrings(endpointConfiguration.Value.Configuration), evidence.EndpointConfigurationDigest, StringComparison.Ordinal)
+                || IsSelfRemoteEndpoint(worktreePath, endpointConfiguration.Value.Endpoint))
+            {
+                return null;
+            }
+
+            return new GraceCheckpoint(
+                evidence.Head,
+                evidence.BranchRef,
+                evidence.Remote,
+                evidence.MergeRef,
+                evidence.RemoteTip,
+                endpointConfiguration.Value.Endpoint,
+                endpointConfiguration.Value.Configuration,
+                evidence.WorkspaceIdentityDigest);
+        }
+        catch (WorktreeProvisioningException)
+        {
+            return null;
+        }
+    }
+
+    private static IReadOnlyList<string> ReadWorkspaceIdentity(string worktreePath)
+    {
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            throw new WorktreeProvisioningException("The captured grace workspace is unavailable.");
+        }
+
+        var (exitCode, stdout, _) = RunGit(worktreePath, "rev-parse", "--show-toplevel", "--git-dir");
+        if (exitCode != 0)
+        {
+            throw new WorktreeProvisioningException("Could not establish grace workspace identity.");
+        }
+
+        var lines = stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length != 2)
+        {
+            throw new WorktreeProvisioningException("Could not establish grace workspace identity.");
+        }
+
+        var root = Path.GetFullPath(lines[0]);
+        var gitDirectory = Path.GetFullPath(Path.Combine(root, lines[1]));
+        return [NormalizeForComparison(root), NormalizeForComparison(gitDirectory)];
+    }
+
+    private static string FingerprintStrings(IReadOnlyList<string> values)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Span<byte> length = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(length, values.Count);
+        hash.AppendData(length);
+        foreach (var value in values)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+            hash.AppendData(length);
+            hash.AppendData(bytes);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
 
     /// <summary>
     /// True only when the original symbolic branch remains checked out, its configured remote and merge
@@ -1348,7 +1482,8 @@ public sealed record GraceCheckpoint(
     string MergeRef,
     string RemoteTip,
     string Endpoint,
-    IReadOnlyList<string> EndpointConfiguration);
+    IReadOnlyList<string> EndpointConfiguration,
+    string? WorkspaceIdentityDigest = null);
 
 /// <summary>
 /// A worktree provisioned for a run, held so <c>WorktreeProvisioner.Teardown</c> can be called on it

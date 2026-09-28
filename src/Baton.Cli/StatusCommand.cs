@@ -742,10 +742,11 @@ public static class StatusCommand
 
     /// <summary>
     /// The room-wide roll-up (#1360's "one rolled-up line in human baton status"). Sums the per-execution
-    /// <see cref="ExecutionUsageView.WallClockMs"/> figures across every execution with both a start
-    /// and exit event, since that half is always derivable; a token/turn figure is summed and its
-    /// reporting count disclosed only when at least one execution actually carried it — an adapter (or
-    /// a text-mode dispatch) that reports none is silence, not a printed zero.
+    /// <see cref="ExecutionUsageView.WallClockMs"/> figures only where a start/exit pair provides a
+    /// duration; unresolved grace children remain counted but disclose that their duration is unknown.
+    /// A token/turn figure is summed and its reporting count disclosed only when at least one
+    /// execution actually carried it — an adapter (or a text-mode dispatch) that reports none is
+    /// silence, not a printed zero.
     /// <para>
     /// Labelled "execution time", not "wall-clock" (#1360 F4, review): parallel steps' executions
     /// overlap in real time, so this sum can exceed the room's own actual elapsed time — it is
@@ -770,12 +771,24 @@ public static class StatusCommand
             return "Usage: no completed executions yet.";
         }
 
-        var totalExecutionSeconds = usageByExecutionId.Values.Sum(u => u.WallClockMs) / 1000.0;
         var parts = new List<string>
         {
             $"{usageByExecutionId.Count} execution(s)",
-            $"{totalExecutionSeconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}s execution time",
         };
+
+        var executionsWithDuration = usageByExecutionId.Values.Where(usage => usage.WallClockMs is not null).ToArray();
+        if (executionsWithDuration.Length == 0)
+        {
+            parts.Add("execution time unknown");
+        }
+        else
+        {
+            var totalExecutionSeconds = executionsWithDuration.Sum(usage => usage.WallClockMs!.Value) / 1000.0;
+            var durationSuffix = executionsWithDuration.Length == usageByExecutionId.Count
+                ? string.Empty
+                : $" ({executionsWithDuration.Length}/{usageByExecutionId.Count} with duration)";
+            parts.Add($"{totalExecutionSeconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}s execution time{durationSuffix}");
+        }
 
         AppendTokenPart(parts, usageByExecutionId, u => u.BilledTokens, "billed tokens");
         AppendTokenPart(parts, usageByExecutionId, u => u.TokensIn, "tokens in");

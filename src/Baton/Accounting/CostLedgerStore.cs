@@ -10,7 +10,8 @@ namespace Baton.Accounting;
 /// Reads and writes the repository-keyed cost ledger (#1849 phase A) —
 /// <c>{BatonPaths.Root}/&lt;repo-slug&gt;/cost-ledger.jsonl</c> since #2041, resolved by
 /// <see cref="CostLedgerLocation"/> rather than spelled at a call site — one immutable append-only row
-/// per settled execution attempt. Shares the whole append-only JSONL store — <see cref="JsonLinesLedger{TEntry}"/>,
+/// for each projectable execution. Recovery can project an orphaned grace child's unknown spend;
+/// a still-running claim cannot enter the ledger. Shares the whole append-only JSONL store — <see cref="JsonLinesLedger{TEntry}"/>,
 /// and through it <see cref="MutexGuardedFileLock"/> — with <c>QuotaLedgerStore</c> (#1884) rather than
 /// introducing a second copy of it or a third concurrency mechanism, under its own lock name prefix so
 /// the three files never contend with each other.
@@ -48,10 +49,10 @@ public static partial class CostLedgerStore
     internal const string ModelMismatchReason = "model-mismatch";
 
     /// <summary>
-    /// Builds one <see cref="CostLedgerEntry"/> per execution in <paramref name="entries"/> that has
-    /// both a recorded start and exit — the same population <c>QuotaLedgerStore.BuildEntries</c> yields,
-    /// for the same stated reason: an execution missing a lifecycle event has no wall-clock to derive
-    /// and is absent rather than reported as zero (spec/baton.md §7's accepted loss, not a second one).
+    /// Builds one <see cref="CostLedgerEntry"/> per row in the shared usage projection — the same
+    /// population <c>QuotaLedgerStore.BuildEntries</c> yields. Ordinarily that requires a recorded
+    /// start and exit; the projector also admits an orphaned grace child's unknown-spend row,
+    /// leaving duration and usage absent rather than inventing values.
     /// <b>A retry or redispatch is a separate row</b>, with no extra machinery: every dispatch mints a
     /// fresh <c>ExecutionId</c>, so two attempts of one step are two executions here.
     /// </summary>
@@ -128,6 +129,7 @@ public static partial class CostLedgerStore
         var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
         var checkpointTerminalByExecutionId = new Dictionary<string, (CoreExitReason ExitReason, ArrestReason? ArrestReason)>(StringComparer.Ordinal);
         var arrestReasonByExecutionId = new Dictionary<string, ArrestReason?>(StringComparer.Ordinal);
+        var graceChildExecutionIds = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
         {
@@ -153,6 +155,12 @@ public static partial class CostLedgerStore
             {
                 case FlowEvent.ExecutionRequestAccepted accepted:
                     requestByExecutionId[accepted.Request.ExecutionId.Value] = accepted.Request;
+                    break;
+
+                case FlowEvent.GraceTurnClaimed graceClaim:
+                    requestByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.Request;
+                    checkpointPredecessorByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.ParentExecutionId.Value;
+                    graceChildExecutionIds.Add(graceClaim.GraceExecutionId.Value);
                     break;
 
                 case FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } checkpoint:
@@ -204,6 +212,25 @@ public static partial class CostLedgerStore
                     outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.TerminalOutcome;
                     checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = (checkpoint.ExitReason, checkpoint.ArrestReason);
                     break;
+
+                case FlowEvent.GraceTurnCompleted graceCompletion:
+                    outcomeByExecutionId[graceCompletion.GraceExecutionId.Value] = graceCompletion.ArrestReason is not null
+                        ? "Arrested"
+                        : graceCompletion.ExitReason switch
+                        {
+                            CoreExitReason.Natural => "NaturalExit",
+                            CoreExitReason.TimedOut => "TimedOut",
+                            CoreExitReason.CancelRequested => "CancelRequested",
+                            _ => "UnknownExit",
+                        };
+                    checkpointTerminalByExecutionId[graceCompletion.GraceExecutionId.Value] =
+                        (graceCompletion.ExitReason, graceCompletion.ArrestReason);
+                    break;
+
+                case FlowEvent.GraceTurnSpendUnresolved unresolvedGrace:
+                    outcomeByExecutionId[unresolvedGrace.GraceExecutionId.Value] = "Unresolved";
+                    checkpointPredecessorByExecutionId[unresolvedGrace.GraceExecutionId.Value] = unresolvedGrace.ParentExecutionId.Value;
+                    break;
             }
         }
 
@@ -232,8 +259,11 @@ public static partial class CostLedgerStore
             // #1927: the requested model, else this worker's stamp (RoomBindingStamps.ModelResolvedByWorker
             // states the precedence and why intent always wins). Applied before pricing on purpose:
             // withholding it from Estimate would keep refusing to price a room whose model is known.
+            // A grace child keeps the model captured in its claim. If the claim omitted one, a
+            // later worker rebind is not evidence of which model that child actually used.
             var resolvedModel = binding.Model
-                ?? (request?.Worker is { } modelWorker && modelResolvedByWorker is not null
+                ?? (!graceChildExecutionIds.Contains(executionId)
+                    && request?.Worker is { } modelWorker && modelResolvedByWorker is not null
                     && modelResolvedByWorker.TryGetValue(modelWorker, out var stampedModel)
                         ? stampedModel
                         : null);
@@ -614,6 +644,7 @@ public static partial class CostLedgerStore
             Workflow: last.Workflow,
             Step: last.Step,
             Execution: execution + ResolutionExecutionSuffix(resolution),
+            PredecessorExecution: last.PredecessorExecution,
             Role: last.Role,
             Outcome: last.Outcome,
             Issue: last.Issue,
