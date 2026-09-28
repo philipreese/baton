@@ -239,6 +239,12 @@ internal sealed class CodexSteeringIngress : IAsyncDisposable
                     {
                         // Overlong/malformed framing or unavailable durable state closes the connection.
                     }
+                    catch (WorkflowLockedException)
+                    {
+                        // A later receipt lookup can time out after a prior send was claimed.
+                        // Do not invent a queued or rejected answer; the caller must query the
+                        // durable journal after contention clears. Keep this ingress listening.
+                    }
                     catch (IOException) when (!_lifetime.IsCancellationRequested)
                     {
                         // A client may disconnect; the durable room facts answer what happened.
