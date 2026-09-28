@@ -1418,7 +1418,7 @@ public sealed class CostLedgerStoreTests
     }
 
     /// <summary>
-    /// #1921's three tool-step figures reach the row from the settle-time stream read, and the two
+    /// #1921's tool-step figures reach the row from the settle-time stream read, and the two
     /// readings a reader must never confuse are pinned as separate arms:
     /// <list type="bullet">
     /// <item><b>refused</b> — a stream carrying a marked refusal reports <c>refusedToolSteps: 1</c>.</item>
@@ -1432,11 +1432,11 @@ public sealed class CostLedgerStoreTests
     /// present-only test passes on a build that writes <c>0</c> for both.
     /// </summary>
     [Theory]
-    [InlineData("refused", 3, 1, 1)]
-    [InlineData("clean", 1, 0, 0)]
-    [InlineData("prose", null, null, null)]
+    [InlineData("refused", 3, 1, 1, 3)]
+    [InlineData("clean", 1, 0, 0, 1)]
+    [InlineData("prose", null, null, null, null)]
     public void The_tool_step_figures_reach_the_row_as_counted_and_stay_absent_rather_than_zero_when_unread(
-        string shape, int? expectedSteps, int? expectedRefused, int? expectedRepeated)
+        string shape, int? expectedSteps, int? expectedRefused, int? expectedRepeated, int? expectedKeyable)
     {
         var room = NewRoom();
         try
@@ -1469,6 +1469,7 @@ public sealed class CostLedgerStoreTests
             Assert.Equal(expectedSteps, row.ToolSteps);
             Assert.Equal(expectedRefused, row.RefusedToolSteps);
             Assert.Equal(expectedRepeated, row.RepeatedToolSteps);
+            Assert.Equal(expectedKeyable, row.KeyableToolSteps);
 
             var json = JsonSerializer.Serialize(row);
             if (expectedSteps is { } steps)
@@ -1476,17 +1477,20 @@ public sealed class CostLedgerStoreTests
                 Assert.Contains($"\"toolSteps\":{steps}", json, StringComparison.Ordinal);
                 Assert.Contains($"\"refusedToolSteps\":{expectedRefused}", json, StringComparison.Ordinal);
                 Assert.Contains($"\"repeatedToolSteps\":{expectedRepeated}", json, StringComparison.Ordinal);
+                Assert.Contains($"\"keyableToolSteps\":{expectedKeyable}", json, StringComparison.Ordinal);
             }
             else
             {
                 Assert.DoesNotContain("\"toolSteps\"", json, StringComparison.Ordinal);
                 Assert.DoesNotContain("\"refusedToolSteps\"", json, StringComparison.Ordinal);
                 Assert.DoesNotContain("\"repeatedToolSteps\"", json, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"keyableToolSteps\"", json, StringComparison.Ordinal);
             }
 
             // The round trip, because a JSON name a reader cannot read back is half a contract.
             var readBack = JsonSerializer.Deserialize<CostLedgerEntry>(json)!;
             Assert.Equal(expectedRefused, readBack.RefusedToolSteps);
+            Assert.Equal(expectedKeyable, readBack.KeyableToolSteps);
         }
         finally
         {

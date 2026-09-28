@@ -22,7 +22,7 @@ namespace Baton.Status;
 /// <see cref="IWorkerUsageParser.ToolInvocationKeys"/>'s documented gap, not a measurement of no repeats.
 /// </param>
 /// <param name="EmptyResults">Σ <see cref="IWorkerUsageParser.CountEmptyToolResults"/>.</param>
-public readonly record struct ToolStepCounts(int ToolSteps, int Refused, int Repeated, int EmptyResults);
+public readonly record struct ToolStepCounts(int ToolSteps, int Refused, int Repeated, int EmptyResults, int Keyable = 0);
 
 /// <summary>
 /// Accumulates <see cref="ToolStepCounts"/> across one execution's captured stdout, one line at a time
@@ -56,6 +56,7 @@ public sealed class ToolStepTally
     private int _toolSteps;
     private int _refused;
     private int _emptyResults;
+    private int _keyable;
 
     public ToolStepTally(IWorkerUsageParser parser)
     {
@@ -75,7 +76,9 @@ public sealed class ToolStepTally
         _refused += _parser.CountRefusedToolSteps(rawLine);
         _emptyResults += _parser.CountEmptyToolResults(rawLine);
 
-        foreach (var key in _parser.ToolInvocationKeys(rawLine))
+        var keys = _parser.ToolInvocationKeys(rawLine);
+        _keyable += keys.Count;
+        foreach (var key in keys)
         {
             _keyOccurrences[key] = _keyOccurrences.TryGetValue(key, out var seen) ? seen + 1 : 1;
         }
@@ -117,6 +120,6 @@ public sealed class ToolStepTally
             return null;
         }
 
-        return new ToolStepCounts(_toolSteps, _refused, repeated, _emptyResults);
+        return new ToolStepCounts(_toolSteps, _refused, repeated, _emptyResults, _keyable);
     }
 }

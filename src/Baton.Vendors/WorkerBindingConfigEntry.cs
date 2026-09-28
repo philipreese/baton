@@ -301,6 +301,7 @@ public sealed record WorkerBindingConfigEntry(
     MemoryAddDispatchGrant? MemoryAddGrant = null,
     string? ExactFileRestoreBaseSha = null,
     ExecutionLimitResolution? ExecutionLimitResolution = null,
+    int? MaxRepeatedToolSteps = null,
     IReadOnlyList<string>? AttachmentNames = null);
 
 /// <summary>

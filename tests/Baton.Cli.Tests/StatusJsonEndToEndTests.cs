@@ -160,7 +160,12 @@ public class StatusJsonEndToEndTests
             Turns: 2,
             CacheReadTokens: 300,
             CacheCreationTokens: 400,
-            ThinkingTokens: 50);
+            ThinkingTokens: 50,
+            RepeatedToolSteps: 2,
+            KeyableToolSteps: 3,
+            Limits: new ExecutionLimitEvidence(
+                TimeSpan.FromMinutes(5), null, null, null, MonitorInputsKnown: true,
+                MaxRepeatedToolSteps: 8, MaxRepeatedToolStepsSource: "dispatch-override"));
 
         var rawJson = JsonSerializer.Serialize(usage);
 
@@ -171,6 +176,10 @@ public class StatusJsonEndToEndTests
         Assert.Contains("\"cacheReadTokens\":300", rawJson);
         Assert.Contains("\"cacheCreationTokens\":400", rawJson);
         Assert.Contains("\"thinkingTokens\":50", rawJson);
+        Assert.Contains("\"repeatedToolSteps\":2", rawJson);
+        Assert.Contains("\"keyableToolSteps\":3", rawJson);
+        Assert.Contains("\"maxRepeatedToolSteps\":8", rawJson);
+        Assert.Contains("\"maxRepeatedToolStepsSource\":\"dispatch-override\"", rawJson);
     }
 
     [Fact]

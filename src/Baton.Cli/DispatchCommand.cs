@@ -1297,6 +1297,14 @@ public static class DispatchCommand
                 "remove the --max-tool-steps flag, or dispatch a single role instead of a template.");
         }
 
+        if (options.MaxRepeatedToolSteps is not null)
+        {
+            throw new CliArgumentException(
+                $"'{options.Name}' is a workflow template — each phase carries its own repeated-call cap, "
+                + "so --max-repeated-tool-steps does not apply to one of them.",
+                "remove --max-repeated-tool-steps, or dispatch a single role.");
+        }
+
         if (options.BilledRateLimit is not null)
         {
             throw new CliArgumentException(
@@ -1429,6 +1437,7 @@ public static class DispatchCommand
             modelOverride: options.Model, effortOverride: options.Effort, outputOverride: options.OutputPath,
             timeoutOverride: options.Timeout, attachments: options.Attachments, roomDirectoryPath: options.RoomDirectoryPath,
             tokenBudgetOverride: options.TokenBudget, maxToolStepsOverride: options.MaxToolSteps,
+            maxRepeatedToolStepsOverride: options.MaxRepeatedToolSteps,
             billedRateLimitOverride: options.BilledRateLimit,
             verifyCommandOverride: options.VerifyCommand, expectPrOverride: options.ExpectPr,
             verifyResultsPath: VerifyResultsPath(options),
@@ -1479,13 +1488,15 @@ public static class DispatchCommand
             role.MaxToolSteps,
             options.Timeout,
             options.TokenBudget,
-            options.MaxToolSteps);
+            options.MaxToolSteps,
+            options.MaxRepeatedToolSteps);
 
         return binding with
         {
             Timeout = resolution.Timeout,
             TokenBudget = resolution.TokenBudget,
             MaxToolSteps = resolution.MaxToolSteps,
+            MaxRepeatedToolSteps = resolution.MaxRepeatedToolSteps,
             ExecutionLimitResolution = resolution,
         };
     }

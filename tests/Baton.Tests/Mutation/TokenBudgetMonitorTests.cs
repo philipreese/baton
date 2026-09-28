@@ -14,6 +14,58 @@ namespace Baton.Tests.Mutation;
 public sealed class TokenBudgetMonitorTests
 {
     [Fact]
+    public void Explicit_repeated_tool_cap_arrests_only_when_a_keyed_call_repeats()
+    {
+        var monitor = new TokenBudgetMonitor(
+            budget: null,
+            maxToolSteps: null,
+            billedRateLimit: null,
+            new ClaudeUsageParser(),
+            maxRepeatedToolSteps: 1);
+
+        monitor.OnStdoutLine(ClaudeCall("Bash", "cat a.txt"));
+        monitor.OnStdoutLine(ClaudeCall("Bash", "cat b.txt"));
+        Assert.False(monitor.Arrested);
+        monitor.OnStdoutLine(ClaudeCall("Bash", "cat a.txt"));
+        Assert.False(monitor.Arrested);
+        monitor.OnStdoutLine(ClaudeCall("Bash", "cat a.txt"));
+
+        Assert.True(monitor.Arrested);
+        Assert.Equal(ArrestReason.RepeatedToolCallCap, monitor.ArrestReasonValue);
+        Assert.Equal(4, monitor.SnapshotToolStepCount());
+        Assert.Equal(4, monitor.SnapshotKeyableToolStepCount());
+        Assert.Equal(2, monitor.SnapshotRepeatedToolStepCount());
+    }
+
+    [Fact]
+    public void Claude_calls_without_input_are_unkeyable_and_do_not_trigger_a_fabricated_repeat()
+    {
+        const string callWithoutInput =
+            """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}""";
+        var monitor = new TokenBudgetMonitor(
+            budget: null,
+            maxToolSteps: null,
+            billedRateLimit: null,
+            new ClaudeUsageParser(),
+            maxRepeatedToolSteps: 1);
+
+        monitor.OnStdoutLine(callWithoutInput);
+        monitor.OnStdoutLine(callWithoutInput);
+
+        Assert.False(monitor.Arrested);
+        Assert.Equal(2, monitor.SnapshotToolStepCount());
+        Assert.Equal(0, monitor.SnapshotKeyableToolStepCount());
+        Assert.Equal(0, monitor.SnapshotRepeatedToolStepCount());
+    }
+
+    private static string ClaudeCall(string name, string command) =>
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\""
+        + name
+        + "\",\"input\":{\"command\":\""
+        + command
+        + "\"}}]}}";
+
+    [Fact]
     public void ArrestRequested_fires_once_the_running_SUM_of_billed_tokens_crosses_the_budget()
     {
         // #1682: billed is additive across turns, NOT a level -- unlike the pre-#1682 arithmetic this

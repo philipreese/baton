@@ -13,6 +13,7 @@ public sealed record ExecutionLimitProfile
     public TimeSpan Timeout { get; init; }
     public long TokenBudget { get; init; }
     public int MaxToolSteps { get; init; }
+    public int? MaxRepeatedToolSteps { get; init; }
 }
 
 public sealed record ExecutionLimitResolution(
@@ -23,7 +24,9 @@ public sealed record ExecutionLimitResolution(
     TimeSpan Timeout,
     long? TokenBudget,
     int? MaxToolSteps,
-    string? OriginatingSelectionKey = null);
+    string? OriginatingSelectionKey = null,
+    string? MaxRepeatedToolStepsSource = null,
+    int? MaxRepeatedToolSteps = null);
 
 public static class ExecutionLimitSource
 {
@@ -51,7 +54,8 @@ public static class ExecutionLimitProfileResolver
         int? roleMaxToolSteps,
         TimeSpan? timeoutOverride = null,
         long? tokenBudgetOverride = null,
-        int? maxToolStepsOverride = null)
+        int? maxToolStepsOverride = null,
+        int? maxRepeatedToolStepsOverride = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(adapter);
         ArgumentException.ThrowIfNullOrWhiteSpace(role);
@@ -72,7 +76,10 @@ public static class ExecutionLimitProfileResolver
             timeoutOverride ?? profile?.Timeout ?? roleTimeout,
             tokenBudgetOverride ?? profile?.TokenBudget ?? roleTokenBudget,
             maxToolStepsOverride ?? profile?.MaxToolSteps ?? roleMaxToolSteps,
-            selectedKey);
+            selectedKey,
+            maxRepeatedToolStepsOverride is not null ? ExecutionLimitSource.DispatchOverride
+                : profile?.MaxRepeatedToolSteps is not null ? ExecutionLimitSource.Profile : null,
+            maxRepeatedToolStepsOverride ?? profile?.MaxRepeatedToolSteps);
     }
 
     /// <summary>Check a recorded selection against the exact normalized key this resolver produces.</summary>
@@ -101,6 +108,7 @@ public static class ExecutionLimitProfileResolver
                 throw Invalid(index, "timeout must be finite and positive");
             if (profile.TokenBudget <= 0) throw Invalid(index, "token budget must be positive");
             if (profile.MaxToolSteps <= 0) throw Invalid(index, "tool steps must be positive");
+            if (profile.MaxRepeatedToolSteps is <= 0) throw Invalid(index, "repeated tool steps must be positive");
             var key = new ExecutionLimitProfileKey(profile.Adapter, profile.Model, profile.Role, size);
             if (!keys.Add(key)) throw Invalid(index, $"duplicate normalized key '{key}'");
         }

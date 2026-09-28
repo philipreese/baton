@@ -100,6 +100,8 @@ public sealed record QueueItem
 
     public int? MaxToolSteps { get; init; }
 
+    public int? MaxRepeatedToolSteps { get; init; }
+
     public long? TokenBudget { get; init; }
 
     /// <summary>The audited runway-hold bypass forwarded as <c>--override-runway</c>. Null means the

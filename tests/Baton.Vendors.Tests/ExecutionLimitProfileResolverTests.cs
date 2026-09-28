@@ -51,6 +51,63 @@ public class ExecutionLimitProfileResolverTests
     }
 
     [Fact]
+    public void Repeated_call_cap_has_only_profile_or_explicit_override_sources_and_no_role_default()
+    {
+        var profile = Profile("sonnet", 20, 2000, 20) with { MaxRepeatedToolSteps = 9 };
+        var selected = ExecutionLimitProfileResolver.Resolve(
+            [profile], "claude", "sonnet", "review", DeclaredTaskSize.Medium,
+            TimeSpan.FromMinutes(5), null, null);
+        var overridden = ExecutionLimitProfileResolver.Resolve(
+            [profile], "claude", "sonnet", "review", DeclaredTaskSize.Medium,
+            TimeSpan.FromMinutes(5), null, null, maxRepeatedToolStepsOverride: 4);
+        var noProfile = ExecutionLimitProfileResolver.Resolve(
+            null, "claude", "sonnet", "review", DeclaredTaskSize.Medium,
+            TimeSpan.FromMinutes(5), null, null);
+
+        Assert.Equal(9, selected.MaxRepeatedToolSteps);
+        Assert.Equal(ExecutionLimitSource.Profile, selected.MaxRepeatedToolStepsSource);
+        Assert.Equal(4, overridden.MaxRepeatedToolSteps);
+        Assert.Equal(ExecutionLimitSource.DispatchOverride, overridden.MaxRepeatedToolStepsSource);
+        Assert.Null(noProfile.MaxRepeatedToolSteps);
+        Assert.Null(noProfile.MaxRepeatedToolStepsSource);
+    }
+
+    [Fact]
+    public void Same_role_profiles_can_set_different_repeated_call_caps_for_different_models()
+    {
+        var profiles = new[]
+        {
+            Profile("opus", 20, 2000, 20) with { MaxRepeatedToolSteps = 7 },
+            Profile("sonnet", 20, 2000, 20) with { MaxRepeatedToolSteps = 3 },
+        };
+
+        var opus = ExecutionLimitProfileResolver.Resolve(
+            profiles, "claude", "opus", "review", DeclaredTaskSize.Medium,
+            TimeSpan.FromMinutes(5), null, null);
+        var sonnet = ExecutionLimitProfileResolver.Resolve(
+            profiles, "claude", "sonnet", "review", DeclaredTaskSize.Medium,
+            TimeSpan.FromMinutes(5), null, null);
+
+        Assert.Equal(7, opus.MaxRepeatedToolSteps);
+        Assert.Equal(ExecutionLimitSource.Profile, opus.MaxRepeatedToolStepsSource);
+        Assert.Equal("claude/opus/review/medium", opus.ChosenKey);
+        Assert.Equal(3, sonnet.MaxRepeatedToolSteps);
+        Assert.Equal(ExecutionLimitSource.Profile, sonnet.MaxRepeatedToolStepsSource);
+        Assert.Equal("claude/sonnet/review/medium", sonnet.ChosenKey);
+    }
+
+    [Fact]
+    public void A_nonpositive_profile_repeated_call_cap_is_rejected()
+    {
+        var profile = Profile("sonnet", 20, 2000, 20) with { MaxRepeatedToolSteps = 0 };
+
+        var exception = Assert.Throws<ExecutionLimitProfileConfigurationException>(
+            () => ExecutionLimitProfileResolver.Validate([profile]));
+
+        Assert.Contains("repeated tool steps must be positive", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_missing_profile_preserves_role_defaults_with_truthful_sources()
     {
         var result = ExecutionLimitProfileResolver.Resolve(

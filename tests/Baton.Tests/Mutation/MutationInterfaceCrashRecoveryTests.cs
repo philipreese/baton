@@ -7,6 +7,7 @@ using Baton.Outcomes;
 using Baton.Status;
 using Baton.Store;
 using Baton.Tests.TestSupport;
+using System.Text.Json;
 
 namespace Baton.Tests.Mutation;
 
@@ -28,6 +29,210 @@ public class MutationInterfaceCrashRecoveryTests
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
     private static readonly CoreDispatchResult Succeeded = new(0, CoreExitReason.Natural);
+
+    [Fact]
+    public async Task An_explicit_repeated_call_cap_refuses_a_parserless_binding_before_accept_or_spawn()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var bindings = MakeBindings(adapter: "unregistered", maxRepeatedToolSteps: 5);
+            var stub = new StubCoreDispatcher();
+
+            var exception = await Assert.ThrowsAsync<InvalidRoomMutationException>(async () =>
+                await MutationInterface.StartWorkflowAsync(
+                    new WorkflowId("wf"), roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                    cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Contains("no tool-identity parser", exception.Message, StringComparison.Ordinal);
+            Assert.Empty(await reader.ReadAllAsync(TestContext.Current.CancellationToken));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Legacy_capped_pre_spawn_resubmit_refuses_parserless_binding_before_rebound_or_spawn()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-legacy-capped-parserless");
+            await AcceptRequestAsync(writer, workflowId, artifactsRoot, A,
+                adapter: "unregistered", model: "legacy-model");
+            var originalJournalEvents = SerializeEvents(await reader.ReadAllAsync(TestContext.Current.CancellationToken));
+            var bindings = MakeBindings(adapter: "unregistered", maxRepeatedToolSteps: 5);
+            var stub = new StubCoreDispatcher();
+
+            var exception = await Assert.ThrowsAsync<InvalidRoomMutationException>(async () =>
+                await MutationInterface.StartWorkflowAsync(
+                    workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                    cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Contains("no tool-identity parser", exception.Message, StringComparison.Ordinal);
+            Assert.Equal(originalJournalEvents, SerializeEvents(
+                await reader.ReadAllAsync(TestContext.Current.CancellationToken)));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Legacy_limitless_request_records_only_new_cap_when_resubmitting_known_binding()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-legacy-limits-capped");
+            var executionId = await AcceptRequestAsync(
+                writer, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet");
+            var appliedLimits = new ExecutionLimitEvidence(
+                Timeout, null, null, null, MonitorInputsKnown: true,
+                MaxRepeatedToolSteps: 5, MaxRepeatedToolStepsSource: "dispatch-override");
+            var bindings = MakeBindings(
+                adapter: "claude", model: "sonnet", maxRepeatedToolSteps: 5, limitEvidence: appliedLimits);
+            var stub = new StubCoreDispatcher();
+            var result = stub.EnqueueResult(A);
+
+            var runTask = MutationInterface.StartWorkflowAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(A, await ReadNextDispatchAsync(stub));
+            Assert.Equal(5, stub.LastDispatchedRequest!.Limits!.MaxRepeatedToolSteps);
+            result.SetResult(Succeeded);
+            await runTask;
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            var accepted = Assert.Single(events.OfType<FlowEvent.ExecutionRequestAccepted>());
+            Assert.Null(accepted.Request.Limits);
+            var rebound = Assert.Single(events.OfType<FlowEvent.StepRebound>());
+            Assert.Equal(executionId, rebound.ForExecutionId);
+            Assert.Null(rebound.PreviousLimits);
+            Assert.False(rebound.NewLimits!.MonitorInputsKnown);
+            Assert.Null(rebound.NewLimits.TokenBudget);
+            Assert.Null(rebound.NewLimits.MaxToolSteps);
+            Assert.Equal(5, rebound.NewLimits.MaxRepeatedToolSteps);
+            Assert.Equal("dispatch-override", rebound.NewLimits.MaxRepeatedToolStepsSource);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Legacy_unrecorded_binding_refuses_new_cap_without_fabricating_adapter_rebound()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var workflowId = new WorkflowId("wf-legacy-unknown-binding-capped");
+            await AcceptRequestAsync(writer, workflowId, artifactsRoot, A);
+            var journal = SerializeEvents(await reader.ReadAllAsync(TestContext.Current.CancellationToken));
+            var bindings = MakeBindings(adapter: "claude", model: "sonnet", maxRepeatedToolSteps: 5);
+            var stub = new StubCoreDispatcher();
+
+            var exception = await Assert.ThrowsAsync<InvalidRoomMutationException>(async () =>
+                await MutationInterface.StartWorkflowAsync(
+                    workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                    cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Contains("did not record its adapter or model", exception.Message, StringComparison.Ordinal);
+            Assert.Equal(journal, SerializeEvents(await reader.ReadAllAsync(TestContext.Current.CancellationToken)));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Capped_resubmit_refuses_unknown_journal_events_before_any_append_or_spawn()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            var workflowId = new WorkflowId("wf-unknown-journal-capped");
+            await using (var initialWriter = new FlowEventLogWriter(logPath))
+            {
+                await AcceptRequestAsync(
+                    initialWriter, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet");
+            }
+
+            await File.AppendAllTextAsync(logPath,
+                """{"owner":"flow","Event":{"eventType":"futureEventKind"}}""" + "\n",
+                TestContext.Current.CancellationToken);
+            var originalJournalBytes = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var bindings = MakeBindings(adapter: "claude", model: "sonnet", maxRepeatedToolSteps: 5);
+            var stub = new StubCoreDispatcher();
+            var reader = new FlowEventLogReader(logPath);
+
+            await using (var writer = new FlowEventLogWriter(logPath))
+            {
+                await Assert.ThrowsAsync<FlowEventLogReadException>(async () =>
+                    await MutationInterface.StartWorkflowAsync(
+                        workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                        cancellationToken: TestContext.Current.CancellationToken));
+            }
+
+            Assert.Equal(originalJournalBytes,
+                await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Direct_process_binding_refuses_a_nonpositive_repeat_cap_before_accept_or_spawn()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var bindings = MakeBindings(adapter: "claude", maxRepeatedToolSteps: -1);
+            var stub = new StubCoreDispatcher();
+
+            var exception = await Assert.ThrowsAsync<InvalidRoomMutationException>(async () =>
+                await MutationInterface.StartWorkflowAsync(
+                    new WorkflowId("wf-invalid-repeat-cap"), roomDirectory, snapshot, bindings,
+                    artifactsRoot, reader, writer, stub,
+                    cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Contains("positive integer", exception.Message, StringComparison.Ordinal);
+            Assert.Empty(await reader.ReadAllAsync(TestContext.Current.CancellationToken));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
 
     [Fact]
     public async Task StartWorkflowAsync_resubmits_an_execution_with_no_recorded_ExecutionStarted_under_the_same_ExecutionId()
@@ -62,6 +267,292 @@ public class MutationInterfaceCrashRecoveryTests
             // The same attempt, not a retry: no new ExecutionRequestAccepted for this step.
             var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
             Assert.Single(events.OfType<FlowEvent.ExecutionRequestAccepted>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Capped_pre_spawn_resubmit_proves_empty_capture_before_journaling_uncapped_to_capped_rebound()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var acceptedLimits = new ExecutionLimitEvidence(Timeout, null, null, null, MonitorInputsKnown: true);
+            var childLimits = acceptedLimits with
+            {
+                MaxRepeatedToolSteps = 3,
+                MaxRepeatedToolStepsSource = "dispatch-override",
+            };
+            var bindings = MakeBindings(
+                adapter: "claude",
+                maxRepeatedToolSteps: 3,
+                limitEvidence: childLimits);
+            var workflowId = new WorkflowId("wf");
+            var executionId = await AcceptRequestAsync(
+                writer, workflowId, artifactsRoot, A, adapter: "claude", limits: acceptedLimits);
+
+            var stub = new StubCoreDispatcher();
+            var result = stub.EnqueueResult(A);
+            var runTask = MutationInterface.StartWorkflowAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(A, await ReadNextDispatchAsync(stub));
+            Assert.Equal(executionId, stub.LastDispatchedRequest!.ExecutionId);
+            result.SetResult(Succeeded);
+            await runTask;
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            var accepted = Assert.Single(events.OfType<FlowEvent.ExecutionRequestAccepted>());
+            var rebound = Assert.Single(events.OfType<FlowEvent.StepRebound>());
+            Assert.Equal(executionId, accepted.Request.ExecutionId);
+            Assert.Null(accepted.Request.Limits!.MaxRepeatedToolSteps);
+            Assert.Equal(3, rebound.NewLimits!.MaxRepeatedToolSteps);
+            Assert.Equal("dispatch-override", rebound.NewLimits.MaxRepeatedToolStepsSource);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Same_value_repeat_cap_rebind_records_changed_profile_to_override_source()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var acceptedLimits = new ExecutionLimitEvidence(
+                Timeout, null, null, null, MonitorInputsKnown: true,
+                MaxRepeatedToolSteps: 3, MaxRepeatedToolStepsSource: "profile");
+            var currentLimits = acceptedLimits with { MaxRepeatedToolStepsSource = "dispatch-override" };
+            var bindings = MakeBindings(
+                adapter: "claude", maxRepeatedToolSteps: 3, limitEvidence: currentLimits);
+            var workflowId = new WorkflowId("wf-repeat-source-rebound");
+            var executionId = await AcceptRequestAsync(
+                writer, workflowId, artifactsRoot, A, adapter: "claude", limits: acceptedLimits);
+
+            var stub = new StubCoreDispatcher();
+            var result = stub.EnqueueResult(A);
+            var runTask = MutationInterface.StartWorkflowAsync(
+                workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(A, await ReadNextDispatchAsync(stub));
+            result.SetResult(Succeeded);
+            await runTask;
+
+            var rebound = Assert.Single((await reader.ReadAllAsync(TestContext.Current.CancellationToken))
+                .OfType<FlowEvent.StepRebound>());
+            Assert.Equal(executionId, rebound.ForExecutionId);
+            Assert.Equal("profile", rebound.PreviousLimits!.MaxRepeatedToolStepsSource);
+            Assert.Equal("dispatch-override", rebound.NewLimits!.MaxRepeatedToolStepsSource);
+            Assert.Equal(3, rebound.NewLimits.MaxRepeatedToolSteps);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Theory]
+    [InlineData(".stdout.log", "unkeyable captured bytes")]
+    [InlineData(".stdout.log", """{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"true"}}]}}""")]
+    [InlineData(".stdout.log.write-failed", "loss")]
+    [InlineData(".stdout.log", "<directory>")]
+    public async Task Capped_pre_spawn_resubmit_refuses_nonempty_or_lossy_capture_before_any_append(
+        string fileName, string content)
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            await using var writer = new FlowEventLogWriter(logPath);
+            var reader = new FlowEventLogReader(logPath);
+            var acceptedLimits = new ExecutionLimitEvidence(Timeout, null, null, null, MonitorInputsKnown: true);
+            var childLimits = acceptedLimits with { MaxRepeatedToolSteps = 3 };
+            var bindings = MakeBindings(adapter: "claude", maxRepeatedToolSteps: 3, limitEvidence: childLimits);
+            var workflowId = new WorkflowId("wf");
+            var executionId = await AcceptRequestAsync(
+                writer, workflowId, artifactsRoot, A, adapter: "claude", limits: acceptedLimits);
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, executionId);
+            Directory.CreateDirectory(outputDirectory);
+            var capturePath = Path.Combine(outputDirectory, fileName);
+            if (content == "<directory>")
+            {
+                Directory.CreateDirectory(capturePath);
+            }
+            else
+            {
+                await File.WriteAllTextAsync(capturePath, content,
+                    TestContext.Current.CancellationToken);
+            }
+            var originalJournalEvents = SerializeEvents(
+                await reader.ReadAllAsync(TestContext.Current.CancellationToken));
+            var stub = new StubCoreDispatcher();
+
+            await Assert.ThrowsAsync<FlowEventLogReadException>(async () =>
+                await MutationInterface.StartWorkflowAsync(
+                    workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                    cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Equal(originalJournalEvents, SerializeEvents(
+                await reader.ReadAllAsync(TestContext.Current.CancellationToken)));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+            if (content == "<directory>")
+            {
+                Assert.True(Directory.Exists(capturePath));
+            }
+            else
+            {
+                Assert.Equal(content, await File.ReadAllTextAsync(capturePath,
+                    TestContext.Current.CancellationToken));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Capped_pre_spawn_resubmit_refuses_journalled_stream_loss_before_any_append_or_spawn()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            var workflowId = new WorkflowId("wf-journalled-stream-loss-capped");
+            ExecutionId executionId;
+            await using (var initialWriter = new FlowEventLogWriter(logPath))
+            {
+                executionId = await AcceptRequestAsync(
+                    initialWriter, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet");
+                await initialWriter.AppendAsync(new FlowEvent.StreamLogLossDeclared(
+                    executionId, "stdout", "capture write failed", BytesSurrendered: 12),
+                    TestContext.Current.CancellationToken);
+            }
+
+            var originalJournalBytes = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var bindings = MakeBindings(adapter: "claude", model: "sonnet", maxRepeatedToolSteps: 5);
+            var stub = new StubCoreDispatcher();
+            var reader = new FlowEventLogReader(logPath);
+            await using (var writer = new FlowEventLogWriter(logPath))
+            {
+                await Assert.ThrowsAsync<FlowEventLogReadException>(async () =>
+                    await MutationInterface.StartWorkflowAsync(
+                        workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                        cancellationToken: TestContext.Current.CancellationToken));
+            }
+
+            Assert.Equal(originalJournalBytes,
+                await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Capped_pre_spawn_resubmit_refuses_torn_journal_before_any_append_or_spawn()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: []));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            var workflowId = new WorkflowId("wf-torn-journal-capped");
+            await using (var initialWriter = new FlowEventLogWriter(logPath))
+            {
+                await AcceptRequestAsync(
+                    initialWriter, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet");
+            }
+
+            await File.AppendAllTextAsync(logPath, "{\"owner\":\"flow\",\"Event\":",
+                TestContext.Current.CancellationToken);
+            var originalJournalBytes = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var bindings = MakeBindings(adapter: "claude", model: "sonnet", maxRepeatedToolSteps: 5);
+            var stub = new StubCoreDispatcher();
+            var reader = new FlowEventLogReader(logPath);
+            await using (var writer = new FlowEventLogWriter(logPath))
+            {
+                await Assert.ThrowsAsync<FlowEventLogReadException>(async () =>
+                    await MutationInterface.StartWorkflowAsync(
+                        workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                        cancellationToken: TestContext.Current.CancellationToken));
+            }
+
+            Assert.Equal(originalJournalBytes,
+                await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.False(stub.DispatchStarted.TryRead(out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Capped_started_no_exit_orphan_is_abandoned_and_retried_with_a_new_execution_id()
+    {
+        var snapshot = MakeSnapshot(Step(A, dependsOn: [], maxAttempts: 2));
+        var (roomDirectory, artifactsRoot, logPath) = MakeTaskPaths();
+        try
+        {
+            var workflowId = new WorkflowId("wf-core-start-capped");
+            var limits = new ExecutionLimitEvidence(
+                Timeout, null, null, null, MonitorInputsKnown: true,
+                MaxRepeatedToolSteps: 5, MaxRepeatedToolStepsSource: "dispatch-override");
+            ExecutionId executionId;
+            await using (var initialWriter = new FlowEventLogWriter(logPath))
+            {
+                executionId = await AcceptRequestAsync(
+                    initialWriter, workflowId, artifactsRoot, A, adapter: "claude", model: "sonnet",
+                    limits: limits);
+            }
+
+            await using (var coreWriter = new FlowEventLogWriter(logPath))
+            {
+                await coreWriter.AppendAsync(new CoreEvent.ExecutionStarted(executionId, Pid: 4242),
+                    TestContext.Current.CancellationToken);
+            }
+
+            var bindings = MakeBindings(
+                adapter: "claude", model: "sonnet", maxRepeatedToolSteps: 5, limitEvidence: limits);
+            var stub = new StubCoreDispatcher();
+            var reader = new FlowEventLogReader(logPath);
+            await using (var writer = new FlowEventLogWriter(logPath))
+            {
+                var retryResult = stub.EnqueueResult(A);
+                var runTask = MutationInterface.StartWorkflowAsync(
+                    workflowId, roomDirectory, snapshot, bindings, artifactsRoot, reader, writer, stub,
+                    cancellationToken: TestContext.Current.CancellationToken);
+
+                Assert.Equal(A, await ReadNextDispatchAsync(stub));
+                Assert.NotNull(stub.LastDispatchedRequest);
+                Assert.NotEqual(executionId, stub.LastDispatchedRequest.ExecutionId);
+                retryResult.SetResult(Succeeded);
+                var state = await runTask;
+
+                Assert.Equal(StepStatus.Succeeded, Assert.Single(state.Steps).Status);
+                Assert.NotEqual(executionId, state.Steps.Single().LatestExecutionId);
+            }
+
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            var abandoned = Assert.Single(events.OfType<FlowEvent.ExecutionFailed>());
+            Assert.Equal(executionId, abandoned.ExecutionId);
+            Assert.Equal(FailureClassification.Retryable, abandoned.FailureClassification);
+            Assert.Equal(2, events.OfType<FlowEvent.ExecutionRequestAccepted>().Count());
         }
         finally
         {
@@ -1740,6 +2231,9 @@ public class MutationInterfaceCrashRecoveryTests
         return executionId;
     }
 
+    private static string[] SerializeEvents(IReadOnlyList<FlowEvent> events) =>
+        events.Select(entry => JsonSerializer.Serialize(entry, typeof(FlowEvent), FlowEventLogJson.Options)).ToArray();
+
     private static WorkflowStepDefinition Step(
         StepId stepId,
         IReadOnlyList<StepId> dependsOn,
@@ -1760,7 +2254,8 @@ public class MutationInterfaceCrashRecoveryTests
         int? tokenBudget = null,
         int? maxToolSteps = null,
         long? billedRateLimit = null,
-        ExecutionLimitEvidence? limitEvidence = null) => new()
+        ExecutionLimitEvidence? limitEvidence = null,
+        int? maxRepeatedToolSteps = null) => new()
         {
             ["stub-worker"] = new WorkerBinding.Process(
                 ProcessContract,
@@ -1771,7 +2266,8 @@ public class MutationInterfaceCrashRecoveryTests
                 TokenBudget: tokenBudget,
                 MaxToolSteps: maxToolSteps,
                 BilledRateLimit: billedRateLimit,
-                LimitEvidence: limitEvidence),
+                LimitEvidence: limitEvidence,
+                MaxRepeatedToolSteps: maxRepeatedToolSteps),
         };
 
     private sealed class LateCapacityClassifier : IFailureClassifier

@@ -385,6 +385,7 @@ public static class RedispatchCommand
             Timeout = options.Timeout ?? parentEntry.Timeout,
             TokenBudget = options.TokenBudget ?? parentEntry.TokenBudget,
             MaxToolSteps = options.MaxToolSteps ?? parentEntry.MaxToolSteps,
+            MaxRepeatedToolSteps = options.MaxRepeatedToolSteps ?? parentEntry.MaxRepeatedToolSteps,
             BilledRateLimit = options.BilledRateLimit ?? parentEntry.BilledRateLimit, // #1691
             VerifyCommandOverride = options.VerifyCommand ?? parentEntry.VerifyCommandOverride,
             Label = (options.LabelSpecified || options.Label is not null) ? options.Label : parentEntry.Label, // #1499, spec/baton.md §2
@@ -421,7 +422,8 @@ public static class RedispatchCommand
         var parentResolution = parentEntry.ExecutionLimitResolution;
         var hasOverride = options.Timeout is not null
             || options.TokenBudget is not null
-            || options.MaxToolSteps is not null;
+            || options.MaxToolSteps is not null
+            || options.MaxRepeatedToolSteps is not null;
         if (parentResolution is null && !hasOverride)
         {
             return null;
@@ -465,7 +467,11 @@ public static class RedispatchCommand
             inherited.MaxToolSteps,
             selectionStillDescribesChild
                 ? parentResolution?.OriginatingSelectionKey ?? parentResolution?.ChosenKey
-                : null);
+                : null,
+            options.MaxRepeatedToolSteps is not null
+                ? ExecutionLimitSource.DispatchOverride
+                : InheritedSource(parentResolution?.MaxRepeatedToolStepsSource, inherited.MaxRepeatedToolSteps, parentResolution?.MaxRepeatedToolSteps),
+            inherited.MaxRepeatedToolSteps);
     }
 
     /// <summary>
@@ -675,6 +681,7 @@ public static class RedispatchCommand
                 roomDirectoryPath: options.RoomDirectoryPath,
                 tokenBudgetOverride: options.TokenBudget ?? parentEntry.TokenBudget,
                 maxToolStepsOverride: options.MaxToolSteps ?? parentEntry.MaxToolSteps,
+                maxRepeatedToolStepsOverride: options.MaxRepeatedToolSteps ?? parentEntry.MaxRepeatedToolSteps,
             // #1691: threaded on the amended-spec path too, which is exactly where #1686 review F2
             // found --max-tool-steps silently dropped. Both paths, or the override does not survive
             // a redispatch.

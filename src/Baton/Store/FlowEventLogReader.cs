@@ -148,7 +148,8 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
             ReportUnknownKinds(unknownCount, firstUnknownKind);
 
             return new EventLogSnapshot(
-                flowEvents, coreEvents, seekByteOffset + completeByteCount, HasUnterminatedTail: hasUnterminatedTail);
+                flowEvents, coreEvents, seekByteOffset + completeByteCount,
+                HasUnterminatedTail: hasUnterminatedTail, UnknownEventCount: unknownCount);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not FlowJournalHeldException)
         {
@@ -315,7 +316,8 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
         ReportUnknownKinds(unknownCount, firstUnknownKind);
 
         return new EventLogSnapshot(
-            flowEvents, coreEvents, completeByteCount, IsFallbackToFull: true, HasUnterminatedTail: hasUnterminatedTail);
+            flowEvents, coreEvents, completeByteCount, IsFallbackToFull: true,
+            HasUnterminatedTail: hasUnterminatedTail, UnknownEventCount: unknownCount);
     }
 
     private static FileStream OpenReadStream(string logFilePath)

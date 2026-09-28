@@ -631,6 +631,7 @@ public static class QueueLauncher
         Add("--label", options.Label);
         Add("--token-budget", options.TokenBudget?.ToString(CultureInfo.InvariantCulture));
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
+        Add("--max-repeated-tool-steps", options.MaxRepeatedToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
         Add("--originating-pr", options.OriginatingPullRequest);
         Add("--originating-pr-branch", options.OriginatingPullRequestBranch);
@@ -1039,6 +1040,7 @@ public static class QueueLauncher
                     : item.Tag),
             TokenBudget: item.TokenBudget,
             MaxToolSteps: item.MaxToolSteps,
+            MaxRepeatedToolSteps: item.MaxRepeatedToolSteps,
             OverrideRunwayReason: item.OverrideRunwayReason,
             Skills: NormalizeSkillsForLaunch(item),
             DeclaredTaskSize: item.DeclaredTaskSize.Size == DeclaredTaskSize.Unknown

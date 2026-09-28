@@ -17,7 +17,7 @@ public static class DispatchOptionsParser
 {
     /// <summary>The one copy of <c>baton dispatch</c>'s usage line, printed here on error and by <c>Program</c>.</summary>
     public const string Usage =
-        $"Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <{TaskSizeDeclaration.Usage}> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--originating-pr <owner/repo#number>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
+        $"Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <{TaskSizeDeclaration.Usage}> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--max-repeated-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--originating-pr <owner/repo#number>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
 
     /// <summary>
     /// <c>--label</c>'s cap (#1499) — a Fleet Glass room title, not a description; long enough for "the
@@ -70,6 +70,7 @@ public static class DispatchOptionsParser
         TimeSpan? timeout = null;
         long? tokenBudget = null;
         int? maxToolSteps = null;
+        int? maxRepeatedToolSteps = null;
         long? billedRateLimit = null;
         string? verifyCommand = null;
         var verifyCommands = new List<string>();
@@ -172,6 +173,9 @@ public static class DispatchOptionsParser
                     break;
                 case "--max-tool-steps":
                     maxToolSteps = ParseMaxToolSteps(RequireValue(args, ref i, arg));
+                    break;
+                case "--max-repeated-tool-steps":
+                    maxRepeatedToolSteps = ParseMaxRepeatedToolSteps(RequireValue(args, ref i, arg));
                     break;
                 case "--billed-rate-limit":
                     billedRateLimit = ParseBilledRateLimit(RequireValue(args, ref i, arg));
@@ -332,7 +336,8 @@ public static class DispatchOptionsParser
             ParseTaskSizeDeclaration(declaredSize, sizeRationale),
             originatingPullRequest,
             originatingPullRequestBranch,
-            memoryAddGrant);
+            memoryAddGrant,
+            maxRepeatedToolSteps);
     }
 
     internal static TaskSizeDeclaration? ParseTaskSizeDeclaration(string? declaredSize, string? sizeRationale)
@@ -531,6 +536,18 @@ public static class DispatchOptionsParser
             throw new CliArgumentException(
                 $"'--max-tool-steps {rawValue}' is not a non-negative whole number of tool calls. {Usage}",
                 "pass a non-negative integer, e.g. --max-tool-steps 0.");
+        }
+
+        return steps;
+    }
+
+    private static int ParseMaxRepeatedToolSteps(string rawValue)
+    {
+        if (!int.TryParse(rawValue, out var steps) || steps <= 0)
+        {
+            throw new CliArgumentException(
+                $"'--max-repeated-tool-steps {rawValue}' is not a positive whole number. {Usage}",
+                "pass a positive integer, e.g. --max-repeated-tool-steps 12.");
         }
 
         return steps;

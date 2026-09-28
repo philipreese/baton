@@ -546,7 +546,11 @@ public abstract record FlowEvent
         // journal lines and failed probes are unmeasurable, so a queue must not spend a continuation
         // on either without positive evidence.
         [property: JsonPropertyName("workspaceChanged")]
-        bool? WorkspaceChanged = null) : FlowEvent;
+        bool? WorkspaceChanged = null,
+        [property: JsonPropertyName("repeatedToolStepCount")]
+        int? RepeatedToolStepCount = null,
+        [property: JsonPropertyName("keyableToolStepCount")]
+        int? KeyableToolStepCount = null) : FlowEvent;
 
     /// <summary>
     /// #2134: the grace turn's own outcome (`spec/baton.md` §3, "The grace turn", is the canonical

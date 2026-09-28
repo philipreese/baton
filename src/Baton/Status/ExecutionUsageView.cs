@@ -173,6 +173,10 @@ public sealed record ExecutionUsageView(
     [property: JsonPropertyName("repeatedToolSteps")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? RepeatedToolSteps = null,
+    /// <summary>Tool calls with a parser-provided identity key, for interpreting repeat-count coverage.</summary>
+    [property: JsonPropertyName("keyableToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? KeyableToolSteps = null,
     /// <summary>
     /// #1921: <see cref="ToolStepCounts.EmptyResults"/>. Reported by <c>baton audit lanes</c> and
     /// deliberately not carried onto the cost-ledger row —
@@ -563,6 +567,7 @@ public static class ExecutionUsageProjector
                 reading?.ToolStepCounts?.ToolSteps,
                 reading?.ToolStepCounts?.Refused,
                 reading?.ToolStepCounts?.Repeated,
+                reading?.ToolStepCounts?.Keyable,
                 reading?.ToolStepCounts?.EmptyResults,
                 checkpointPredecessorByExecutionId.GetValueOrDefault(executionId)
                     ?? gracePredecessorByExecutionId.GetValueOrDefault(executionId),

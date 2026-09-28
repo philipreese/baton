@@ -68,4 +68,5 @@ public sealed record RedispatchOptions(
     bool SkillsSpecified = false,
     bool NoDefaultSkills = false,
     TaskSizeDeclaration? DeclaredTaskSize = null,
-    string? OriginatingPullRequest = null);
+    string? OriginatingPullRequest = null,
+    int? MaxRepeatedToolSteps = null);

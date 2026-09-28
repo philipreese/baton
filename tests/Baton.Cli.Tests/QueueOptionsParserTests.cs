@@ -105,6 +105,7 @@ public sealed class QueueOptionsParserTests
             "--effort", "high",
             "--timeout", "95",
             "--max-tool-steps", "900",
+            "--max-repeated-tool-steps", "75",
             "--token-budget", "4000000",
             "--override-runway", "milestone night",
             "--reason", "engine scope, vendor swap measured",
@@ -121,6 +122,7 @@ public sealed class QueueOptionsParserTests
         Assert.Equal("high", options.Effort);
         Assert.Equal(95, options.TimeoutMinutes);
         Assert.Equal(900, options.MaxToolSteps);
+        Assert.Equal(75, options.MaxRepeatedToolSteps);
         Assert.Equal(4_000_000L, options.TokenBudget);
         Assert.Equal("milestone night", options.OverrideRunwayReason);
         Assert.Equal("engine scope, vendor swap measured", options.Reason);
@@ -318,6 +320,8 @@ public sealed class QueueOptionsParserTests
     [Theory]
     [InlineData("--timeout", "0")]
     [InlineData("--max-tool-steps", "-1")]
+    [InlineData("--max-repeated-tool-steps", "0")]
+    [InlineData("--max-repeated-tool-steps", "-1")]
     [InlineData("--token-budget", "0")]
     [InlineData("--issue", "0")]
     public void Add_refuses_a_non_positive_numeric_flag(string flag, string value)

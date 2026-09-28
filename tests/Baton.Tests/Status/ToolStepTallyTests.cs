@@ -57,7 +57,7 @@ public sealed class ToolStepTallyTests
             ClaudeToolUse("Bash", """{"command":"gh issue view 1"}"""),
             ClaudeToolResult(RefusalReason));
 
-        Assert.Equal(new ToolStepCounts(ToolSteps: 2, Refused: 2, Repeated: 0, EmptyResults: 0), counts);
+        Assert.Equal(new ToolStepCounts(ToolSteps: 2, Refused: 2, Repeated: 0, EmptyResults: 0, Keyable: 2), counts);
     }
 
     [Fact]
@@ -73,7 +73,7 @@ public sealed class ToolStepTallyTests
             ClaudeToolUse("Read", """{"file_path":"b.cs"}"""),
             ClaudeToolResult("namespace X;"));
 
-        Assert.Equal(new ToolStepCounts(2, 0, 0, 0), counts);
+        Assert.Equal(new ToolStepCounts(2, 0, 0, 0, 2), counts);
     }
 
     [Fact]
@@ -93,7 +93,7 @@ public sealed class ToolStepTallyTests
             ClaudeToolUse("Bash", """{"command":"gh api repos/x/y"}"""),
             ClaudeToolResult(RefusalReason));
 
-        Assert.Equal(new ToolStepCounts(ToolSteps: 4, Refused: 1, Repeated: 2, EmptyResults: 1), counts);
+        Assert.Equal(new ToolStepCounts(ToolSteps: 4, Refused: 1, Repeated: 2, EmptyResults: 1, Keyable: 4), counts);
     }
 
     [Fact]
@@ -106,7 +106,7 @@ public sealed class ToolStepTallyTests
 
         // Two calls on one line, identical: 2 steps and 1 repeat. A key reader that returned only the
         // first block (the shape TryParseToolName has) would report 2 steps and 0 repeats.
-        Assert.Equal(new ToolStepCounts(2, 0, 1, 0), counts);
+        Assert.Equal(new ToolStepCounts(2, 0, 1, 0, 2), counts);
     }
 
     [Fact]
@@ -135,8 +135,8 @@ public sealed class ToolStepTallyTests
             error: "tool call denied by pre-tool hook: " + RefusalReason);
         var clean = AgyToolStep("DONE", "run_command", """{"CommandLine":"git status"}""", output: "## main");
 
-        Assert.Equal(new ToolStepCounts(1, 1, 0, 0), Tally(new AgyUsageParser(), refused));
-        Assert.Equal(new ToolStepCounts(1, 0, 0, 0), Tally(new AgyUsageParser(), clean));
+        Assert.Equal(new ToolStepCounts(1, 1, 0, 0, 1), Tally(new AgyUsageParser(), refused));
+        Assert.Equal(new ToolStepCounts(1, 0, 0, 0, 1), Tally(new AgyUsageParser(), clean));
     }
 
     [Fact]
@@ -153,7 +153,7 @@ public sealed class ToolStepTallyTests
             AgyToolStep("ERROR", "write_to_file", """{"TargetFile":"x.md"}""",
                 error: "tool call denied by pre-tool hook: " + RefusalReason));
 
-        Assert.Equal(new ToolStepCounts(ToolSteps: 4, Refused: 1, Repeated: 1, EmptyResults: 1), counts);
+        Assert.Equal(new ToolStepCounts(ToolSteps: 4, Refused: 1, Repeated: 1, EmptyResults: 1, Keyable: 4), counts);
     }
 
     [Fact]
@@ -171,7 +171,7 @@ public sealed class ToolStepTallyTests
             CodexStarted("baton_run_command", "bbbbbbbbbbbbbbbb"),
             CodexCompleted("baton_run_command", "failed", RefusalReason));
 
-        Assert.Equal(new ToolStepCounts(ToolSteps: 3, Refused: 1, Repeated: 1, EmptyResults: 1), counts);
+        Assert.Equal(new ToolStepCounts(ToolSteps: 3, Refused: 1, Repeated: 1, EmptyResults: 1, Keyable: 3), counts);
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class ToolStepTallyTests
             """{"type":"item.started","item":{"type":"mcp_tool_call","tool":"baton_read_text"}}""",
             CodexCompleted("baton_read_text", "completed", "b"));
 
-        Assert.Equal(new ToolStepCounts(ToolSteps: 2, Refused: 0, Repeated: 0, EmptyResults: 0), counts);
+        Assert.Equal(new ToolStepCounts(ToolSteps: 2, Refused: 0, Repeated: 0, EmptyResults: 0, Keyable: 0), counts);
     }
 
     private static string AgyToolStep(

@@ -142,7 +142,8 @@ public static class RoleDispatch
         long? tokenBudgetOverride = null, int? maxToolStepsOverride = null,
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null,
         bool? expectPrOverride = null, string? verifyResultsPath = null,
-        IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true)
+        IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true,
+        int? maxRepeatedToolStepsOverride = null)
     {
         ArgumentNullException.ThrowIfNull(role);
         ArgumentNullException.ThrowIfNull(spec);
@@ -267,6 +268,7 @@ public static class RoleDispatch
             TokenBudget: tokenBudgetOverride ?? role.TokenBudget?.Resolve(role.Id, adapter),
             // #1686 review F11: the --max-tool-steps escape hatch, mirroring --token-budget.
             MaxToolSteps: maxToolStepsOverride ?? role.MaxToolSteps,
+            MaxRepeatedToolSteps: maxRepeatedToolStepsOverride,
             // #1691: the --billed-rate-limit escape hatch, mirroring both of the above.
             BilledRateLimit: billedRateLimitOverride ?? role.BilledRateLimit,
             // #1622/#1390: read off the CATALOG role's own grant, before the write-widening above can
@@ -385,7 +387,8 @@ public static class RoleDispatch
         TimeSpan? timeoutOverride = null, IReadOnlyList<string>? attachments = null,
         string? attachmentsDirectory = null, long? tokenBudgetOverride = null, int? maxToolStepsOverride = null,
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null, bool? expectPrOverride = null,
-        string? verifyResultsPath = null, IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true)
+        string? verifyResultsPath = null, IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true,
+        int? maxRepeatedToolStepsOverride = null)
     {
         ArgumentNullException.ThrowIfNull(role);
 
@@ -396,7 +399,8 @@ public static class RoleDispatch
             tokenBudgetOverride: tokenBudgetOverride, maxToolStepsOverride: maxToolStepsOverride,
             billedRateLimitOverride: billedRateLimitOverride,
             verifyCommandOverride: verifyCommandOverride, expectPrOverride: expectPrOverride,
-            verifyResultsPath: verifyResultsPath, skills: skills, attachDefaultSkills: attachDefaultSkills);
+            verifyResultsPath: verifyResultsPath, skills: skills, attachDefaultSkills: attachDefaultSkills,
+            maxRepeatedToolStepsOverride: maxRepeatedToolStepsOverride);
 
         var stepOutputs = binding.Contract.ProducedOutputs.Select(o => o.Name).ToList();
 

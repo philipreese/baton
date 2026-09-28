@@ -50,7 +50,7 @@ public static class LedgerCsv
         "attempt", "role", "adapter", "model", "modelEchoed", "modelAnomaly", "modelsObserved", "effort", "outcome",
         "declaredTaskSize", "sizeRationale",
         "issue", "pr", "startedAt", "endedAt", "tokensIn", "tokensOut", "cacheRead", "cacheCreation",
-        "thinking", "turns", "wallClockMs", "toolSteps", "refusedToolSteps", "repeatedToolSteps",
+        "thinking", "turns", "wallClockMs", "toolSteps", "refusedToolSteps", "repeatedToolSteps", "keyableToolSteps",
         "verifyStepMs", "verifyResultsBytes", "pushWaitMs", "prePushGateMs",
         "billedTokens", "liveBilledTokens", "billedUnderReadTokens",
         "peakBilledInWindow", "raw", "completeness", "completenessReason", "apiEquivalentUsd",
