@@ -87,6 +87,11 @@ public static class FlowEventLogJson
         .Select(attribute => (string)attribute.TypeDiscriminator!)
         .ToFrozenSet(StringComparer.Ordinal);
 
+    private static readonly FrozenSet<string> KnownRoomEventTypes = typeof(RoomEvent)
+        .GetCustomAttributes<JsonDerivedTypeAttribute>()
+        .Select(attribute => (string)attribute.TypeDiscriminator!)
+        .ToFrozenSet(StringComparer.Ordinal);
+
     /// <summary>
     /// #1779: the tolerant entry point for reading one <c>flow.jsonl</c> line — every caller that reads
     /// the journal (<see cref="FlowEventLogReader"/>, and any test asserting the converter-level
@@ -130,6 +135,20 @@ public static class FlowEventLogJson
                         : (DateTime?)null;
                 return new LogEntry.FlowLogEntry(
                     new FlowEvent.UnknownFlowEvent(eventType, eventElement.GetRawText()), writerUtcTimestamp);
+            }
+        }
+
+        if (owner == "room" && root.TryGetProperty("Event", out var roomElement))
+        {
+            var eventType = ReadDiscriminator(roomElement, "eventType");
+            if (!KnownRoomEventTypes.Contains(eventType))
+            {
+                var writerUtcTimestamp = root.TryGetProperty("WriterUtcTimestamp", out var timestampElement)
+                    && timestampElement.ValueKind != JsonValueKind.Null
+                        ? timestampElement.GetDateTime()
+                        : (DateTime?)null;
+                return new LogEntry.RoomLogEntry(
+                    new RoomEvent.UnknownRoomEvent(eventType, roomElement.GetRawText()), writerUtcTimestamp);
             }
         }
 

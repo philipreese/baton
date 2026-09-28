@@ -17,7 +17,7 @@ public sealed class RoomEventLogReader(string logFilePath) : IRoomEventLogReader
         var events = new List<RoomEvent>(entries.Count);
         foreach (var entry in entries)
         {
-            if (entry is LogEntry.RoomLogEntry roomLogEntry)
+            if (entry is LogEntry.RoomLogEntry { Event: not RoomEvent.UnknownRoomEvent } roomLogEntry)
             {
                 events.Add(roomLogEntry.Event);
             }
@@ -50,7 +50,7 @@ public sealed class RoomEventLogReader(string logFilePath) : IRoomEventLogReader
             LogEntry? entry;
             try
             {
-                entry = JsonSerializer.Deserialize<LogEntry>(line, FlowEventLogJson.Options);
+                entry = FlowEventLogJson.DeserializeLine(line);
             }
             catch (Exception ex) when (ex is JsonException or NotSupportedException)
             {

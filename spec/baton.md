@@ -6426,9 +6426,23 @@ and for which realization does what to a package's bytes.
   is not a thing a person opens and drives turn by turn.
 - **Session-parity UI (desktop/phone daily-driver use).** Nothing here promises feature parity with
   either vendor's own app.
-- **Interactive mid-run steering.** Reaching into a running worker mid-generation to redirect it
-  without stopping it first is out of scope; only cancellation-then-restart and between-step
-  pause/decide (§5) exist.
+- **General interactive mid-run steering remains out of scope.** #2482 makes one narrow exception:
+  `baton steer <room-dir> --execution <id> --message-id <id> --file <text-file>` routes a text
+  correction to the exact *running Codex app-server broker turn* already owned by Baton on
+  Windows. It neither
+  starts a worker nor changes its frozen permission grant. Claude and AGY return `unsupported`;
+  desktop-session injection, phone/Glass writes, and automatic continuation remain out of scope.
+  A conductor may query `baton steer <room-dir> --execution <id> --message-id <id> --receipt`.
+  The room journal owns immutable request, write-ahead send-started, and semantic transport-response
+  facts under a separate cross-process steering lock. Send-started is fsynced before native bytes;
+  it can only become `inFlight` while the exact broker turn is live, then `outcomeUnknown` without
+  a retained response. It must never be blindly resent. A durable native ACK is
+  `transportAcknowledged`, **not proof that the worker read or applied the correction**. A queued
+  request can be claimed once by the verified live broker; a changed payload under the same message
+  ID fails. The local pipe admits only the same OS user and rechecks room, execution, broker
+  incarnation, thread and turn. A descriptor is routing, not authentication. Existing older Baton
+  binaries are not compatible with these new room-event variants: use isolated unregistered rooms
+  until every reader on a room is upgraded.
 - **Phone pairing and remote *viewing* infrastructure built for a paired client.** `PairedClientsStore`
   and WebSocket broadcast (§7) are archived; the mailbox (§6) is the harness-era replacement for
   "something remote learns what happened," not a client-pairing model. The tailnet drill-down page
@@ -6578,10 +6592,10 @@ resume for free, which matters because the primary client is a phone that sleeps
 write verbs are rare, discrete, and want request/response semantics — a status
 code, per-request auth, a log line — not a frame on a stream; routing them over `POST` is the better
 design even where a socket already exists. A bidirectional channel earns its machinery only under
-chatty two-way traffic, and the steering model settled alongside this entry (arrest + rehire;
-corrections travel as briefs through `redispatch --spec`, #1495/#1381) guarantees there is none.
-Revisit only if a genuinely interactive surface is ever ruled in — which §10's mid-run-steering
-ruling currently forbids.
+chatty two-way traffic. #2482 permits one local, exact-running Codex correction through the
+existing broker (§10), but it does not make Fleet Glass a steering client or authorize remote
+worker writes. Corrections to Claude/AGY and replacement executions still use the existing
+arrest-and-redispatch path; the narrow Codex exception adds no phone transport here.
 
 **Durable SSE cursor (#2140, first substrate slice).** The cursor belongs to Baton's event record,
 not to the projection writer's process lifetime. `FleetEventLog.Append` is the single writer seam for

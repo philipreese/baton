@@ -27,11 +27,17 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(ArrestRequestUnresolvable), "arrestRequestUnresolvable")]
 [JsonDerivedType(typeof(ArrestRequestExpired), "arrestRequestExpired")]
 [JsonDerivedType(typeof(ArrestIntentRecorded), "arrestIntentRecorded")]
+[JsonDerivedType(typeof(SteeringRequested), "steeringRequested")]
+[JsonDerivedType(typeof(SteeringSendStarted), "steeringSendStarted")]
+[JsonDerivedType(typeof(SteeringTransportAnswered), "steeringTransportAnswered")]
 public abstract record RoomEvent
 {
     private RoomEvent()
     {
     }
+
+    /// <summary>A newer room fact ignored by older projections, never serialized by this build.</summary>
+    internal sealed record UnknownRoomEvent(string EventType, string RawJson) : RoomEvent;
 
     /// <summary>Records that a held work reference was dispatched into a workflow directory.</summary>
     public sealed record HeldWorkDispatched(
@@ -267,5 +273,33 @@ public abstract record RoomEvent
         string RequestedBy,
         string? Reason,
         DateTimeOffset RecordedAtUtc) : RoomEvent;
+
+    /// <summary>An immutable, execution-addressed correction reserved before contacting a broker.</summary>
+    public sealed record SteeringRequested(
+        string MessageId,
+        string ExecutionId,
+        string PayloadSha256,
+        string BrokerIncarnation,
+        string ThreadId,
+        string TurnId,
+        string OsPrincipal,
+        DateTimeOffset RequestedAtUtc) : RoomEvent;
+
+    /// <summary>
+    /// Write-ahead fact: fsynced before the first native turn/steer byte. Once present, an absent
+    /// semantic response can never license a resend, even if the broker crashed before writing.
+    /// </summary>
+    public sealed record SteeringSendStarted(
+        string MessageId,
+        string BrokerIncarnation,
+        DateTimeOffset StartedAtUtc) : RoomEvent;
+
+    /// <summary>Native semantic response, which is a transport receipt rather than worker consumption.</summary>
+    public sealed record SteeringTransportAnswered(
+        string MessageId,
+        bool Accepted,
+        string? Receipt,
+        string? Reason,
+        DateTimeOffset AnsweredAtUtc) : RoomEvent;
 }
 

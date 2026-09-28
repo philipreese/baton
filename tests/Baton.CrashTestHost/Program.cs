@@ -6,7 +6,33 @@ using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
 using Baton.Status;
+using Baton.Steering;
 using Baton.Store;
+
+// #2482: cross-process reservation probe. The gate makes two independent OS processes race on
+// the same room-owned message ID, not merely two store instances in one test process.
+if (args is ["steering-reserve", var steeringRoom, var steeringGate, var steeringMessageId, var steeringPayload])
+{
+    await File.WriteAllTextAsync(steeringGate + $".{Environment.ProcessId}.ready", "ready");
+    var deadline = DateTime.UtcNow.AddSeconds(15);
+    while (!File.Exists(steeringGate) && DateTime.UtcNow < deadline)
+        await Task.Delay(10);
+    if (!File.Exists(steeringGate)) return 3;
+    try
+    {
+        var request = new RoomEvent.SteeringRequested(
+            MessageId: steeringMessageId, ExecutionId: "execution-1", PayloadSha256: steeringPayload,
+            BrokerIncarnation: "broker-1", ThreadId: "thread-1", TurnId: "turn-1",
+            OsPrincipal: "test-user", RequestedAtUtc: DateTimeOffset.UtcNow);
+        var receipt = new SteeringMessageStore(steeringRoom).Reserve(request, targetLive: true);
+        await Console.Out.WriteLineAsync(receipt.State.ToString());
+        return 0;
+    }
+    catch (InvalidOperationException)
+    {
+        return 4;
+    }
+}
 
 // M10 Phase 4 (issue #72): a small, test-only pump host standing in for Baton.Cli, which is still a
 // stub. Baton.Tests spawns this as a real OS process, waits for a specific durable fact to
