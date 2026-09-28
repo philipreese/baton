@@ -2540,8 +2540,12 @@ configuration are rederived from the room's bindings before a replayed safety qu
 journal tail fails closed before a recovery append. After Core returns, `GraceTurnCompleted` is durable
 before safety validation, followed by `GraceTurnSafetyRecorded`. The child is independently attributed
 in status and the quota/cost ledgers under its own ID, linked to its parent, and counted once. A claim
-without completion is unresolved spend, not zero spend or permission to spawn again; recovery checks
-claims from the full journal before generic parent crash classification. Historical
+without completion is unresolved spend, not zero spend or permission to spawn again; while its parent
+or child is live it remains in progress and is not written to an append-only ledger. After journal
+integrity is established and recovery classifies the claim as orphaned, one idempotent
+`GraceTurnSpendUnresolved` fact admits its child-keyed unknown row to the shared status/quota/cost
+projection. No Core exit, duration, token measure, or zero is synthesized. Recovery checks claims from
+the full journal before generic parent crash classification. Historical
 `GraceTurnAttempted` records remain readable, but do not gain fabricated child limits or identity.
 
 **A grace turn never turns an arrest into a `Succeeded` room.** It runs entirely inside the same
@@ -2638,7 +2642,10 @@ code is the only signal a lane is even still going, and it is unreliable for tha
   "try": string | null,                // corrected-invocation text; only set on a pre-ledger refusal
   "rejected": boolean,                 // #1377, widened by #1622 (c) and re-scoped by F11 (#1720 review): true iff some step settled via `DecisionType.Reject` OR `baton resolve --reject` -- NOT `--close`, which is an administrative settlement rather than a refusal
   "resolvedBy"?: string,               // #1622 (d)/#1700: "conductor" when some step settled via a non-accepting `baton resolve` ruling (--reject OR --close); omitted otherwise. The signal for a `--close`, which sets this without setting `rejected`
-  "terminalAt"?: string                // #1157: when this run ENDED (ISO-8601, UTC) -- absence rules in "The terminal instant" below
+  "terminalAt"?: string,               // #1157: when this run ENDED (ISO-8601, UTC) -- absence rules in "The terminal instant" below
+  "unresolvedGraceChildren"?: {        // keyed by child ID; only recovery-classified grace claims appear
+    "<executionId>": ExecutionUsageView
+  }
 }
 ```
 
@@ -2751,7 +2758,7 @@ already tracks reads the identical value a `status --json` caller would.
 
 where `ExecutionUsageView` is
 ```
-{ "wallClockMs": number, "tokensIn"?: number, "tokensOut"?: number, "turns"?: number,
+{ "wallClockMs"?: number, "tokensIn"?: number, "tokensOut"?: number, "turns"?: number,
   "cacheReadTokens"?: number, "cacheCreationTokens"?: number, "thinkingTokens"?: number,
   "billedTokens"?: number, "liveBilledTokens"?: number, "billedUnderReadTokens"?: number,
   "billedReconciliationUnavailable"?: string, "peakBilledInWindow"?: number,
@@ -2761,13 +2768,16 @@ where `ExecutionUsageView` is
                       "observedModel"?: string },
   "verifyStepMs"?: number, "verifyResultsBytes"?: number,
   "toolSteps"?: number, "refusedToolSteps"?: number, "repeatedToolSteps"?: number,
-  "emptyToolResults"?: number }
+  "emptyToolResults"?: number, "predecessorExecutionId"?: string,
+  "outcome"?: "Unresolved" }
 ```
 (`src/Baton/Status/ExecutionUsageView.cs` declares the C# record; `WorkflowStatusView.cs` projects it). The four
 #1921 added are the step-budget axis, present or absent as a set of four (`Status.ToolStepTally.Snapshot`
 decides once); §7's ledger table states what each counts and which zeros are not measurements, and names
 `emptyToolResults` as the one the cost-ledger row deliberately does not carry. `wallClockMs` is
-always present when the object is present at all — derived from recorded start/exit timestamps. The
+derived from recorded start/exit timestamps and absent only on the recovery-classified unresolved
+grace child described above; its predecessor and outcome identify that row without manufacturing a
+duration. The
 three added by #1569 follow one vendor's own field split, not a Baton-invented one: `cacheReadTokens` is a
 real field on both measured vendors' envelopes (claude: `cache_read_input_tokens`; agy:
 `cache_read_tokens`); `cacheCreationTokens` is claude-only (`cache_creation_input_tokens`) — agy has
@@ -4662,8 +4672,8 @@ tolerance — is likewise one shared primitive, `JsonLinesLedger<T>`
 (`src/Baton/Status/JsonLinesLedger.cs`, #1884), which this store and the cost ledger below both wrap
 under their own lock names; its own remarks state what it guarantees. `QuotaLedgerStore.BuildEntries`
 harvests engine-side, at settle — `Program.cs`'s own terminal-sentinel write site — from the terminal
-usage `ExecutionUsageProjector` already has in hand for every execution with a recorded start and exit:
-one ledger line per execution — `AppendAsync`'s own doc comment states why it skips an execution id
+usage `ExecutionUsageProjector` already has in hand for every execution with a recorded start and exit, plus the recovery-classified unresolved grace-child population in §3:
+one ledger line per execution ID — `AppendAsync`'s own doc comment states why it skips an execution id
 the file already holds, and against what repeated-settle shapes. `Adapter`/`Model` come from
 `ExecutionBindingResolver` (`src/Baton/Status/ExecutionBindingResolver.cs`) — the one primitive that
 resolves the frozen `ExecutionRequest` fields (#1567) with the `StepRebound` override for the
@@ -4729,13 +4739,14 @@ low-probability but permanent split of durable price provenance, which nothing c
 `baton ledger backfill` reports the same refusal per repository; `--dry-run` never relocates at all,
 and discloses the move a real run would make.
 
-**One row per settled execution attempt.** `CostLedgerStore.BuildEntries` reuses
+**One row per settled execution attempt, plus recovery-classified unresolved grace spend.** `CostLedgerStore.BuildEntries` reuses
 `ExecutionUsageProjector.BuildByExecutionId` and `ExecutionBindingResolver.Resolve` — the same two
 primitives the burn ledger reads — `CostLedgerStore`'s own remarks state what sharing them buys over
 a second reader. A retry or redispatch mints a fresh
 `ExecutionId`, so it is a fresh row with no extra machinery; a cancellation, failure, arrest or
 indeterminate settle is a row carrying that outcome, from the same closed token set
-`QuotaLedgerEntry.Outcome` documents; a capture the stream reader could not establish as whole is a row
+`QuotaLedgerEntry.Outcome` documents; `Unresolved` is reserved for the grace-child fact in §3. An
+unresolved row leaves unobserved measures and estimates absent. A capture the stream reader could not establish as whole is a row
 with `completeness: "partial"` and the reason string `ExecutionUsageView.BilledReconciliationUnavailable`
 already emits.
 `AppendAsync` skips an execution id the file already holds — its own doc comment states against which

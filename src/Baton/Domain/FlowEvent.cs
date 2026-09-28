@@ -46,6 +46,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(GraceTurnAttempted), "graceTurnAttempted")]
 [JsonDerivedType(typeof(GraceTurnClaimed), "graceTurnClaimed")]
 [JsonDerivedType(typeof(GraceTurnCompleted), "graceTurnCompleted")]
+[JsonDerivedType(typeof(GraceTurnSpendUnresolved), "graceTurnSpendUnresolved")]
 [JsonDerivedType(typeof(GraceTurnSafetyRecorded), "graceTurnSafetyRecorded")]
 [JsonDerivedType(typeof(ArtifactCheckpointAttempted), "artifactCheckpointAttempted")]
 [JsonDerivedType(typeof(ArtifactCheckpointCompleted), "artifactCheckpointCompleted")]
@@ -585,6 +586,14 @@ public abstract record FlowEvent
         int ExitCode = 0,
         bool TerminalSuccessObserved = false,
         bool TerminalResultObserved = false) : FlowEvent;
+
+    /// <summary>
+    /// Recovery established that a claimed grace child is orphaned but has no durable completion.
+    /// This records uncertain spend only; it is not a Core exit or a usage measurement.
+    /// </summary>
+    public sealed record GraceTurnSpendUnresolved(
+        ExecutionId ParentExecutionId,
+        ExecutionId GraceExecutionId) : FlowEvent;
 
     /// <summary>Parent safety result after the independently-accounted grace child completed.</summary>
     public sealed record GraceTurnSafetyRecorded(

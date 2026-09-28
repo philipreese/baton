@@ -3040,7 +3040,7 @@ public static class MutationInterface
         CancellationToken cancellationToken)
     {
         var claims = events.OfType<FlowEvent.GraceTurnClaimed>().ToArray();
-        if (claims.Length == 0)
+        if (claims.Length == 0 && !events.OfType<FlowEvent.GraceTurnSpendUnresolved>().Any())
         {
             return GraceReconciliationResult.None;
         }
@@ -3051,7 +3051,7 @@ public static class MutationInterface
         {
             var parentId = claim.ParentExecutionId;
             var childId = claim.GraceExecutionId;
-            if (registeredExecutionIds.Contains(parentId))
+            if (registeredExecutionIds.Contains(parentId) || registeredExecutionIds.Contains(childId))
             {
                 // The live dispatch owns both the child's safety append and the parent's terminal
                 // event. A sibling can complete while this child is still running, so a pump round
@@ -3063,7 +3063,18 @@ public static class MutationInterface
                 .LastOrDefault(item => item.GraceExecutionId == childId);
             if (completion is null)
             {
-                // A claim is spent even if Core never recorded a start: absence is not a safe retry signal.
+                // Do not freeze an append-only Unresolved ledger row while the child can still return.
+                // Once neither parent nor child is registered, this idempotent journal fact records
+                // uncertainty (not a fabricated exit or zero usage) and admits the shared projector row.
+                if (!events.OfType<FlowEvent.GraceTurnSpendUnresolved>()
+                    .Any(item => item.GraceExecutionId == childId))
+                {
+                    await eventLogWriter.AppendAsync(
+                            new FlowEvent.GraceTurnSpendUnresolved(parentId, childId), cancellationToken)
+                        .ConfigureAwait(false);
+                    return GraceReconciliationResult.Appended;
+                }
+
                 return GraceReconciliationResult.Unresolved;
             }
 
@@ -3179,14 +3190,17 @@ public static class MutationInterface
 
         var acceptedRequests = acceptedRequestGroups.ToDictionary(pair => pair.Key, pair => pair.Value[0]);
         var completions = events.OfType<FlowEvent.GraceTurnCompleted>().ToArray();
+        var unresolvedSpendEvents = events.OfType<FlowEvent.GraceTurnSpendUnresolved>().ToArray();
         var safetyRecords = events.OfType<FlowEvent.GraceTurnSafetyRecorded>().ToArray();
         if (completions.Any(completion => !claimsByChild.ContainsKey(completion.GraceExecutionId))
+            || unresolvedSpendEvents.Any(unresolved => !claimsByChild.ContainsKey(unresolved.GraceExecutionId))
             || safetyRecords.Any(safety => !claimsByChild.ContainsKey(safety.GraceExecutionId)))
         {
-            throw new FlowEventLogReadException("A grace completion or safety record has no matching durable claim.");
+            throw new FlowEventLogReadException("A grace completion, unresolved-spend fact, or safety record has no matching durable claim.");
         }
 
         if (completions.GroupBy(completion => completion.GraceExecutionId).Any(group => group.Count() > 1)
+            || unresolvedSpendEvents.GroupBy(item => item.GraceExecutionId).Any(group => group.Count() > 1)
             || safetyRecords.GroupBy(safety => safety.GraceExecutionId).Any(group => group.Count() > 1))
         {
             throw new FlowEventLogReadException("A grace child has duplicate completion or safety records.");
@@ -3197,6 +3211,14 @@ public static class MutationInterface
         {
             var parentId = claim.ParentExecutionId;
             var childId = claim.GraceExecutionId;
+            var unresolvedSpend = unresolvedSpendEvents.SingleOrDefault(item => item.GraceExecutionId == childId);
+            if (unresolvedSpend is not null
+                && (unresolvedSpend.ParentExecutionId != parentId
+                    || completions.Any(item => item.GraceExecutionId == childId)))
+            {
+                throw new FlowEventLogReadException("A grace unresolved-spend fact has an invalid parent join or conflicts with a child completion.");
+            }
+
             var childRequest = claim.Request;
             if (parentId == childId
                 || childRequest.ExecutionId != childId
@@ -3253,6 +3275,12 @@ public static class MutationInterface
             }
 
             var claimIndex = eventPositions.Single(item => ReferenceEquals(item.flowEvent, claim)).index;
+            if (unresolvedSpend is not null
+                && eventPositions.Single(item => ReferenceEquals(item.flowEvent, unresolvedSpend)).index <= claimIndex)
+            {
+                throw new FlowEventLogReadException("A grace unresolved-spend fact appears before its durable claim.");
+            }
+
             var completion = completions.SingleOrDefault(item => item.GraceExecutionId == childId);
             if (completion is not null
                 && eventPositions.Single(item => ReferenceEquals(item.flowEvent, completion)).index <= claimIndex)

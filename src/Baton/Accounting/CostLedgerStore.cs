@@ -10,7 +10,8 @@ namespace Baton.Accounting;
 /// Reads and writes the repository-keyed cost ledger (#1849 phase A) —
 /// <c>{BatonPaths.Root}/&lt;repo-slug&gt;/cost-ledger.jsonl</c> since #2041, resolved by
 /// <see cref="CostLedgerLocation"/> rather than spelled at a call site — one immutable append-only row
-/// per settled execution attempt. Shares the whole append-only JSONL store — <see cref="JsonLinesLedger{TEntry}"/>,
+/// per settled execution attempt, plus recovery-classified unresolved grace spend. A live grace claim
+/// alone is not admitted. Shares the whole append-only JSONL store — <see cref="JsonLinesLedger{TEntry}"/>,
 /// and through it <see cref="MutexGuardedFileLock"/> — with <c>QuotaLedgerStore</c> (#1884) rather than
 /// introducing a second copy of it or a third concurrency mechanism, under its own lock name prefix so
 /// the three files never contend with each other.
@@ -48,10 +49,10 @@ public static partial class CostLedgerStore
     internal const string ModelMismatchReason = "model-mismatch";
 
     /// <summary>
-    /// Builds one <see cref="CostLedgerEntry"/> per execution in <paramref name="entries"/> that has
-    /// both a recorded start and exit — the same population <c>QuotaLedgerStore.BuildEntries</c> yields,
-    /// for the same stated reason: an execution missing a lifecycle event has no wall-clock to derive
-    /// and is absent rather than reported as zero (spec/baton.md §7's accepted loss, not a second one).
+    /// Builds one <see cref="CostLedgerEntry"/> per row in the shared usage projection — the same
+    /// population <c>QuotaLedgerStore.BuildEntries</c> yields. Ordinarily that requires a recorded
+    /// start and exit; a grace child with a durable recovery-classified unresolved-spend fact is the
+    /// narrow exception, with absent rather than fabricated duration/usage.
     /// <b>A retry or redispatch is a separate row</b>, with no extra machinery: every dispatch mints a
     /// fresh <c>ExecutionId</c>, so two attempts of one step are two executions here.
     /// </summary>
@@ -222,6 +223,11 @@ public static partial class CostLedgerStore
                         };
                     checkpointTerminalByExecutionId[graceCompletion.GraceExecutionId.Value] =
                         (graceCompletion.ExitReason, graceCompletion.ArrestReason);
+                    break;
+
+                case FlowEvent.GraceTurnSpendUnresolved unresolvedGrace:
+                    outcomeByExecutionId[unresolvedGrace.GraceExecutionId.Value] = "Unresolved";
+                    checkpointPredecessorByExecutionId[unresolvedGrace.GraceExecutionId.Value] = unresolvedGrace.ParentExecutionId.Value;
                     break;
             }
         }

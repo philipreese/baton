@@ -56,7 +56,8 @@ public sealed record QuotaLedgerEntry(
     long? WallClockMs = null,
     // The closed token set: FailureClassification's four member names verbatim (Retryable, Permanent,
     // ExhaustedUntil, ToolDenied), or one of Succeeded/Failed/Cancelled/Indeterminate/Arrested for an
-    // execution whose terminal event carries no classification -- see QuotaLedgerStore.BuildEntries.
+    // execution whose terminal event carries no classification, or Unresolved for a recovered grace
+    // claim without observed completion -- see QuotaLedgerStore.BuildEntries.
     // Display/grouping only, like WorkflowStatusStepView.FailureKind; nothing parses it back.
     [property: JsonPropertyName("outcome")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -102,13 +103,11 @@ public static class QuotaLedgerStore
         new("baton-quota-ledger", "quota ledger", entry => entry.Execution);
 
     /// <summary>
-    /// Builds one <see cref="QuotaLedgerEntry"/> per execution in <paramref name="entries"/> that has
-    /// both a recorded start and exit — the same population
-    /// <see cref="ExecutionUsageProjector.BuildByExecutionId"/> yields, reused rather than re-derived
-    /// (Architecture Rule 2: no second vendor-envelope reader). An execution missing either lifecycle
-    /// event (still running, or Flow crashed before Core recorded one) is entirely absent, same as
-    /// there: the accepted loss spec/baton.md §7 documents — "a lane that dies before settling" — is
-    /// this same gap, not a second one.
+    /// Builds one <see cref="QuotaLedgerEntry"/> for each row in the shared
+    /// <see cref="ExecutionUsageProjector.BuildByExecutionId"/> population (Architecture Rule 2: no
+    /// second vendor-envelope reader). Ordinarily that requires a Core start/exit pair; the one
+    /// exception is a grace child with a durable recovery-classified unresolved-spend fact, whose
+    /// duration and usage remain absent. A live claim alone never enters this append-only ledger.
     /// </summary>
     public static IReadOnlyList<QuotaLedgerEntry> BuildEntries(IReadOnlyList<LogEntry> entries, string roomDirectoryPath)
     {
@@ -193,6 +192,10 @@ public static class QuotaLedgerStore
                         };
                     terminalByExecutionId[graceCompletion.GraceExecutionId.Value] =
                         (graceCompletion.ExitReason, graceCompletion.ArrestReason);
+                    break;
+
+                case FlowEvent.GraceTurnSpendUnresolved unresolvedGrace:
+                    outcomeByExecutionId[unresolvedGrace.GraceExecutionId.Value] = "Unresolved";
                     break;
             }
         }

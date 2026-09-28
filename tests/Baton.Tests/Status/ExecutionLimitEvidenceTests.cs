@@ -202,6 +202,105 @@ public sealed class ExecutionLimitEvidenceTests
     }
 
     [Fact]
+    public async Task Only_a_recovery_classified_orphan_claim_projects_an_unknown_child_row()
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"grace-unresolved-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var childId = new ExecutionId("grace-child-unresolved");
+            var parentRequest = Request(ExecutionId, null);
+            var childLimits = GraceTurn.CreateLimitEvidence(monitorInputsKnown: true);
+            var childRequest = Request(childId, childLimits);
+            var baseline = new GraceCheckpointEvidence(
+                "head", "refs/heads/main", "origin", "refs/heads/main", "tip", "endpoint-hash", "config-hash", "workspace-hash");
+            var pendingParent = new GraceParentRecoveryEvidence(
+                true, -1, CoreExitReason.CancelRequested, false, false,
+                new FlowEvent.ExecutionArrested(ExecutionId, Reason: ArrestReason.TokenBudget));
+            var claim = new FlowEvent.GraceTurnClaimed(ExecutionId, childId, childRequest, baseline, pendingParent);
+            var accepted = new FlowEvent.ExecutionRequestAccepted(parentRequest);
+            var childStartedAt = DateTime.UtcNow;
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(accepted),
+                new LogEntry.FlowLogEntry(claim),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(childId, 42), childStartedAt),
+            };
+
+            // While the dispatch is live, ordinary status/ledger projection must not freeze an
+            // append-only unknown row that would suppress the child's eventual observed completion.
+            var liveProjection = ExecutionUsageProjector.BuildByExecutionId(entries, room);
+            Assert.DoesNotContain(childId.Value, liveProjection.Keys);
+            Assert.DoesNotContain(childId.Value, QuotaLedgerStore.BuildEntries(entries, room).Select(row => row.Execution));
+
+            var liveCostRows = CostLedgerStore.BuildEntries(
+                entries, room, RepositoryIdentity.From("https://github.com/example/grace.git", null)!);
+            Assert.DoesNotContain(childId.Value, liveCostRows.Select(row => row.Execution));
+
+            var completedEntries = entries.ToList();
+            completedEntries.Add(new LogEntry.FlowLogEntry(
+                new FlowEvent.GraceTurnCompleted(childId, CoreExitReason.Natural, new WorkerUsage(TokensIn: 4))));
+            completedEntries.Add(new LogEntry.CoreLogEntry(
+                new CoreEvent.ExecutionExited(childId, 0, CoreExitReason.Natural), DateTime.UtcNow.AddMilliseconds(1250)));
+            Assert.Equal("NaturalExit",
+                ExecutionUsageProjector.BuildByExecutionId(completedEntries, room)[childId.Value].Outcome);
+
+            entries.Add(new LogEntry.FlowLogEntry(
+                new FlowEvent.GraceTurnSpendUnresolved(ExecutionId, childId)));
+            var orphanProjection = ExecutionUsageProjector.BuildByExecutionId(entries, room);
+            var child = orphanProjection[childId.Value];
+            Assert.Null(child.WallClockMs);
+            Assert.Equal("Unresolved", child.Outcome);
+            Assert.Equal(ExecutionId.Value, child.PredecessorExecutionId);
+            Assert.Equal(childLimits, child.Limits);
+            Assert.Null(child.TokensIn);
+            Assert.Null(child.TokensOut);
+            Assert.Null(child.BilledTokens);
+            Assert.Null(child.ExitReason);
+            Assert.Null(child.ArrestReason);
+
+            var quota = Assert.Single(QuotaLedgerStore.BuildEntries(entries, room), row => row.Execution == childId.Value);
+            Assert.Equal("Unresolved", quota.Outcome);
+            Assert.Equal(ExecutionId.Value, quota.PredecessorExecution);
+            Assert.Null(quota.At);
+            Assert.Null(quota.WallClockMs);
+            Assert.Null(quota.TokensIn);
+            Assert.Null(quota.TokensOut);
+
+            var repository = RepositoryIdentity.From("https://github.com/example/grace.git", null)!;
+            var cost = Assert.Single(CostLedgerStore.BuildEntries(entries, room, repository), row => row.Execution == childId.Value);
+            Assert.Equal("Unresolved", cost.Outcome);
+            Assert.Equal(ExecutionId.Value, cost.PredecessorExecution);
+            Assert.Equal(childStartedAt, cost.StartedAt);
+            Assert.Null(cost.EndedAt);
+            Assert.Null(cost.WallClockMs);
+            Assert.Null(cost.TokensIn);
+            Assert.Null(cost.TokensOut);
+            Assert.Null(cost.ApiEquivalentUsd);
+            Assert.Null(cost.PlanMeterEstimateUsd);
+
+            var quotaPath = Path.Combine(room, "quota-ledger.jsonl");
+            var costPath = Path.Combine(room, "cost-ledger.jsonl");
+            await QuotaLedgerStore.RebuildAsync(
+                QuotaLedgerStore.BuildEntries(entries, room), quotaPath, TestContext.Current.CancellationToken);
+            await QuotaLedgerStore.RebuildAsync(
+                QuotaLedgerStore.BuildEntries(entries, room), quotaPath, TestContext.Current.CancellationToken);
+            await CostLedgerStore.AppendAsync(
+                CostLedgerStore.BuildEntries(entries, room, repository), costPath, TestContext.Current.CancellationToken);
+            await CostLedgerStore.AppendAsync(
+                CostLedgerStore.BuildEntries(entries, room, repository), costPath, TestContext.Current.CancellationToken);
+            Assert.Single(await QuotaLedgerStore.ReadDistinctByExecutionAsync(quotaPath, TestContext.Current.CancellationToken),
+                row => row.Execution == childId.Value);
+            Assert.Single(await CostLedgerStore.ReadAllAsync(costPath, TestContext.Current.CancellationToken),
+                row => row.Execution == childId.Value);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
     public void Legacy_request_without_evidence_remains_unknown()
     {
         var original = new FlowEvent.ExecutionRequestAccepted(Request());

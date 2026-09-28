@@ -1,4 +1,5 @@
 using Baton.Dispatch;
+using Baton.Accounting;
 using Baton.Domain;
 using Baton.Mutation;
 using Baton.Outcomes;
@@ -196,6 +197,38 @@ public sealed class GraceTurnEndToEndTests
             Assert.Equal(WorkflowOutcome.Running, WorkflowOutcome.Describe(recoveredState));
             Assert.Equal(0, recoveryDispatcher.CallCount);
 
+            var recoveredReader = new FlowEventLogReader(logPath);
+            var recoveredEvents = await recoveredReader.ReadAllAsync(TestContext.Current.CancellationToken);
+            var recoveredEntries = await recoveredReader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var unresolved = Assert.Single(recoveredEvents.OfType<FlowEvent.GraceTurnSpendUnresolved>());
+            Assert.Equal(claim.ParentExecutionId, unresolved.ParentExecutionId);
+            Assert.Equal(claim.GraceExecutionId, unresolved.GraceExecutionId);
+            var repository = RepositoryIdentity.From("https://github.com/example/grace.git", null)!;
+            var unresolvedQuota = Assert.Single(QuotaLedgerStore.BuildEntries(recoveredEntries, run.RoomDirectory),
+                item => item.Execution == claim.GraceExecutionId.Value);
+            var unresolvedCost = Assert.Single(CostLedgerStore.BuildEntries(recoveredEntries, run.RoomDirectory, repository),
+                item => item.Execution == claim.GraceExecutionId.Value);
+            Assert.Equal("Unresolved", unresolvedQuota.Outcome);
+            Assert.Equal("Unresolved", unresolvedCost.Outcome);
+            Assert.Null(unresolvedQuota.WallClockMs);
+            Assert.Null(unresolvedCost.WallClockMs);
+            Assert.Null(unresolvedCost.TokensIn);
+            Assert.Null(unresolvedCost.ApiEquivalentUsd);
+
+            var repeatedWriter = new FlowEventLogWriter(logPath);
+            var repeatedDispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            _ = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), repeatedWriter, repeatedDispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+            await repeatedWriter.DisposeAsync();
+            Assert.Equal(0, repeatedDispatcher.CallCount);
+            Assert.Single((await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken))
+                .OfType<FlowEvent.GraceTurnSpendUnresolved>());
+            completeJournal = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+
             await File.AppendAllTextAsync(Path.Combine(run.RoomDirectory, "flow.jsonl"), "{\"eventType\":\"graceTurnClaimed\"",
                 TestContext.Current.CancellationToken);
             var bytesBeforeTornClaimReplay = await File.ReadAllBytesAsync(
@@ -310,6 +343,27 @@ public sealed class GraceTurnEndToEndTests
                 await dispatcher.GraceStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             }
 
+            var liveEntries = await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var liveClaim = Assert.Single(liveEntries.OfType<LogEntry.FlowLogEntry>()
+                .Select(item => item.Event).OfType<FlowEvent.GraceTurnClaimed>());
+            Assert.Empty(liveEntries.OfType<LogEntry.FlowLogEntry>()
+                .Select(item => item.Event).OfType<FlowEvent.GraceTurnSpendUnresolved>());
+            var liveQuotaPath = Path.Combine(roomDirectory, "grace-live-quota.jsonl");
+            var liveCostPath = Path.Combine(roomDirectory, "grace-live-cost.jsonl");
+            var liveQuotaRows = QuotaLedgerStore.BuildEntries(liveEntries, roomDirectory);
+            var liveCostRows = CostLedgerStore.BuildEntries(
+                liveEntries, roomDirectory, RepositoryIdentity.From("https://github.com/example/grace.git", null)!);
+            Assert.DoesNotContain(liveClaim.GraceExecutionId.Value, liveQuotaRows.Select(item => item.Execution));
+            Assert.DoesNotContain(liveClaim.GraceExecutionId.Value, liveCostRows.Select(item => item.Execution));
+            await QuotaLedgerStore.RebuildAsync(liveQuotaRows, liveQuotaPath, TestContext.Current.CancellationToken);
+            await QuotaLedgerStore.RebuildAsync(liveQuotaRows, liveQuotaPath, TestContext.Current.CancellationToken);
+            await CostLedgerStore.AppendAsync(liveCostRows, liveCostPath, TestContext.Current.CancellationToken);
+            await CostLedgerStore.AppendAsync(liveCostRows, liveCostPath, TestContext.Current.CancellationToken);
+            Assert.DoesNotContain(liveClaim.GraceExecutionId.Value,
+                (await QuotaLedgerStore.ReadAllAsync(liveQuotaPath, TestContext.Current.CancellationToken)).Select(item => item.Execution));
+            Assert.DoesNotContain(liveClaim.GraceExecutionId.Value,
+                (await CostLedgerStore.ReadAllAsync(liveCostPath, TestContext.Current.CancellationToken)).Select(item => item.Execution));
+
             dispatcher.ReleaseSiblingOne.TrySetResult();
             await writer.FirstSiblingSucceeded.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             Assert.False(workflowTask.IsCompleted, "a live child claim must not return the pump while the child is blocked");
@@ -330,8 +384,26 @@ public sealed class GraceTurnEndToEndTests
             var state = await workflowTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
             var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
             Assert.Single(events.OfType<FlowEvent.GraceTurnClaimed>(), item => item.ParentExecutionId == dispatcher.ParentExecutionId);
+            Assert.Empty(events.OfType<FlowEvent.GraceTurnSpendUnresolved>());
             Assert.Empty(events.OfType<FlowEvent.ExecutionFailed>());
             Assert.Single(events.OfType<FlowEvent.ExecutionArrested>(), item => item.ExecutionId == dispatcher.ParentExecutionId);
+            var completedEntries = await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var completedQuotaRows = QuotaLedgerStore.BuildEntries(completedEntries, roomDirectory);
+            var completedCostRows = CostLedgerStore.BuildEntries(
+                completedEntries, roomDirectory, RepositoryIdentity.From("https://github.com/example/grace.git", null)!);
+            Assert.DoesNotContain(completedQuotaRows, item => item.Execution == liveClaim.GraceExecutionId.Value
+                && item.Outcome == "Unresolved");
+            Assert.DoesNotContain(completedCostRows, item => item.Execution == liveClaim.GraceExecutionId.Value
+                && item.Outcome == "Unresolved");
+            await QuotaLedgerStore.RebuildAsync(completedQuotaRows, liveQuotaPath,
+                TestContext.Current.CancellationToken);
+            await CostLedgerStore.AppendAsync(completedCostRows, liveCostPath, TestContext.Current.CancellationToken);
+            Assert.DoesNotContain(await QuotaLedgerStore.ReadDistinctByExecutionAsync(
+                liveQuotaPath, TestContext.Current.CancellationToken), item => item.Execution == liveClaim.GraceExecutionId.Value
+                    && item.Outcome == "Unresolved");
+            Assert.DoesNotContain(await CostLedgerStore.ReadAllAsync(
+                liveCostPath, TestContext.Current.CancellationToken), item => item.Execution == liveClaim.GraceExecutionId.Value
+                    && item.Outcome == "Unresolved");
             Assert.Equal(StepStatus.Succeeded, state.Steps.Single(step => step.StepId == SiblingOne).Status);
             Assert.Equal(StepStatus.Succeeded, state.Steps.Single(step => step.StepId == SiblingTwo).Status);
             Assert.Equal(StepStatus.Succeeded, state.Steps.Single(step => step.StepId == SiblingThree).Status);

@@ -5,6 +5,7 @@ using Baton.Domain;
 using Baton.Projection;
 using Baton.Status;
 using Baton.Vendors;
+using System.Text.Json;
 
 namespace Baton.Cli.Tests;
 
@@ -35,6 +36,52 @@ public sealed class WorkflowStatusProjectorUsageRoutingTests
         executionId, WorkflowId, StepId, "plan",
         Inputs: [], Outputs: [], Timeout: TimeSpan.FromMinutes(10), Environment: [],
         UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(), Adapter: "claude");
+
+    [Fact]
+    public void Status_json_exposes_only_recovery_classified_unknown_grace_children()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"usage-routing-grace-{Guid.NewGuid():N}");
+        try
+        {
+            var parentId = new ExecutionId("parent-grace-status");
+            var childId = new ExecutionId("child-grace-status");
+            var parentRequest = MakeRequest(parentId);
+            var accepted = new FlowEvent.ExecutionRequestAccepted(parentRequest);
+            var childRequest = MakeRequest(childId) with
+            {
+                Limits = new Baton.Domain.ExecutionLimitEvidence(
+                    TimeSpan.FromMinutes(5), null, null, null, ChosenKey: null,
+                    TimeoutSource: "grace-turn", MonitorInputsKnown: false),
+            };
+            var baseline = new GraceCheckpointEvidence(
+                "head", "refs/heads/main", "origin", "refs/heads/main", "tip", "endpoint", "config", "workspace");
+            var pendingParent = new GraceParentRecoveryEvidence(
+                true, -1, CoreExitReason.CancelRequested, false, false,
+                new FlowEvent.ExecutionArrested(parentId, Reason: ArrestReason.TokenBudget));
+            var claim = new FlowEvent.GraceTurnClaimed(parentId, childId, childRequest, baseline, pendingParent);
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(accepted),
+                new LogEntry.FlowLogEntry(claim),
+                new LogEntry.FlowLogEntry(new FlowEvent.GraceTurnSpendUnresolved(parentId, childId)),
+            };
+            var state = StateProjector.Project([accepted], OneStepSnapshot());
+
+            var view = WorkflowStatusProjector.Project(state, OneStepSnapshot(), roomDirectory, entries);
+            using var json = JsonDocument.Parse(JsonSerializer.Serialize(view));
+            var row = json.RootElement.GetProperty("unresolvedGraceChildren").GetProperty(childId.Value);
+
+            Assert.Equal("Unresolved", row.GetProperty("outcome").GetString());
+            Assert.Equal(parentId.Value, row.GetProperty("predecessorExecutionId").GetString());
+            Assert.False(row.TryGetProperty("wallClockMs", out _));
+            Assert.False(row.TryGetProperty("tokensIn", out _));
+            Assert.False(row.TryGetProperty("billedTokens", out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
 
     [Fact]
     public void Terminal_json_call_shape_reports_the_same_token_usage_status_json_does()

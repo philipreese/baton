@@ -231,7 +231,12 @@ public sealed record WorkflowStatusView(
     // separate linked artifact, so arbitrary changes.md prose can never become routing input.
     [property: JsonPropertyName("delivery")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<ExecutionDeliveryStatusView>? Delivery = null);
+    IReadOnlyList<ExecutionDeliveryStatusView>? Delivery = null,
+    // An unresolved grace child is not necessarily the step's latest attempt. Keep its identity and
+    // predecessor explicit at the workflow root without replacing the parent's ordinary step usage.
+    [property: JsonPropertyName("unresolvedGraceChildren")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyDictionary<string, ExecutionUsageView>? UnresolvedGraceChildren = null);
 
 /// <summary>
 /// The machine-owned delivery observation for one execution. <see cref="State"/> is authoritative:
@@ -546,11 +551,16 @@ public static class WorkflowStatusProjector
         var arrestViews = arrestLedger is { Count: > 0 }
             ? arrestLedger.Select(ArrestLedgerEntryView.From).ToList()
             : null;
+        var unresolvedGraceChildren = usageByExecutionId
+            .Where(pair => string.Equals(pair.Value.Outcome, "Unresolved", StringComparison.Ordinal)
+                && pair.Value.PredecessorExecutionId is not null)
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
 
         return new WorkflowStatusView(
             WorkflowOutcome.Describe(state), steps, outputs, firstFailureReason, Rejected: anyRejected,
             ResolvedBy: resolvedBy, TerminalAt: terminalAt, Arrests: arrestViews,
-            ArrestLedgerUnavailableReason: arrestLedgerUnavailableReason);
+            ArrestLedgerUnavailableReason: arrestLedgerUnavailableReason,
+            UnresolvedGraceChildren: unresolvedGraceChildren.Count > 0 ? unresolvedGraceChildren : null);
     }
 
     /// <summary>

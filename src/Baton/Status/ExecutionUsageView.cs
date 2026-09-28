@@ -10,9 +10,10 @@ namespace Baton.Status;
 /// <summary>
 /// One execution's usage, per <c>baton status --json</c>'s additive shape (issue #1360, extended by
 /// #1569). Canonical field list and wire contract at <c>spec/baton.md</c> §3, not restated here.
-/// <see cref="WallClockMs"/> is always present — it is derived from the ledger's own
-/// <see cref="CoreEvent.ExecutionStarted"/>/<see cref="CoreEvent.ExecutionExited"/> timestamps, which
-/// every completed execution has. Every other field is independently omitted from the serialized JSON
+/// <see cref="WallClockMs"/> is present only when it is derived from the ledger's own
+/// <see cref="CoreEvent.ExecutionStarted"/>/<see cref="CoreEvent.ExecutionExited"/> timestamps. A
+/// recovery-classified grace claim without an observed completion is an unresolved row with no
+/// fabricated duration or usage. Every other field is independently omitted from the serialized JSON
 /// (never emitted as <c>null</c>, never fabricated as zero) when the vendor's captured stdout carried
 /// no such figure — see <see cref="ExecutionUsageProjector"/> for how they are read. #1876 widened
 /// "no such figure" by one source (the in-memory fallback off <see cref="FlowEvent.ExecutionArrested"/>,
@@ -37,7 +38,9 @@ namespace Baton.Status;
 /// </para>
 /// </summary>
 public sealed record ExecutionUsageView(
-    [property: JsonPropertyName("wallClockMs")] long WallClockMs,
+    [property: JsonPropertyName("wallClockMs")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? WallClockMs = null,
     [property: JsonPropertyName("tokensIn")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     long? TokensIn = null,
@@ -179,7 +182,7 @@ public sealed record ExecutionUsageView(
     [property: JsonPropertyName("emptyToolResults")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? EmptyToolResults = null,
-    /// <summary>The arrested execution from which an artifact checkpoint was dispatched.</summary>
+    /// <summary>The parent execution linked to an artifact checkpoint or grace child.</summary>
     [property: JsonPropertyName("predecessorExecutionId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? PredecessorExecutionId = null,
@@ -241,10 +244,9 @@ public sealed record ExecutionUsageView(
 }
 
 /// <summary>
-/// Builds one <see cref="ExecutionUsageView"/> per <see cref="ExecutionId"/> that has both a recorded
-/// <see cref="CoreEvent.ExecutionStarted"/> and <see cref="CoreEvent.ExecutionExited"/> (issue #1360)
-/// — an execution still running, or one that crashed before Core recorded either lifecycle event, has
-/// no wall-clock to derive and is simply absent from the result rather than reported as zero.
+/// Builds settled execution views from recorded Core start/exit pairs and, only after recovery has
+/// durably classified an orphaned grace claim, a claim-only unresolved view with every unobserved
+/// measurement absent. A live claim alone never enters append-only accounting.
 /// <para>
 /// Token/turn counts are read from the execution's already-captured <c>.stdout.log</c>
 /// (<see cref="ExecutionStreamLogger"/>) — never a new ledger event, per the issue's own preference
@@ -293,6 +295,8 @@ public static class ExecutionUsageProjector
         var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
         var checkpointTerminalByExecutionId = new Dictionary<string, FlowEvent.ArtifactCheckpointCompleted>(StringComparer.Ordinal);
         var gracePredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var graceClaimByExecutionId = new Dictionary<string, FlowEvent.GraceTurnClaimed>(StringComparer.Ordinal);
+        var unresolvedGraceExecutionIds = new HashSet<string>(StringComparer.Ordinal);
         var graceTerminalByExecutionId = new Dictionary<string, FlowEvent.GraceTurnCompleted>(StringComparer.Ordinal);
         // #1885: the JOURNALLED half of the loss announcement, filtered to the one stream that bears on
         // a billed reconciliation -- spec/baton.md §3 is where that scoping is ruled. Last one wins,
@@ -316,6 +320,12 @@ public static class ExecutionUsageProjector
             {
                 workerNameByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.Request.Worker;
                 gracePredecessorByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim.ParentExecutionId.Value;
+                graceClaimByExecutionId[graceClaim.GraceExecutionId.Value] = graceClaim;
+            }
+
+            if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.GraceTurnSpendUnresolved unresolvedGrace })
+            {
+                unresolvedGraceExecutionIds.Add(unresolvedGrace.GraceExecutionId.Value);
             }
 
             if (entry is LogEntry.FlowLogEntry flowEntry)
@@ -549,6 +559,21 @@ public static class ExecutionUsageProjector
                         ? graceTerminal.ArrestReason
                         : null,
                 resolvedBinding.Limits);
+        }
+
+        foreach (var executionId in unresolvedGraceExecutionIds)
+        {
+            if (graceTerminalByExecutionId.ContainsKey(executionId)
+                || !graceClaimByExecutionId.TryGetValue(executionId, out var claim))
+            {
+                continue;
+            }
+
+            result[executionId] = new ExecutionUsageView(
+                WallClockMs: null,
+                PredecessorExecutionId: claim.ParentExecutionId.Value,
+                Outcome: "Unresolved",
+                Limits: claim.Request.Limits);
         }
 
         return result;

@@ -82,4 +82,32 @@ public class StatusCommandUsageSummaryTests
 
         Assert.Contains("200 billed tokens (1/2 reporting)", line);
     }
+
+    [Fact]
+    public void Unresolved_child_does_not_turn_unknown_duration_into_zero_seconds()
+    {
+        var usageByExecutionId = new Dictionary<string, ExecutionUsageView>
+        {
+            ["grace-child"] = new ExecutionUsageView(Outcome: "Unresolved"),
+        };
+
+        var line = StatusCommand.FormatUsageSummary(usageByExecutionId);
+
+        Assert.Equal("Usage: 1 execution(s), execution time unknown", line);
+        Assert.DoesNotContain("0s execution time", line);
+    }
+
+    [Fact]
+    public void Mixed_usage_summary_names_how_many_durations_are_observed()
+    {
+        var usageByExecutionId = new Dictionary<string, ExecutionUsageView>
+        {
+            ["settled"] = new ExecutionUsageView(WallClockMs: 1500),
+            ["grace-child"] = new ExecutionUsageView(Outcome: "Unresolved"),
+        };
+
+        var line = StatusCommand.FormatUsageSummary(usageByExecutionId);
+
+        Assert.Contains("1.5s execution time (1/2 with duration)", line);
+    }
 }
