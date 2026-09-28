@@ -60,6 +60,13 @@ public class RoomEventLogJsonTests
         // #2073: both Reason polarities, same pairing as WorkerJoined's rows above.
         new RoomEvent.ArrestIntentRecorded("exec-1", "operator", "lane is looping", FixedInstant),
         new RoomEvent.ArrestIntentRecorded("exec-1", "operator", null, FixedInstant),
+        // #2482: request, write-ahead send boundary, and semantic transport response are
+        // distinct durable facts. Both response polarities pin nullable receipt/reason shapes.
+        new RoomEvent.SteeringRequested("message-1", "exec-1", new string('A', 64),
+            "broker-1", "thread-1", "turn-1", "test-user", FixedInstant),
+        new RoomEvent.SteeringSendStarted("message-1", "broker-1", FixedInstant),
+        new RoomEvent.SteeringTransportAnswered("message-1", true, "turn-1", null, FixedInstant),
+        new RoomEvent.SteeringTransportAnswered("message-2", false, null, "turn ended", FixedInstant),
     ];
 
 
