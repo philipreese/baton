@@ -16,6 +16,7 @@ namespace Baton.Tests.Store;
 public class FlowEventLogJsonTests
 {
     private static readonly ExecutionId ExecutionId = new("exec-1");
+    private static readonly ExecutionId GraceExecutionId = new("grace-1");
     private static readonly WorkflowId WorkflowId = new("wf-1");
     private static readonly StepId StepId = new("step-1");
     private static readonly DecisionId DecisionId = new("dec-1");
@@ -66,6 +67,17 @@ public class FlowEventLogJsonTests
         // #2134: both GraceTurnAttempted.ArrestReason polarities on the wire (FlowEvent.cs's own doc).
         new FlowEvent.GraceTurnAttempted(ExecutionId, WorkspaceCleanAfter: true, CoreExitReason.Natural),
         new FlowEvent.GraceTurnAttempted(ExecutionId, WorkspaceCleanAfter: false, CoreExitReason.CancelRequested, ArrestReason.TokenBudget),
+        new FlowEvent.GraceTurnClaimed(
+            ExecutionId, GraceExecutionId,
+            new ExecutionRequest(GraceExecutionId, WorkflowId, StepId, "worker", [], [],
+                TimeSpan.FromSeconds(30), [], new Dictionary<StepId, ExecutionId>()),
+            new GraceCheckpointEvidence("head", "refs/heads/main", "origin", "refs/heads/main",
+                "tip", "endpoint-digest", "configuration-digest", "workspace-digest"),
+            new GraceParentRecoveryEvidence(true, -1, CoreExitReason.CancelRequested, false, false,
+                new FlowEvent.ExecutionArrested(ExecutionId, Reason: ArrestReason.TokenBudget))),
+        new FlowEvent.GraceTurnCompleted(GraceExecutionId, CoreExitReason.Natural, new WorkerUsage(10, 20)),
+        new FlowEvent.GraceTurnSpendUnresolved(ExecutionId, GraceExecutionId),
+        new FlowEvent.GraceTurnSafetyRecorded(ExecutionId, GraceExecutionId, WorkspaceCleanAfter: true),
         new FlowEvent.ArtifactCheckpointAttempted(new ExecutionId("checkpoint-1"), ExecutionId, ["report.md"]),
         new FlowEvent.ArtifactCheckpointCompleted(new ExecutionId("checkpoint-1"), CoreExitReason.Natural, new WorkerUsage(10, 20)),
         new FlowEvent.StepRebound(StepId, ExecutionId, "agy", "gemini-3-pro", "claude", "sonnet", "Vendor failover"),

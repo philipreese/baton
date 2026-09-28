@@ -6,6 +6,7 @@ using Baton.Outcomes;
 using Baton.Projection;
 using Baton.Status;
 using Baton.Store;
+using Baton.Tests.Shared;
 using Baton.Tests.TestSupport;
 using Baton.Workspaces;
 
@@ -527,7 +528,7 @@ public sealed class GraceTurnEndToEndTests
             var grading = Assert.IsType<GraceTimeoutGradingEvidence>(claim.ParentEvidence.TimeoutGrading);
             Assert.Equal("./meta/outcome.json", Assert.Single(grading.OptionalMetadata));
             await RewriteWithoutParentTerminalsAsync(run, claim.ParentExecutionId);
-            File.Delete(Path.Combine(run.Workspace, "left-behind.txt"));
+            FileCleanup.EnsureDeleted(Path.Combine(run.Workspace, "left-behind.txt"));
             Assert.True(RepositoryIsClean(run.Workspace));
             var original = Assert.IsType<WorkerBinding.Process>(run.Bindings["implement"]);
             var replacement = original with
@@ -579,7 +580,7 @@ public sealed class GraceTurnEndToEndTests
             Assert.Equal(FailureClassification.ExhaustedUntil, grading.TimeoutFailure?.Classification);
             Assert.Equal(retryNotBefore, grading.TimeoutFailure?.RetryNotBefore);
             await RewriteWithoutParentTerminalsAsync(run, claim.ParentExecutionId);
-            File.Delete(Path.Combine(run.Workspace, "left-behind.txt"));
+            FileCleanup.EnsureDeleted(Path.Combine(run.Workspace, "left-behind.txt"));
             Assert.True(RepositoryIsClean(run.Workspace));
             var original = Assert.IsType<WorkerBinding.Process>(run.Bindings["implement"]);
             var changedBindings = new Dictionary<string, WorkerBinding>(run.Bindings, StringComparer.Ordinal)

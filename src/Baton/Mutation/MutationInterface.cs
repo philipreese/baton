@@ -1049,13 +1049,13 @@ public static class MutationInterface
                     && log.ByteOffset < retainedCheckpoint.ByteOffset)
                 {
                     throw new FlowEventLogReadException(
-                        "Cannot resume from a missing or shortened flow.jsonl behind its saved projection checkpoint; preserve the journal and workspace for inspection.");
+                        $"Cannot resume from a missing or shortened {BatonPaths.FlowLogFileName} behind its saved projection checkpoint; preserve the journal and workspace for inspection.");
                 }
 
                 if (log.HasUnterminatedTail)
                 {
                     throw new FlowEventLogReadException(
-                        "Cannot reconcile or append workflow recovery while flow.jsonl has an unterminated tail; preserve the bytes and inspect the journal before retrying.");
+                        $"Cannot reconcile or append workflow recovery while {BatonPaths.FlowLogFileName} has an unterminated tail; preserve the bytes and inspect the journal before retrying.");
                 }
 
                 if (log.IsFallbackToFull)
@@ -1119,7 +1119,7 @@ public static class MutationInterface
                 if (graceSnapshot.HasUnterminatedTail)
                 {
                     throw new FlowEventLogReadException(
-                        "Cannot reconcile grace claims while flow.jsonl has an unterminated tail; preserve the bytes and inspect the journal before retrying.");
+                        $"Cannot reconcile grace claims while {BatonPaths.FlowLogFileName} has an unterminated tail; preserve the bytes and inspect the journal before retrying.");
                 }
 
                 var graceEvents = graceSnapshot.FlowEvents;
@@ -3753,7 +3753,7 @@ public static class MutationInterface
         if (integrity.HasUnterminatedTail)
         {
             throw new FlowEventLogReadException(
-                "Cannot claim grace spend while flow.jsonl has an unterminated tail; preserve the bytes and inspect the journal before retrying.");
+                $"Cannot claim grace spend while {BatonPaths.FlowLogFileName} has an unterminated tail; preserve the bytes and inspect the journal before retrying.");
         }
 
         await eventLogWriter.AppendAsync(
