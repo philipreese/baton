@@ -9,6 +9,29 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.59.0](https://github.com/philipreese/baton/compare/v0.58.3...v0.59.0) (2026-09-28)
+
+
+### Features
+
+* **accounting:** Preserve artifact checkpoint limit evidence ([#2473](https://github.com/philipreese/baton/issues/2473)) ([0a86e95](https://github.com/philipreese/baton/commit/0a86e95ec3b521f7d8d12bbe02e59b57c161e066))
+* **accounting:** Record immutable ordinary execution limit evidence ([#2458](https://github.com/philipreese/baton/issues/2458)) ([9508fce](https://github.com/philipreese/baton/commit/9508fce7be750ee0f9836ca27efe5dab7208dc92))
+* **conductor:** inspect retained recovery requests without mutation ([#2471](https://github.com/philipreese/baton/issues/2471)) ([79e236f](https://github.com/philipreese/baton/commit/79e236fde346b2cebca8c9936911ae2eed314c45))
+* **recovery:** Account for grace dispatches with durable child identity ([#2475](https://github.com/philipreese/baton/issues/2475)) ([f88d1a7](https://github.com/philipreese/baton/commit/f88d1a7dacfd8439d8f1dac54e991bfe9cb6a20c))
+
+
+### Bug Fixes
+
+* **conductor:** Isolate continuation obligation ownership ([#2467](https://github.com/philipreese/baton/issues/2467)) ([af69388](https://github.com/philipreese/baton/commit/af69388376bd4e393575b1e818a14ecbe0650d8e))
+* **conductor:** preserve obligation transition timestamps ([#2465](https://github.com/philipreese/baton/issues/2465)) ([84c3006](https://github.com/philipreese/baton/commit/84c3006348137de3a2c22037b83c01bfefbc0af8))
+* **refresh:** Serialize daemon creation time without locale or precision loss ([#2455](https://github.com/philipreese/baton/issues/2455)) ([75f8b8f](https://github.com/philipreese/baton/commit/75f8b8fdf819ff5955ee0c7647d538a49308159f))
+* **tooling:** Show formatter-safe wait-ceiling guidance ([#2462](https://github.com/philipreese/baton/issues/2462)) ([8ec6cf7](https://github.com/philipreese/baton/commit/8ec6cf72b5a932ccf34e46a54f093bb620313fb7))
+
+
+### Miscellaneous
+
+* **benchmarks:** Refresh routing evidence and reading guidance ([#2470](https://github.com/philipreese/baton/issues/2470)) ([c69d8f8](https://github.com/philipreese/baton/commit/c69d8f870121e2ce1930144b9cf3447a61b683c7))
+
 ## [0.58.3](https://github.com/philipreese/baton/compare/v0.58.2...v0.58.3) (2026-09-27)
 
 
