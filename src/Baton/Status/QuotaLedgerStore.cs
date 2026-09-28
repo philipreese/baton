@@ -106,8 +106,8 @@ public static class QuotaLedgerStore
     /// Builds one <see cref="QuotaLedgerEntry"/> for each row in the shared
     /// <see cref="ExecutionUsageProjector.BuildByExecutionId"/> population (Architecture Rule 2: no
     /// second vendor-envelope reader). Ordinarily that requires a Core start/exit pair; the one
-    /// exception is a grace child with a durable recovery-classified unresolved-spend fact, whose
-    /// duration and usage remain absent. A live claim alone never enters this append-only ledger.
+    /// exception is the projector's orphaned-child row. Its measurements stay unknown, and an
+    /// in-flight child is not a ledger entry.
     /// </summary>
     public static IReadOnlyList<QuotaLedgerEntry> BuildEntries(IReadOnlyList<LogEntry> entries, string roomDirectoryPath)
     {

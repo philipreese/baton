@@ -1,5 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Baton.Accounting;
+using Baton.Domain;
+using Baton.Mutation;
+using Baton.Status;
+using Baton.Store;
 using Baton.Tests.Shared;
 using Baton.Tests.TestSupport;
 using Baton.Workspaces;
@@ -22,7 +27,7 @@ public sealed class GraceCheckpointRealGitTests
     }
 
     [Fact]
-    public void Replay_evidence_is_secret_free_and_refuses_endpoint_configuration_drift()
+    public async Task Replay_evidence_is_secret_free_and_refuses_endpoint_configuration_drift()
     {
         using var fixture = new GraceRepository();
         const string secretEndpoint = "https://grace-user:grace-secret@example.invalid/repository.git";
@@ -40,6 +45,59 @@ public sealed class GraceCheckpointRealGitTests
         Assert.NotNull(replayed);
         Assert.Equal(checkpoint.Head, replayed.Head);
         Assert.Equal(checkpoint.RemoteTip, replayed.RemoteTip);
+
+        // Check the emitted journal and its accounting/status projections, not only the small
+        // evidence object: none may accidentally carry the credential-bearing Git endpoint.
+        var room = Path.Combine(Path.GetTempPath(), $"grace-surface-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var parentId = new ExecutionId("secret-parent");
+            var childId = new ExecutionId("secret-child");
+            var parentRequest = new ExecutionRequest(
+                parentId, new WorkflowId("secret-workflow"), new StepId("implement"), "worker",
+                [], [], TimeSpan.FromMinutes(3), [], new Dictionary<StepId, ExecutionId>(),
+                Adapter: "claude", Model: "sonnet");
+            var childRequest = parentRequest with
+            {
+                ExecutionId = childId,
+                Limits = GraceTurn.CreateLimitEvidence(monitorInputsKnown: true),
+            };
+            var claim = new FlowEvent.GraceTurnClaimed(
+                parentId, childId, childRequest, evidence,
+                new GraceParentRecoveryEvidence(true, -1, CoreExitReason.CancelRequested, false, false,
+                    new FlowEvent.ExecutionArrested(parentId, Reason: ArrestReason.TokenBudget)));
+            var journalPath = Path.Combine(room, "flow.jsonl");
+            await using (var writer = new FlowEventLogWriter(journalPath))
+            {
+                await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(parentRequest),
+                    TestContext.Current.CancellationToken);
+                await writer.AppendAsync(claim, TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new FlowEvent.GraceTurnSpendUnresolved(parentId, childId),
+                    TestContext.Current.CancellationToken);
+            }
+
+            var journal = await File.ReadAllTextAsync(journalPath, TestContext.Current.CancellationToken);
+            var entries = await new FlowEventLogReader(journalPath)
+                .ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var usage = ExecutionUsageProjector.BuildByExecutionId(entries, room)[childId.Value];
+            var quota = Assert.Single(QuotaLedgerStore.BuildEntries(entries, room), row => row.Execution == childId.Value);
+            var cost = Assert.Single(CostLedgerStore.BuildEntries(entries, room,
+                RepositoryIdentity.From("https://github.com/example/grace.git", null)!),
+                row => row.Execution == childId.Value);
+            foreach (var surface in new[]
+            {
+                journal, JsonSerializer.Serialize(usage), JsonSerializer.Serialize(quota), JsonSerializer.Serialize(cost),
+            })
+            {
+                Assert.DoesNotContain("grace-user", surface, StringComparison.Ordinal);
+                Assert.DoesNotContain("grace-secret", surface, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
 
         fixture.Run("config", "--unset-all", $"url.{localEndpoint}.insteadOf");
         Assert.Null(WorktreeProvisioner.RehydrateGraceCheckpoint(fixture.Repository, evidence));

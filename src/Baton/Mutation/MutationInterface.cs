@@ -1123,7 +1123,8 @@ public static class MutationInterface
                 }
 
                 var graceEvents = graceSnapshot.FlowEvents;
-                if (graceEvents.OfType<FlowEvent.GraceTurnClaimed>().Any())
+                if (graceEvents.Any(flowEvent => flowEvent is FlowEvent.GraceTurnClaimed
+                    or FlowEvent.GraceTurnSpendUnresolved))
                 {
                     var reconciliation = await ReconcileGraceClaimsAsync(
                             graceEvents, workerBindings, registeredExecutionIds, eventLogWriter, ioCancellationToken)
@@ -3109,7 +3110,11 @@ public static class MutationInterface
                         .Where(item => item.Files is not null)
                         .SelectMany(item => item.Files!)
                         .ToArray();
-                    if (Workspaces.WorktreeProvisioner.TryReadWorkspaceChanged(
+                    // A later worker rebind can point at another checkout. Without the captured
+                    // baseline's verified identity, that checkout cannot answer whether the
+                    // original parent's workspace changed; preserve unknown instead.
+                    if (baseline is not null
+                        && Workspaces.WorktreeProvisioner.TryReadWorkspaceChanged(
                             workspacePath, attemptStarted?.WorkspaceHeadShaAtStart, out var changed, placedFiles))
                     {
                         parentWorkspaceChanged = changed;
@@ -3168,7 +3173,7 @@ public static class MutationInterface
         return GraceReconciliationResult.None;
     }
 
-    private static void ValidateGraceClaimJoins(
+    internal static void ValidateGraceClaimJoins(
         IReadOnlyList<FlowEvent> events,
         IReadOnlyList<FlowEvent.GraceTurnClaimed> claims)
     {

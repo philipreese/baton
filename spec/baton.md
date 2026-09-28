@@ -2536,15 +2536,21 @@ left behind. Before spawning, `MutationInterface.RunGraceTurnAsync` writes one d
 `GraceTurnClaimed` with a distinct child execution ID, its own request/limit snapshot, the parent's
 already-observed result (or pending monitor arrest), and a secret-free workspace baseline whose
 endpoint/configuration identities are digests. The exact captured endpoint and applicable URL rewrite
-configuration are rederived from the room's bindings before a replayed safety query; drift or a torn
-journal tail fails closed before a recovery append. After Core returns, `GraceTurnCompleted` is durable
+configuration are rederived from the room's bindings before a replayed safety query. Binding, endpoint,
+or configuration drift prevents the remote probe and any clean-workspace certification; the engine
+records the unsafe result without changing the checkout, and leaves parent workspace-change evidence
+unknown when the captured workspace identity cannot be rehydrated. A torn journal tail refuses any
+recovery append. After Core returns, `GraceTurnCompleted` is durable
 before safety validation, followed by `GraceTurnSafetyRecorded`. The child is independently attributed
 in status and the quota/cost ledgers under its own ID, linked to its parent, and counted once. A claim
 without completion is unresolved spend, not zero spend or permission to spawn again; while its parent
 or child is live it remains in progress and is not written to an append-only ledger. After journal
 integrity is established and recovery classifies the claim as orphaned, one idempotent
 `GraceTurnSpendUnresolved` fact admits its child-keyed unknown row to the shared status/quota/cost
-projection. No Core exit, duration, token measure, or zero is synthesized. Recovery checks claims from
+projection. A claimed child does not enter append-only accounting on Core start/exit alone: the Flow
+completion or orphan-uncertainty fact must be durable first. Read-side projections validate those
+claim/completion/uncertainty joins before publishing a row. No Core exit, duration, token measure, or
+zero is synthesized. Recovery checks claims from
 the full journal before generic parent crash classification. Historical
 `GraceTurnAttempted` records remain readable, but do not gain fabricated child limits or identity.
 

@@ -190,10 +190,94 @@ public sealed class ExecutionLimitEvidenceTests
             Assert.Equal(ExecutionId.Value, cost.PredecessorExecution);
             Assert.Equal(childRequest.Limits, cost.Limits);
             Assert.Equal("NaturalExit", cost.Outcome);
+            var quota = Assert.Single(QuotaLedgerStore.BuildEntries(entries, room),
+                entry => entry.Execution == childId.Value);
+            Assert.Equal(ExecutionId.Value, quota.PredecessorExecution);
+            var correction = CostLedgerStore.BuildResolutionRow(
+                [cost], BatonPaths.RecordKey(room), ConductorResolution.Reject, "grace review");
+            Assert.Equal(ExecutionId.Value, correction!.PredecessorExecution);
+            Assert.Equal(childRequest.Limits, correction.Limits);
 
             var resolved = ExecutionBindingResolver.Resolve(entries);
             Assert.Equal(changedParentLimits, resolved[ExecutionId.Value].Limits);
             Assert.Equal(childRequest.Limits, resolved[childId.Value].Limits);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public void Grace_child_without_a_claimed_model_does_not_inherit_a_later_worker_model_stamp()
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"grace-model-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var childId = new ExecutionId("grace-child-no-model");
+            var parentRequest = Request(ExecutionId, null) with { Model = null };
+            var childRequest = Request(childId, GraceTurn.CreateLimitEvidence(monitorInputsKnown: true))
+                with
+            { Model = null };
+            var claim = new FlowEvent.GraceTurnClaimed(
+                ExecutionId, childId, childRequest,
+                new GraceCheckpointEvidence("head", "refs/heads/main", "origin", "refs/heads/main", "tip",
+                    "endpoint-hash", "config-hash", "workspace-hash"),
+                new GraceParentRecoveryEvidence(true, -1, CoreExitReason.CancelRequested, false, false,
+                    new FlowEvent.ExecutionArrested(ExecutionId, Reason: ArrestReason.TokenBudget)));
+            var now = DateTime.UtcNow;
+            var entries = new LogEntry[]
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(parentRequest)),
+                new LogEntry.FlowLogEntry(claim),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(childId, 1), now),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(childId, 0, CoreExitReason.Natural), now.AddSeconds(1)),
+                new LogEntry.FlowLogEntry(new FlowEvent.GraceTurnCompleted(childId, CoreExitReason.Natural, null)),
+            };
+            var laterWorkerModel = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["worker"] = "later-model",
+            };
+            var cost = Assert.Single(CostLedgerStore.BuildEntries(entries, room,
+                RepositoryIdentity.From("https://github.com/example/grace.git", null)!,
+                modelResolvedByWorker: laterWorkerModel), row => row.Execution == childId.Value);
+            Assert.Null(cost.Model);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public void Historical_grace_attempt_remains_parent_only_in_status_and_ledgers()
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"grace-legacy-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var legacy = new FlowEvent.GraceTurnAttempted(ExecutionId, WorkspaceCleanAfter: false,
+                CoreExitReason.CancelRequested, ArrestReason.TokenBudget);
+            var serialized = JsonSerializer.Serialize<FlowEvent>(legacy, FlowEventLogJson.Options);
+            var roundTripped = Assert.IsType<FlowEvent.GraceTurnAttempted>(
+                JsonSerializer.Deserialize<FlowEvent>(serialized, FlowEventLogJson.Options));
+            var now = DateTime.UtcNow;
+            var entries = new LogEntry[]
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(Request())),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(ExecutionId, 1), now),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(ExecutionId, -1, CoreExitReason.CancelRequested), now.AddSeconds(1)),
+                new LogEntry.FlowLogEntry(roundTripped),
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionArrested(ExecutionId, Reason: ArrestReason.TokenBudget)),
+            };
+
+            Assert.Equal([ExecutionId.Value], ExecutionUsageProjector.BuildByExecutionId(entries, room).Keys);
+            Assert.Equal([ExecutionId.Value], QuotaLedgerStore.BuildEntries(entries, room).Select(row => row.Execution));
+            var cost = Assert.Single(CostLedgerStore.BuildEntries(entries, room,
+                RepositoryIdentity.From("https://github.com/example/grace.git", null)!));
+            Assert.Equal(ExecutionId.Value, cost.Execution);
+            Assert.Null(cost.PredecessorExecution);
         }
         finally
         {
@@ -237,13 +321,37 @@ public sealed class ExecutionLimitEvidenceTests
                 entries, room, RepositoryIdentity.From("https://github.com/example/grace.git", null)!);
             Assert.DoesNotContain(childId.Value, liveCostRows.Select(row => row.Execution));
 
-            var completedEntries = entries.ToList();
+            // A ledger backfill can run after Core exits but before the Flow completion is durable.
+            // An early row would be immutable under the child execution ID and hide terminal usage.
+            var exitedBeforeCompletion = entries.ToList();
+            exitedBeforeCompletion.Add(new LogEntry.CoreLogEntry(
+                new CoreEvent.ExecutionExited(childId, 0, CoreExitReason.Natural), DateTime.UtcNow.AddMilliseconds(1250)));
+            Assert.DoesNotContain(childId.Value,
+                ExecutionUsageProjector.BuildByExecutionId(exitedBeforeCompletion, room).Keys);
+            Assert.DoesNotContain(childId.Value,
+                QuotaLedgerStore.BuildEntries(exitedBeforeCompletion, room).Select(row => row.Execution));
+            var repository = RepositoryIdentity.From("https://github.com/example/grace.git", null)!;
+            var prematureCostPath = Path.Combine(room, "premature-cost-ledger.jsonl");
+            await CostLedgerStore.AppendAsync(
+                CostLedgerStore.BuildEntries(exitedBeforeCompletion, room, repository),
+                prematureCostPath, TestContext.Current.CancellationToken);
+            Assert.DoesNotContain(childId.Value,
+                (await CostLedgerStore.ReadAllAsync(prematureCostPath, TestContext.Current.CancellationToken))
+                    .Select(row => row.Execution));
+
+            var completedEntries = exitedBeforeCompletion.ToList();
             completedEntries.Add(new LogEntry.FlowLogEntry(
                 new FlowEvent.GraceTurnCompleted(childId, CoreExitReason.Natural, new WorkerUsage(TokensIn: 4))));
-            completedEntries.Add(new LogEntry.CoreLogEntry(
-                new CoreEvent.ExecutionExited(childId, 0, CoreExitReason.Natural), DateTime.UtcNow.AddMilliseconds(1250)));
             Assert.Equal("NaturalExit",
                 ExecutionUsageProjector.BuildByExecutionId(completedEntries, room)[childId.Value].Outcome);
+            await CostLedgerStore.AppendAsync(
+                CostLedgerStore.BuildEntries(completedEntries, room, repository),
+                prematureCostPath, TestContext.Current.CancellationToken);
+            var settledAfterBackfill = Assert.Single(
+                await CostLedgerStore.ReadAllAsync(prematureCostPath, TestContext.Current.CancellationToken),
+                row => row.Execution == childId.Value);
+            Assert.Equal("NaturalExit", settledAfterBackfill.Outcome);
+            Assert.Equal(4, settledAfterBackfill.TokensIn);
 
             entries.Add(new LogEntry.FlowLogEntry(
                 new FlowEvent.GraceTurnSpendUnresolved(ExecutionId, childId)));
@@ -267,7 +375,6 @@ public sealed class ExecutionLimitEvidenceTests
             Assert.Null(quota.TokensIn);
             Assert.Null(quota.TokensOut);
 
-            var repository = RepositoryIdentity.From("https://github.com/example/grace.git", null)!;
             var cost = Assert.Single(CostLedgerStore.BuildEntries(entries, room, repository), row => row.Execution == childId.Value);
             Assert.Equal("Unresolved", cost.Outcome);
             Assert.Equal(ExecutionId.Value, cost.PredecessorExecution);
@@ -293,6 +400,68 @@ public sealed class ExecutionLimitEvidenceTests
                 row => row.Execution == childId.Value);
             Assert.Single(await CostLedgerStore.ReadAllAsync(costPath, TestContext.Current.CancellationToken),
                 row => row.Execution == childId.Value);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Theory]
+    [InlineData("marker-only")]
+    [InlineData("marker-before-claim")]
+    [InlineData("wrong-parent")]
+    [InlineData("duplicate-marker")]
+    [InlineData("completion-conflict")]
+    public async Task Malformed_grace_spend_fact_cannot_reach_status_or_append_only_ledgers(string fault)
+    {
+        var room = Path.Combine(Path.GetTempPath(), $"grace-malformed-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(room);
+        try
+        {
+            var childId = new ExecutionId("grace-malformed-child");
+            var childRequest = Request(childId, GraceTurn.CreateLimitEvidence(monitorInputsKnown: true));
+            var claim = new FlowEvent.GraceTurnClaimed(
+                ExecutionId, childId, childRequest,
+                new GraceCheckpointEvidence("head", "refs/heads/main", "origin", "refs/heads/main", "tip",
+                    "endpoint-hash", "config-hash", "workspace-hash"),
+                new GraceParentRecoveryEvidence(true, -1, CoreExitReason.CancelRequested, false, false,
+                    new FlowEvent.ExecutionArrested(ExecutionId, Reason: ArrestReason.TokenBudget)));
+            var marker = new FlowEvent.GraceTurnSpendUnresolved(
+                fault == "wrong-parent" ? new ExecutionId("another-parent") : ExecutionId, childId);
+            var events = new List<FlowEvent>
+            {
+                new FlowEvent.ExecutionRequestAccepted(Request(ExecutionId, null)),
+                claim,
+                marker,
+            };
+            if (fault == "marker-only")
+            {
+                events.Remove(claim);
+            }
+            else if (fault == "marker-before-claim")
+            {
+                events.Remove(marker);
+                events.Insert(1, marker);
+            }
+            else if (fault == "duplicate-marker")
+            {
+                events.Add(marker);
+            }
+            else if (fault == "completion-conflict")
+            {
+                events.Add(new FlowEvent.GraceTurnCompleted(childId, CoreExitReason.Natural, null));
+            }
+
+            var entries = events.Select(flowEvent => (LogEntry)new LogEntry.FlowLogEntry(flowEvent)).ToArray();
+            Assert.Throws<FlowEventLogReadException>(() => ExecutionUsageProjector.BuildByExecutionId(entries, room));
+            Assert.Throws<FlowEventLogReadException>(() => QuotaLedgerStore.BuildEntries(entries, room));
+            var ledgerPath = Path.Combine(room, "cost-ledger.jsonl");
+            await Assert.ThrowsAsync<FlowEventLogReadException>(async () => await CostLedgerStore.AppendAsync(
+                CostLedgerStore.BuildEntries(entries, room,
+                    RepositoryIdentity.From("https://github.com/example/grace.git", null)!),
+                ledgerPath, TestContext.Current.CancellationToken));
+            Assert.False(File.Exists(ledgerPath));
         }
         finally
         {

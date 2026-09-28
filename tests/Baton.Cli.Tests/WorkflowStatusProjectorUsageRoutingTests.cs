@@ -49,9 +49,7 @@ public sealed class WorkflowStatusProjectorUsageRoutingTests
             var accepted = new FlowEvent.ExecutionRequestAccepted(parentRequest);
             var childRequest = MakeRequest(childId) with
             {
-                Limits = new Baton.Domain.ExecutionLimitEvidence(
-                    TimeSpan.FromMinutes(5), null, null, null, ChosenKey: null,
-                    TimeoutSource: "grace-turn", MonitorInputsKnown: false),
+                Limits = Baton.Mutation.GraceTurn.CreateLimitEvidence(monitorInputsKnown: false),
             };
             var baseline = new GraceCheckpointEvidence(
                 "head", "refs/heads/main", "origin", "refs/heads/main", "tip", "endpoint", "config", "workspace");

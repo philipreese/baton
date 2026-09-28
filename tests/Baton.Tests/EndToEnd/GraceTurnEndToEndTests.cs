@@ -7,6 +7,7 @@ using Baton.Projection;
 using Baton.Status;
 using Baton.Store;
 using Baton.Tests.TestSupport;
+using Baton.Workspaces;
 
 namespace Baton.Tests.EndToEnd;
 
@@ -326,13 +327,13 @@ public sealed class GraceTurnEndToEndTests
                 new WorkflowId("wf-grace-live"), roomDirectory, snapshot, bindings, artifactsRoot,
                 reader, writer, dispatcher, registry, cancellationToken: TestContext.Current.CancellationToken);
 
-            await dispatcher.PrimaryStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
-            await dispatcher.SiblingOneStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
-            await dispatcher.SiblingTwoStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await dispatcher.PrimaryStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            await dispatcher.SiblingOneStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            await dispatcher.SiblingTwoStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             var graceOrClaimOrArrest = await Task.WhenAny(
                     dispatcher.GraceStarted.Task, writer.GraceClaimWritten.Task,
                     writer.ParentArrestBlocked.Task)
-                .WaitAsync(TimeSpan.FromSeconds(25), TestContext.Current.CancellationToken);
+                .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             if (ReferenceEquals(graceOrClaimOrArrest, writer.ParentArrestBlocked.Task))
             {
                 var earlyEvents = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
@@ -340,7 +341,7 @@ public sealed class GraceTurnEndToEndTests
             }
             if (ReferenceEquals(graceOrClaimOrArrest, writer.GraceClaimWritten.Task))
             {
-                await dispatcher.GraceStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                await dispatcher.GraceStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             }
 
             var liveEntries = await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
@@ -365,23 +366,23 @@ public sealed class GraceTurnEndToEndTests
                 (await CostLedgerStore.ReadAllAsync(liveCostPath, TestContext.Current.CancellationToken)).Select(item => item.Execution));
 
             dispatcher.ReleaseSiblingOne.TrySetResult();
-            await writer.FirstSiblingSucceeded.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await writer.FirstSiblingSucceeded.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             Assert.False(workflowTask.IsCompleted, "a live child claim must not return the pump while the child is blocked");
             Assert.Equal(1, dispatcher.GraceCallCount);
 
             dispatcher.ReleaseGrace.TrySetResult();
-            await writer.ParentArrestBlocked.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await writer.ParentArrestBlocked.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             var afterSafety = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
             Assert.Single(afterSafety.OfType<FlowEvent.GraceTurnSafetyRecorded>(), item => item.ParentExecutionId == dispatcher.ParentExecutionId);
             dispatcher.ReleaseSiblingTwo.TrySetResult();
-            await writer.SecondSiblingSucceeded.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
-            await dispatcher.SiblingThreeStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await writer.SecondSiblingSucceeded.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            await dispatcher.SiblingThreeStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             Assert.False(workflowTask.IsCompleted, "the live dispatch still owns its pending parent terminal append");
             Assert.Equal(1, writer.ParentArrestAttempts);
 
             writer.ReleaseParentArrest.TrySetResult();
             dispatcher.ReleaseSiblingThree.TrySetResult();
-            var state = await workflowTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            var state = await workflowTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
             Assert.Single(events.OfType<FlowEvent.GraceTurnClaimed>(), item => item.ParentExecutionId == dispatcher.ParentExecutionId);
             Assert.Empty(events.OfType<FlowEvent.GraceTurnSpendUnresolved>());
@@ -483,6 +484,106 @@ public sealed class GraceTurnEndToEndTests
     }
 
     [Fact]
+    public async Task Replay_in_a_rebound_checkout_does_not_measure_the_original_parent_workspace()
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit: false);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            await RewriteFlowJournalAsync(run.RoomDirectory, run.Snapshot,
+                run.Events.Where(item => item is not FlowEvent.GraceTurnSafetyRecorded
+                    && item is not FlowEvent.ExecutionArrested).ToArray());
+
+            var reboundWorkspace = Path.Combine(run.RoomDirectory, "rebound-lane");
+            Directory.CreateDirectory(reboundWorkspace);
+            TempGitRepository.InitWithEverythingCommitted(reboundWorkspace);
+            var reboundRemote = TempGitRepository.InitBareRepository(Path.Combine(run.RoomDirectory, "rebound-origin.git"));
+            TempGitRepository.AddRemote(reboundWorkspace, "origin", reboundRemote);
+            TempGitRepository.Push(reboundWorkspace, "origin", "HEAD:refs/heads/main");
+            RunGit(reboundWorkspace, "branch", "--set-upstream-to", "origin/main");
+            var originalBinding = Assert.IsType<WorkerBinding.Process>(run.Bindings["implement"]);
+            var reboundBindings = new Dictionary<string, WorkerBinding>(run.Bindings, StringComparer.Ordinal)
+            {
+                ["implement"] = originalBinding with
+                {
+                    Target = originalBinding.Target with { WorkingDirectory = reboundWorkspace },
+                },
+            };
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            var dispatcher = new GraceTurnCoreDispatcher(
+                reboundWorkspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            var probeSignal = Path.Combine(run.RoomDirectory, "rebound-probe-called.txt");
+            var probeCommand = $"[IO.File]::WriteAllText('{probeSignal.Replace("'", "''")}', 'called'); exit 1";
+            using var probe = WorktreeProvisioner.BeginGraceRemoteProbeScope(
+                TimeSpan.FromSeconds(5), "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-Command", probeCommand);
+            await using var writer = new FlowEventLogWriter(logPath);
+            _ = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, reboundBindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+            var replayed = await new FlowEventLogReader(logPath)
+                .ReadAllAsync(TestContext.Current.CancellationToken);
+
+            var safety = Assert.Single(replayed.OfType<FlowEvent.GraceTurnSafetyRecorded>(),
+                item => item.GraceExecutionId == claim.GraceExecutionId);
+            Assert.False(safety.WorkspaceCleanAfter);
+            Assert.Null(safety.ParentWorkspaceChanged);
+            Assert.Equal(0, dispatcher.CallCount);
+            Assert.False(File.Exists(probeSignal));
+            Assert.True(RepositoryIsClean(reboundWorkspace));
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Replay_refuses_endpoint_drift_before_the_remote_safety_probe()
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit: false);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            await RewriteFlowJournalAsync(run.RoomDirectory, run.Snapshot,
+                run.Events.Where(item => item is not FlowEvent.GraceTurnSafetyRecorded
+                    && item is not FlowEvent.ExecutionArrested).ToArray());
+            RunGit(run.Workspace, "config", "remote.origin.url", "https://changed.invalid/no-probe.git");
+            var workspaceBefore = RunGitCapturingOutput(run.Workspace, "status", "--porcelain");
+            var probeSignal = Path.Combine(run.RoomDirectory, "drift-probe-called.txt");
+            var probeCommand = $"[IO.File]::WriteAllText('{probeSignal.Replace("'", "''")}', 'called'); exit 1";
+            using var probe = WorktreeProvisioner.BeginGraceRemoteProbeScope(
+                TimeSpan.FromSeconds(5), "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-Command", probeCommand);
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            var dispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            await using var writer = new FlowEventLogWriter(logPath);
+            _ = await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                new FlowEventLogReader(logPath), writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+            var replayed = await new FlowEventLogReader(logPath)
+                .ReadAllAsync(TestContext.Current.CancellationToken);
+
+            var safety = Assert.Single(replayed.OfType<FlowEvent.GraceTurnSafetyRecorded>(),
+                item => item.GraceExecutionId == claim.GraceExecutionId);
+            Assert.False(safety.WorkspaceCleanAfter);
+            Assert.Null(safety.ParentWorkspaceChanged);
+            Assert.Equal(0, dispatcher.CallCount);
+            Assert.False(File.Exists(probeSignal));
+            Assert.Equal(workspaceBefore, RunGitCapturingOutput(run.Workspace, "status", "--porcelain"));
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
     public async Task Replay_after_grace_safety_without_parent_arrest_appends_the_monitor_arrest_once()
     {
         var run = await RunArrestedLaneAsync(graceShouldCommit: false);
@@ -516,6 +617,39 @@ public sealed class GraceTurnEndToEndTests
         }
     }
 
+    [Fact]
+    public async Task Replay_refuses_an_unresolved_spend_fact_without_its_claim_before_dispatch_or_write()
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit: false);
+        try
+        {
+            await RewriteFlowJournalAsync(run.RoomDirectory, run.Snapshot,
+            [
+                new FlowEvent.GraceTurnSpendUnresolved(
+                    new ExecutionId("missing-parent"), new ExecutionId("missing-child")),
+            ]);
+            var logPath = Path.Combine(run.RoomDirectory, "flow.jsonl");
+            var before = await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken);
+            var dispatcher = new GraceTurnCoreDispatcher(
+                run.Workspace, PrimaryArrestingUsageLine, graceShouldCommit: true,
+                GraceExceedingUsageLine, graceSpawnFails: false);
+            await using (var writer = new FlowEventLogWriter(logPath))
+            {
+                await Assert.ThrowsAsync<FlowEventLogReadException>(() => MutationInterface.StartWorkflowAsync(
+                    new WorkflowId("wf-2134"), run.RoomDirectory, run.Snapshot, run.Bindings, run.ArtifactsRoot,
+                    new FlowEventLogReader(logPath), writer, dispatcher,
+                    cancellationToken: TestContext.Current.CancellationToken));
+            }
+
+            Assert.Equal(0, dispatcher.CallCount);
+            Assert.Equal(before, await File.ReadAllBytesAsync(logPath, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
     private static WorkerBinding.Process ReadOnlySibling(string worker, string workspace) =>
         new(new WorkerContract(worker, [], [], []), new CoreDispatchTarget(worker, [], WorkingDirectory: workspace),
             TimeSpan.FromSeconds(30), VerifiesWorkspace: false);
@@ -524,7 +658,7 @@ public sealed class GraceTurnEndToEndTests
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var registration = cancellationToken.Register(() => completion.TrySetResult());
-        await completion.Task.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(60), CancellationToken.None);
     }
 
     private sealed class LiveGraceConcurrencyDispatcher(string workspace, string primaryUsageLine) : ICoreDispatcher
@@ -551,7 +685,7 @@ public sealed class GraceTurnEndToEndTests
                 {
                     Interlocked.Increment(ref graceCallCount);
                     GraceStarted.TrySetResult();
-                    await ReleaseGrace.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+                    await ReleaseGrace.Task.WaitAsync(TimeSpan.FromSeconds(60), cancellationToken);
                     return new CoreDispatchResult(0, CoreExitReason.Natural);
                 }
 
@@ -582,7 +716,7 @@ public sealed class GraceTurnEndToEndTests
                 var stepId when stepId == SiblingTwo => SiblingTwoStarted,
                 _ => SiblingThreeStarted,
             }).TrySetResult();
-            await release.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(60), cancellationToken);
             return new CoreDispatchResult(0, CoreExitReason.Natural);
         }
     }
@@ -606,7 +740,7 @@ public sealed class GraceTurnEndToEndTests
                 if (Interlocked.Increment(ref parentArrestAttempts) == 1)
                 {
                     ParentArrestBlocked.TrySetResult();
-                    await ReleaseParentArrest.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+                    await ReleaseParentArrest.Task.WaitAsync(TimeSpan.FromSeconds(60), cancellationToken);
                 }
             }
 

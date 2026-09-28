@@ -278,6 +278,17 @@ public static class ExecutionUsageProjector
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(artifactsRootPath);
 
+        // Status and backfill can read a room before the recovery pump runs. Validate the same
+        // grace joins here before any append-only ledger consumes a projected child row.
+        var flowEvents = entries.OfType<LogEntry.FlowLogEntry>().Select(entry => entry.Event).ToArray();
+        if (flowEvents.Any(flowEvent => flowEvent is FlowEvent.GraceTurnClaimed
+            or FlowEvent.GraceTurnCompleted or FlowEvent.GraceTurnSpendUnresolved
+            or FlowEvent.GraceTurnSafetyRecorded))
+        {
+            MutationInterface.ValidateGraceClaimJoins(
+                flowEvents, flowEvents.OfType<FlowEvent.GraceTurnClaimed>().ToArray());
+        }
+
         var startedTimestamps = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         var exitedTimestamps = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         var workerNameByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -402,10 +413,10 @@ public static class ExecutionUsageProjector
         // #1849's ledger the moment a step retried; attributing it to none would hide a real cost. The
         // earliest execution with a start/exit pair is the one the step preceded — ties broken by id
         // so the answer is deterministic rather than dictionary-order. The exit half of that pair is
-        // not an extra rule this projection invented: the loop below emits NO view at all for an
-        // execution that never exited (wallClockMs is unconditional on the view), so an id chosen
-        // without it would attribute the cost to a row that is never written and lose the figures
-        // entirely. spec/baton.md §3 states the same condition, in those terms.
+        // not an extra rule this projection invented: the settled loop below emits no row without
+        // a Core exit, and the separate unresolved grace rows do not own pre-turn verify work.
+        // Choosing an id without a settled pair would lose those figures. spec/baton.md §3 states
+        // the same condition, in those terms.
         var verifyStep = VerifyStepReport.TryReadSidecar(artifactsRootPath);
         var verifyStepExecutionId = verifyStep is null
             ? null
@@ -420,6 +431,15 @@ public static class ExecutionUsageProjector
         foreach (var (executionId, startedAt) in startedTimestamps)
         {
             if (!exitedTimestamps.TryGetValue(executionId, out var exitedAt))
+            {
+                continue;
+            }
+
+            // Backfill reads active rooms. A Core exit can precede the durable grace completion;
+            // publishing that partial child would permanently freeze an incomplete append-only row.
+            // The unresolved branch below emits a separate unknown row only after orphan recovery.
+            if (graceClaimByExecutionId.ContainsKey(executionId)
+                && !graceTerminalByExecutionId.ContainsKey(executionId))
             {
                 continue;
             }
@@ -509,7 +529,10 @@ public static class ExecutionUsageProjector
                 ? recordedPeak
                 : null;
             var requestedModel = resolvedBinding.Model;
-            var resolvedModel = requestedModel ?? bindingStamp?.ModelResolved;
+            // Grace children must not inherit a model stamp from bindings.json after a rebind.
+            // Their claim-time request is the last durable model fact; absence stays unknown.
+            var resolvedModel = requestedModel
+                ?? (graceClaimByExecutionId.ContainsKey(executionId) ? null : bindingStamp?.ModelResolved);
 
             result[executionId] = new ExecutionUsageView(
                 wallClockMs,
