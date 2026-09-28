@@ -771,4 +771,11 @@ For an old roomless Failed continuation, retirement requires an exact typed refu
 terminal parent room. For an old Cancelled next stage, it requires its keyed cancellation fact and
 terminal proof for every recorded prior launched room. Neither state word alone is enough; if the
 command refuses a row, leave it active and investigate the missing evidence rather than edit the queue.
+If retirement refuses a queued lifecycle row, keep new launches held while that row is unresolved.
+The refused queued row remains eligible for a scheduler launch on the next tick if the queue is
+resumed, even when a merged-PR observation is expected shortly. Recheck for a fresh trusted
+observation that retires it. Alternatively, `queue retire <tag> --reason <text> --merged-pr <n>`
+reads that PR from the row's repository and requires a positive merged result, matching repository
+and branch, and no live claim; if any proof fails, it leaves the row unchanged. Resume only after
+the queued row is retired or otherwise no longer launchable; `hold` does not stop lanes already live.
 `spec/baton.md` §13 is the contract.
