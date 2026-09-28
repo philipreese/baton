@@ -160,6 +160,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {ResumeOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {StatusOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {WatchOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {SteerOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {DeliverOptionsParser.Usage[7..]}");
     Console.Error.WriteLine("       baton templates [--json]");
     Console.Error.WriteLine($"       {KeepOptionsParser.Usage[7..]}");
@@ -244,6 +245,13 @@ try
     {
         var watchOptions = WatchOptionsParser.Parse(args[1..]);
         return await WatchCommand.ExecuteAsync(watchOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
+    }
+
+    if (args[0] == "steer")
+    {
+        var steerOptions = SteerOptionsParser.Parse(args[1..]);
+        return await SteerCommand.ExecuteAsync(steerOptions, Console.Out, hostStopSource.Token)
+            .ConfigureAwait(false);
     }
 
     if (args[0] == "deliver")

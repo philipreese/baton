@@ -23,6 +23,7 @@ public static class CliVerbTable
         new("resume", false, [], ["baton resume room-1"]),
         new("status", false, [new("baton status*", typeof(StatusCommand))], []),
         new("watch", false, [], ["baton watch room-1 --command notify.exe"]),
+        new("steer", false, [], ["baton steer room-1 --execution e1 --message-id m1 --file correction.txt"]),
         new("deliver", false, [], ["baton deliver --title x --file y.md"]),
         new("templates", false, [new("baton templates*", typeof(TemplatesCommand))], []),
         new("keep", false, [], ["baton keep room-1"]),

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -46,6 +47,7 @@ namespace Baton.Vendors;
 /// </summary>
 public static class CodexAppServerBroker
 {
+    private static readonly ConditionalWeakTable<TextWriter, SemaphoreSlim> NativeWriterGates = new();
     private const int InitializeRequestId = 1;
     private const int ThreadRequestId = 2;
     private const int TurnRequestId = 3;
@@ -113,7 +115,7 @@ public static class CodexAppServerBroker
         {
             return await RunProtocolAsync(
                 configuration, prompt, policy, outputDirectory, process.StandardInput,
-                process.StandardOutput, output, error, cancellationToken).ConfigureAwait(false);
+                process.StandardOutput, output, error, cancellationToken, enableSteering: true).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -525,7 +527,8 @@ public static class CodexAppServerBroker
         TextReader serverOutput,
         TextWriter batonOutput,
         TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool enableSteering = false)
     {
         await InitializeAsync(serverInput, serverOutput, error, cancellationToken).ConfigureAwait(false);
 
@@ -564,8 +567,14 @@ public static class CodexAppServerBroker
                 ["environments"] = new JsonArray(),
             },
         }, cancellationToken).ConfigureAwait(false);
-        await ReadResponseAsync(serverOutput, TurnRequestId, error, cancellationToken).ConfigureAwait(false);
+        var turnResponse = await ReadResponseAsync(serverOutput, TurnRequestId, error, cancellationToken).ConfigureAwait(false);
+        var turnId = turnResponse["result"]?["turn"]?["id"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Codex app-server did not return a turn ID.");
         await EmitAsync(batonOutput, new JsonObject { ["type"] = "turn.started" }).ConfigureAwait(false);
+
+        await using var steering = enableSteering
+            ? CodexSteeringIngress.Start(grantDecisionOutputDirectory, threadId, turnId, serverInput)
+            : null;
 
         JsonObject? lastUsage = null;
         var roundTrip = 0;
@@ -574,6 +583,11 @@ public static class CodexAppServerBroker
             if (!TryParseObject(line, out var message))
             {
                 await error.WriteLineAsync($"Ignored non-JSON app-server output: {line}").ConfigureAwait(false);
+                continue;
+            }
+
+            if (steering is not null && await steering.TryHandleNativeResponseAsync(message).ConfigureAwait(false))
+            {
                 continue;
             }
 
@@ -620,6 +634,7 @@ public static class CodexAppServerBroker
                     }
                     break;
                 case "turn/completed":
+                    if (steering is not null) await steering.MarkTerminalAsync().ConfigureAwait(false);
                     return await EmitTerminalTurnAsync(message, lastUsage, roundTrip, batonOutput).ConfigureAwait(false);
             }
         }
@@ -1013,11 +1028,20 @@ public static class CodexAppServerBroker
         throw new IOException($"Codex app-server closed stdout before response {expectedId}.");
     }
 
-    private static async Task SendAsync(
+    internal static async Task SendAsync(
         TextWriter writer, JsonObject message, CancellationToken cancellationToken)
     {
-        await writer.WriteLineAsync(message.ToJsonString().AsMemory(), cancellationToken).ConfigureAwait(false);
-        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        var gate = NativeWriterGates.GetValue(writer, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await writer.WriteLineAsync(message.ToJsonString().AsMemory(), cancellationToken).ConfigureAwait(false);
+            await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     private static async Task EmitAsync(TextWriter writer, JsonObject message)

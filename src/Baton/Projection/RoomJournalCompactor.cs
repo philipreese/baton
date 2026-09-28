@@ -32,6 +32,13 @@ public static class RoomJournalCompactor
     public static async Task<bool> CompactAsync(
         string roomDirectoryPath,
         CancellationToken cancellationToken = default)
+        => await CompactAsync(roomDirectoryPath, cancellationToken, beforeReplace: null).ConfigureAwait(false);
+
+    /// <summary>Test seam for the read/replace window; production passes null.</summary>
+    internal static async Task<bool> CompactAsync(
+        string roomDirectoryPath,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeReplace)
     {
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
 
@@ -102,7 +109,16 @@ public static class RoomJournalCompactor
             throw;
         }
 
-        RetryingFileMove.Move(tempFilePath, roomLogPath, overwrite: true, deleteSourceOnFinalFailure: true);
+        try
+        {
+            if (beforeReplace is not null) await beforeReplace().ConfigureAwait(false);
+            RetryingFileMove.Move(tempFilePath, roomLogPath, overwrite: true, deleteSourceOnFinalFailure: true);
+        }
+        catch
+        {
+            TryDeleteTemp(tempFilePath);
+            throw;
+        }
         return true;
     }
 
