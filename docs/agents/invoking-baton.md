@@ -779,3 +779,36 @@ reads that PR from the row's repository and requires a positive merged result, m
 and branch, and no live claim; if any proof fails, it leaves the row unchanged. Resume only after
 the queued row is retired or otherwise no longer launchable; `hold` does not stop lanes already live.
 `spec/baton.md` §13 is the contract.
+
+### Opting one canonical repository into draft-PR handoff
+
+An operator can opt one canonical repository into the existing setting by merging this member into
+the existing `$BATON_HOME/settings.json` (normally `~/.baton/settings.json`). Preserve every other
+setting and every other `Queue` member; do not replace the file or the `Queue` object:
+
+```json
+{
+  "Queue": {
+    "DraftPullRequestHandoff": {
+      "github.com/example/project": true
+    }
+  }
+}
+```
+
+Use the repository's exact canonical key. An absent or false entry leaves the opt-in off. The
+operator then uses `baton queue add` to record the work. A running daemon, not `queue add`, launches
+and advances it; queued work alone does not start a lane. `queue hold` stops new launches, but does
+not stop every daemon observation or recovery action.
+
+For the initial opted-in implementation, the worker still must produce verified committed and pushed
+work on its branch. The daemon may create one verified draft PR and dispatch review after that
+delivery; it does not merge automatically or wake a desktop chat. Review and merge authority remain
+unchanged. The exact eligibility and recovery rules are in [`spec/baton.md` §13](../../spec/baton.md).
+
+If the daemon records a **may-have-called** create marker, it is permanent. The operator inspects the
+exact queue item and PR identity, while recovery observes that identity and never replays the create.
+Do not delete the marker or other queue state, and do not invent a retry or reset command. Turning
+the setting off blocks new creates; it does not cancel an already-admitted create or rewrite the
+contract already dispatched to a worker. If the exact PR cannot be verified, the item stops for
+operator reconciliation; §13 gives the detailed rules.
