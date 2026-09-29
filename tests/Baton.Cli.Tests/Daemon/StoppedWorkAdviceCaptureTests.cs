@@ -107,6 +107,27 @@ public sealed class StoppedWorkAdviceCaptureTests
             Assert.Equal(Head, judgment.PullRequestHead);
             Assert.Equal(StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(judgment)),
                 judgment.ContextSha256);
+
+            var store = Store();
+            var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var calls = 0;
+            var scheduler = Scheduler(store, new WorkItemAdvancer(
+                new FakeGh(), (_, _) => Task.FromResult<string?>(Head)),
+                (obligation, request, _, _, _) =>
+                {
+                    Interlocked.Increment(ref calls);
+                    entered.TrySetResult(true);
+                    return Task.FromResult(Response(obligation, request));
+                });
+            await scheduler.TickOnceAsync(Ct);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            await WaitForAsync(async () =>
+                (await store.ReadAsync(judgment.Key!, Ct))?.Status
+                    == ConductorObligationStatus.TransportAcknowledged);
+            Assert.Equal(1, calls);
+            Assert.Equal(ConductorObligationStatus.TransportAcknowledged,
+                (await store.ReadAsync(judgment.Key!, Ct))?.Status);
+            await scheduler.DrainStoppedWorkAdviceAsync();
         }
         finally
         {
@@ -282,5 +303,55 @@ public sealed class StoppedWorkAdviceCaptureTests
                 },
             },
         }, BatonPaths.SettingsFile, Ct);
+
+    private static ConductorObligationStore Store() => new(
+        new FleetEventLog(
+            BatonPaths.FleetEventsFile,
+            BatonPaths.FleetEventsRolloverFile,
+            100_000),
+        BatonPaths.ConductorObligationsFile,
+        () => Now);
+
+    private static QueueSchedulerService Scheduler(
+        ConductorObligationStore store,
+        WorkItemAdvancer advancer,
+        Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
+            string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>> launch) =>
+        new(
+            (_, _) => Task.FromResult(new QueueLaunchOutcome(null)),
+            _ => Task.FromResult(0d),
+            () => 16d,
+            () => Now,
+            advancer: advancer,
+            conductorObligations: store,
+            stoppedWorkAdvice: launch);
+
+    private static RetainedStoppedWorkAdviceResponse Response(
+        ConductorObligation obligation, StoppedWorkAdviceRequest request) => new(
+        new StoppedWorkAdviceDecision(
+            obligation.ObligationId,
+            request.Repository,
+            request.Tag,
+            request.AttemptId.Value,
+            request.ContextSha256,
+            StoppedWorkAdviceChoice.Hold,
+            "The verdict is incomplete."),
+        CodexReadinessDecisionAdapter.AdapterName,
+        CodexReadinessDecisionAdapter.Model,
+        CodexReadinessDecisionAdapter.Effort,
+        Now,
+        new StoppedWorkAdviceUsage(null, null, null));
+
+    private static async Task WaitForAsync(Func<Task<bool>> predicate)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (await predicate().ConfigureAwait(false)) return;
+            await Task.Delay(10, Ct).ConfigureAwait(false);
+        }
+
+        Assert.Fail("Timed out waiting for durable stopped-work advice state.");
+    }
 
 }

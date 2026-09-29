@@ -89,4 +89,3 @@ public sealed record RetainedStoppedWorkAdviceResponse(
     [property: JsonRequired] string Effort,
     [property: JsonRequired] DateTimeOffset CompletedAt,
     StoppedWorkAdviceUsage? Usage = null);
-

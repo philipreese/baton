@@ -88,4 +88,3 @@ public sealed record StoppedWorkJudgment(
     [property: JsonPropertyName("explanation")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Explanation = null);
-

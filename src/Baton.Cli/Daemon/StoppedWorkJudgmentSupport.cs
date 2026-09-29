@@ -74,4 +74,3 @@ public sealed partial class WorkItemAdvancer
             throw new ConductorObligationStoreException("Stopped-work pull-request evidence changed or is unavailable.");
     }
 }
-

@@ -70,8 +70,10 @@ public sealed class StoppedWorkAdviceDurabilityTests : IDisposable
         Assert.Equal(ConductorObligationStatus.TransportAcknowledged, completed.Obligation.Status);
     }
 
-    [Fact]
-    public async Task Acknowledged_response_replays_after_restart_and_event_log_rotation()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Acknowledged_response_replays_after_restart_and_event_log_rotation(bool retainProjection)
     {
         var fixture = await CreateFixtureAsync();
         var calls = 0;
@@ -87,7 +89,15 @@ public sealed class StoppedWorkAdviceDurabilityTests : IDisposable
             fixture.Events, fixture.Rollover, maxLiveBytes: 1);
         await rotatingLog.Append(
             new FleetEventDraft(FleetEventKind.DaemonStarted, "rotation:after-stopped-advice", Now), Ct);
-        File.Delete(fixture.Projection);
+        if (retainProjection)
+        {
+            await rotatingLog.Append(new FleetEventDraft(FleetEventKind.DaemonStarted,
+                "rotation:discard-original-events", Now.AddSeconds(1)), Ct);
+        }
+        else
+        {
+            FileCleanup.EnsureDeleted(fixture.Projection);
+        }
 
         var restarted = NewStore();
         var replay = await restarted.DecideStoppedWorkOnceAsync(
