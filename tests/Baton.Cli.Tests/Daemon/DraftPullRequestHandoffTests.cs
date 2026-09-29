@@ -12,6 +12,7 @@ using Xunit;
 
 namespace Baton.Cli.Tests.Daemon;
 
+[Collection(SerializedEnvironmentCollection.Name)]
 public sealed class DraftPullRequestHandoffTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
