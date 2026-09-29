@@ -66,6 +66,7 @@
   banner chain is the precedence table beside that chain.
 -->
 <title>Baton</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="manifest" href="/fleet-glass.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -311,6 +312,15 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
 .stream-empty{color:var(--ink-soft); font-size:.85rem; padding:.6rem 0;}
 .queueboard{max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch;}
 @media (max-width:480px){.queueboard td{white-space:normal; word-break:break-word; overflow-wrap:anywhere; max-width:12rem;}}
+/* Phone readability without changing the desktop layout or disabling browser zoom. */
+@media (max-width:600px){
+  html{font-size:18px;}
+  body{font-size:16px;}
+  .tabs{flex-wrap:wrap;}
+  .tabbtn{font-size:.85rem; min-height:44px;}
+  .stream-summary-box, .stream-card-action, .stream-card-result{font-size:.9rem;}
+  .stream-id-chip{white-space:normal; overflow-wrap:anywhere; min-width:0; max-width:100%; box-sizing:border-box;}
+}
 </style>
 <main>
   <div class="masthead">
