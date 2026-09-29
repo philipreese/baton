@@ -164,6 +164,39 @@ def _sabotage_workflow_recovery(
     run_in_temp_tree("workflow-recovery-sabotage-", exercise)
 
 
+@fixture("ci-page-selftest")
+def _sabotage_ci_page_selftest() -> None:
+    """The production page controls must reject an unrelated file admitted as page-only."""
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td)
+        for relative in [
+            "tools/ci/page_selftest.py", "tools/ci/page_changes.py", "tools/ci/aggregate.py",
+            "tools/ci/selftest.py", "tools/ci/test_shards.py", "tools/gates/gates.py",
+            "tools/gates/member_receipt.py", "pixi.toml", ".github/workflows/ci.yml",
+        ]:
+            target = dest / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, target)
+
+        def run() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [sys.executable, "-B", str(dest / "tools/ci/page_selftest.py")],
+                cwd=dest, capture_output=True, text=True, env=_clean_git_env(), timeout=60,
+            )
+
+        baseline = run()
+        assert baseline.returncode == 0, "control failed before sabotage:\n" + baseline.stdout + baseline.stderr
+        classifier = dest / "tools/ci/page_changes.py"
+        original = classifier.read_text(encoding="utf-8")
+        target = " or path not in PAGE_PATHS"
+        assert original.count(target) == 1, "page allowlist mutation target changed"
+        classifier.write_text(original.replace(target, "", 1), encoding="utf-8")
+        sabotaged = run()
+        assert sabotaged.returncode != 0 and "AssertionError" in sabotaged.stderr, (
+            sabotaged.stdout + sabotaged.stderr
+        )
+
+
 @fixture("ci-selftest")
 def _sabotage_ci_selftest() -> None:
     """Prove the CI selftest rejects a fail-open same-revision coverage aggregate."""

@@ -31,6 +31,7 @@ def main():
         page = root / "tools/fleet-glass/glass.html"
         page.parent.mkdir(parents=True)
         page.write_text("before")
+        (root / "unknown.txt").write_text("before")
         git("add", ".")
         git("commit", "-qm", "base")
         base = git("rev-parse", "HEAD")
