@@ -4289,6 +4289,20 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   in-flight atomic rewrite never surfaces a torn read to it. The open itself is not promised —
   contention on the handle is an ordinary retry, and what a reader may conclude from it is stated
   once, on `FleetProjectionWriter.WriteAtomic` (#2012).
+  **Retained conductor requests (#2493).** The daemon projection includes `conductorObligations`:
+  `available`, `rows` (at most 100, unresolved first, then oldest first), `unresolvedCount`,
+  `completedCount`, `quarantinedCount`, and `omittedCount`. Rows contain only `requestedAction`,
+  `owner`, retained `status`, `createdAt`, and a fixed `reason` status explanation. Known actions and
+  queue ownership are named; exact known blocked/unsupported causes map to fixed safe explanations.
+  Other free-text identities and unknown causes are explicitly withheld, as are
+  context, receipts, proof, local paths and keys. `InspectAsync` reads without repair or lifecycle
+  writes. Quarantined identities are excluded from rows and counted as unknown, never complete.
+  Missing evidence or a failed inspection yields `available: false` with the fixed reason
+  `evidence-unavailable`; an absent section from an older daemon is also unknown, not empty.
+  Stream separates `ActionObserved` completion from all unresolved states, including `Blocked`,
+  `Unsupported` and `TransportAcknowledged` (receipt is not completion). Known-empty requires a
+  successful inspection without quarantine. Existing projection freshness warnings cover this
+  as-of view. This adds no transport, action controls, model calls or refresh timer.
 - **The tailnet glass listener (#1946 slice 1)** — `GlassHttpService` (`src/Baton.Cli/Daemon/`, a
   hosted service registered after `FleetProjectionWriter`): three GET routes serving `glass.html`,
   the projection file above, and an SSE stream of its changes. The decision, the two planes, the

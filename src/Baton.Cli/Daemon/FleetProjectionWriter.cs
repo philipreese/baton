@@ -352,6 +352,8 @@ public sealed class FleetProjectionWriter : BackgroundService
             root[QueueUnavailableReasonKey] = queue.UnavailableReason;
         }
 
+        root["conductorObligations"] = await ConductorObligationProjection.ReadAsync(cancellationToken)
+            .ConfigureAwait(false);
         return root.ToJsonString(FleetStatusTool.SerializerOptions);
     }
 
