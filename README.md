@@ -79,6 +79,7 @@ adapter/model/effort from a role-and-scope tier table. Every evaluation lands as
 numbers and the tier table live in `~/.baton/settings.json` under `Queue`.
 
 For add-time admission against a recorded project ceiling, see [`spec/baton.md` §13](spec/baton.md).
+For the operator steps to opt one canonical repository into draft-PR handoff, see [Invoking Baton §7](docs/agents/invoking-baton.md#opting-one-canonical-repository-into-draft-pr-handoff).
 
 An item added with `--lifecycle` carries a required declared task size and one-clause rationale
 (`--declared-size` and `--size-rationale`; the single vocabulary definition is
