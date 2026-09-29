@@ -77,7 +77,7 @@ public sealed class ConductorObligationProjectionTests : IDisposable
         File.WriteAllText(BatonPaths.ConductorObligationsFile, "{broken");
         Assert.False((await ConductorObligationProjection.ReadAsync(TestContext.Current.CancellationToken))["available"]!.GetValue<bool>());
         Assert.Equal("{broken", File.ReadAllText(BatonPaths.ConductorObligationsFile));
-        File.Delete(BatonPaths.ConductorObligationsFile);
+        FileCleanup.EnsureDeleted(BatonPaths.ConductorObligationsFile);
         Directory.CreateDirectory(BatonPaths.ConductorObligationsFile);
         Assert.False((await ConductorObligationProjection.ReadAsync(TestContext.Current.CancellationToken))["available"]!.GetValue<bool>());
     }
