@@ -34,6 +34,10 @@ public static class ConductorCommand
             ConductorVerb.List => ListAsync(options, stdout, root, cancellationToken),
             ConductorVerb.Release => ReleaseAsync(options, stdout, root, resolver, cancellationToken),
             ConductorVerb.Takeover => TakeoverAsync(options, stdout, root, resolver, cancellationToken),
+            ConductorVerb.Prepare => ReadinessConductorCommand.PrepareAsync(options.RequestFile!, stdout, root,
+                cancellationToken: cancellationToken),
+            ConductorVerb.Decide => ReadinessConductorCommand.DecideAsync(options.ObligationKey!,
+                options.ContextFile!, stdout, root, cancellationToken: cancellationToken),
             _ => throw new ArgumentOutOfRangeException(nameof(options)),
         };
     }

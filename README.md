@@ -52,6 +52,7 @@ The [arm comparator](benchmarks/comparator.md) records the matched-brief routing
 | `baton janitor now` | Deterministically apply the existing retained-worktree cleanup policy to Baton-owned issue worktrees in the current repository; report refusals and unknown evidence without deleting it. |
 | `baton queue list --recovery [--history] [--format text\|json]` | Inspect retained conductor requests without modifying them; [selection, paging and evidence limits](spec/baton.md). This is not a wake or retry command. |
 | `baton conductor claim <holder> [--workspace <dir>]` / `list [--json]` / `release <holder> [--workspace <dir>] --reason <text>` / `takeover <holder> [--workspace <dir>] --reason <text>` | Durable repository-claim register coordinating external conductor sessions across disjoint repositories (`spec/baton.md` §14). Mutation enforcement is deferred. |
+| `baton conductor prepare --request <file>` / `decide --obligation <key> --context <file>` | Manually prepare and record one exact-revision readiness decision under an existing claim. The response is advice only; the [typed file contract and recovery rule](spec/baton.md#one-shot-owned-readiness-advice-2484) govern the command. |
 | `baton mcp` / `baton daemon` | The stdio MCP server workers connect to (`fleet_status`, `yield`, `memory-edit-proposal`, `promote-artifact`, `room_detail`), and the narrowed background daemon (`spec/baton.md` §7). |
 
 `spec/baton.md` is the authority on every verb's exact contract — this table is an index, not a
@@ -63,8 +64,9 @@ restatement.
 repository identity has at most one current holder. Its claim file is
 `~/.baton/<repository-slug>/conductor-claim.json`; a missing file is unheld, while corrupt or
 unreadable state fails closed and is preserved for operator recovery rather than overwritten.
-Use `claim`, `list`, `release`, and `takeover` as listed above. Claims do not yet enforce queue,
-room, or other mutations. The normative contract and recovery details are in
+Use `claim`, `list`, `release`, and `takeover` as listed above. The opt-in one-shot readiness
+commands require the current claim holder; claims do not otherwise enforce queue, room, or other
+mutations. The normative contract and recovery details are in
 [`spec/baton.md` §14](spec/baton.md#14-conductor-claims-durable-repository-ownership-register-2296).
 
 ## The conductor queue

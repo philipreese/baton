@@ -9,6 +9,104 @@ using Baton.Status;
 using Baton.Steering;
 using Baton.Store;
 
+// #2484: the vendor test project runs this existing apphost as an inert fake Codex executable.
+// All output goes to the private test directory; no installed vendor CLI or credential is touched.
+if (args is ["exec", ..] && File.Exists(Path.Combine(Environment.CurrentDirectory, "mode.txt")))
+{
+    var cwd = Environment.CurrentDirectory;
+    File.WriteAllText(Path.Combine(cwd, "fake.pid"), Environment.ProcessId.ToString());
+    var mode = File.ReadAllText(Path.Combine(cwd, "mode.txt")).Trim();
+    var answerIndex = Array.IndexOf(args, "--output-last-message");
+    if (answerIndex < 0 || answerIndex + 1 >= args.Length) return 21;
+    var answer = args[answerIndex + 1];
+    using var promptDocument = JsonDocument.Parse(args[^1].Split('\n').Last());
+    var prompt = promptDocument.RootElement;
+    var obligationId = prompt.GetProperty("obligationId").GetString()!;
+    var repository = prompt.GetProperty("repository").GetString()!;
+    var revision = prompt.GetProperty("revision").GetString()!;
+    var contextSha256 = prompt.GetProperty("contextSha256").GetString()!;
+    if (mode == "identity")
+    {
+        File.WriteAllText(answer, JsonSerializer.Serialize(new
+        {
+            obligationId = "wrong-obligation",
+            repository,
+            revision,
+            contextSha256,
+            decision = "recommend",
+            explanation = "wrong identity",
+        }));
+    }
+    else if (mode == "schema")
+    {
+        File.WriteAllText(answer, JsonSerializer.Serialize(new
+        {
+            obligationId,
+            repository,
+            revision,
+            contextSha256,
+            decision = "recommend",
+        }));
+    }
+    else if (mode == "tool")
+    {
+        Console.WriteLine("""{"type":"item.started","item":{"type":"mcp_tool_call"}}""");
+        return 0;
+    }
+    else if (mode == "stdout-overflow")
+    {
+        Console.Out.Write(new string('x', 1048577));
+        Console.Out.Flush();
+        await Task.Delay(TimeSpan.FromMinutes(1));
+        return 0;
+    }
+    else if (mode == "stderr-overflow")
+    {
+        Console.Error.Write(new string('x', 1048577));
+        Console.Error.Flush();
+        await Task.Delay(TimeSpan.FromMinutes(1));
+        return 0;
+    }
+    else if (mode == "nonzero")
+    {
+        Console.Error.WriteLine("nonzero diagnostic");
+        return 7;
+    }
+    else if (mode == "timeout")
+    {
+        Console.WriteLine("""{"type":"thread.started"}""");
+        Console.Out.Flush();
+        Console.Error.WriteLine("timeout diagnostic");
+        Console.Error.Flush();
+        await Task.Delay(TimeSpan.FromMinutes(1));
+        return 0;
+    }
+    else
+    {
+        File.WriteAllText(answer, JsonSerializer.Serialize(new
+        {
+            obligationId,
+            repository,
+            revision,
+            contextSha256,
+            decision = "recommend",
+            explanation = "valid decision",
+        }));
+    }
+
+    Console.WriteLine("""{"type":"thread.started"}""");
+    Console.WriteLine("""{"type":"turn.started"}""");
+    Console.WriteLine("""{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40,"cached_input_tokens":10}}""");
+    Console.Out.Flush();
+    if (mode == "valid") Console.Error.WriteLine("diagnostic stderr");
+    return 0;
+}
+
+// Keep the readiness-only Baton.Cli dependency in a separately JIT-compiled method. Historical
+// git/gh fixture copies intentionally omit Baton.Cli.dll and must still start without loading it.
+if (args is ["readiness-decide", ..])
+    return await ReadinessCrashProcessMode.RunAsync(args);
+
 // #2482: cross-process reservation probe. The gate makes two independent OS processes race on
 // the same room-owned message ID, not merely two store instances in one test process.
 if (args is ["steering-reserve", var steeringRoom, var steeringGate, var steeringMessageId, var steeringPayload])

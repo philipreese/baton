@@ -33,7 +33,10 @@ public sealed record ConductorObligationRequest(
     string Adapter,
     string AdapterCapability,
     bool AdapterSupported,
-    string? UnsupportedReason = null);
+    string? UnsupportedReason = null,
+    string? TargetWorkspace = null,
+    string? TargetRevision = null,
+    string? ContextSha256 = null);
 
 /// <summary>A durable obligation projection; status is never inferred from transport acceptance.</summary>
 public sealed record ConductorObligation(
@@ -55,7 +58,10 @@ public sealed record ConductorObligation(
     DateTimeOffset? ActionObservedAt = null,
     string? TransportReceipt = null,
     string? Reason = null,
-    string? ActionProof = null);
+    string? ActionProof = null,
+    string? TargetWorkspace = null,
+    string? TargetRevision = null,
+    string? ContextSha256 = null);
 
 /// <summary>Read-only retained obligation evidence and keyed quarantine diagnostics.</summary>
 internal sealed record ConductorObligationInspection(
@@ -105,7 +111,7 @@ public sealed class ConductorObligationStoreException : BatonFlowException
 /// The projection retains complete terminal obligations when supporting fleet facts rotate, and a
 /// transport acknowledgement therefore cannot close an obligation.
 /// </summary>
-public sealed class ConductorObligationStore
+public sealed partial class ConductorObligationStore
 {
     private const string LockNamePrefix = "baton-conductor-obligations";
     private const int ProjectionVersion = 2;
@@ -312,7 +318,16 @@ public sealed class ConductorObligationStore
     }
 
     /// <summary>Records independent evidence that the requested action actually occurred.</summary>
-    public async Task<ConductorObligation> ObserveActionAsync(
+    public Task<ConductorObligation> ObserveActionAsync(
+        string idempotencyKey,
+        string actionProof,
+        CancellationToken cancellationToken = default) =>
+        IsOwnedReadinessKey(idempotencyKey)
+            ? WithReadinessExclusiveAsync(idempotencyKey,
+                () => ObserveActionCoreAsync(idempotencyKey, actionProof, cancellationToken), cancellationToken)
+            : ObserveActionCoreAsync(idempotencyKey, actionProof, cancellationToken);
+
+    private async Task<ConductorObligation> ObserveActionCoreAsync(
         string idempotencyKey,
         string actionProof,
         CancellationToken cancellationToken = default)
@@ -356,7 +371,16 @@ public sealed class ConductorObligationStore
     }
 
     /// <summary>Closes an open obligation explicitly without claiming the requested action occurred.</summary>
-    public async Task<ConductorObligation> BlockAsync(
+    public Task<ConductorObligation> BlockAsync(
+        string idempotencyKey,
+        string reason,
+        CancellationToken cancellationToken = default) =>
+        IsOwnedReadinessKey(idempotencyKey)
+            ? WithReadinessExclusiveAsync(idempotencyKey,
+                () => BlockCoreAsync(idempotencyKey, reason, cancellationToken), cancellationToken)
+            : BlockCoreAsync(idempotencyKey, reason, cancellationToken);
+
+    private async Task<ConductorObligation> BlockCoreAsync(
         string idempotencyKey,
         string reason,
         CancellationToken cancellationToken = default)
@@ -420,6 +444,9 @@ public sealed class ConductorObligationStore
             ObligationAdapter: obligation.Adapter,
             ObligationAdapterCapability: obligation.AdapterCapability,
             ObligationAdapterSupported: obligation.AdapterSupported,
+            ObligationTargetWorkspace: obligation.TargetWorkspace,
+            ObligationTargetRevision: obligation.TargetRevision,
+            ObligationContextSha256: obligation.ContextSha256,
             ObligationReason: reason ?? obligation.Reason,
             ObligationTransportReceipt: receipt ?? obligation.TransportReceipt,
             ObligationActionProof: actionProof ?? obligation.ActionProof);
@@ -576,7 +603,10 @@ public sealed class ConductorObligationStore
             row.ObligationAdapter,
             row.ObligationAdapterCapability,
             supported,
-            ConductorObligationStatus.Pending);
+            ConductorObligationStatus.Pending,
+            TargetWorkspace: row.ObligationTargetWorkspace,
+            TargetRevision: row.ObligationTargetRevision,
+            ContextSha256: row.ObligationContextSha256);
     }
 
     private static ConductorObligationStatus StatusFor(FleetEventKind kind) => kind switch
@@ -748,7 +778,8 @@ public sealed class ConductorObligationStore
     {
         ValidateRequest(new(item.IdempotencyKey, item.TargetProject, item.TargetRoom,
             item.TargetExecution, item.PullRequestHead, item.RequestedAction, item.Owner,
-            item.CreatedAt, item.Adapter, item.AdapterCapability, item.AdapterSupported, item.Reason));
+            item.CreatedAt, item.Adapter, item.AdapterCapability, item.AdapterSupported, item.Reason,
+            item.TargetWorkspace, item.TargetRevision, item.ContextSha256));
         if (string.IsNullOrWhiteSpace(item.ObligationId) || item.CreatedAt == default || !Enum.IsDefined(item.Status))
         {
             throw new InvalidDataException("A retained obligation has invalid identity, age or status.");
@@ -868,7 +899,10 @@ public sealed class ConductorObligationStore
         request.AdapterCapability,
         request.AdapterSupported,
         ConductorObligationStatus.Pending,
-        Reason: request.UnsupportedReason);
+        Reason: request.UnsupportedReason,
+        TargetWorkspace: request.TargetWorkspace,
+        TargetRevision: request.TargetRevision,
+        ContextSha256: request.ContextSha256);
 
     private static void ValidateRequest(ConductorObligationRequest request)
     {
@@ -881,7 +915,8 @@ public sealed class ConductorObligationStore
         ArgumentException.ThrowIfNullOrWhiteSpace(request.AdapterCapability);
         if (string.IsNullOrWhiteSpace(request.TargetRoom)
             && string.IsNullOrWhiteSpace(request.TargetExecution)
-            && string.IsNullOrWhiteSpace(request.PullRequestHead))
+            && string.IsNullOrWhiteSpace(request.PullRequestHead)
+            && string.IsNullOrWhiteSpace(request.TargetRevision))
         {
             throw new ArgumentException(
                 "An obligation needs a room, execution, or pull-request head target.", nameof(request));
@@ -891,6 +926,20 @@ public sealed class ConductorObligationStore
         {
             throw new ArgumentException(
                 "An unsupported adapter needs an explicit reason.", nameof(request));
+        }
+
+        if (request.RequestedAction == "readiness-decision"
+            && (!request.IdempotencyKey.StartsWith("owned-readiness:", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(request.TargetWorkspace)
+                || string.IsNullOrWhiteSpace(request.TargetRevision)
+                || string.IsNullOrWhiteSpace(request.ContextSha256)
+                || request.TargetRoom is not null || request.TargetExecution is not null
+                || request.PullRequestHead is not null
+                || request.Adapter != "codex-subscription-cli"
+                || request.AdapterCapability != "one-shot-readiness" || !request.AdapterSupported))
+        {
+            throw new ArgumentException("Owned readiness obligation has an incomplete or unsupported payload.",
+                nameof(request));
         }
     }
 
@@ -923,14 +972,18 @@ public sealed class ConductorObligationStore
         && left.CreatedAt == right.CreatedAt.ToUniversalTime()
         && string.Equals(left.Adapter, right.Adapter, StringComparison.Ordinal)
         && string.Equals(left.AdapterCapability, right.AdapterCapability, StringComparison.Ordinal)
-        && left.AdapterSupported == right.AdapterSupported;
+        && left.AdapterSupported == right.AdapterSupported
+        && string.Equals(left.TargetWorkspace, right.TargetWorkspace, StringComparison.Ordinal)
+        && string.Equals(left.TargetRevision, right.TargetRevision, StringComparison.Ordinal)
+        && string.Equals(left.ContextSha256, right.ContextSha256, StringComparison.Ordinal);
 
     private static bool SamePayload(ConductorObligation left, ConductorObligation right) =>
         left.ObligationId == right.ObligationId
         && SamePayload(left, new ConductorObligationRequest(
             right.IdempotencyKey, right.TargetProject, right.TargetRoom, right.TargetExecution,
             right.PullRequestHead, right.RequestedAction, right.Owner, right.CreatedAt, right.Adapter,
-            right.AdapterCapability, right.AdapterSupported));
+            right.AdapterCapability, right.AdapterSupported, TargetWorkspace: right.TargetWorkspace,
+            TargetRevision: right.TargetRevision, ContextSha256: right.ContextSha256));
 
     private static string DedupeKey(FleetEventKind kind, string idempotencyKey) =>
         $"conductor-obligation:{kind.ToString().ToCamelCase()}:{idempotencyKey}";

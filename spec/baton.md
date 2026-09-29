@@ -6450,7 +6450,9 @@ and for which realization does what to a package's bytes.
   (C-11, §11) is not this: no pairing state, no client registry — that entry records the distinction
   and the narrow listener it prices back in.
 - **A resident orchestrator that decides on a human's behalf.** There is no room-resident presence;
-  the harness is the decider, always (§5, §7).
+  the harness remains the decider for worker and queue actions (§5, §7). The explicit, one-shot
+  local readiness advice in §14 is the only opt-in model-backed conductor exception; it does not
+  act on its advice or start a standing conductor loop.
 - **Remote *dispatch* triggering — closed, orchestrator-only.** Settled, not open: remote dispatch
   already exists as "talk to your harness from the phone" — a Claude Code mobile session (or any
   other agent that can run CLI verbs and read `terminal.json`/`fleet_status`) driving `baton dispatch`,
@@ -8401,6 +8403,42 @@ This section defines the first bounded slice: a durable, auditable repository-cl
 - Writes are serialized with `MutexGuardedFileLock` using the `baton-conductor-claim` mutex prefix.
 - Writes use atomic replacement (`.tmp` file written then replaced via `File.Move(..., overwrite: true)`).
 - The durable record maintains full audit history in `transitions[]`, tracking every `Claim`, `Takeover`, and `Release` transition with timestamps, holders, displaced holders, and reasons.
+
+### One-shot owned readiness advice (#2484)
+
+`baton conductor prepare --request <file>` creates one manually requested readiness obligation
+for a claim holder, canonical repository, clean workspace and exact local `HEAD`.
+`baton conductor decide --obligation <key> --context <file>` checks the same owner, repository,
+workspace and revision, then makes at most one Codex subscription invocation. The typed request
+binds the SHA-256 digest of the supplied, bounded as-of context; changing the key or context
+cannot repurpose the obligation. The response can only say `hold` or `recommend` and explain why.
+It is advice, never a merge grant or an executable action. No response alone writes
+`ActionObserved`.
+
+The UTF-8 request JSON has `schemaVersion: 1`, `key`, `repository`, `workspace`, `revision`,
+`holder`, `observedAt`, `contextSha256`, `adapter`, `model`, and `effort`. `contextSha256` is the
+lowercase SHA-256 of the exact context-file bytes. The context JSON has `schemaVersion: 1`,
+matching `key`, `repository`, absolute `workspace`, `revision`, and `observedAt`, plus an `evidence`
+array of `{name,status,detail}`. The returned obligation key is prefixed `owned-readiness:` and
+is the `decide --obligation` argument. Evidence is caller-supplied as-of input, not freshly
+observed forge state. An empty or mismatching claim, a dirty workspace, or a moved HEAD refuses
+before a model launch.
+
+This explicit local path is the narrow exception to the external-harness-only conductor shape in
+§10. It does not introduce a goal loop, heartbeat, queue launch, automatic action execution,
+website decision surface or paid API transport. The existing queue-owned continuation obligations
+retain their at-least-once transport semantics. The readiness path uses the same
+`ConductorObligationStore` for identity and `TransportAcknowledged` but writes a durable launch
+marker before the vendor process. A complete validated response and matching controller receipt
+are retained before acknowledgement. A marker without complete response is uncertain and never
+automatically retried; a complete response can be replayed and acknowledged without a second
+model call. The initial adapter is pinned to Codex subscription `gpt-5.6-luna`/`low`, with native
+tools, MCP, apps, browser, subagents and approval escalation disabled. The limits are 64 KiB per
+input file and structured response, 1 MiB per captured stream and 180 seconds per invocation;
+they do not guarantee a provider token or billing ceiling.
+The initial Codex exec path passes its prompt as a direct process argument; it also refuses a
+serialized prompt above 24 KiB before launch to stay below the Windows process-argument ceiling.
+It never truncates supplied evidence to fit.
 
 ---
 
