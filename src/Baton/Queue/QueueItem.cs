@@ -186,6 +186,13 @@ public sealed record QueueItem
     /// </remarks>
     public string? ReadinessMutationClaim { get; init; }
 
+    /// <summary>
+    /// Permanent evidence that this exact settled implementation may have called GitHub's PR-create
+    /// endpoint. Unlike a readiness claim it is never replaced or cleared: a crash, cancellation,
+    /// import, or later lifecycle stage cannot grant another create for this attempt.
+    /// </summary>
+    public QueueDraftPullRequestCreateMarker? DraftPullRequestCreateMarker { get; init; }
+
     /// <summary>A retained disposition, atomically recording kind, time, and reason.</summary>
     public QueueRetirement? Retirement { get; init; }
 
@@ -434,6 +441,16 @@ public sealed record QueueAttemptEnvelope(
     [property: JsonPropertyName("attemptBaseRevision")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AttemptBaseRevision,
     [property: JsonPropertyName("factTimestamp")] DateTimeOffset FactTimestamp);
+
+/// <summary>The durable, pre-call identity for one queue-owned draft PR handoff.</summary>
+public sealed record QueueDraftPullRequestCreateMarker(
+    FleetAttemptId AttemptId,
+    string RoomDirectory,
+    string Repository,
+    string Branch,
+    string HeadSha,
+    string BaseBranch,
+    DateTimeOffset MayHaveCalledAt);
 
 /// <summary>The closed set of automatic reconciliations permitted after an operator halt.</summary>
 [JsonConverter(typeof(JsonStringEnumConverter<QueueReconciliationKind>))]

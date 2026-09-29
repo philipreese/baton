@@ -361,7 +361,7 @@ public static class WorkspaceDeliveryProbe
     /// Credential Isolation: it shells out to whatever <c>git</c>/<c>gh</c> is already authenticated on
     /// the host and touches no credential of its own.
     /// </summary>
-    private static async Task<Daemon.GhCliResult> SpawnAsync(
+    internal static async Task<Daemon.GhCliResult> SpawnAsync(
         string program, string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
         ChildProcessTree child;

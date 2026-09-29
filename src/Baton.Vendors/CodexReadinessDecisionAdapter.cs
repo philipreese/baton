@@ -10,14 +10,17 @@ public sealed class CodexReadinessDecisionAdapter
 {
     private readonly string? _testExecutable;
     private readonly TimeSpan _timeout;
+    private readonly Func<FileStream, CancellationToken, Task>? _afterStdoutWriteForTests;
 
     public CodexReadinessDecisionAdapter() => _timeout = Timeout;
 
     // Test-only direct-executable seam. Production always resolves the installed Codex CLI.
-    internal CodexReadinessDecisionAdapter(string executable, TimeSpan timeout)
+    internal CodexReadinessDecisionAdapter(string executable, TimeSpan timeout,
+        Func<FileStream, CancellationToken, Task>? afterStdoutWriteForTests = null)
     {
         _testExecutable = Path.GetFullPath(executable);
         _timeout = timeout;
+        _afterStdoutWriteForTests = afterStdoutWriteForTests;
     }
 
     public const string AdapterName = "codex-subscription-cli";
@@ -91,7 +94,7 @@ public sealed class CodexReadinessDecisionAdapter
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_timeout);
         var stdoutTask = ReadBoundedAsync(child.StandardOutput, stdoutEvidence, MaxStreamBytes, child,
-            timeout.Token);
+            timeout.Token, _afterStdoutWriteForTests);
         var stderrTask = ReadBoundedAsync(child.StandardError, stderrEvidence, MaxStreamBytes, child,
             timeout.Token);
         try
@@ -118,18 +121,41 @@ public sealed class CodexReadinessDecisionAdapter
             return new RetainedReadinessResponse(decision, usage, AdapterName, Model, Effort,
                 DateTimeOffset.UtcNow);
         }
-        catch
+        catch (Exception failure)
         {
             child.Terminate();
+            using var teardown = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var childExited = false;
             try
             {
-                using var teardown = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                 await child.Process.WaitForExitAsync(teardown.Token).ConfigureAwait(false);
+                childExited = true;
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (teardown.IsCancellationRequested)
             {
                 // Disposal closes the Windows Job Object as a final containment rung.
             }
+
+            // Do not expose retained diagnostics while an owned capture task can still hold
+            // an evidence file's OS handle. The child-exit and capture drain share one bound.
+            var captures = Task.WhenAll(stdoutTask, stderrTask);
+            try
+            {
+                await captures.WaitAsync(teardown.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (teardown.IsCancellationRequested && !captures.IsCompleted)
+            {
+                throw new InvalidOperationException(
+                    "Codex evidence capture did not settle within the cleanup bound; diagnostic files may remain in use.",
+                    failure);
+            }
+            catch (Exception)
+            {
+                // A capture fault is secondary to the failure that began teardown.
+            }
+
+            if (!childExited)
+                throw new InvalidOperationException("Codex child did not exit within the cleanup bound.", failure);
 
             throw;
         }
@@ -218,7 +244,8 @@ public sealed class CodexReadinessDecisionAdapter
         usage.TryGetProperty(name, out var value) && value.TryGetInt64(out var count) ? count : null;
 
     private static async Task<string> ReadBoundedAsync(StreamReader reader, FileStream evidence, int maxBytes,
-        ChildProcessTree child, CancellationToken token)
+        ChildProcessTree child, CancellationToken token,
+        Func<FileStream, CancellationToken, Task>? afterWriteForTests = null)
     {
         var buffer = new char[4096];
         var text = new StringBuilder();
@@ -240,6 +267,8 @@ public sealed class CodexReadinessDecisionAdapter
                 }
 
                 await evidence.WriteAsync(chunk, CancellationToken.None).ConfigureAwait(false);
+                if (afterWriteForTests is not null)
+                    await afterWriteForTests(evidence, token).ConfigureAwait(false);
                 bytes += chunk.Length;
                 text.Append(buffer, 0, count);
             }

@@ -7950,7 +7950,7 @@ written:
 | implement | succeeded-shaped, PR open | **review** | there is something to review |
 | continue | succeeded-shaped, PR open, readable distinct attempt revision | **review** | the recovered work has a new authoritative revision to review |
 | fix | succeeded-shaped, PR open, readable distinct attempt revision | **re-review** | the prior verdict's findings are being checked against a new authoritative revision |
-| implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR; a conductor-supplied exact draft PR is reconciled before another lifecycle round |
+| implement / fix / continue | succeeded-shaped, no PR | **operator**, except the opt-in implement handoff below | a conductor-supplied exact draft PR is reconciled before another lifecycle round; only the bounded opt-in implement path may create one |
 | review / re-review | succeeded-shaped, `decision: approve`, exact full `reviewedRef` = current PR head, required checks passing | **ready** | only current-head approval plus green required checks may clear draft |
 | review / re-review | succeeded-shaped, `decision: approve`, canonical full-SHA `reviewedRef` differs from current PR head | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
 | review / re-review | succeeded-shaped, `decision: approve`, noncanonical `reviewedRef` | **operator** | lifecycle approval requires exactly one full 40-character hexadecimal PR-head SHA; halt rather than spend a re-review |
@@ -7982,6 +7982,42 @@ An exact open draft PR releases this delivery-identity halt even when the valid 
 empty; required checks gate readiness approval, not dispatch into review. A later missing trusted
 repository identity clears the recovery allowance and becomes a terminal operator halt, not a
 repeated reconciliation tick.
+
+**Opt-in draft-PR handoff for one settled implementation (#2486).** The `Queue` block of
+`settings.json` may opt in one canonical remote repository, for example:
+
+```json
+{ "Queue": { "DraftPullRequestHandoff": { "github.com/example/project": true } } }
+```
+
+Absent, false, malformed, and noncanonical entries are off. The setting is read again under the
+queue admission lock; turning it off prevents new markers, but cannot revoke a create already
+admitted. Only the current issue-anchored `implement` attempt with a durable `AttemptSettled`
+fact, succeeded-shaped terminal room, typed `AwaitingVerifiedPullRequest` halt, canonical recorded
+repository, exact clean local branch/HEAD, positive origin branch-tip proof at that full SHA, and a
+resolvable literal `main` base may enter this path. A successful bounded all-state exact-repository
+branch/base PR history read must show no previous PR, including closed or merged history; failure,
+ambiguity, or a full result limit is unknown, never absence. Existing open drafts continue through
+ordinary reconciliation. Fix, continue, review, legacy and unpushed rows have no create authority.
+
+For an opted-in initial issue-anchored `implement` launch with canonical recorded repository and
+branch and no PR, the queue passes `--expect-pr false` into that lane's immutable dispatch binding.
+This lets the post-exit delivery check accept a new clean revision pushed to origin before the
+daemon creates the draft; revision and branch-delivery checks still run. Other launches retain the
+role's ordinary PR expectation. Turning the setting off after launch does not rewrite its delivery
+binding, but the later admission recheck prevents a new draft-create marker.
+
+The queue commits an attempt/room/repository/branch/head/`main` **may-have-called** marker before a
+single `gh pr create --draft --head <branch> --base main --repo <repository>` call. It is permanent
+through restart, cancellation refusal, import refusal and later stage transitions; no later daemon
+may issue another create for that attempt. Only deterministic retained issue/queue fields form the
+title and body. A command receipt does not prove an open PR. After a call or crash, marked-row recovery takes
+precedence over ordinary unpinned reconciliation and independently requires exactly one open draft
+PR in the same repository, branch and `main` base at the marker's full head, then lets the existing
+lifecycle advance to review. An absent, moved-head, non-draft, closed, merged or unreadable result
+keeps the typed halt and original terminal room for operator reconciliation; it never retries
+create. The pre-call marker cannot make an external actor's simultaneous PR creation atomic with
+local cancellation or the preceding absence read, so conflicts are observed, not overwritten.
 
 **Draft is the lifecycle's visible readiness signal, not merge authority.** Every open PR with an
 unfinished review, fix, continuation, stale-approval, or required-check obligation is reconciled to draft.

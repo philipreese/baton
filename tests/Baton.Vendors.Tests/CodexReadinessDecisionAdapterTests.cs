@@ -101,6 +101,149 @@ public sealed class CodexReadinessDecisionAdapterTests
         AssertStopped(run);
     }
 
+    [Fact]
+    public async Task A_timeout_waits_for_owned_capture_before_diagnostics_are_readable()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Windows share violations are the CI symptom.
+
+        var captureEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var captureCanceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCapture = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var captureSettled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var run = new FakeCodexRun("timeout", TimeSpan.FromSeconds(4), async (evidence, token) =>
+        {
+            // An in-flight Windows FileStream write may retain its SafeHandle after the stream
+            // is disposed. Hold that exact handle, not a second unrelated file lock, while
+            // cancellation tears down the child and the capture task finishes.
+            var handle = evidence.SafeFileHandle;
+            var held = false;
+            handle.DangerousAddRef(ref held);
+            try
+            {
+                captureEntered.SetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    captureCanceled.SetResult();
+                    await releaseCapture.Task;
+                    throw;
+                }
+            }
+            finally
+            {
+                if (held) handle.DangerousRelease();
+                captureSettled.SetResult();
+            }
+        });
+
+        var decisionTask = run.Adapter.DecideAsync("obligation-1", Request, Context, run.Directory,
+            TestContext.Current.CancellationToken);
+        try
+        {
+            await captureEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            using var child = Process.GetProcessById(run.Pid);
+            await captureCanceled.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            await child.WaitForExitAsync(TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+
+            // Once the child is gone, the old failure path returns without joining this capture.
+            // Reproduce CI's exact unreadable-file symptom if it returns while our handle is held.
+            if (await Task.WhenAny(decisionTask,
+                    Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken)) == decisionTask) // wait-ok: observe premature return before the five-second capture cleanup deadline
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => decisionTask);
+                Assert.Contains("thread.started", File.ReadAllText(run.StdoutPath));
+            }
+        }
+        finally
+        {
+            releaseCapture.TrySetResult();
+            try
+            {
+                if (captureEntered.Task.IsCompleted)
+                    await captureSettled.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                try
+                {
+                    await decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+                }
+                catch (Exception)
+                {
+                    // The assertion outside the cleanup path checks the original outcome.
+                }
+            }
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken));
+        Assert.Contains("thread.started", File.ReadAllText(run.StdoutPath));
+        Assert.Contains("timeout diagnostic", File.ReadAllText(run.StderrPath));
+        AssertStopped(run);
+    }
+
+    [Fact]
+    public async Task A_capture_that_outlives_cleanup_reports_incomplete_diagnostics()
+    {
+        var captureEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCapture = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var captureSettled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var run = new FakeCodexRun("timeout", TimeSpan.FromSeconds(4), async (_, token) =>
+        {
+            captureEntered.SetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                await releaseCapture.Task;
+                throw;
+            }
+            finally
+            {
+                captureSettled.SetResult();
+            }
+        });
+        var decisionTask = run.Adapter.DecideAsync("obligation-1", Request, Context, run.Directory,
+            TestContext.Current.CancellationToken);
+        try
+        {
+            await captureEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                decisionTask.WaitAsync(TimeSpan.FromSeconds(11), TestContext.Current.CancellationToken)); // wait-ok: bound the four-second request timeout plus five-second cleanup; detect cleanup deadline regressions
+            Assert.Contains("capture did not settle within the cleanup bound", error.Message);
+            Assert.IsAssignableFrom<OperationCanceledException>(error.InnerException);
+            AssertStopped(run);
+        }
+        finally
+        {
+            releaseCapture.TrySetResult();
+            try
+            {
+                if (captureEntered.Task.IsCompleted)
+                    await captureSettled.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                try
+                {
+                    await decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+                }
+                catch (Exception)
+                {
+                    // The assertion above checks the explicit cleanup-bound failure.
+                }
+            }
+        }
+        Assert.Contains("thread.started", File.ReadAllText(run.StdoutPath));
+        Assert.Contains("timeout diagnostic", File.ReadAllText(run.StderrPath));
+    }
+
     private static void AssertStopped(FakeCodexRun run)
     {
         Assert.True(run.Pid > 0, "the fake executable must have started and recorded its PID");
@@ -120,7 +263,8 @@ internal sealed class FakeCodexRun : IDisposable
     public int Pid => File.Exists(PidPath) && int.TryParse(File.ReadAllText(PidPath), out var pid) ? pid : 0;
     public CodexReadinessDecisionAdapter Adapter { get; }
 
-    public FakeCodexRun(string mode, TimeSpan? timeout = null)
+    public FakeCodexRun(string mode, TimeSpan? timeout = null,
+        Func<FileStream, CancellationToken, Task>? afterStdoutWriteForTests = null)
     {
         _root = Path.Combine(Path.GetTempPath(), "baton-readiness-run-" + Guid.NewGuid().ToString("N"));
         System.IO.Directory.CreateDirectory(_root);
@@ -129,7 +273,8 @@ internal sealed class FakeCodexRun : IDisposable
         var executable = Path.Combine(hostDirectory,
             "Baton.CrashTestHost" + (OperatingSystem.IsWindows() ? ".exe" : string.Empty));
         Assert.True(File.Exists(executable), "the source-built crash test apphost must be present");
-        Adapter = new CodexReadinessDecisionAdapter(executable, timeout ?? TimeSpan.FromSeconds(15));
+        Adapter = new CodexReadinessDecisionAdapter(executable, timeout ?? TimeSpan.FromSeconds(15),
+            afterStdoutWriteForTests);
     }
 
     public void Dispose()

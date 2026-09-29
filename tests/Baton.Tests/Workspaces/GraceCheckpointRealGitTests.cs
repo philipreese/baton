@@ -264,8 +264,8 @@ public sealed class GraceCheckpointRealGitTests
         var timeout = TimeSpan.FromSeconds(1);
         var command = $"$child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru; [IO.File]::WriteAllText('{temporarySignalPath.Replace("'", "''")}', \"$PID,$($child.Id)\"); [IO.File]::Move('{temporarySignalPath.Replace("'", "''")}', '{signalPath.Replace("'", "''")}'); Start-Sleep -Seconds 30";
         Task<GraceCheckpoint?>? capture = null;
-        Process? helper = null;
-        Process? child = null;
+        ProbeProcess? helper = null;
+        ProbeProcess? child = null;
         Exception? primaryFailure = null;
         try
         {
@@ -273,16 +273,15 @@ public sealed class GraceCheckpointRealGitTests
                 timeout, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command);
             var stopwatch = Stopwatch.StartNew();
             capture = WorktreeProvisioner.CaptureGraceCheckpointAsync(fixture.Repository, CancellationToken.None);
-            (helper, child) = await ReadProbeProcessIdsAsync(signalPath, TimeSpan.FromSeconds(5));
+            var observed = await ReadProbeProcessIdsAsync(signalPath, TimeSpan.FromSeconds(5));
+            (helper, child) = observed;
 
-            Assert.False(helper.HasExited);
-            Assert.False(child.HasExited);
             Assert.Null(await capture);
             stopwatch.Stop();
 
             Assert.InRange(stopwatch.Elapsed, timeout, TimeSpan.FromSeconds(10));
-            Assert.True(helper.HasExited);
-            Assert.True(child.HasExited);
+            Assert.True(observed.Helper.HasExited);
+            Assert.True(observed.Child.HasExited);
             Assert.Equal(originalHead, fixture.Head);
             Assert.True(fixture.IsAncestor(originalHead, fixture.TrackingRef));
         }
@@ -458,7 +457,8 @@ public sealed class GraceCheckpointRealGitTests
         }
     }
 
-    private static async Task<(Process Helper, Process Child)> ReadProbeProcessIdsAsync(string signalPath, TimeSpan timeout)
+    private static async Task<(ProbeProcess Helper, ProbeProcess Child)> ReadProbeProcessIdsAsync(
+        string signalPath, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (!File.Exists(signalPath))
@@ -476,6 +476,56 @@ public sealed class GraceCheckpointRealGitTests
         Assert.Equal(2, ids.Length);
         Assert.True(int.TryParse(ids[0], out var helperPid) && helperPid > 0, "The probe root PID was invalid.");
         Assert.True(int.TryParse(ids[1], out var childPid) && childPid > 0, "The probe child PID was invalid.");
-        return (Process.GetProcessById(helperPid), Process.GetProcessById(childPid));
+        return (
+            new ProbeProcess(helperPid, TryGetProcessById(helperPid)),
+            new ProbeProcess(childPid, TryGetProcessById(childPid)));
+    }
+
+    private static Process? TryGetProcessById(int processId)
+    {
+        try
+        {
+            return Process.GetProcessById(processId);
+        }
+        catch (ArgumentException)
+        {
+            // The timeout's process-tree kill can reap a genuinely published PID before this
+            // observation. Preserve that valid outcome without hiding other lookup failures.
+            return null;
+        }
+    }
+
+    [Fact]
+    public void A_missing_probe_handle_does_not_hide_a_live_pid()
+    {
+        using var observation = new ProbeProcess(Environment.ProcessId, null);
+
+        Assert.False(observation.HasExited);
+    }
+
+    private sealed class ProbeProcess(int processId, Process? process) : IDisposable
+    {
+        public bool HasExited
+        {
+            get
+            {
+                if (process is not null)
+                {
+                    return process.HasExited;
+                }
+
+                try
+                {
+                    using var current = Process.GetProcessById(processId);
+                    return current.HasExited;
+                }
+                catch (ArgumentException)
+                {
+                    return true;
+                }
+            }
+        }
+
+        public void Dispose() => process?.Dispose();
     }
 }

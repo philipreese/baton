@@ -35,7 +35,7 @@ namespace Baton.Cli.Daemon;
 /// guard here would quietly become the one that mattered.
 /// </para>
 /// </remarks>
-public sealed class WorkItemAdvancer
+public sealed partial class WorkItemAdvancer
 {
     private const int MaxRequiredCheckEvidenceAttempts = 6;
     private static readonly TimeSpan RequiredCheckEvidenceBackoff = TimeSpan.FromSeconds(30);
@@ -45,6 +45,10 @@ public sealed class WorkItemAdvancer
     private const string BoardObservationJsonFields = "number,state,headRefOid";
 
     private readonly IGhCliRunner _gh;
+    private readonly IGhCliRunner _draftGh;
+    private readonly WorkspaceDeliveryProbe.CommandRunner _git;
+    private readonly bool _gitInjected;
+    private readonly TimeSpan _draftCommandTimeout;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
     private readonly Func<string, CancellationToken, Task<RepositoryIdentity?>>? _repositoryIdentity;
     private readonly TimeSpan _boardObservationTimeout;
@@ -69,9 +73,15 @@ public sealed class WorkItemAdvancer
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null,
         TimeSpan? boardObservationTimeout = null,
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
-        ConductorObligationStore? conductorObligations = null)
+        ConductorObligationStore? conductorObligations = null,
+        WorkspaceDeliveryProbe.CommandRunner? git = null,
+        TimeSpan? draftCommandTimeout = null)
     {
         _gh = gh ?? new GhCliRunner();
+        _draftGh = gh ?? new GhCliRunner(requireOutsideWorkspace: true);
+        _git = git ?? WorkspaceDeliveryProbe.SpawnAsync;
+        _gitInjected = git is not null;
+        _draftCommandTimeout = draftCommandTimeout ?? DefaultDraftPullRequestCommandTimeout;
         _workspaceHead = workspaceHead ?? ReadWorkspaceHeadAsync;
         _repositoryIdentity = repositoryIdentity;
         _boardObservationTimeout = boardObservationTimeout ?? WorkspaceDeliveryProbe.SpawnTimeout;
@@ -204,8 +214,22 @@ public sealed class WorkItemAdvancer
         var arrestedStep = sentinel?.Steps?.FirstOrDefault(step =>
             string.Equals(step.IndeterminateProducerKind, nameof(Baton.Domain.IndeterminateProducer.Arrested), StringComparison.Ordinal));
 
-        var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
-        var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
+        // A permanent may-have-called marker takes precedence over the older unpinned open-PR
+        // reconciliation. A moved head or non-draft PR must never reach lifecycle advancement.
+        var markedHandoff = IsAwaitingMissingPullRequestReconciliation(item)
+            && item.DraftPullRequestCreateMarker is not null;
+        var trustedDraftHandoff = markedHandoff || IsAwaitingMissingPullRequestReconciliation(item)
+            && item.Stage == WorkStage.Implement && IsDraftHandoffEnabledNow(item.Repository);
+        var pr = markedHandoff
+            ? await RecoverDraftPullRequestAsync(item, cancellationToken).ConfigureAwait(false)
+            : await ReadPullRequestAsync(item, cancellationToken, trustedDraftHandoff).ConfigureAwait(false);
+        if (pr is null)
+        {
+            return null;
+        }
+        var head = trustedDraftHandoff
+            ? await ReadTrustedDraftHeadAsync(item, cancellationToken).ConfigureAwait(false)
+            : await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
         var deliveryFailingMembers = ReadDeliveryFailingMembers(sentinel);
         await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
             .ConfigureAwait(false);
@@ -295,6 +319,28 @@ public sealed class WorkItemAdvancer
         // Preserve the original delivery failure and terminal room while the operator has not yet
         // supplied the exact forge object. Re-observation is the supported recovery seam; it does
         // not infer a PR from a branch or manufacture another failure fact each scheduler tick.
+        if (awaitingMissingPullRequest && item.Stage == WorkStage.Implement
+            && IsDraftHandoffEnabledNow(item.Repository)
+            && pr is { Succeeded: true, Number: not null, IsOpen: true, IsDraft: true }
+            && !string.Equals(pr.HeadSha, head, StringComparison.OrdinalIgnoreCase))
+        {
+            await RetainDraftHandoffReasonAsync(item,
+                "preexisting draft PR is not at the current implementation HEAD; operator reconciliation required")
+                .ConfigureAwait(false);
+            return null;
+        }
+        if (awaitingMissingPullRequest
+            && item.DraftPullRequestCreateMarker is null
+            && pr.Succeeded && pr.Number is null
+            && item.Stage == WorkStage.Implement
+            && IsDraftHandoffEnabledNow(item.Repository))
+        {
+            var created = await TryCreateDraftPullRequestAsync(item, outcome, head, now, cancellationToken)
+                .ConfigureAwait(false);
+            if (created is null) return null;
+            item = created.Value.Item;
+            pr = created.Value.Observation;
+        }
         if (awaitingMissingPullRequest
             && (!pr.Succeeded || pr.Number is null || pr.IsOpen != true || pr.IsDraft != true))
         {
@@ -1143,7 +1189,7 @@ public sealed class WorkItemAdvancer
     /// successful list is distinct from a failed list. The queue never merges and never reopens a PR.
     /// </remarks>
     private async Task<PullRequestObservation> ReadPullRequestAsync(
-        QueueItem item, CancellationToken cancellationToken)
+        QueueItem item, CancellationToken cancellationToken, bool trustedDraftHandoff = false)
     {
         if (item.Branch is not { Length: > 0 } branch)
         {
@@ -1170,9 +1216,11 @@ public sealed class WorkItemAdvancer
                 + "re-add it from the owning repository");
         }
 
-        var currentIdentity = _repositoryIdentity is null
-            ? persistedIdentity
-            : await _repositoryIdentity(item.Workspace, cancellationToken).ConfigureAwait(false);
+        var currentIdentity = trustedDraftHandoff
+            ? await ReadTrustedDraftRepositoryIdentityAsync(item, cancellationToken).ConfigureAwait(false)
+            : _repositoryIdentity is null
+                ? persistedIdentity
+                : await _repositoryIdentity(item.Workspace, cancellationToken).ConfigureAwait(false);
         if (currentIdentity?.RemoteValue is not { Length: > 0 } currentRepository)
         {
             return PullRequestObservation.Failed(
@@ -1186,18 +1234,19 @@ public sealed class WorkItemAdvancer
                 + "refusing all GitHub PR reads and mutations");
         }
 
-        var before = await ReadPullRequestSnapshotAsync(item, cancellationToken).ConfigureAwait(false);
+        var before = await ReadPullRequestSnapshotAsync(item, cancellationToken, trustedDraftHandoff)
+            .ConfigureAwait(false);
         if (!before.Succeeded || before.Number is null || before.IsOpen != true)
         {
             return before;
         }
 
-        var requiredResult = await _gh.RunAsync(
-            item.Workspace,
-            RepositoryArgs(
-                item, "pr", "checks", before.Number.Value.ToString(CultureInfo.InvariantCulture),
-                "--required", "--json", "bucket,name,state,workflow"),
-            cancellationToken).ConfigureAwait(false);
+        var requiredArgs = RepositoryArgs(
+            item, "pr", "checks", before.Number.Value.ToString(CultureInfo.InvariantCulture),
+            "--required", "--json", "bucket,name,state,workflow");
+        var requiredResult = trustedDraftHandoff
+            ? await RunBoundedGhAsync(item, requiredArgs, cancellationToken).ConfigureAwait(false)
+            : await _gh.RunAsync(item.Workspace, requiredArgs, cancellationToken).ConfigureAwait(false);
         var required = requiredResult.Started
             ? PullRequestChecks.TrySummarizeRequired(requiredResult.Stdout)
             : null;
@@ -1213,7 +1262,8 @@ public sealed class WorkItemAdvancer
         // Even on the discovery tick, the stability read is exact by number. A second same-branch PR
         // appearing between the two reads therefore cannot replace the candidate about to be stored.
         var after = await ReadPullRequestSnapshotAsync(
-            item with { PullRequest = before.Number }, cancellationToken).ConfigureAwait(false);
+            item with { PullRequest = before.Number }, cancellationToken, trustedDraftHandoff)
+            .ConfigureAwait(false);
         if (!after.Succeeded)
         {
             return after;
@@ -1276,7 +1326,7 @@ public sealed class WorkItemAdvancer
         Directory.Exists(workspace) ? workspace : Environment.CurrentDirectory;
 
     private async Task<PullRequestObservation> ReadPullRequestSnapshotAsync(
-        QueueItem item, CancellationToken cancellationToken)
+        QueueItem item, CancellationToken cancellationToken, bool trustedDraftHandoff = false)
     {
         var branch = item.Branch!;
         var persistedNumber = item.PullRequest;
@@ -1289,10 +1339,9 @@ public sealed class WorkItemAdvancer
                 item,
                 "pr", "list", "--head", branch, "--state", "open", "--limit", "100",
                 "--json", PullRequestJsonFields);
-        var result = await _gh.RunAsync(
-            item.Workspace,
-            args,
-            cancellationToken).ConfigureAwait(false);
+        var result = trustedDraftHandoff
+            ? await RunBoundedGhAsync(item, args, cancellationToken).ConfigureAwait(false)
+            : await _gh.RunAsync(item.Workspace, args, cancellationToken).ConfigureAwait(false);
         if (!result.Started || result.ExitCode != 0)
         {
             var operation = persistedNumber is null ? "gh pr list" : $"gh pr view {persistedNumber}";

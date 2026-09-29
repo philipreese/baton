@@ -244,7 +244,7 @@ public static class WorkItemLifecycle
         {
             return WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled succeeded but no pull request is open on "
-                + $"'{observation.Branch}' — the queue will not open a PR; {Recovery(observation.Stage)}",
+                + $"'{observation.Branch}' — a pushed branch is not PR evidence; {Recovery(observation.Stage)}",
                 QueueReconciliationKind.AwaitingVerifiedPullRequest);
         }
 
