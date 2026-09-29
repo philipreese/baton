@@ -37,7 +37,8 @@ jobs:
           fi
 
   # Detects which areas a PR touched, so the heavy jobs below can skip when irrelevant.
-  # pull_request ONLY: paths-filter uses the API there (no checkout needed), but on push it shells
+  # pull_request ONLY: paths-filter uses the API there; the page classifier also reads complete Git
+  # history from checkout. On push paths-filter shells
   # out to `git` and dies without a checkout (#410). On push the heavy jobs ignore this job entirely
   # -- their `!cancelled()` if: runs them unconditionally, so main is always validated in full. (A
   # skipped `needs` dependency would normally skip its dependents; those jobs' if: uses a status
@@ -51,7 +52,18 @@ jobs:
       pull-requests: read
     outputs:
       dotnet: ${{ steps.filter.outputs.dotnet }}
+      page-only: ${{ steps.page.outputs.page-only }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Classify complete PR diff for page-only coverage
+        id: page
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/ci/page_changes.py
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -283,7 +295,7 @@ jobs:
   # added there, or in pixi.toml, go unrun in CI until someone remembered to add a step). What
   # `--ci` enforces: spec/baton.md §11 C-12. Several members must catch docs-only changes too, so
   # gates always runs; only its coverage mode changes. Relevant PRs/pushes/recovery run the test
-  # complement beside shards, while a non-.NET PR runs ordinary full gates and skips shards.
+  # complement beside shards. Non-.NET PRs run full gates unless the complete diff is page-only.
   #
   # Cost, stated once: the former `audit` job passed `audit-recordonce` an explicit
   # `origin/${{ github.base_ref || 'main' }}` argument; the tracked `pixi run audit-recordonce`
@@ -308,8 +320,13 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           DOTNET: ${{ needs.changes.outputs.dotnet }}
+          PAGE_ONLY: ${{ needs.changes.outputs.page-only }}
+          CHANGES: ${{ needs.changes.result }}
         run: |
-          if [ "$EVENT" = "pull_request" ] && [ "$DOTNET" != "true" ]; then
+          if [ "$EVENT" = "pull_request" ] && [ "$CHANGES" = "success" ] && [ "$DOTNET" = "false" ] && [ "$PAGE_ONLY" = "true" ]; then
+            echo "mode=page-only" >> "$GITHUB_OUTPUT"
+            echo "task=gates-ci-page-only-quiet" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "pull_request" ] && [ "$DOTNET" != "true" ]; then
             echo "mode=full" >> "$GITHUB_OUTPUT"
             echo "task=gates-ci-quiet" >> "$GITHUB_OUTPUT"
           else
@@ -383,6 +400,7 @@ jobs:
           TEST: ${{ needs.test.result }}
           GATES: ${{ needs.gates.result }}
           MODE: ${{ needs.gates.outputs.coverage-mode }}
+          PAGE_ONLY: ${{ needs.changes.outputs.page-only }}
         run: python tools/ci/aggregate.py
 
   recovery_ci:

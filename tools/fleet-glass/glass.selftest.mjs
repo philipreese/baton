@@ -748,6 +748,9 @@ for(const invalid of [undefined, null, 0, -1, "90", NaN, Infinity]){
 check("invalid derivation timestamp stays unknown", obligationFreshness({...freshSnap,derived_at:"broken"}, NOW) === "unknown");
 check("future derivation timestamp stays unknown", obligationFreshness({...freshSnap,derived_at:"2026-09-08T12:00:00Z"}, NOW) === "unknown");
 
+check("mobile browsers use device width and retain zoom", html.includes('<meta name="viewport" content="width=device-width, initial-scale=1">'));
+check("phone navigation wraps instead of clipping", html.includes('.tabs{flex-wrap:wrap;}'));
+
 if (failures.length) {
   console.error(`glass.selftest.mjs: FAIL -- ${failures.length} check(s):`);
   for (const f of failures) console.error(`  !! ${f}`);

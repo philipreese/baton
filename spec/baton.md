@@ -6677,14 +6677,27 @@ or produces a local receipt.
 On a push or .NET-relevant PR, `.github/workflows/ci.yml` runs the two solution-test shards and
 `gates.py --ci --ci-test-shards-cover` in parallel at `github.sha`; the latter subtracts exactly
 `SOLUTION_TEST_MEMBER` from `_all_members()`. On a non-.NET PR the shards skip and ordinary
-`gates.py --ci` runs the full member register instead. The always-reporting `ci` job accepts only
-those two complementary shapes: successful complement plus successful shards, or successful full
-gates plus skipped shards. Path-filter failure, a missing/contradictory mode, and every failed,
+`gates.py --ci` runs the full member register instead, except for the narrow page-only case below.
+The always-reporting `ci` job accepts successful complement plus successful shards, successful full
+gates plus skipped shards, or the independently classified page-only shape. Path-filter failure,
+a missing/contradictory mode, and every failed,
 cancelled, or unexpectedly skipped coverage job are red. This is the sole gates/test aggregate;
 `diff-shape` and `pr-body-lint` remain separate checks. A green complement job alone makes no full
-coverage claim. Both CI gate modes derive from the same tracked register, exclude any reasoned and
-ratcheted `CI_SKIP` member, and assert their executed population; neither accepts or writes a gate
+coverage claim. All CI gate modes derive from the same tracked register, exclude any reasoned and
+ratcheted `CI_SKIP` member, and assert their executed population; none accepts or writes a gate
 receipt. Standalone/local gates remain full and unchanged.
+
+**Page-only PR coverage (#2498).** Only modifications of existing regular, non-executable
+`tools/fleet-glass/glass.html` and/or `glass.selftest.mjs` qualify. The complete NUL-delimited raw
+Git diff from the explicit PR base/head merge base, with renames disabled, is the classifier's
+evidence; additions, deletions, renames, type/mode changes, empty diffs and any other path do not
+qualify. Unreadable or malformed evidence fails the changes job. CI tooling, build inputs and
+mixed changes therefore retain full coverage. `--ci --ci-page-only` subtracts only the reasoned
+`CI_PAGE_SKIP` register from canonical membership: file audits and all three Fleet Glass selftests
+remain, as do pure routing/aggregate controls. New members run unless explicitly excluded. The
+aggregate requires successful classification, page-only=true, dotnet=false, skipped shards and
+successful page-only gates together; missing or contradictory evidence is red. Push and recovery
+coverage are unchanged. This narrow result is not evidence that the .NET suite ran.
 
 **Scope, stated plainly: tracked content only.** The dirty-hash is `git diff HEAD`, which does not
 see untracked files. A tree that was already dirty when its receipt was written, and then gains an
@@ -6709,7 +6722,7 @@ it reachable: it runs only the fast members this tree has no receipt for, so the
 legs a lane already paid for are not paid twice, and it writes per-member receipts only — a partial
 run never mints a whole-run receipt. The hook, the exit-code contract above, and the ban on
 `--no-verify`, environment-variable and per-worktree-`hooksPath` bypasses are all unchanged; CI's
-authoritative union still covers everything and is never skipped by any receipt. Two supporting
+authoritative union still covers its declared change scope and is never skipped by any receipt. Two supporting
 changes ship with it:
 `tools/buildlock.py` gains a **read-only priority class** (`--class readonly`, refused for any argv
 that directly invokes `dotnet`/`msbuild` on a build verb — a tripwire on the single task line that

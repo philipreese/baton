@@ -46,6 +46,7 @@ import member_receipt  # noqa: E402 -- sibling module, importable however this f
 # dependency rested on (pixi.toml's `audit-selfcheck` entry has the full account); they stay out of
 # OVERLAP regardless (see AFTER_BUILD_FAST below).
 OVERLAP = [
+    "ci-page-selftest",
     "audit-completeness",
     "audit-recordonce",
     "audit-staleness-ext-selftest",
@@ -185,12 +186,21 @@ AFTER_BUILD_FULL = AFTER_BUILD_FAST + [SOLUTION_TEST_MEMBER]
 # cited the same way.
 CI_SKIP: dict[str, str] = {}
 
+# #2498: sole page-only exclusion register. All future members run by default.
+CI_PAGE_SKIP = {
+    "fmt-check": "MSBuild formatting has no input in the exact page-file allowlist.",
+    "lint": "The exact page-file allowlist changes no compiled .NET inputs.",
+    "vendor-check": "Runs the compiled vendor probe; page files cannot change its inputs.",
+    "ci-selftest": "Evaluates MSBuild identities; ci-page-selftest retains routing/binding controls.",
+    SOLUTION_TEST_MEMBER: "The exact page-file allowlist is covered by all Fleet Glass selftests.",
+}
+
 
 def validate_ci_skip():
     """Ratchet: every CI_SKIP entry names a real gate member and carries a reason (#1676)."""
     problems = []
     members = set(_all_members())
-    for name, reason in CI_SKIP.items():
+    for name, reason in list(CI_SKIP.items()) + list(CI_PAGE_SKIP.items()):
         if name not in members:
             problems.append(f"CI_SKIP names {name!r}, which is not a gates.py member")
         if not reason or not reason.strip():
@@ -2194,9 +2204,11 @@ def _all_members():
     return seen
 
 
-def ci_member_set(test_shards_cover=False):
+def ci_member_set(test_shards_cover=False, page_only=False):
     """The canonical ordered CI member set, optionally complemented by external test shards."""
     externally_covered = {SOLUTION_TEST_MEMBER} if test_shards_cover else set()
+    if page_only:
+        externally_covered.update(CI_PAGE_SKIP)
     return [name for name in _all_members() if name not in CI_SKIP and name not in externally_covered]
 
 
@@ -2231,6 +2243,8 @@ def build_parser():
     parser.add_argument("--ci-test-shards-cover", action="store_true",
                         help="with --ci only, omit exactly the solution-test member covered by "
                              "same-revision CI shards")
+    parser.add_argument("--ci-page-only", action="store_true",
+                        help="with --ci only, omit the reasoned page-only exclusion register")
     parser.add_argument("--lane-fast", action="store_true",
                         help="run only lane_fast_member_set() -- the seconds-scale audits plus "
                              "fmt-check, no build, no tests, no self-tests (#2129; what "
@@ -2273,6 +2287,12 @@ def main():
         os.environ.pop(k, None)
 
     args = build_parser().parse_args()
+
+    if args.ci_page_only and (not args.ci or args.ci_test_shards_cover or args.fast
+            or args.skip_covered or args.check_receipt or args.record_member is not None
+            or args.selftest or args.lane_fast):
+        print("gates: --ci-page-only requires standalone --ci coverage without receipts")
+        return 2
 
     if args.ci_test_shards_cover:
         incompatible = []
@@ -2330,6 +2350,8 @@ def main():
     skip = frozenset(CI_SKIP) if args.ci else frozenset()
     if args.ci_test_shards_cover:
         skip = frozenset(skip | {SOLUTION_TEST_MEMBER})
+    if args.ci_page_only:
+        skip = frozenset(skip | set(CI_PAGE_SKIP))
     if args.skip_covered:
         # #1910: the completion pass. Skipping a member here is the same decision --check-receipt
         # makes about the whole set, taken one member at a time and against the same identity, so
@@ -2352,7 +2374,7 @@ def main():
     # this must equal the canonical CI member set -- ordinary CI is the whole register minus
     # CI_SKIP; complement CI additionally subtracts exactly the solution member owned by shards.
     if args.ci:
-        expected = ci_member_set(args.ci_test_shards_cover)
+        expected = ci_member_set(args.ci_test_shards_cover, args.ci_page_only)
         if names != expected:
             print("gates: CI member list does not match the tracked list -- ")
             print(f"  ran:      {names}")

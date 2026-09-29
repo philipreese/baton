@@ -345,6 +345,8 @@ gates-quiet = { cmd = "python -u tools/gates/gates.py --quiet" }
 gates-fast-quiet = { cmd = "python -u tools/gates/gates.py --fast --quiet" }
 workflow-recovery-selftest = { cmd = "python tools/workflow-recovery/selftest.py" }
 ci-selftest = { cmd = "python tools/ci/selftest.py" }
+ci-page-selftest = { cmd = "python tools/ci/page_selftest.py" }
+gates-ci-page-only-quiet = { cmd = "python -u tools/gates/gates.py --ci --ci-page-only --quiet" }
 gates-selftest = { cmd = "python -u tools/gates/gates.py --selftest" }
 # #1910: the completion pass a lane runs before pushing -- what it skips, and why it writes no
 # whole-run receipt, are stated at tools/gates/gates.py's covering rule (spec/baton.md C-12 ruling C).
