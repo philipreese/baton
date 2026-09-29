@@ -1877,7 +1877,7 @@ function streamStatusSummaryHtml(snap, events){
   return `<div class="stream-summary-grid">`
     + `<div class="stream-summary-box moving"><div class="stream-summary-label">Moving</div><div class="stream-summary-val">${movingSummary}</div></div>`
     + `<div class="stream-summary-box blocked"><div class="stream-summary-label">Blocked / Stale</div><div class="stream-summary-val">${blockedSummary}</div></div>`
-    + `<div class="stream-summary-box needs-you"><div class="stream-summary-label">Needs Operator</div><div class="stream-summary-val">${needsSummary}</div></div>`
+    + `<div class="stream-summary-box needs-you"><div class="stream-summary-label">Needs attention</div><div class="stream-summary-val">${needsSummary}</div></div>`
     + `<div class="stream-summary-box quota"><div class="stream-summary-label">Quota Remains</div><div class="stream-summary-val">${quotaSummary}</div></div>`
     + `</div>`;
 }
@@ -2195,10 +2195,59 @@ function conductorObligationsHtml(snap){
   const unresolved = section.rows.filter(row => row.status !== "ActionObserved");
   const labels = {Pending:"Pending", Submitted:"Submitted", TransportAcknowledged:"Receipt acknowledged",
     ActionObserved:"Action observed", Blocked:"Blocked", Unsupported:"Unsupported"};
+  const adviceStates = {
+    pending: ["Pending", "c-warn"], running: ["Running", "c-run"], available: ["Available", "c-ok"],
+    uncertain: ["Uncertain", "c-warn"], blocked: ["Blocked", "c-bad"], unsupported: ["Unsupported", "c-warn"],
+    stale: ["Stale", "c-warn"]
+  };
+  const adviceStages = {implement:"Implement", review:"Review", fix:"Fix", "re-review":"Re-review", continue:"Continue", ready:"Ready"};
+  const adviceChoices = {hold:"Hold", recommend:"Recommend"};
+  const isoTimestamp = (value) => typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && Number.isFinite(Date.parse(value));
+  function adviceHtml(row){
+    // Advice is optional for backwards compatibility. If a producer sends the field, however,
+    // its disposition must validate before any advice content is shown; source identity is
+    // optional for blocked/pending captures and is labelled unknown when it is absent.
+    if(!row || !Object.prototype.hasOwnProperty.call(row, "advice") || typeof row.advice === "undefined") return "";
+    const advice = row.advice;
+    const objectAdvice = advice !== null && typeof advice === "object" && !Array.isArray(advice);
+    const issuePresent = Object.prototype.hasOwnProperty.call(row, "issue");
+    const stagePresent = Object.prototype.hasOwnProperty.call(row, "stage");
+    const issueValid = !issuePresent || (Number.isSafeInteger(row.issue) && row.issue > 0);
+    const stageValid = !stagePresent || (typeof row.stage === "string"
+      && Object.prototype.hasOwnProperty.call(adviceStages, row.stage));
+    const stateValid = objectAdvice && typeof advice.state === "string"
+      && Object.prototype.hasOwnProperty.call(adviceStates, advice.state);
+    const observedValid = objectAdvice && isoTimestamp(advice.observedAt);
+    const explanationValid = !objectAdvice || !Object.prototype.hasOwnProperty.call(advice, "explanation")
+      || (typeof advice.explanation === "string" && advice.explanation.length <= 4096);
+    const choiceValid = !objectAdvice || !Object.prototype.hasOwnProperty.call(advice, "choice")
+      || (typeof advice.choice === "string" && Object.prototype.hasOwnProperty.call(adviceChoices, advice.choice));
+    const completedValid = !objectAdvice || !Object.prototype.hasOwnProperty.call(advice, "completedAt")
+      || isoTimestamp(advice.completedAt);
+    const valid = objectAdvice && issueValid && stageValid && stateValid && observedValid
+      && explanationValid && choiceValid && completedValid;
+    const prefix = `<div class="stream-card-result"><b>Advice only — no action taken</b>`;
+    if(!valid) return prefix + ` · <span class="chip c-warn">Unknown advice</span>`
+      + `<div>Advice status: Unknown. Advice details are unavailable.</div></div>`;
+    const [stateLabel, stateClass] = adviceStates[advice.state];
+    let out = prefix + ` · <span class="chip ${stateClass}">${stateLabel}</span>`
+      + (issuePresent && stagePresent
+        ? ` · Issue #${esc(row.issue)} · Stage ${esc(adviceStages[row.stage])}`
+        : ` · Source unknown`)
+      + ` · Observed ${esc(advice.observedAt)}`;
+    if(advice.choice && (advice.state === "available" || advice.state === "stale")) out += ` · Choice: ${esc(adviceChoices[advice.choice])}`;
+    if(advice.completedAt && (advice.state === "available" || advice.state === "stale")) out += ` · Advice recorded ${esc(advice.completedAt)}`;
+    out += `</div>`;
+    if(advice.explanation && (advice.state === "available" || advice.state === "stale")) out += `<div class="stream-card-result">Advice explanation: ${esc(advice.explanation)}</div>`;
+    return out;
+  }
   function cards(rows){
     return rows.map(row => `<div class="stream-group-card"><div class="stream-card-action"><b>${esc(row.requestedAction)}</b></div>`
       + `<div class="stream-card-result">Owner: ${esc(row.owner)} · ${esc(labels[row.status] || "Unknown state")} · Created ${esc(age(row.createdAt) || "unknown")}</div>`
-      + `<div class="stream-card-result">Status explanation: ${esc(row.reason)}</div></div>`).join("");
+      + `<div class="stream-card-result">Status explanation: ${esc(row.reason)}</div>`
+      + adviceHtml(row) + `</div>`).join("");
   }
   out += `<div class="stream-section-title">Unresolved requests (${unresolved.length} shown of ${esc(section.unresolvedCount ?? "unknown")})</div>` + cards(unresolved);
   if(!unresolved.length && !section.quarantinedCount && !section.omittedCount) out += `<div class="stream-empty">No unresolved conductor requests in this snapshot.</div>`;

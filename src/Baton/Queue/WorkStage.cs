@@ -85,6 +85,27 @@ public static class WorkStages
         _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, "Unknown work stage."),
     };
 
+    /// <summary>Parses the stable lower-case stage token emitted by <see cref="Token"/>.</summary>
+    public static bool TryParseToken(string? token, out WorkStage stage)
+    {
+        stage = default;
+        if (token is null)
+        {
+            return false;
+        }
+
+        foreach (var candidate in Enum.GetValues<WorkStage>())
+        {
+            if (string.Equals(Token(candidate), token, StringComparison.Ordinal))
+            {
+                stage = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// The worker role <paramref name="stage"/> dispatches. <see cref="WorkStage.Ready"/> has none —
     /// it is the stage that does not dispatch — so asking for one is a caller bug rather than a

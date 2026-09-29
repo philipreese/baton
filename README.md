@@ -69,6 +69,31 @@ commands require the current claim holder; claims do not otherwise enforce queue
 mutations. The normative contract and recovery details are in
 [`spec/baton.md` §14](spec/baton.md#14-conductor-claims-durable-repository-ownership-register-2296).
 
+### Advice when a lifecycle stops
+
+An optional [stopped-work judgment handoff](spec/baton.md#stopped-work-judgment-handoff-2499)
+gives the repository's conductor one saved recommendation when a new lifecycle needs judgment.
+The site displays it as **advice only — no action taken**. It does not restart workers, apply a fix,
+merge, or wake your desktop chat. A recommendation leaves the request unresolved.
+
+To opt in, merge this member into the existing `Queue` object in `~/.baton/settings.json`, preserving
+all other settings, and use your exact canonical repository key:
+
+```json
+{"StoppedWorkAdvice":{"github.com/example/project":true}}
+```
+
+Establish the repository's conductor claim first. Missing ownership or source evidence blocks calls;
+old stopped jobs are not backfilled. Set the entry to false to stop new advice admissions. `queue hold`
+pauses worker launches, not this separately opted-in advice. The initial provider is Codex's subscription
+CLI; the request itself is vendor-neutral, but other advice providers are not yet implemented.
+
+Restarting Baton reuses retained results, not paid calls. If a launch is uncertain, inspect its local
+evidence; do not delete a launch marker or recreate the request to force a retry. A changed owner or
+source makes old advice stale. The [contract](spec/baton.md#stopped-work-judgment-handoff-2499) owns the
+exact admission, recovery and provider limits. This prepares conductor-owned judgment handoffs without
+granting automatic execution authority.
+
 ## The conductor queue
 
 `baton queue` is the dispatch queue the running daemon drains. The verbs only write the queue file —

@@ -193,6 +193,12 @@ public sealed record QueueItem
     /// </summary>
     public QueueDraftPullRequestCreateMarker? DraftPullRequestCreateMarker { get; init; }
 
+    /// <summary>
+    /// The immutable stopped-work judgment intent captured with a NEW NeedsOperator halt. This is
+    /// queue evidence, not a launch instruction and never satisfies continuation or readiness.
+    /// </summary>
+    public StoppedWorkJudgment? StoppedWorkJudgment { get; init; }
+
     /// <summary>A retained disposition, atomically recording kind, time, and reason.</summary>
     public QueueRetirement? Retirement { get; init; }
 

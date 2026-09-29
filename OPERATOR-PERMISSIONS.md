@@ -20,3 +20,17 @@ public; this entry expressly also permits the named uncommitted worktree content
 This permission excludes credentials, tokens, `.env` files, unrelated repositories, and arbitrary files
 elsewhere in the operator's home directory. A conductor must keep those exclusions out of the worker's
 inputs and working scope.
+
+## OpenAI stopped-work advice
+
+Granted by the repository operator on 2026-09-29, until revoked, for the opt-in stopped-work
+advice feature in #2499. The operator explicitly authorized this data sharing and permission record.
+
+Baton may automatically send this repository's identity, job/attempt identifiers, PR/check status,
+and bounded typed failure facts to OpenAI through the existing authenticated Codex subscription
+CLI to obtain stopped-work advice. This includes corresponding bounded fixture data for verification.
+
+This grant excludes credentials, raw logs or transcripts, unrelated files and repositories, and
+paid API calls. It permits advice, not execution of the recommendation, worker restart, merge,
+or resumption of ordinary dispatch. Repository opt-in and current conductor ownership still
+govern admission under `spec/baton.md`'s stopped-work judgment contract.
