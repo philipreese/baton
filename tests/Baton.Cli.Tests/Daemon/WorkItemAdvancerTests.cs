@@ -3034,7 +3034,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Null(next.RoomDirectory);
             await green.AdvanceAsync(finalObservationAt.AddSeconds(93), Ct);
             var ledger = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
-            Assert.Single(ledger.Where(entry => entry.Decision == QueueDecisionEntry.Restored));
+            Assert.Single(ledger, entry => entry.Decision == QueueDecisionEntry.Restored);
             Assert.Single((await ReadBackAsync()).DispositionOutbox);
         }
         finally
@@ -3116,6 +3116,39 @@ public sealed class WorkItemAdvancerTests
             var priorCalls = calls;
             Assert.Empty(await advancer.AdvanceAsync(Now.AddSeconds(32), Ct));
             if (condition != "replacement-during-read") Assert.Equal(priorCalls, calls);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Check_evidence_recovery_restores_a_roomless_ready_item_without_launching_it()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var seed = await SeedAsync(home, WorkStage.Review, Path.Combine(home, "unused"), QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [seed with
+                {
+                    Stage = WorkStage.Ready, Halted = true, RoomDirectory = null, PullRequest = 77,
+                    ReconciliationKind = QueueReconciliationKind.AwaitingRequiredCheckEvidence,
+                    RequiredCheckEvidenceWait = new(FullPushedSha, Now, Now, 6, "empty checks"),
+                }],
+            }, Ct);
+            var advancer = Advancer(new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha));
+            await advancer.AdvanceAsync(Now.AddSeconds(31), Ct);
+            var recovered = await ReadBackAsync();
+            Assert.False(recovered.Halted);
+            Assert.Equal(WorkStage.Ready, recovered.Stage);
+            Assert.Equal(QueueItemState.Queued, recovered.State);
+            Assert.Null(recovered.RoomDirectory);
+            Assert.Null(recovered.RequiredCheckEvidenceWait);
         }
         finally
         {

@@ -132,6 +132,7 @@ public sealed partial class WorkItemAdvancer
                     || now - waiting.LatestObservationAt >= RequiredCheckEvidenceBackoff)
                 && (stage == WorkStage.Ready
                     ? i.State == QueueItemState.Queued && !i.Halted
+                        || i.State == QueueItemState.Failed && !snapshot.Held && IsAwaitingCheckEvidenceRecovery(i)
                     : i.State is QueueItemState.Done or QueueItemState.Failed
                         && (i.RoomDirectory is { Length: > 0 }
                             // A refusal is recorded before a launch can create a room, so unlike a
@@ -254,6 +255,7 @@ public sealed partial class WorkItemAdvancer
                 ? existing with
                 {
                     Halted = false,
+                    State = existing.Stage == WorkStage.Ready ? QueueItemState.Queued : existing.State,
                     ReconciliationKind = null,
                     RequiredCheckEvidenceWait = null,
                     Error = null,
