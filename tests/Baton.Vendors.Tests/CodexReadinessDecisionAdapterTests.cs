@@ -215,7 +215,7 @@ public sealed class CodexReadinessDecisionAdapterTests
         {
             await captureEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken));
+                decisionTask.WaitAsync(TimeSpan.FromSeconds(11), TestContext.Current.CancellationToken)); // wait-ok: bound the four-second request timeout plus five-second cleanup; detect cleanup deadline regressions
             Assert.Contains("capture did not settle within the cleanup bound", error.Message);
             Assert.IsAssignableFrom<OperationCanceledException>(error.InnerException);
             AssertStopped(run);
