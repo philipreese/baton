@@ -2172,8 +2172,9 @@ function streamHomeHtml(snap, events){
 }
 function conductorObligationsHtml(snap){
   const section = snap && snap.conductorObligations;
+  const freshness = conductorProjectionFreshness(snap);
   const title = `<div class="stream-section-title">Conductor requests</div>`
-    + `<div class="stream-empty">Snapshot as of ${esc(snap && snap.derived_at || "unknown time")} · ${esc(age(snap && snap.derived_at) || "age unknown")}. Retained evidence, not a live activity signal.${snap && snap.projection && snap.projection.stale ? " Snapshot is stale." : ""}</div>`;
+    + `<div class="stream-empty">Snapshot as of ${esc(snap && snap.derived_at || "unknown time")} · ${esc(age(snap && snap.derived_at) || "age unknown")}. Retained evidence, not a live activity signal. ${freshness === "stale" ? "Snapshot is stale." : freshness === "unknown" ? "Snapshot freshness unknown." : "Fresh when rendered."}</div>`;
   if(!section || section.available !== true || !Array.isArray(section.rows)){
     return title + `<div class="stream-empty">Conductor request state unavailable; pending work is unknown.</div>`;
   }
@@ -2193,6 +2194,13 @@ function conductorObligationsHtml(snap){
   if(!unresolved.length && !section.quarantinedCount && !section.omittedCount) out += `<div class="stream-empty">No unresolved conductor requests in this snapshot.</div>`;
   if(section.completedCount > 0 || completed.length) out += `<details><summary>Completed requests (${completed.length} shown of ${esc(section.completedCount ?? "unknown")})</summary>${cards(completed)}</details>`;
   return out;
+}
+function conductorProjectionFreshness(snap, now = Date.now()){
+  const threshold = snap && snap.projectionStaleAfterSeconds;
+  const derived = snap && typeof snap.derived_at === "string" ? Date.parse(snap.derived_at) : NaN;
+  if(typeof threshold !== "number" || !Number.isFinite(threshold) || threshold <= 0
+      || !Number.isFinite(derived) || derived > now) return "unknown";
+  return (now - derived) / 1000 > threshold ? "stale" : "fresh";
 }
 // <<< QUEUE-PANEL-END
 function renderQueueBoard(q, unavailableReason){ $("queueboard").innerHTML = queueBoardHtml(q, unavailableReason); }

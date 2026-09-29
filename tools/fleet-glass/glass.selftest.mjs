@@ -736,8 +736,17 @@ const escapedObligations = obligationPanel(obligationView([hostileRow]));
 check("all displayed obligation text escaped", !escapedObligations.includes("<img") && !escapedObligations.includes("<script>") && !escapedObligations.includes("<svg>"));
 check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents)"));
 check("summary cannot claim all-clear for unresolved requests", streamStatusSummaryHtml(obligationView([obligationRow("Pending")]), []).includes("1 conductor request(s) unresolved"));
-check("stale obligation snapshot remains visibly as-of", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z", projection:{stale:true}}).includes("Snapshot is stale"));
+check("daemon-shaped stale obligation snapshot remains visibly as-of", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z", projectionStaleAfterSeconds:90}).includes("Snapshot is stale"));
 check("snapshot timestamp shown even with no rooms", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z"}).includes("Snapshot as of 2026-09-01T00:00:00Z"));
+const obligationFreshness = new Function(`${source}\nreturn conductorProjectionFreshness;`)();
+const freshSnap = {derived_at:"2026-09-07T11:59:00Z", projectionStaleAfterSeconds:90};
+check("daemon timestamp within actual threshold is fresh", obligationFreshness(freshSnap, NOW) === "fresh");
+check("daemon threshold controls staleness", obligationFreshness({...freshSnap,projectionStaleAfterSeconds:30}, NOW) === "stale");
+for(const invalid of [undefined, null, 0, -1, "90", NaN, Infinity]){
+  check(`invalid freshness threshold ${invalid} stays unknown`, obligationFreshness({...freshSnap,projectionStaleAfterSeconds:invalid}, NOW) === "unknown");
+}
+check("invalid derivation timestamp stays unknown", obligationFreshness({...freshSnap,derived_at:"broken"}, NOW) === "unknown");
+check("future derivation timestamp stays unknown", obligationFreshness({...freshSnap,derived_at:"2026-09-08T12:00:00Z"}, NOW) === "unknown");
 
 if (failures.length) {
   console.error(`glass.selftest.mjs: FAIL -- ${failures.length} check(s):`);

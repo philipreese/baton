@@ -107,6 +107,8 @@ public sealed class ConductorObligationProjectionTests : IDisposable
             .BuildProjectionJsonAsync(TestContext.Current.CancellationToken));
         Assert.Equal("TransportAcknowledged", document.RootElement.GetProperty("conductorObligations")
             .GetProperty("rows")[0].GetProperty("status").GetString());
+        Assert.Equal(FleetProjectionWriter.StaleAfter().TotalSeconds,
+            document.RootElement.GetProperty("projectionStaleAfterSeconds").GetDouble());
     }
 
     [Fact]

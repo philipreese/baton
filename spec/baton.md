@@ -4301,8 +4301,11 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   `evidence-unavailable`; an absent section from an older daemon is also unknown, not empty.
   Stream separates `ActionObserved` completion from all unresolved states, including `Blocked`,
   `Unsupported` and `TransportAcknowledged` (receipt is not completion). Known-empty requires a
-  successful inspection without quarantine. Existing projection freshness warnings cover this
-  as-of view. This adds no transport, action controls, model calls or refresh timer.
+  successful inspection without quarantine. `projectionStaleAfterSeconds` carries the existing
+  daemon staleness threshold; Stream compares it with `derived_at` at render time, including when
+  there are no running rooms. Absent/invalid freshness evidence is unknown. The fixed timestamp
+  remains an as-of view between renders, not a continuously updated liveness claim. This adds no
+  transport, action controls, model calls or refresh timer.
 - **The tailnet glass listener (#1946 slice 1)** — `GlassHttpService` (`src/Baton.Cli/Daemon/`, a
   hosted service registered after `FleetProjectionWriter`): three GET routes serving `glass.html`,
   the projection file above, and an SSE stream of its changes. The decision, the two planes, the
