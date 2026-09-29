@@ -348,7 +348,7 @@ public sealed class StoppedWorkAdviceCaptureTests
         while (DateTime.UtcNow < deadline)
         {
             if (await predicate().ConfigureAwait(false)) return;
-            await Task.Delay(10, Ct).ConfigureAwait(false);
+            await Task.Delay(10, Ct).ConfigureAwait(false); // wait-ok: polling interval, not the sixty-second failure ceiling
         }
 
         Assert.Fail("Timed out waiting for durable stopped-work advice state.");
