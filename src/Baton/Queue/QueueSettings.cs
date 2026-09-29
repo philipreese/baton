@@ -96,8 +96,21 @@ public sealed record QueueSettings
     /// </summary>
     public IReadOnlyDictionary<string, JsonElement>? DraftPullRequestHandoff { get; init; }
 
+    /// <summary>
+    /// Exact canonical repositories allowed to receive one bounded stopped-work advisory judgment.
+    /// Raw JSON is retained so malformed values disable only the named repository rather than
+    /// resetting the rest of the queue settings.
+    /// </summary>
+    public IReadOnlyDictionary<string, JsonElement>? StoppedWorkAdvice { get; init; }
+
     public bool IsDraftPullRequestHandoffEnabled(string repository) =>
         DraftPullRequestHandoff?.TryGetValue(repository, out var enabled) == true
+        && enabled.ValueKind == JsonValueKind.True
+        && string.Equals(RepositoryIdentity.TryCanonicalize(repository), repository, StringComparison.Ordinal)
+        && !repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase);
+
+    public bool IsStoppedWorkAdviceEnabled(string repository) =>
+        StoppedWorkAdvice?.TryGetValue(repository, out var enabled) == true
         && enabled.ValueKind == JsonValueKind.True
         && string.Equals(RepositoryIdentity.TryCanonicalize(repository), repository, StringComparison.Ordinal)
         && !repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase);

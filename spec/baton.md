@@ -6468,8 +6468,8 @@ and for which realization does what to a package's bytes.
   and the narrow listener it prices back in.
 - **A resident orchestrator that decides on a human's behalf.** There is no room-resident presence;
   the harness remains the decider for worker and queue actions (§5, §7). The explicit, one-shot
-  local readiness advice in §14 is the only opt-in model-backed conductor exception; it does not
-  act on its advice or start a standing conductor loop.
+  local readiness advice and stopped-work judgment handoff in §14 are narrow opt-in model-backed
+  conductor exceptions. Neither acts on its advice or starts a standing conductor loop.
 - **Remote *dispatch* triggering — closed, orchestrator-only.** Settled, not open: remote dispatch
   already exists as "talk to your harness from the phone" — a Claude Code mobile session (or any
   other agent that can run CLI verbs and read `terminal.json`/`fleet_status`) driving `baton dispatch`,
@@ -8490,7 +8490,7 @@ is the `decide --obligation` argument. Evidence is caller-supplied as-of input, 
 observed forge state. An empty or mismatching claim, a dirty workspace, or a moved HEAD refuses
 before a model launch.
 
-This explicit local path is the narrow exception to the external-harness-only conductor shape in
+This explicit local path is one narrow exception to the external-harness-only conductor shape in
 §10. It does not introduce a goal loop, heartbeat, queue launch, automatic action execution,
 website decision surface or paid API transport. The existing queue-owned continuation obligations
 retain their at-least-once transport semantics. The readiness path uses the same
@@ -8505,6 +8505,58 @@ they do not guarantee a provider token or billing ceiling.
 The initial Codex exec path passes its prompt as a direct process argument; it also refuses a
 serialized prompt above 24 KiB before launch to stay below the Windows process-argument ceiling.
 It never truncates supplied evidence to fit.
+
+### Stopped-work judgment handoff (#2499)
+
+**Operator ruling, September 29.** A newly halted lifecycle may request one automatic advisory
+judgment from its repository conductor. This is the first bounded handoff toward a conductor that
+handles judgment calls, not a permanent rule that a person must decide every exception. The current
+slice delivers advice only: the conductor's later permission to execute a proposed action is separate
+authority. An answer or delivery acknowledgement never closes the underlying request.
+
+`Queue.StoppedWorkAdvice` opts exact canonical remote repository keys into this feature. Only JSON
+`true` enables a key; absence, false, malformed values and noncanonical keys disable it. Only a new
+`NeedsOperator` halt while enabled creates an intent. Existing halted rows are not a backlog of calls
+to replay when the setting is enabled. Holding the worker queue does not revoke an enabled advisory
+setting; disable that setting to prevent new advice admissions. Neither setting resumes workers.
+
+The halt mutation retains the typed source evidence, observation time and recorded conductor holder
+atomically with the queue row. Its stable identity binds repository, tag, attempt and stage, not a
+changing timestamp or model wording. `stopped-judgment:` keys use the existing obligation store with
+`stopped-work-judgment` action and `stopped-work-advice` capability. They cannot be interpreted as
+queue continuations or manual `owned-readiness:` commands. Unknown PR head is explicitly unknown;
+missing source identity or holder blocks admission without inventing evidence or taking ownership.
+
+The bounded evidence snapshot carries typed lifecycle, terminal, repair and check observations,
+not transcripts, raw exceptions, command lines, arbitrary files or credentials. It is untrusted,
+as-of evidence, not a fresh forge read. The response binds the obligation, repository, source attempt
+and snapshot digest. A failed worker's dirty checkout is not forced through the manual readiness
+command's clean-workspace contract, and that command's existing validation is not weakened.
+
+The existing scheduler reconciles retained intents without a new model polling loop. One tracked,
+cancellable advice invocation may be active at a time; a waiting provider does not block worker
+scheduling and never holds the queue mutex. Deterministic opt-in, ownership, source and prompt-limit
+checks run under the per-key lock before the durable launch marker. A preflight refusal is unlaunched,
+not evidence of an uncertain charged call. After a launch marker, missing or invalid output is
+uncertain and must not cause an automatic retry. A complete validated response and receipt survive
+restart and replay without another call. Disabling the setting prevents new calls, not an already
+admitted call. Shutdown cancels and joins the tracked provider task.
+
+The first provider uses the existing tool-free Codex subscription transport and its bounded limits
+from the preceding section, with a stopped-work-specific prompt and response. The request is
+vendor-neutral; this does not claim working Claude/AGY providers or wake an external desktop session.
+No provider can invoke a fix, dispatch, merge, queue resume, permission change or automatic action.
+
+Fleet Glass displays the request and retained bounded advice as **advice only, no action taken**.
+Source/owner drift before launch refuses; drift after launch makes retained advice stale rather than
+applicable authority when observed. Available means a validated saved response with as-of source
+verification, not a continuously verified PR head or permission to act; rendering advice does not
+introduce forge polling. Unknown, blocked, unsupported and uncertain evidence remains visible. The safe
+projection omits private paths, prompts, transcripts and receipts, and treats explanation text as
+untrusted text, never executable markup. `ActionObserved` still requires independently verified action
+evidence; a recommendation alone cannot set it. This is a read-only advisory display, not a website
+decision or dispatch control. A future conductor action protocol must consume these saved requests
+under its own explicit permissions, not reinterpret advice as permission.
 
 ---
 

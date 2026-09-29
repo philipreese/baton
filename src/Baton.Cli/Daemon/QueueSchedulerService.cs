@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Baton.Conductor;
 using Baton.Domain;
 using Baton.Core.Internal;
 using Baton.Cli.Mcp;
@@ -39,7 +40,7 @@ namespace Baton.Cli.Daemon;
 /// <see cref="QueueItemState.Failed"/>.
 /// </para>
 /// </remarks>
-public sealed class QueueSchedulerService : BackgroundService
+public sealed partial class QueueSchedulerService : BackgroundService
 {
     private readonly Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>> _launch;
     private readonly Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>> _adopt;
@@ -56,6 +57,11 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly ConductorObligationStore _conductorObligations;
     private readonly DaemonLoopDriver _loopDriver;
     private readonly DaemonRoomInventory _roomInventory;
+    private readonly Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
+        string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>>? _stoppedWorkAdvice;
+    private readonly Func<ConductorObligation, CancellationToken, Task>? _stoppedWorkAdvicePreflight;
+    private Task? _stoppedWorkTask;
+    private string? _stoppedWorkTaskKey;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
@@ -95,7 +101,10 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<string, IReadOnlyList<string>>? workspaceLocks = null,
         DaemonLoopDriver? loopDriver = null,
         DaemonRoomInventory? roomInventory = null,
-        ConductorObligationStore? conductorObligations = null)
+        ConductorObligationStore? conductorObligations = null,
+        Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
+            string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>>? stoppedWorkAdvice = null,
+        Func<ConductorObligation, CancellationToken, Task>? stoppedWorkAdvicePreflight = null)
     {
         _roomInventory = roomInventory ?? new DaemonRoomInventory();
         _launch = launch ?? QueueLauncher.LaunchAsync;
@@ -111,6 +120,9 @@ public sealed class QueueSchedulerService : BackgroundService
         _fleetOutbox = new QueueFleetEventOutbox(_appendFleetEvent);
         _conductorObligations = conductorObligations
             ?? new ConductorObligationStore(FleetEventLog.OpenOperational());
+        _stoppedWorkAdvice = stoppedWorkAdvice ?? ((_, request, context, directory, token) =>
+            new CodexReadinessDecisionAdapter().DecideStoppedWorkAsync(request, context, directory, token));
+        _stoppedWorkAdvicePreflight = stoppedWorkAdvicePreflight;
         _advancer = advancer ?? new WorkItemAdvancer(
             null,
             null,
@@ -140,13 +152,20 @@ public sealed class QueueSchedulerService : BackgroundService
                 + $"until they settle on their own: {ex.Message}");
         }
 
-        await _loopDriver.RunAsync(
+        try
+        {
+            await _loopDriver.RunAsync(
             nameof(QueueSchedulerService),
             TickOnceAsync,
             () => TimeSpan.FromSeconds(QueueSettings.DefaultTickSeconds),
             _ => TimeSpan.FromSeconds(QueueSettings.DefaultTickSeconds),
             ex => Console.Error.WriteLine($"QueueSchedulerService: iteration failed: {ex.Message}"),
-            stoppingToken).ConfigureAwait(false);
+                stoppingToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await DrainStoppedWorkAdviceAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -207,6 +226,7 @@ public sealed class QueueSchedulerService : BackgroundService
             // candidate this same tick rather than one tick later.
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
             await ReconcileContinuationObligationsAsync(cancellationToken).ConfigureAwait(false);
+            await ReconcileStoppedWorkAdviceAsync(cancellationToken).ConfigureAwait(false);
 
             QueueSnapshot snapshot;
             using (DaemonLoopDriver.EnterPhase("queue-store"))

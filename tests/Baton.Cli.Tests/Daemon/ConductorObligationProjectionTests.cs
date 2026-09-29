@@ -1,6 +1,11 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Baton.Cli.Daemon;
+using Baton.Conductor;
+using Baton.Domain;
+using Baton.Queue;
 using Baton.Status;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -13,6 +18,13 @@ public sealed class ConductorObligationProjectionTests : IDisposable
     {
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
+    private const string StoppedKey = "stopped-judgment:github.com/example/project:job:attempt:review";
+    private const string StoppedRepository = "github.com/example/project";
+    private const string StoppedTag = "job";
+    private const string StoppedAttempt = "attempt";
+    private const string StoppedHead = "0123456789abcdef0123456789abcdef01234567";
+    private static readonly DateTimeOffset StoppedAt = new(2026, 9, 29, 12, 0, 0, TimeSpan.Zero);
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     public ConductorObligationProjectionTests()
     {
@@ -44,6 +56,238 @@ public sealed class ConductorObligationProjectionTests : IDisposable
             terminalObligations = rows.Where(row => row.Status is ConductorObligationStatus.ActionObserved
                 or ConductorObligationStatus.Blocked or ConductorObligationStatus.Unsupported),
         }, Json));
+    }
+
+    private static ConductorObligation StoppedRow(ConductorObligationStatus status) => new(
+        "stopped-obligation", StoppedKey, StoppedRepository, null, StoppedTag, null,
+        StoppedWorkJudgmentKey.Action, "repository-conductor", StoppedAt,
+        StoppedWorkJudgmentKey.Adapter, StoppedWorkJudgmentKey.Capability, true, status,
+        TargetRevision: StoppedHead, ContextSha256: "stopped-context");
+
+    private static string StoppedEvidenceDirectory(string key) => Path.Combine(
+        Path.GetDirectoryName(BatonPaths.ConductorObligationsFile)!, "stopped-work-advice",
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant());
+
+    private static string Marker(ConductorObligation row) => JsonSerializer.Serialize(new
+    {
+        obligationId = row.ObligationId,
+        contextSha256 = row.ContextSha256,
+        startedAt = StoppedAt,
+    }, Json);
+
+    private static RetainedStoppedWorkAdviceResponse Response(ConductorObligation row) => new(
+        new StoppedWorkAdviceDecision(row.ObligationId, StoppedRepository, StoppedTag,
+            StoppedAttempt, row.ContextSha256!, StoppedWorkAdviceChoice.Hold, "Needs operator review."),
+        StoppedWorkJudgmentKey.Adapter, "gpt-5.6-luna", "low", StoppedAt,
+        new StoppedWorkAdviceUsage(null, null, null));
+
+    [Fact]
+    public void Stopped_work_is_an_unresolved_conductor_request_without_private_owner()
+    {
+        var row = Row(ConductorObligationStatus.TransportAcknowledged) with
+        {
+            IdempotencyKey = "stopped-judgment:github.com/example/project:job:attempt:review",
+            RequestedAction = "stopped-work-judgment",
+            Owner = "secret-owner",
+            AdapterCapability = "stopped-work-advice",
+        };
+        var view = ConductorObligationProjection.Project(new([row], new Dictionary<string, string>()));
+        Assert.Equal("Assess stopped work", view["rows"]![0]!["requestedAction"]!.GetValue<string>());
+        Assert.Equal("Repository conductor", view["rows"]![0]!["owner"]!.GetValue<string>());
+        Assert.Equal(1, view["unresolvedCount"]!.GetValue<int>());
+        Assert.Equal(0, view["completedCount"]!.GetValue<int>());
+        Assert.DoesNotContain("secret", view.ToJsonString());
+    }
+
+    [Theory]
+    [InlineData("not-a-receipt\n")]
+    [InlineData("stopped-work-advice-sha256:wrong\n")]
+    public async Task Corrupt_or_mismatched_receipt_never_exposes_retained_advice(string receipt)
+    {
+        var row = StoppedRow(ConductorObligationStatus.TransportAcknowledged) with
+        {
+            TransportReceipt = "stopped-work-advice-sha256:acknowledged-but-wrong",
+        };
+        Snapshot(row);
+        var evidence = StoppedEvidenceDirectory(row.IdempotencyKey);
+        Directory.CreateDirectory(evidence);
+        File.WriteAllText(Path.Combine(evidence, "launch.json"), Marker(row));
+        File.WriteAllText(Path.Combine(evidence, "response.json"), JsonSerializer.Serialize(Response(row), Json));
+        File.WriteAllText(Path.Combine(evidence, "receipt.json"), receipt);
+
+        using var document = JsonDocument.Parse(
+            await new FleetProjectionWriter().BuildProjectionJsonAsync(TestContext.Current.CancellationToken));
+        var advice = document.RootElement.GetProperty("conductorObligations").GetProperty("rows")[0]
+            .GetProperty("advice");
+        Assert.Equal("uncertain", advice.GetProperty("state").GetString());
+        Assert.False(advice.TryGetProperty("choice", out _));
+        Assert.False(advice.TryGetProperty("explanation", out _));
+    }
+
+    [Fact]
+    public async Task Launch_marker_without_response_projects_uncertain_not_success()
+    {
+        var row = StoppedRow(ConductorObligationStatus.Submitted);
+        Snapshot(row);
+        var evidence = StoppedEvidenceDirectory(row.IdempotencyKey);
+        Directory.CreateDirectory(evidence);
+        File.WriteAllText(Path.Combine(evidence, "launch.json"), Marker(row));
+
+        using var document = JsonDocument.Parse(
+            await new FleetProjectionWriter().BuildProjectionJsonAsync(TestContext.Current.CancellationToken));
+        var advice = document.RootElement.GetProperty("conductorObligations").GetProperty("rows")[0]
+            .GetProperty("advice");
+        Assert.Equal("uncertain", advice.GetProperty("state").GetString());
+        Assert.False(advice.TryGetProperty("choice", out _));
+        Assert.False(advice.TryGetProperty("explanation", out _));
+    }
+
+    [Fact]
+    public async Task Transport_acknowledgement_remains_unresolved_and_has_no_advice_authority()
+    {
+        var row = StoppedRow(ConductorObligationStatus.TransportAcknowledged);
+        Snapshot(row);
+
+        using var document = JsonDocument.Parse(
+            await new FleetProjectionWriter().BuildProjectionJsonAsync(TestContext.Current.CancellationToken));
+        var obligations = document.RootElement.GetProperty("conductorObligations");
+        var projected = obligations.GetProperty("rows")[0];
+        Assert.Equal("TransportAcknowledged", projected.GetProperty("status").GetString());
+        Assert.Equal(1, obligations.GetProperty("unresolvedCount").GetInt32());
+        Assert.Equal("pending", projected.GetProperty("advice").GetProperty("state").GetString());
+        Assert.False(projected.GetProperty("advice").TryGetProperty("choice", out _));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void Unbound_halted_stopped_intent_is_visible_as_safe_blocked_work(
+        bool missingHolder, bool missingAttempt)
+    {
+        var source = UnboundStoppedSource(missingHolder, missingAttempt);
+        var view = ConductorObligationProjection.Project(
+            new([], new Dictionary<string, string>()),
+            stoppedSources: [source]);
+
+        var projected = view["rows"]![0]!.AsObject();
+        Assert.Equal("Assess stopped work", projected["requestedAction"]!.GetValue<string>());
+        Assert.Equal("Repository conductor", projected["owner"]!.GetValue<string>());
+        Assert.Equal("Blocked", projected["status"]!.GetValue<string>());
+        Assert.Equal("Stopped-work evidence is incomplete; operator review required.",
+            projected["reason"]!.GetValue<string>());
+        Assert.Equal("blocked", projected["advice"]!["state"]!.GetValue<string>());
+        Assert.Equal("review", projected["stage"]!.GetValue<string>());
+        Assert.Equal(1934, projected["issue"]!.GetValue<int>());
+        Assert.False(projected.ContainsKey("obligationId"));
+        Assert.Equal(1, view["unresolvedCount"]!.GetValue<int>());
+        Assert.Equal(0, view["completedCount"]!.GetValue<int>());
+        Assert.Equal(0, view["omittedCount"]!.GetValue<int>());
+        Assert.DoesNotContain("private-holder", view.ToJsonString());
+        Assert.DoesNotContain("private-attempt", view.ToJsonString());
+        Assert.DoesNotContain("private-key", view.ToJsonString());
+    }
+
+    [Fact]
+    public async Task Read_async_keeps_queue_only_unbound_stopped_intent_visible()
+    {
+        await QueueStore.MutateAsync(BatonPaths.QueueFile,
+            _ => new QueueSnapshot([UnboundStoppedSource(missingHolder: true, missingAttempt: false)]), Ct);
+
+        var view = await ConductorObligationProjection.ReadAsync(Ct);
+
+        Assert.True(view["available"]!.GetValue<bool>());
+        Assert.Equal("Blocked", view["rows"]![0]!["status"]!.GetValue<string>());
+        Assert.Equal(1, view["unresolvedCount"]!.GetValue<int>());
+        Assert.DoesNotContain("private-holder", view.ToJsonString());
+    }
+
+    [Theory]
+    [InlineData(ConductorObligationStatus.Pending)]
+    [InlineData(ConductorObligationStatus.Blocked)]
+    public void Bound_stopped_rows_take_issue_and_stage_from_queue_evidence(
+        ConductorObligationStatus status)
+    {
+        var row = StoppedRow(status);
+        var view = ConductorObligationProjection.Project(
+            new([row], new Dictionary<string, string>()),
+            stoppedSources: [BoundStoppedSource(row)]);
+
+        var projected = view["rows"]![0]!.AsObject();
+        Assert.Equal(1934, projected["issue"]!.GetValue<int>());
+        Assert.Equal("review", projected["stage"]!.GetValue<string>());
+    }
+
+    private static QueueItem UnboundStoppedSource(bool missingHolder, bool missingAttempt)
+    {
+        var attempt = new FleetAttemptId("private-attempt");
+        return new QueueItem
+        {
+            Tag = "private-tag",
+            Workspace = Path.GetTempPath(),
+            Role = "review",
+            Repository = StoppedRepository,
+            Issue = 1934,
+            Stage = WorkStage.Review,
+            State = QueueItemState.Failed,
+            Halted = true,
+            AttemptId = missingAttempt ? null : attempt,
+            SpecFile = Path.Combine(Path.GetTempPath(), "private-spec.md"),
+            StoppedWorkJudgment = new StoppedWorkJudgment(
+                Key: missingAttempt ? null : StoppedWorkJudgmentKey.For(
+                    StoppedRepository, "private-tag", attempt, WorkStage.Review),
+                Repository: StoppedRepository,
+                Tag: "private-tag",
+                AttemptId: missingAttempt ? null : attempt,
+                Stage: WorkStage.Review,
+                ObservedAt: StoppedAt,
+                Holder: missingHolder ? null : "private-holder",
+                PullRequest: 77,
+                PullRequestHead: StoppedHead,
+                AttemptBaseRevision: null,
+                TerminalOutcome: "Succeeded",
+                TerminalEvidenceAvailable: true,
+                Checks: "passing",
+                ChecksObservedAt: StoppedAt,
+                ContextSha256: "private-context",
+                HaltCause: StoppedWorkHaltCause.MissingVerdict,
+                State: StoppedWorkJudgmentState.Blocked,
+                Reason: "private cause"),
+        };
+    }
+
+    private static QueueItem BoundStoppedSource(ConductorObligation row)
+    {
+        var attempt = new FleetAttemptId(StoppedAttempt);
+        return new QueueItem
+        {
+            Tag = StoppedTag,
+            Workspace = Path.GetTempPath(),
+            Role = "review",
+            Repository = StoppedRepository,
+            Issue = 1934,
+            Stage = WorkStage.Review,
+            State = QueueItemState.Failed,
+            Halted = true,
+            AttemptId = attempt,
+            SpecFile = Path.Combine(Path.GetTempPath(), "stopped-spec.md"),
+            StoppedWorkJudgment = new StoppedWorkJudgment(
+                row.IdempotencyKey,
+                StoppedRepository,
+                StoppedTag,
+                attempt,
+                WorkStage.Review,
+                StoppedAt,
+                "private-holder",
+                77,
+                StoppedHead,
+                null,
+                "Succeeded",
+                true,
+                "passing",
+                StoppedAt,
+                row.ContextSha256!,
+                StoppedWorkHaltCause.MissingVerdict),
+        };
     }
 
     [Theory]

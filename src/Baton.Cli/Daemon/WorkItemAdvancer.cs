@@ -1,9 +1,12 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Baton.Accounting;
 using Baton.Artifacts;
 using Baton.Domain;
 using Baton.Dispatch;
+using Baton.Conductor;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Vendors;
@@ -398,8 +401,10 @@ public sealed partial class WorkItemAdvancer
             {
                 var exhausted = new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0,
                     $"{reason}; observation bound exhausted after first unreadable observation at "
-                    + $"{(changedHead ? now : prior!.FirstUnreadableAt):O}; the settled room remains attached and no worker was dispatched");
-                return await FailAsync(item, stage, exhausted, verdictPath, now, room, wait).ConfigureAwait(false);
+                    + $"{(changedHead ? now : prior!.FirstUnreadableAt):O}; the settled room remains attached and no worker was dispatched",
+                    HaltCause: StoppedWorkHaltCause.UnavailableCheckEvidence);
+                return await FailAsync(item, stage, exhausted, verdictPath, now, room, wait,
+                    pr, sentinel, verdict is not null, outcome, cancellationToken).ConfigureAwait(false);
             }
 
             await TryMarkAsync(item, existing => existing with
@@ -523,7 +528,8 @@ public sealed partial class WorkItemAdvancer
                     pr, now, room,
                     recordFailure: !pr.Succeeded).ConfigureAwait(false),
             WorkItemTransitionKind.NeedsOperator =>
-                await FailAsync(item, stage, transition, verdictPath, now, room).ConfigureAwait(false),
+                await FailAsync(item, stage, transition, verdictPath, now, room,
+                    null, pr, sentinel, verdict is not null, outcome, cancellationToken).ConfigureAwait(false),
             WorkItemTransitionKind.Stop =>
                 await StopAsync(item, stage, transition, pr, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Dispatch =>
@@ -770,14 +776,19 @@ public sealed partial class WorkItemAdvancer
             || existing.ChecksHeadSha is { Length: > 0 } checksHead
                 && !string.Equals(checksHead, observedHead, StringComparison.Ordinal));
 
-    private static async Task<QueueDecisionEntry?> FailAsync(
+    private async Task<QueueDecisionEntry?> FailAsync(
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
         string? verdictPath,
         DateTimeOffset now,
         string? room,
-        RequiredCheckEvidenceWait? requiredCheckEvidenceWait = null)
+        RequiredCheckEvidenceWait? requiredCheckEvidenceWait = null,
+        PullRequestObservation? pullRequest = null,
+        WorkflowStatusView? sentinel = null,
+        bool verdictAvailable = false,
+        string? terminalOutcome = null,
+        CancellationToken cancellationToken = default)
     {
         // Failed, not silently left: every arm that reaches here is one where the queue would have to
         // guess, and a guess dispatches a lane against evidence nobody checked. The reason is on the
@@ -785,6 +796,11 @@ public sealed partial class WorkItemAdvancer
         // the LAST tick that reads this item, rather than the first of an unbounded run of identical
         // ones (QueueItem.Halted's own remarks). The room and the stage are left on the item, for the
         // reason spec/baton.md §13 gives.
+        var stoppedJudgment = transition.Kind == WorkItemTransitionKind.NeedsOperator
+            ? await CaptureStoppedWorkJudgmentAsync(item, from, pullRequest, sentinel, verdictAvailable,
+                terminalOutcome, transition.HaltCause, now,
+                cancellationToken).ConfigureAwait(false)
+            : null;
         var failed = await TryMarkAsync(item, existing => existing with
         {
             Stage = from,
@@ -798,11 +814,126 @@ public sealed partial class WorkItemAdvancer
             OriginatingPullRequestRecoveryProofDigest = null,
             Halted = true,
             ReadinessMutationClaim = null,
+            StoppedWorkJudgment = stoppedJudgment ?? existing.StoppedWorkJudgment,
         }).ConfigureAwait(false);
 
         return failed ? new QueueDecisionEntry(
             now, item.Tag, QueueDecisionEntry.Failed, transition.Reason,
             LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room) : null;
+    }
+
+    private async Task<StoppedWorkJudgment?> CaptureStoppedWorkJudgmentAsync(
+        QueueItem item,
+        WorkStage stage,
+        PullRequestObservation? pullRequest,
+        WorkflowStatusView? sentinel,
+        bool verdictAvailable,
+        string? terminalOutcome,
+        StoppedWorkHaltCause haltCause,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken)
+    {
+        if (item.StoppedWorkJudgment is { } prior
+            && (item.AttemptId is null || prior.AttemptId == item.AttemptId && prior.Stage == stage)
+            || item.StoppedWorkJudgment is not null && item.AttemptId is null
+            || item.Repository is not { Length: > 0 } repository
+            || !IsStoppedWorkAdviceEnabledNow(repository))
+        {
+            return null;
+        }
+
+        var holder = default(string);
+        var blockedReasons = new List<string>();
+        try
+        {
+            var identity = RepositoryIdentity.From("https://" + repository, null);
+            var claim = identity is null
+                ? null
+                : await ConductorClaimStore.GetClaimAsync(identity, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            holder = claim?.Holder;
+            if (string.IsNullOrWhiteSpace(holder))
+            {
+                blockedReasons.Add("repository has no recorded conductor holder");
+            }
+        }
+        catch (ConductorClaimException)
+        {
+            blockedReasons.Add("recorded conductor ownership is unavailable");
+        }
+
+        var attempt = item.AttemptId;
+        if (attempt is null)
+        {
+            blockedReasons.Add("source attempt identity is unavailable");
+        }
+
+        var observedAtUtc = observedAt.ToUniversalTime();
+        var checksObservedAt = pullRequest?.Checks is null ? (DateTimeOffset?)null : observedAtUtc;
+        var repairAllowance = item.AutomaticFixUsed is true || item.Round >= WorkStages.MaxRounds
+            ? "exhausted"
+            : "available";
+        var requiredChecks = pullRequest?.RequiredChecks;
+        var blockedReason = blockedReasons.Count == 0 ? null : string.Join("; ", blockedReasons);
+        var state = blockedReason is null ? StoppedWorkJudgmentState.Pending : StoppedWorkJudgmentState.Blocked;
+        var key = attempt is null
+            ? null
+            : StoppedWorkJudgmentKey.For(repository, item.Tag, attempt.Value, stage);
+
+        // Hash exactly the typed snapshot retained below. Transient prose (including the lifecycle
+        // reason) is deliberately excluded: a replay must identify the same evidence, not a later
+        // rendering of its explanation.
+        var evidence = new
+        {
+            key,
+            repository,
+            item.Tag,
+            attemptId = attempt?.Value,
+            stage = WorkStages.Token(stage),
+            observedAt = observedAtUtc,
+            holder,
+            pullRequest = pullRequest?.Number,
+            pullRequestHead = pullRequest?.HeadSha,
+            attemptBaseRevision = item.AttemptBaseRevision,
+            terminalOutcome,
+            terminalEvidenceAvailable = sentinel is not null,
+            checks = pullRequest?.Checks,
+            checksObservedAt,
+            haltCause,
+            repairAllowance,
+            verdictAvailable,
+            requiredChecks,
+            state,
+            blockedReason,
+        };
+        var digest = Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(evidence)))).ToLowerInvariant();
+        var captured = new StoppedWorkJudgment(
+            key,
+            repository,
+            item.Tag,
+            attempt,
+            stage,
+            observedAtUtc,
+            holder,
+            pullRequest?.Number,
+            pullRequest?.HeadSha,
+            item.AttemptBaseRevision,
+            terminalOutcome,
+            sentinel is not null,
+            pullRequest?.Checks,
+            checksObservedAt,
+            digest,
+            haltCause,
+            repairAllowance,
+            verdictAvailable,
+            requiredChecks,
+            state,
+            blockedReason);
+        return attempt is null ? captured : captured with
+        {
+            ContextSha256 = StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(captured)),
+        };
     }
 
     /// <summary>

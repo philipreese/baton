@@ -210,6 +210,9 @@ public sealed partial class ConductorObligationStore
     private static bool IsOwnedReadinessKey(string key) =>
         key is not null && key.StartsWith("owned-readiness:", StringComparison.Ordinal);
 
+    private static bool RequiresDecisionLock(string key) => IsOwnedReadinessKey(key)
+        || key is not null && key.StartsWith(StoppedWorkJudgmentKey.Prefix, StringComparison.Ordinal);
+
     private async Task<T> WithReadinessExclusiveAsync<T>(string key, Func<Task<T>> action,
         CancellationToken cancellationToken)
     {

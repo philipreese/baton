@@ -2,6 +2,7 @@ using Baton.Cli;
 using Baton.Cli.Daemon;
 using Baton.Accounting;
 using Baton.Artifacts;
+using Baton.Conductor;
 using Baton.Domain;
 using Baton.Dispatch;
 using Baton.Queue;
@@ -3462,4 +3463,98 @@ public sealed class WorkItemAdvancerTests
             DirectoryCleanup.DeleteRecursively(home);
         }
     }
+
+    [Fact]
+    public async Task A_new_operator_halt_captures_typed_advice_source_facts_once()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableStoppedWorkAdviceAsync();
+            await ConductorClaimStore.ClaimAsync(ExpectedRepositoryIdentity, "conductor-fixture",
+                cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            var attempt = new FleetAttemptId("stopped-advice-attempt");
+            var seeded = await SeedAsync(home, WorkStage.Review, room, attemptId: attempt);
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+            var first = (await ReadBackAsync()).StoppedWorkJudgment;
+            Assert.NotNull(first);
+            Assert.Equal("conductor-fixture", first.Holder);
+            Assert.Equal("Succeeded", first.TerminalOutcome);
+            Assert.Equal(PushedSha, first.PullRequestHead);
+            Assert.Equal(StoppedWorkHaltCause.MissingVerdict, first.HaltCause);
+            Assert.Equal(StoppedWorkJudgmentState.Pending, first.State);
+
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [seeded with { State = QueueItemState.Done, Halted = false,
+                    StoppedWorkJudgment = first, AttemptId = attempt }],
+            }, Ct);
+            await advancer.AdvanceAsync(Now.AddMinutes(1), Ct);
+            var repeated = (await ReadBackAsync()).StoppedWorkJudgment;
+            Assert.Equal(first.Key, repeated?.Key);
+            Assert.Equal(first.ContextSha256, repeated?.ContextSha256);
+
+            var distinctAttempt = new FleetAttemptId("stopped-advice-attempt-2");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [seeded with { State = QueueItemState.Done, Halted = false,
+                    StoppedWorkJudgment = first, AttemptId = distinctAttempt }],
+            }, Ct);
+            await advancer.AdvanceAsync(Now.AddMinutes(2), Ct);
+            var distinct = (await ReadBackAsync()).StoppedWorkJudgment;
+            Assert.Equal(distinctAttempt, distinct?.AttemptId);
+            Assert.NotEqual(first.Key, distinct?.Key);
+            Assert.NotEqual(first.ContextSha256, distinct?.ContextSha256);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_missing_advice_owner_and_attempt_remain_a_blocked_intent()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableStoppedWorkAdviceAsync();
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+
+            Assert.Single(await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct));
+            var judgment = (await ReadBackAsync()).StoppedWorkJudgment;
+            Assert.NotNull(judgment);
+            Assert.Null(judgment.Key);
+            Assert.Null(judgment.Holder);
+            Assert.Null(judgment.AttemptId);
+            Assert.Equal(StoppedWorkJudgmentState.Blocked, judgment.State);
+            Assert.Contains("conductor holder", judgment.Reason!, StringComparison.Ordinal);
+            Assert.Contains("attempt identity", judgment.Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    private static async Task EnableStoppedWorkAdviceAsync() =>
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                StoppedWorkAdvice = new Dictionary<string, JsonElement>
+                {
+                    [Repository] = JsonSerializer.SerializeToElement(true),
+                },
+            },
+        }, BatonPaths.SettingsFile, Ct);
 }

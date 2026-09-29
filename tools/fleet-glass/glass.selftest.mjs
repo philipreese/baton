@@ -734,6 +734,42 @@ check("omission never all-clear", !obligationPanel(obligationView([], {omittedCo
 const hostileRow = {...obligationRow("Blocked"), requestedAction:"<img onerror=alert(1)>", owner:"<script>", reason:"<svg>"};
 const escapedObligations = obligationPanel(obligationView([hostileRow]));
 check("all displayed obligation text escaped", !escapedObligations.includes("<img") && !escapedObligations.includes("<script>") && !escapedObligations.includes("<svg>"));
+const validAdvice = {state:"available", explanation:"<img src=x onerror=alert(1)>", choice:"hold", observedAt:"2026-09-07T11:59:00Z", completedAt:"2026-09-07T12:00:00Z"};
+const advisedRow = {...obligationRow("Pending"), issue:2499, stage:"implement", advice:validAdvice};
+const renderedAdvice = obligationPanel(obligationView([advisedRow]));
+check("advice explanation is escaped and private-shaped fields are not rendered",
+  renderedAdvice.includes("Advice only — no action taken") && renderedAdvice.includes("&lt;img")
+    && !renderedAdvice.includes("<img") && !renderedAdvice.includes("holder") && !renderedAdvice.includes("path"));
+const staleAdvice = obligationPanel(obligationView([{...advisedRow, advice:{...validAdvice, state:"stale"}}]));
+check("stale advice is visibly stale and never styled as completed",
+  staleAdvice.includes("Stale") && staleAdvice.includes("Advice recorded 2026-09-07T12:00:00Z")
+    && !staleAdvice.includes("Completed 2026-09-07T12:00:00Z") && staleAdvice.includes("c-warn") && !staleAdvice.includes("c-ok"));
+const pendingAdvice = obligationPanel(obligationView([{...advisedRow, advice:{...validAdvice, state:"pending"}}]));
+check("non-final advice does not expose recommendation details",
+  pendingAdvice.includes("Pending") && !pendingAdvice.includes("Choice: Hold") && !pendingAdvice.includes("Advice explanation: &lt;img"));
+const blockedWithoutIssue = {...advisedRow, advice:{...validAdvice, state:"blocked"}};
+delete blockedWithoutIssue.issue;
+const blockedUnknownSource = obligationPanel(obligationView([blockedWithoutIssue]));
+check("missing source issue keeps blocked disposition visible",
+  blockedUnknownSource.includes("Blocked") && blockedUnknownSource.includes("Source unknown")
+    && !blockedUnknownSource.includes("Unknown advice"));
+const unknownAdvice = obligationPanel(obligationView([{...advisedRow, advice:{...validAdvice, state:"invented"}}]));
+check("unknown advice fails closed visibly",
+  unknownAdvice.includes("Unknown advice") && unknownAdvice.includes("Advice status: Unknown") && !unknownAdvice.includes("invented"));
+const arrayStateAdvice = obligationPanel(obligationView([{...advisedRow, advice:{...validAdvice, state:["available"]}}]));
+check("array-valued advice state fails closed",
+  arrayStateAdvice.includes("Unknown advice") && arrayStateAdvice.includes("Advice status: Unknown"));
+const arrayChoiceAdvice = obligationPanel(obligationView([{...advisedRow, advice:{...validAdvice, choice:["hold"]}}]));
+check("array-valued advice choice fails closed",
+  arrayChoiceAdvice.includes("Unknown advice") && arrayChoiceAdvice.includes("Advice status: Unknown"));
+check("available advice does not move a pending row into completed history",
+  renderedAdvice.includes("Unresolved requests (1 shown of 1)") && !renderedAdvice.includes("Completed requests"));
+const adviceOnlySummary = streamStatusSummaryHtml(obligationView([advisedRow]), []);
+check("advice-only summary uses neutral needs-attention wording",
+  adviceOnlySummary.includes("Needs attention") && !adviceOnlySummary.includes("Needs Operator"));
+const legacyObligation = obligationPanel(obligationView([obligationRow("Pending")]));
+check("rows without advice retain the legacy card rendering",
+  !legacyObligation.includes("Advice only") && legacyObligation.includes("Status explanation: Status explanation"));
 check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents)"));
 check("summary cannot claim all-clear for unresolved requests", streamStatusSummaryHtml(obligationView([obligationRow("Pending")]), []).includes("1 conductor request(s) unresolved"));
 check("daemon-shaped stale obligation snapshot remains visibly as-of", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z", projectionStaleAfterSeconds:90}).includes("Snapshot is stale"));
