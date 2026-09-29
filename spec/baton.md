@@ -8007,11 +8007,27 @@ will refuse before a room exists. The advancer re-observes the exact branch; onl
 draft PR releases normal re-review or continuation routing. It never infers that PR from a pushed branch.
 The recovery allowance is a persisted, closed reconciliation kind on the queue item, not a substring of
 the operator-facing error. Failed or empty GitHub observations preserve the original halt, room, and
-reason without adding another failure fact; every other halted item remains terminal.
+reason without adding another failure fact; only the separate check-evidence recovery below is also permitted.
 An exact open draft PR releases this delivery-identity halt even when the valid required-check set is
 empty; required checks gate readiness approval, not dispatch into review. A later missing trusted
 repository identity clears the recovery allowance and becomes a terminal operator halt, not a
 repeated reconciliation tick.
+
+**Same-revision check-evidence recovery (#2503, operator-approved 2026-09-29).** When the bounded
+empty-required-check observation wait exhausts, the halt atomically records the exact PR number,
+head, and `AwaitingRequiredCheckEvidence` reconciliation kind. The existing advancer may re-observe
+that row on its existing check backoff, without a new polling service or a model call. Only fresh
+passing required checks for that same open PR and unchanged full workspace/PR revision release the
+halt. A held queue prevents this recovery, including at the queue mutation point. Missing legacy
+markers, other halt reasons, changed revisions, missing/closed PRs, and empty, pending, failed or
+unreadable checks do not release it. Unsuccessful observations retain the original halt and reason,
+updating only the backoff timestamp; they do not emit repeated failure facts.
+
+Recovery is a queue compare-and-swap retaining the settled room, stage and repair history, with a
+durable replayable `restored` ledger fact. The next normal lifecycle pass re-observes evidence and
+applies review, revision and round rules; launch still passes existing permission, budget, hold and
+capacity admission. Neither green checks nor an advice response authorizes merging. Stopped-work
+advice remains evidence only; a recovered source is no longer a current halted advice source.
 
 **Opt-in draft-PR handoff for one settled implementation (#2486).** The `Queue` block of
 `settings.json` may opt in one canonical remote repository, for example:
@@ -8166,7 +8182,7 @@ and it belongs in the operator's live list until then. What keeps it from launch
 a braces that silently takes over. An arm the queue cannot derive fails the item with the reason on
 it, where `baton queue list` shows it; it never guesses.
 
-**A failed work item is out of the advance for good** (`halted` on the item). It keeps its room and its
+**A failed work item is out of the advance except for the typed recovery cases above** (`halted` on the item). It keeps its room and its
 stage — a failure with nowhere to look is not investigable — but the candidate filter skips it, because
 the same item otherwise matched on every tick forever: `gh` spawned, `git` spawned, `queue.json`
 rewritten, and the repeated fact hidden by the ledger's own `decision|reason|tag` collapse. What that

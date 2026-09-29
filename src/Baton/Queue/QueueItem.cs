@@ -373,7 +373,7 @@ public sealed record QueueItem
     public string? Error { get; init; }
 
     /// <summary>
-    /// The one halted lifecycle recovery that may re-observe an exact open PR. This is a closed,
+    /// A halted lifecycle recovery that may re-observe an exact open PR. This is a closed,
     /// persisted discriminator; <see cref="Error"/> is an explanation, not scheduler state.
     /// Null on historical rows and on all other operator halts.
     /// </summary>
@@ -464,6 +464,9 @@ public enum QueueReconciliationKind
 {
     /// <summary>A settled incomplete lane lacked an exact open PR; a later verified PR may resume it.</summary>
     AwaitingVerifiedPullRequest,
+
+    /// <summary>Required-check observation exhausted; only the recorded PR/head turning green may release it.</summary>
+    AwaitingRequiredCheckEvidence,
 }
 
 /// <summary>Why a launch attempt was halted rather than classified as started or refused.</summary>

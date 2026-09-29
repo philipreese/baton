@@ -138,7 +138,8 @@ public sealed partial class WorkItemAdvancer
                             // roomless failure it is durable proof there is no late live room.
                             || IsAdmissionRefusedRoomlessFailure(i))
                         && (!i.Halted || i.Branch is { Length: > 0 }
-                            && IsAwaitingMissingPullRequestReconciliation(i))))
+                            && (IsAwaitingMissingPullRequestReconciliation(i)
+                                || !snapshot.Held && IsAwaitingCheckEvidenceRecovery(i)))))
             .ToList();
         if (candidates.Count == 0)
         {
@@ -191,6 +192,10 @@ public sealed partial class WorkItemAdvancer
     private static bool IsAwaitingMissingPullRequestReconciliation(QueueItem item) =>
         item.ReconciliationKind == QueueReconciliationKind.AwaitingVerifiedPullRequest;
 
+    private static bool IsAwaitingCheckEvidenceRecovery(QueueItem item) =>
+        item.Halted && item.ReconciliationKind == QueueReconciliationKind.AwaitingRequiredCheckEvidence
+        && item.PullRequest is > 0 && item.RequiredCheckEvidenceWait is { HeadSha.Length: 40 };
+
     private async Task<QueueDecisionEntry?> AdvanceOneAsync(
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
     {
@@ -233,6 +238,39 @@ public sealed partial class WorkItemAdvancer
         var head = trustedDraftHandoff
             ? await ReadTrustedDraftHeadAsync(item, cancellationToken).ConfigureAwait(false)
             : await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
+
+        if (IsAwaitingCheckEvidenceRecovery(item))
+        {
+            // Green is permission to release this one typed halt, never to bypass lifecycle or
+            // launch admission. Keep the room/stage intact; the next tick re-reads all evidence.
+            // A different PR/head, or any non-green/unknown result, cannot inherit this permission.
+            var wait = item.RequiredCheckEvidenceWait!;
+            var recovered = pr is { Succeeded: true, IsOpen: true, RequiredChecks: PullRequestChecks.Passing }
+                && pr.Number == item.PullRequest && pr.HeadSha == wait.HeadSha && head == wait.HeadSha;
+            var operation = new QueueDispositionOperation(Guid.NewGuid().ToString("N"), now,
+                QueueDecisionEntry.Restored,
+                $"required-check evidence recovered for PR #{item.PullRequest} at {wait.HeadSha}; normal lifecycle admission resumes");
+            var changed = await TryMarkAsync(item, existing => recovered
+                ? existing with
+                {
+                    Halted = false,
+                    ReconciliationKind = null,
+                    RequiredCheckEvidenceWait = null,
+                    Error = null,
+                    Checks = pr.Checks,
+                    ChecksObservedAt = now,
+                    ChecksHeadSha = pr.HeadSha,
+                    DispositionOperations = [.. existing.DispositionOutbox, operation],
+                }
+                : existing with
+                {
+                    RequiredCheckEvidenceWait = wait with { LatestObservationAt = now },
+                }).ConfigureAwait(false);
+            if (changed && recovered)
+                await QueueDecisionLedgerStore.AppendDispositionAsync(item.Tag, operation,
+                    BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+            return null;
+        }
         var deliveryFailingMembers = ReadDeliveryFailingMembers(sentinel);
         await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
             .ConfigureAwait(false);
@@ -402,6 +440,7 @@ public sealed partial class WorkItemAdvancer
                 var exhausted = new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0,
                     $"{reason}; observation bound exhausted after first unreadable observation at "
                     + $"{(changedHead ? now : prior!.FirstUnreadableAt):O}; the settled room remains attached and no worker was dispatched",
+                    ReconciliationKind: QueueReconciliationKind.AwaitingRequiredCheckEvidence,
                     HaltCause: StoppedWorkHaltCause.UnavailableCheckEvidence);
                 return await FailAsync(item, stage, exhausted, verdictPath, now, room, wait,
                     pr, sentinel, verdict is not null, outcome, cancellationToken).ConfigureAwait(false);
@@ -807,6 +846,8 @@ public sealed partial class WorkItemAdvancer
             State = QueueItemState.Failed,
             Error = transition.Reason,
             ReconciliationKind = transition.ReconciliationKind,
+            PullRequest = transition.ReconciliationKind == QueueReconciliationKind.AwaitingRequiredCheckEvidence
+                ? pullRequest?.Number : existing.PullRequest,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
             ExpectedOriginatingPullRequestHead = null,
@@ -993,6 +1034,7 @@ public sealed partial class WorkItemAdvancer
                 var current = snapshot.Items.FirstOrDefault(i =>
                     string.Equals(i.Tag, expected.Tag, StringComparison.Ordinal));
                 if (current is null
+                    || snapshot.Held && IsAwaitingCheckEvidenceRecovery(expected)
                     || !string.Equals(
                         JsonSerializer.Serialize(current),
                         expectedJson,
