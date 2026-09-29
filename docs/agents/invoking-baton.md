@@ -801,14 +801,18 @@ operator then uses `baton queue add` to record the work. A running daemon, not `
 and advances it; queued work alone does not start a lane. `queue hold` stops new launches, but does
 not stop every daemon observation or recovery action.
 
-For the initial opted-in implementation, the worker still must produce verified committed and pushed
-work on its branch. The daemon may create one verified draft PR and dispatch review after that
-delivery; it does not merge automatically or wake a desktop chat. Review and merge authority remain
-unchanged. The exact eligibility and recovery rules are in [`spec/baton.md` §13](../../spec/baton.md).
+Only an opted-in, issue-anchored initial `implement` launch uses the immutable `--expect-pr false`
+delivery exception. The worker still must produce verified committed and pushed work on its branch,
+and the daemon may create one draft PR only after a durable succeeded-shaped settlement of that
+implementation attempt. Other stages and follow-on launches retain the ordinary PR requirement; a
+later setting change does not rewrite an existing execution contract. The daemon does not merge
+automatically or wake a desktop chat. Review and merge authority remain unchanged. The exact
+eligibility and recovery rules are in [`spec/baton.md` §13](../../spec/baton.md).
 
 If the daemon records a **may-have-called** create marker, it is permanent. The operator inspects the
-exact queue item and PR identity, while recovery observes that identity and never replays the create.
-Do not delete the marker or other queue state, and do not invent a retry or reset command. Turning
-the setting off blocks new creates; it does not cancel an already-admitted create or rewrite the
-contract already dispatched to a worker. If the exact PR cannot be verified, the item stops for
-operator reconciliation; §13 gives the detailed rules.
+exact queue item and PR identity, while recovery observes the marker's exact repository, branch, and
+full head and never replays the create. Drift or unknown evidence, including unreadable repository,
+branch, or head evidence, stops the item for operator reconciliation rather than advancing it. Do not
+delete the marker or other queue state, and do not invent a retry or reset command. Turning the
+setting off blocks new creates; it does not cancel an already-admitted create or rewrite the contract
+already dispatched to a worker. The exact PR checks are in §13.
