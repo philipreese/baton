@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using Baton.Vendors;
 
 namespace Baton.Cli.Daemon;
 
@@ -30,10 +31,22 @@ public sealed record GhCliResult(bool Started, int ExitCode, string Stdout, stri
 /// <summary>Production <see cref="IGhCliRunner"/> — spawns the real <c>gh</c> binary.</summary>
 public sealed class GhCliRunner : IGhCliRunner
 {
+    private readonly bool _requireOutsideWorkspace;
+
+    public GhCliRunner(bool requireOutsideWorkspace = false) =>
+        _requireOutsideWorkspace = requireOutsideWorkspace;
+
     public async Task<GhCliResult> RunAsync(
         string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
-        var startInfo = ChildProcessStartInfo.Create("gh", startInfo =>
+        var executable = _requireOutsideWorkspace
+            ? OutsideWorkspaceExecutableResolver.TryResolve(
+                Environment.GetEnvironmentVariable("PATH"), workingDirectory, "gh", OperatingSystem.IsWindows())
+            : "gh";
+        if (executable is null)
+            return new GhCliResult(false, -1, string.Empty,
+                "Could not resolve a link-free gh executable outside the worker workspace.");
+        var startInfo = ChildProcessStartInfo.Create(executable, startInfo =>
         {
             startInfo.WorkingDirectory = workingDirectory;
             startInfo.RedirectStandardOutput = true;

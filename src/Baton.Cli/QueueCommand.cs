@@ -479,6 +479,13 @@ public static class QueueCommand
     /// </remarks>
     private static void RefuseIfNotReplaceable(QueueItem? existing, string tag)
     {
+        if (existing?.DraftPullRequestCreateMarker is not null)
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' retains a may-have-called draft PR create marker. Re-adding it would erase at-most-once evidence.",
+                "reconcile the exact marked PR or choose a different tag for genuinely new work.");
+        }
+
         if (existing?.Retirement is not null)
         {
             throw new CliArgumentException(
@@ -1206,6 +1213,7 @@ public static class QueueCommand
             observed = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
             if (observed?.State != QueueItemState.Queued
                 || observed.ReadinessMutationClaim is { Length: > 0 }
+                || observed.DraftPullRequestCreateMarker is not null
                 || QueueScheduler.IsActiveLifecycle(observed))
             {
                 return snapshot;
@@ -1227,6 +1235,10 @@ public static class QueueCommand
                 throw new CliArgumentException(
                     $"Queue item '{tag}' has an in-flight pull-request readiness update and cannot be cancelled yet.",
                     "the operation was already claimed; wait for reconciliation to finish, then retry cancellation.");
+            case { DraftPullRequestCreateMarker: not null }:
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' retains a may-have-called draft PR create marker and cannot be cancelled.",
+                    "reconcile its exact PR state before changing lifecycle ownership.");
             case { State: QueueItemState.Queued } started when QueueScheduler.IsActiveLifecycle(started):
                 throw new CliArgumentException(
                     $"Queue item '{tag}' is an already-started lifecycle waiting at stage '{WorkStages.Token(started.Stage!.Value)}' "
@@ -1303,7 +1315,8 @@ public static class QueueCommand
         {
             throw new CliArgumentException($"Queue item '{tag}' is ordinary queued work; use 'baton queue cancel {tag}'.");
         }
-        if (observed.ReadinessMutationClaim is not null || observed.State == QueueItemState.Launched)
+        if (observed.ReadinessMutationClaim is not null || observed.State == QueueItemState.Launched
+            || PendingDraftPullRequestHandoff(observed))
         {
             throw new CliArgumentException($"Queue item '{tag}' is live or has an in-flight readiness mutation and cannot be retired.");
         }
@@ -1355,6 +1368,7 @@ public static class QueueCommand
                         && observation.Error is null) == true;
                 if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
                     || current.State == QueueItemState.Launched
+                    || PendingDraftPullRequestHandoff(current)
                     || !SameRetirementAttempt(observed, current)
                     || (current.State != QueueItemState.Failed
                         || !HasTerminalRoomProofAtMutation(current, terminalRoomProof, out journalLease))
@@ -1449,7 +1463,8 @@ public static class QueueCommand
             throw new CliArgumentException($"Queue item '{tag}' is ordinary queued work; use 'baton queue cancel {tag}'.");
         }
 
-        if (observed.ReadinessMutationClaim is not null || observed.State == QueueItemState.Launched)
+        if (observed.ReadinessMutationClaim is not null || observed.State == QueueItemState.Launched
+            || PendingDraftPullRequestHandoff(observed))
         {
             throw new CliArgumentException($"Queue item '{tag}' is live or has an in-flight readiness mutation and cannot be retired with explicit merged-PR evidence.");
         }
@@ -1507,6 +1522,7 @@ public static class QueueCommand
             var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
             if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
                 || current.State == QueueItemState.Launched
+                || PendingDraftPullRequestHandoff(current)
                 || !SameMergedRetirementAttempt(observed, current))
             {
                 return snapshot;
@@ -2026,13 +2042,14 @@ public static class QueueCommand
         {
             var importedTags = imported.Select(i => i.Tag).ToHashSet(StringComparer.Ordinal);
             var claimed = snapshot.Items.FirstOrDefault(
-                item => item.ReadinessMutationClaim is { Length: > 0 } && importedTags.Contains(item.Tag));
+                item => (item.ReadinessMutationClaim is { Length: > 0 }
+                    || item.DraftPullRequestCreateMarker is not null) && importedTags.Contains(item.Tag));
             if (claimed is not null)
             {
                 throw new CliArgumentException(
-                    $"Item '{claimed.Tag}' has an in-flight pull-request readiness update. Importing it would "
-                    + "supersede an operation that is already authorized.",
-                    "remove that tag from the import, or wait for reconciliation to finish and retry.");
+                    $"Item '{claimed.Tag}' retains an in-flight readiness or may-have-called draft PR operation. "
+                    + "Importing it would erase durable external-action evidence.",
+                    "remove that tag from the import and reconcile the existing queue row.");
             }
 
             var cancelled = snapshot.Items.FirstOrDefault(
@@ -2069,6 +2086,11 @@ public static class QueueCommand
 
         return 0;
     }
+
+    private static bool PendingDraftPullRequestHandoff(QueueItem item) =>
+        item.DraftPullRequestCreateMarker is not null
+        && item.Stage == WorkStage.Implement
+        && item.ReconciliationKind == QueueReconciliationKind.AwaitingVerifiedPullRequest;
 
     private static IReadOnlyList<QueueDispositionOperation> AppendDisposition(
         QueueItem item, QueueDispositionOperation operation) => [.. item.DispositionOutbox, operation];

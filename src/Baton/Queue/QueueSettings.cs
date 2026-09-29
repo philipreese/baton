@@ -1,4 +1,6 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using Baton.Accounting;
 
 namespace Baton.Queue;
 
@@ -85,6 +87,20 @@ public sealed record QueueSettings
     /// rows remain unknown because their missing metadata cannot spend shell/write/network authority.
     /// </summary>
     public bool RequireDeclaredRequirements { get; init; }
+
+    /// <summary>
+    /// Exact canonical remote repository keys allowed one deterministic draft-PR handoff after a
+    /// verified settled implementation. Absent, false, malformed, and noncanonical entries are off.
+    /// Admission rereads the settings file; this is not a revocable grant after its durable marker.
+    /// Raw JSON values keep one malformed opt-in from resetting unrelated daemon settings to defaults.
+    /// </summary>
+    public IReadOnlyDictionary<string, JsonElement>? DraftPullRequestHandoff { get; init; }
+
+    public bool IsDraftPullRequestHandoffEnabled(string repository) =>
+        DraftPullRequestHandoff?.TryGetValue(repository, out var enabled) == true
+        && enabled.ValueKind == JsonValueKind.True
+        && string.Equals(RepositoryIdentity.TryCanonicalize(repository), repository, StringComparison.Ordinal)
+        && !repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase);
 
     [JsonIgnore]
     public double EffectiveMaxLiveWeight => MaxLiveWeight > 0 ? MaxLiveWeight : DefaultMaxLiveWeight;
