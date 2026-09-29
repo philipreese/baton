@@ -320,6 +320,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         var root = new JsonObject
         {
             ["derived_at"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["projectionStaleAfterSeconds"] = StaleAfter().TotalSeconds,
             ["rooms"] = roomsArray,
 
             // #1902: room path -> timeline entries, so the daemon-served page can read timelines from
@@ -352,6 +353,8 @@ public sealed class FleetProjectionWriter : BackgroundService
             root[QueueUnavailableReasonKey] = queue.UnavailableReason;
         }
 
+        root["conductorObligations"] = await ConductorObligationProjection.ReadAsync(cancellationToken)
+            .ConfigureAwait(false);
         return root.ToJsonString(FleetStatusTool.SerializerOptions);
     }
 

@@ -336,8 +336,8 @@ check("(control) an unheld queue does not",
   // 1. Idle fleet answers
   const idleOut = streamStatusSummaryHtml(null, []);
   check("idle stream summary answers what is moving", idleOut.includes("No work moving · fleet is idle"));
-  check("idle stream summary answers what is blocked or stale", idleOut.includes("None blocked or stale"));
-  check("idle stream summary answers what needs the operator", idleOut.includes("All clear · no operator action needed"));
+  check("idle stream summary answers what is blocked or stale", idleOut.includes("No worker or PR blockage recorded"));
+  check("idle stream summary does not invent all-clear without obligation evidence", idleOut.includes("Conductor request state unknown"));
   check("idle stream summary answers quota status", idleOut.includes("Quota: unmeasured"));
 
   // 2. Active, blocked, operator-needed, and quota facts
@@ -713,6 +713,40 @@ const { createFleetEventBatcher } = new Function(`${batcherSource}\nreturn { cre
           renderTimes.length >= 2 && renderTimes[0] === 50 && renderTimes[1] === 100);
   }
 }
+
+const obligationPanel = new Function("esc", "age", `${source}\nreturn conductorObligationsHtml;`)(esc, age);
+const obligationRow = (status) => ({ status, requestedAction: "Continue work", owner: "queue-lifecycle",
+  createdAt: "2026-09-07T11:00:00Z", reason: "Status explanation" });
+const obligationView = (rows, overrides = {}) => ({ conductorObligations: {
+  available: true, rows, unresolvedCount: rows.filter(r => r.status !== "ActionObserved").length,
+  completedCount: rows.filter(r => r.status === "ActionObserved").length,
+  quarantinedCount: 0, omittedCount: 0, ...overrides } });
+check("absent schema is unknown, not empty", obligationPanel({}).includes("pending work is unknown"));
+check("unavailable evidence is unknown", obligationPanel({conductorObligations:{available:false}}).includes("pending work is unknown"));
+check("known empty has explicit empty message", obligationPanel(obligationView([])).includes("No unresolved conductor requests"));
+for(const status of ["Pending", "Submitted", "TransportAcknowledged", "Blocked", "Unsupported"]){
+  const rendered = obligationPanel(obligationView([obligationRow(status)]));
+  check(`${status} remains unresolved`, rendered.includes("1 shown of 1") && !rendered.includes("Completed requests"));
+}
+check("observed action is separate completed history", obligationPanel(obligationView([obligationRow("ActionObserved")])).includes("Completed requests"));
+check("quarantine plus completed never all-clear", !obligationPanel(obligationView([obligationRow("ActionObserved")], {quarantinedCount:1})).includes("No unresolved conductor requests"));
+check("omission never all-clear", !obligationPanel(obligationView([], {omittedCount:1})).includes("No unresolved conductor requests"));
+const hostileRow = {...obligationRow("Blocked"), requestedAction:"<img onerror=alert(1)>", owner:"<script>", reason:"<svg>"};
+const escapedObligations = obligationPanel(obligationView([hostileRow]));
+check("all displayed obligation text escaped", !escapedObligations.includes("<img") && !escapedObligations.includes("<script>") && !escapedObligations.includes("<svg>"));
+check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents)"));
+check("summary cannot claim all-clear for unresolved requests", streamStatusSummaryHtml(obligationView([obligationRow("Pending")]), []).includes("1 conductor request(s) unresolved"));
+check("daemon-shaped stale obligation snapshot remains visibly as-of", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z", projectionStaleAfterSeconds:90}).includes("Snapshot is stale"));
+check("snapshot timestamp shown even with no rooms", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z"}).includes("Snapshot as of 2026-09-01T00:00:00Z"));
+const obligationFreshness = new Function(`${source}\nreturn conductorProjectionFreshness;`)();
+const freshSnap = {derived_at:"2026-09-07T11:59:00Z", projectionStaleAfterSeconds:90};
+check("daemon timestamp within actual threshold is fresh", obligationFreshness(freshSnap, NOW) === "fresh");
+check("daemon threshold controls staleness", obligationFreshness({...freshSnap,projectionStaleAfterSeconds:30}, NOW) === "stale");
+for(const invalid of [undefined, null, 0, -1, "90", NaN, Infinity]){
+  check(`invalid freshness threshold ${invalid} stays unknown`, obligationFreshness({...freshSnap,projectionStaleAfterSeconds:invalid}, NOW) === "unknown");
+}
+check("invalid derivation timestamp stays unknown", obligationFreshness({...freshSnap,derived_at:"broken"}, NOW) === "unknown");
+check("future derivation timestamp stays unknown", obligationFreshness({...freshSnap,derived_at:"2026-09-08T12:00:00Z"}, NOW) === "unknown");
 
 if (failures.length) {
   console.error(`glass.selftest.mjs: FAIL -- ${failures.length} check(s):`);

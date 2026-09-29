@@ -1805,7 +1805,7 @@ function streamStatusSummaryHtml(snap, events){
   }
   const blockedSummary = blockedItems.length > 0
     ? `<span class="stream-val-alert">${blockedItems.length} blocked/stale</span>: ${blockedItems.join(", ")}`
-    : "None blocked or stale";
+    : "No worker or PR blockage recorded";
 
   // 3. What needs the operator
   const needsItems = [];
@@ -1829,9 +1829,15 @@ function streamStatusSummaryHtml(snap, events){
       }
     }
   }
+  const obligationState = snap && snap.conductorObligations;
+  const obligationSummary = !obligationState || obligationState.available !== true
+    ? "Conductor request state unknown"
+    : obligationState.quarantinedCount > 0 || obligationState.unresolvedCount > 0
+      ? `${esc(obligationState.unresolvedCount)} conductor request(s) unresolved; ${esc(obligationState.quarantinedCount)} uncertain`
+      : "No unresolved conductor requests in this snapshot";
   const needsSummary = needsItems.length > 0
     ? `<span class="stream-val-warn">${needsItems.length} need(s) operator</span>: ${needsItems.join(", ")}`
-    : "All clear · no operator action needed";
+    : obligationSummary;
 
   // 4. What quota remains (progressive disclosure)
   let quotaSummary = "Quota: unmeasured";
@@ -2162,7 +2168,39 @@ function streamHistoryHtml(events){
   return streamGroupedEventsHtml(events, true);
 }
 function streamHomeHtml(snap, events){
-  return streamStatusSummaryHtml(snap, events) + streamGroupedEventsHtml(events);
+  return streamStatusSummaryHtml(snap, events) + conductorObligationsHtml(snap) + streamGroupedEventsHtml(events);
+}
+function conductorObligationsHtml(snap){
+  const section = snap && snap.conductorObligations;
+  const freshness = conductorProjectionFreshness(snap);
+  const title = `<div class="stream-section-title">Conductor requests</div>`
+    + `<div class="stream-empty">Snapshot as of ${esc(snap && snap.derived_at || "unknown time")} · ${esc(age(snap && snap.derived_at) || "age unknown")}. Retained evidence, not a live activity signal. ${freshness === "stale" ? "Snapshot is stale." : freshness === "unknown" ? "Snapshot freshness unknown." : "Fresh when rendered."}</div>`;
+  if(!section || section.available !== true || !Array.isArray(section.rows)){
+    return title + `<div class="stream-empty">Conductor request state unavailable; pending work is unknown.</div>`;
+  }
+  let out = title;
+  if(section.quarantinedCount > 0) out += `<div class="stream-empty">${esc(section.quarantinedCount)} request(s) quarantined; pending work is incomplete. Inspect local evidence.</div>`;
+  if(section.omittedCount > 0) out += `<div class="stream-empty">${esc(section.omittedCount)} additional request(s) not shown.</div>`;
+  const completed = section.rows.filter(row => row.status === "ActionObserved");
+  const unresolved = section.rows.filter(row => row.status !== "ActionObserved");
+  const labels = {Pending:"Pending", Submitted:"Submitted", TransportAcknowledged:"Receipt acknowledged",
+    ActionObserved:"Action observed", Blocked:"Blocked", Unsupported:"Unsupported"};
+  function cards(rows){
+    return rows.map(row => `<div class="stream-group-card"><div class="stream-card-action"><b>${esc(row.requestedAction)}</b></div>`
+      + `<div class="stream-card-result">Owner: ${esc(row.owner)} · ${esc(labels[row.status] || "Unknown state")} · Created ${esc(age(row.createdAt) || "unknown")}</div>`
+      + `<div class="stream-card-result">Status explanation: ${esc(row.reason)}</div></div>`).join("");
+  }
+  out += `<div class="stream-section-title">Unresolved requests (${unresolved.length} shown of ${esc(section.unresolvedCount ?? "unknown")})</div>` + cards(unresolved);
+  if(!unresolved.length && !section.quarantinedCount && !section.omittedCount) out += `<div class="stream-empty">No unresolved conductor requests in this snapshot.</div>`;
+  if(section.completedCount > 0 || completed.length) out += `<details><summary>Completed requests (${completed.length} shown of ${esc(section.completedCount ?? "unknown")})</summary>${cards(completed)}</details>`;
+  return out;
+}
+function conductorProjectionFreshness(snap, now = Date.now()){
+  const threshold = snap && snap.projectionStaleAfterSeconds;
+  const derived = snap && typeof snap.derived_at === "string" ? Date.parse(snap.derived_at) : NaN;
+  if(typeof threshold !== "number" || !Number.isFinite(threshold) || threshold <= 0
+      || !Number.isFinite(derived) || derived > now) return "unknown";
+  return (now - derived) / 1000 > threshold ? "stale" : "fresh";
 }
 // <<< QUEUE-PANEL-END
 function renderQueueBoard(q, unavailableReason){ $("queueboard").innerHTML = queueBoardHtml(q, unavailableReason); }
@@ -2688,7 +2726,7 @@ function renderStream(){
   const summaryEl = $("stream-summary");
   const contentEl = $("stream-content");
   if(summaryEl) summaryEl.innerHTML = streamStatusSummaryHtml(lastGood, fleetEvents);
-  if(contentEl) contentEl.innerHTML = streamGroupedEventsHtml(fleetEvents);
+  if(contentEl) contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents);
 }
 
 function renderHistory(){
