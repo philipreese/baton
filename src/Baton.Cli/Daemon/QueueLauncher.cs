@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using Baton.Accounting;
 using Baton.Core;
 using Baton.Domain;
 using Baton.Outcomes;
@@ -633,6 +634,7 @@ public static class QueueLauncher
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--max-repeated-tool-steps", options.MaxRepeatedToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
+        Add("--expect-pr", options.ExpectPr is { } expectPr ? (expectPr ? "true" : "false") : null);
         Add("--originating-pr", options.OriginatingPullRequest);
         Add("--originating-pr-branch", options.OriginatingPullRequestBranch);
         if (options.MemoryAddGrant is { } memoryAddGrant)
@@ -1052,8 +1054,35 @@ public static class QueueLauncher
                 ? OriginatingPullRequestVerifier.CanonicalReference(repository, pullRequest)
                 : null,
             OriginatingPullRequestBranch: followOn ? item.Branch : null,
+            // Only an opted-in initial implementation lets Baton's post-exit delivery check
+            // accept a verified pushed branch before the daemon creates its one draft PR.
+            // The immutable binding keeps this launch contract if the setting later changes;
+            // the advancer separately rechecks opt-in before admitting any create call.
+            ExpectPr: UsesDaemonDraftPullRequestHandoff(item) ? false : null,
             MemoryAddGrant: item.MemoryAddGrant);
     }
+
+    private static bool UsesDaemonDraftPullRequestHandoff(QueueItem item) =>
+        item is
+        {
+            Role: "implement",
+            Stage: WorkStage.Implement,
+            Issue: > 0,
+            PullRequest: null,
+            Repository: { Length: > 0 },
+            Branch: { Length: > 0 },
+            External: false,
+            Retirement: null,
+        }
+        && string.Equals(RepositoryIdentity.TryCanonicalize(item.Repository), item.Repository,
+            StringComparison.Ordinal)
+        && !item.Repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase)
+        && (item.WorkspaceOrigin == WorkspaceOrigins.IssueProvisioned
+            || item.WorkspaceOrigin == WorkspaceOrigins.OperatorSupplied
+                && item.RetainedWorktreeReuse is { } reuse
+                && string.Equals(reuse.Repository, item.Repository, StringComparison.Ordinal)
+                && string.Equals(reuse.Branch, item.Branch, StringComparison.Ordinal))
+        && WorkItemAdvancer.IsDraftHandoffEnabledNow(item.Repository);
 
     private static bool RequiresRecoveryProof(QueueItem item) =>
         item.Stage == WorkStage.Continue

@@ -3,6 +3,7 @@ using Baton.Cli.Daemon;
 using Baton.Cli.Mcp;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Core;
+using Baton.Mutation;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Runway;
@@ -721,6 +722,173 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.DoesNotContain("--override-runway", minimal);
         Assert.DoesNotContain("--declared-size", minimal);
         Assert.DoesNotContain("--size-rationale", minimal);
+    }
+
+    [Fact]
+    public async Task Opted_in_initial_implement_forwards_branch_only_delivery_to_the_real_binding()
+    {
+        const string repository = "github.com/example/project";
+        const string branch = "2488-lane";
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                DraftPullRequestHandoff = new Dictionary<string, JsonElement>
+                {
+                    [repository] = JsonSerializer.SerializeToElement(true),
+                },
+            },
+        }, BatonPaths.SettingsFile, Ct);
+        var workspace = Path.Combine(_batonHome.Path, "workspace");
+        var origin = Path.Combine(_batonHome.Path, "origin.git");
+        Directory.CreateDirectory(workspace);
+        await GitAsync(_batonHome.Path, "init", "--bare", origin);
+        await GitAsync(workspace, "init", "--initial-branch", "main");
+        await GitAsync(workspace, "config", "user.name", "Baton Test");
+        await GitAsync(workspace, "config", "user.email", "test@example.invalid");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "fixture.txt"), "base", Ct);
+        await GitAsync(workspace, "add", "fixture.txt");
+        await GitAsync(workspace, "commit", "-m", "base");
+        var baseHead = (await GitAsync(workspace, "rev-parse", "HEAD")).Trim();
+        await GitAsync(workspace, "remote", "add", "origin", origin);
+        await GitAsync(workspace, "checkout", "-b", branch);
+        await File.WriteAllTextAsync(Path.Combine(workspace, "fixture.txt"), "change", Ct);
+        await GitAsync(workspace, "add", "fixture.txt");
+        await GitAsync(workspace, "commit", "-m", "implementation");
+        await GitAsync(workspace, "push", "origin", branch);
+
+        var item = new QueueItem
+        {
+            Tag = branch,
+            Role = "implement",
+            Workspace = workspace,
+            WorkspaceOrigin = WorkspaceOrigins.IssueProvisioned,
+            SpecFile = Path.Combine(_batonHome.Path, "brief.md"),
+            Issue = 2488,
+            Stage = WorkStage.Implement,
+            Repository = repository,
+            Branch = branch,
+        };
+        var role = WorkerRoleCatalog.For("implement");
+        var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(item,
+            new QueueTierResolution("engine", "codex", "test", "low", false, null),
+            Path.Combine(_batonHome.Path, "room")));
+        var argv = QueueLauncher.BuildArguments(options);
+        var parsed = DispatchOptionsParser.Parse(argv.Skip(1).ToList());
+        var binding = RoleDispatch.ToBinding(role, "Build the issue.", workingDirectory: workspace,
+            expectPrOverride: parsed.ExpectPr, attachDefaultSkills: false);
+
+        Assert.True(role.DeliversBranch);
+        Assert.Equal(false, options.ExpectPr);
+        Assert.Contains("--expect-pr", argv);
+        Assert.Equal(false, parsed.ExpectPr);
+        Assert.True(binding.DeliversBranch);
+        Assert.False(binding.ExpectPr);
+        Assert.Equal(role.Grant, binding.PermissionGrant);
+
+        var delivered = await DeliveryVerifier.CheckAsync(workspace, binding.ExpectPr, Ct,
+            workspaceHeadShaAtStart: baseHead, ghProgram: "missing-gh-for-branch-only-test");
+        Assert.Equal(DeliveryCheckStatus.Passed, delivered.Status);
+
+        var currentHead = (await GitAsync(workspace, "rev-parse", "HEAD")).Trim();
+        var noRevision = await DeliveryVerifier.CheckAsync(workspace, binding.ExpectPr, Ct,
+            workspaceHeadShaAtStart: currentHead, ghProgram: "missing-gh-for-branch-only-test");
+        Assert.Equal(DeliveryCheckStatus.Failed, noRevision.Status);
+        Assert.Contains("revision-not-created", noRevision.FailingMembers ?? []);
+
+        await File.WriteAllTextAsync(Path.Combine(workspace, "fixture.txt"), "unpushed", Ct);
+        await GitAsync(workspace, "add", "fixture.txt");
+        await GitAsync(workspace, "commit", "-m", "unpushed");
+        var unpushed = await DeliveryVerifier.CheckAsync(workspace, binding.ExpectPr, Ct,
+            workspaceHeadShaAtStart: baseHead, ghProgram: "missing-gh-for-branch-only-test");
+        Assert.Equal(DeliveryCheckStatus.Failed, unpushed.Status);
+        Assert.Contains("branch-not-pushed", unpushed.FailingMembers ?? []);
+
+        await GitAsync(workspace, "push", "origin", branch);
+        var emptyGh = Path.Combine(_batonHome.Path, "no-pr.cmd");
+        await File.WriteAllTextAsync(emptyGh, "@echo off\necho []\nexit /b 0\n", Ct);
+
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
+        Assert.False(binding.ExpectPr); // The already-launched contract is frozen after opt-out.
+        var ordinary = QueueLauncher.BuildOptions(new QueueLaunchRequest(item,
+            new QueueTierResolution("engine", "codex", "test", "low", false, null),
+            Path.Combine(_batonHome.Path, "ordinary-room")));
+        var ordinaryParsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(ordinary).Skip(1).ToList());
+        var ordinaryBinding = RoleDispatch.ToBinding(role, "Build the issue.", workingDirectory: workspace,
+            expectPrOverride: ordinaryParsed.ExpectPr, attachDefaultSkills: false);
+        Assert.Null(ordinary.ExpectPr);
+        Assert.True(ordinaryBinding.ExpectPr);
+        var ordinaryDelivery = await DeliveryVerifier.CheckAsync(workspace, ordinaryBinding.ExpectPr, Ct,
+            workspaceHeadShaAtStart: baseHead, ghProgram: emptyGh);
+        Assert.Equal(DeliveryCheckStatus.Failed, ordinaryDelivery.Status);
+        Assert.Contains("pr-not-open", ordinaryDelivery.FailingMembers ?? []);
+    }
+
+    [Fact]
+    public async Task Branch_only_delivery_is_never_forwarded_outside_the_opted_in_initial_issue_lane()
+    {
+        const string repository = "github.com/example/project";
+        var item = new QueueItem
+        {
+            Tag = "2488-lane",
+            Role = "implement",
+            Workspace = Path.Combine(_batonHome.Path, "workspace"),
+            WorkspaceOrigin = WorkspaceOrigins.IssueProvisioned,
+            SpecFile = Path.Combine(_batonHome.Path, "brief.md"),
+            Issue = 2488,
+            Stage = WorkStage.Implement,
+            Repository = repository,
+            Branch = "2488-lane",
+        };
+
+        void AssertOrdinary(string name, QueueItem candidate)
+        {
+            var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(candidate,
+                new QueueTierResolution("engine", "codex", "test", "low", false, null),
+                Path.Combine(_batonHome.Path, "room")));
+            Assert.True(options.ExpectPr is null, name);
+            var argv = QueueLauncher.BuildArguments(options);
+            Assert.DoesNotContain("--expect-pr", argv);
+            Assert.Null(DispatchOptionsParser.Parse(argv.Skip(1).ToList()).ExpectPr);
+        }
+
+        AssertOrdinary("default off", item);
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                DraftPullRequestHandoff = new Dictionary<string, JsonElement>
+                {
+                    [repository] = JsonSerializer.SerializeToElement(true),
+                },
+            },
+        }, BatonPaths.SettingsFile, Ct);
+
+        AssertOrdinary("role mismatch", item with { Role = "review" });
+        AssertOrdinary("non-lifecycle", item with { Stage = null });
+        AssertOrdinary("later review", item with { Stage = WorkStage.Review, PullRequest = 17 });
+        AssertOrdinary("later fix", item with { Stage = WorkStage.Fix, PullRequest = 17 });
+        AssertOrdinary("PR-bound implement", item with { PullRequest = 17 });
+        AssertOrdinary("no issue", item with { Issue = null });
+        AssertOrdinary("no repository", item with { Repository = null });
+        AssertOrdinary("noncanonical repository", item with { Repository = "https://github.com/example/project" });
+        AssertOrdinary("wrong repository", item with { Repository = "github.com/other/project" });
+        AssertOrdinary("no branch", item with { Branch = null });
+        AssertOrdinary("imported workspace", item with { WorkspaceOrigin = WorkspaceOrigins.ImportedUnknown });
+        AssertOrdinary("operator workspace without reuse proof", item with { WorkspaceOrigin = WorkspaceOrigins.OperatorSupplied });
+        AssertOrdinary("external row", item with { External = true });
+
+        await File.WriteAllTextAsync(BatonPaths.SettingsFile,
+            """{"Queue":{"DraftPullRequestHandoff":{"github.com/example/project":"not-a-boolean"}}}""", Ct);
+        AssertOrdinary("malformed opt-in", item);
+    }
+
+    private static async Task<string> GitAsync(string directory, params string[] args)
+    {
+        var result = await WorkspaceDeliveryProbe.SpawnAsync("git", directory, args, Ct);
+        Assert.True(result.Started && result.ExitCode == 0,
+            $"git {string.Join(' ', args)} failed: {result.Stderr}");
+        return result.Stdout;
     }
 
     [Fact]

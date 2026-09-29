@@ -8000,6 +8000,13 @@ branch/base PR history read must show no previous PR, including closed or merged
 ambiguity, or a full result limit is unknown, never absence. Existing open drafts continue through
 ordinary reconciliation. Fix, continue, review, legacy and unpushed rows have no create authority.
 
+For an opted-in initial issue-anchored `implement` launch with canonical recorded repository and
+branch and no PR, the queue passes `--expect-pr false` into that lane's immutable dispatch binding.
+This lets the post-exit delivery check accept a new clean revision pushed to origin before the
+daemon creates the draft; revision and branch-delivery checks still run. Other launches retain the
+role's ordinary PR expectation. Turning the setting off after launch does not rewrite its delivery
+binding, but the later admission recheck prevents a new draft-create marker.
+
 The queue commits an attempt/room/repository/branch/head/`main` **may-have-called** marker before a
 single `gh pr create --draft --head <branch> --base main --repo <repository>` call. It is permanent
 through restart, cancellation refusal, import refusal and later stage transitions; no later daemon

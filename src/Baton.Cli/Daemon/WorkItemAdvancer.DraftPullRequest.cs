@@ -15,7 +15,7 @@ public sealed partial class WorkItemAdvancer
         "number,state,isDraft,headRefOid,headRefName,baseRefName,isCrossRepository";
     private static readonly TimeSpan DefaultDraftPullRequestCommandTimeout = TimeSpan.FromSeconds(20);
 
-    private static bool IsDraftHandoffEnabledNow(string? repository)
+    internal static bool IsDraftHandoffEnabledNow(string? repository)
     {
         if (repository is null || !File.Exists(BatonPaths.SettingsFile)) return false;
         try
