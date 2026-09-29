@@ -3019,6 +3019,136 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(finalObservationAt, exhausted.RequiredCheckEvidenceWait.LatestObservationAt);
             Assert.Contains("attempt 6/6", exhausted.RequiredCheckEvidenceWait.Reason, StringComparison.Ordinal);
             Assert.Contains("attempt 6/6", exhausted.Error!, StringComparison.Ordinal);
+
+            // A new daemon instance must recover from disk, not a remembered successful read.
+            var green = Advancer(new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha));
+            await green.AdvanceAsync(finalObservationAt.AddSeconds(31), Ct);
+            var recovered = await ReadBackAsync();
+            Assert.False(recovered.Halted);
+            Assert.Null(recovered.RequiredCheckEvidenceWait);
+            await green.AdvanceAsync(finalObservationAt.AddSeconds(62), Ct);
+            var next = await ReadBackAsync();
+            Assert.Equal(WorkStage.Review, next.Stage);
+            Assert.Equal(QueueItemState.Queued, next.State);
+            Assert.Null(next.RoomDirectory);
+            await green.AdvanceAsync(finalObservationAt.AddSeconds(93), Ct);
+            var ledger = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.Single(ledger, entry => entry.Decision == QueueDecisionEntry.Restored);
+            Assert.Single((await ReadBackAsync()).DispositionOutbox);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("different-head")]
+    [InlineData("different-pr")]
+    [InlineData("different-workspace-head")]
+    [InlineData("closed")]
+    [InlineData("unreadable")]
+    [InlineData("empty")]
+    [InlineData("pending")]
+    [InlineData("failing")]
+    [InlineData("held")]
+    [InlineData("hold-during-read")]
+    [InlineData("replacement-during-read")]
+    [InlineData("other-halt")]
+    [InlineData("legacy-wait")]
+    public async Task Check_evidence_recovery_keeps_unsafe_or_unapproved_sources_halted(string condition)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, null);
+            var seed = await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var halted = seed with
+            {
+                Halted = true,
+                PullRequest = 77,
+                Error = "original halt",
+                ReconciliationKind = condition is "other-halt" or "legacy-wait" ? null
+                    : QueueReconciliationKind.AwaitingRequiredCheckEvidence,
+                RequiredCheckEvidenceWait = new(FullPushedSha, Now, Now, 6, "original wait"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Held = condition == "held",
+                Items = [halted],
+            }, Ct);
+            var calls = 0;
+            var gh = new DelegateGh(async (_, args, _) =>
+            {
+                calls++;
+                if (condition is "hold-during-read" or "replacement-during-read")
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+                    {
+                        Held = condition == "hold-during-read",
+                        Items = condition == "replacement-during-read"
+                            ? [halted with { Error = "replacement" }] : s.Items,
+                    }, Ct);
+                if (condition == "unreadable") return new GhCliResult(false, -1, "", "unavailable");
+                var checks = condition switch
+                {
+                    "empty" => "[]",
+                    "pending" => "[{\"name\":\"ci\",\"bucket\":\"pending\"}]",
+                    "failing" => "[{\"name\":\"ci\",\"bucket\":\"fail\"}]",
+                    _ => "[{\"name\":\"ci\",\"bucket\":\"pass\"}]",
+                };
+                return new GhCliResult(true, 0, args is ["pr", "checks", ..] ? checks
+                    : PrObject(condition == "different-pr" ? 78 : 77,
+                        condition == "different-head" ? PushedSha : FullPushedSha)
+                        .Replace("OPEN", condition == "closed" ? "CLOSED" : "OPEN", StringComparison.Ordinal), "");
+            });
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(
+                condition == "different-workspace-head" ? PushedSha : FullPushedSha));
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
+            var after = await ReadBackAsync();
+            Assert.True(after.Halted);
+            Assert.Equal(WorkStage.Implement, after.Stage);
+            Assert.Equal(room, after.RoomDirectory);
+            Assert.Equal(condition == "replacement-during-read" ? "replacement" : "original halt", after.Error);
+            Assert.Empty(after.DispositionOutbox);
+            if (condition is "held" or "other-halt" or "legacy-wait") Assert.Equal(0, calls);
+            var priorCalls = calls;
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddSeconds(32), Ct));
+            if (condition != "replacement-during-read") Assert.Equal(priorCalls, calls);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Check_evidence_recovery_restores_a_roomless_ready_item_without_launching_it()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var seed = await SeedAsync(home, WorkStage.Review, Path.Combine(home, "unused"), QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [seed with
+                {
+                    Stage = WorkStage.Ready, Halted = true, RoomDirectory = null, PullRequest = 77,
+                    ReconciliationKind = QueueReconciliationKind.AwaitingRequiredCheckEvidence,
+                    RequiredCheckEvidenceWait = new(FullPushedSha, Now, Now, 6, "empty checks"),
+                }],
+            }, Ct);
+            var advancer = Advancer(new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha));
+            await advancer.AdvanceAsync(Now.AddSeconds(31), Ct);
+            var recovered = await ReadBackAsync();
+            Assert.False(recovered.Halted);
+            Assert.Equal(WorkStage.Ready, recovered.Stage);
+            Assert.Equal(QueueItemState.Queued, recovered.State);
+            Assert.Null(recovered.RoomDirectory);
+            Assert.Null(recovered.RequiredCheckEvidenceWait);
         }
         finally
         {
