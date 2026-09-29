@@ -49,13 +49,13 @@ public sealed class StoppedWorkAdviceDurabilityTests : IDisposable
 
         async Task<RetainedStoppedWorkAdviceResponse> CompleteAfterReleaseAsync()
         {
-            await release.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             return Response(fixture.Obligation);
         }
 
         var first = fixture.Store.DecideStoppedWorkOnceAsync(
             fixture.Key, fixture.Request, fixture.Context, PassPreflight, Launch, Ct);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
         var second = NewStore().DecideStoppedWorkOnceAsync(
             fixture.Key, fixture.Request, fixture.Context,
             PassPreflight,

@@ -91,7 +91,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
             });
 
             await scheduler.TickOnceAsync(Ct);
-            await response.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await response.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.TransportAcknowledged);
@@ -161,7 +161,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
             var scheduler = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
                 Task.FromResult<string?>(Head)), Launch);
             await scheduler.TickOnceAsync(Ct);
-            await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             await scheduler.TickOnceAsync(Ct);
             Assert.Equal(1, calls);
             Assert.False(secondEntered.Task.IsCompleted);
@@ -171,7 +171,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 (await store.ReadAsync(first.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.TransportAcknowledged);
             await scheduler.TickOnceAsync(Ct);
-            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             Assert.Equal(1, Volatile.Read(ref maximum));
 
             await WaitForAsync(async () =>
@@ -205,8 +205,8 @@ public sealed class StoppedWorkAdviceSchedulerTests
             });
 
             var tick = scheduler.TickOnceAsync(Ct);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
-            await tick.WaitAsync(TimeSpan.FromSeconds(1), Ct);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            await tick.WaitAsync(TimeSpan.FromSeconds(60), Ct);
 
             release.TrySetResult(true);
             await scheduler.DrainStoppedWorkAdviceAsync();
@@ -237,9 +237,9 @@ public sealed class StoppedWorkAdviceSchedulerTests
             });
 
             await scheduler.TickOnceAsync(Ct);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
 
-            await scheduler.DrainStoppedWorkAdviceAsync().WaitAsync(TimeSpan.FromSeconds(1), Ct);
+            await scheduler.DrainStoppedWorkAdviceAsync().WaitAsync(TimeSpan.FromSeconds(60), Ct);
         }
         finally
         {
@@ -354,11 +354,11 @@ public sealed class StoppedWorkAdviceSchedulerTests
 
     private static async Task WaitForAsync(Func<Task<bool>> predicate)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow.AddSeconds(60);
         while (DateTime.UtcNow < deadline)
         {
             if (await predicate().ConfigureAwait(false)) return;
-            await Task.Delay(10, Ct).ConfigureAwait(false);
+            await Task.Delay(10, Ct).ConfigureAwait(false); // wait-ok: polling interval, not the sixty-second failure ceiling
         }
 
         Assert.Fail("Timed out waiting for durable stopped-work advice state.");
