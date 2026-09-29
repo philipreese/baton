@@ -291,16 +291,20 @@ def record_phase(phase, event, member=None):
 # Quiet mode (#1560): a dispatched worker that runs `gates` inherits ~2,500 tests' worth of stdout
 # into its conversation context and then re-reads it on every subsequent model call -- one small
 # renderer lane measured 1.25M input + 43.8M cache-read tokens, most of it this file's inherited
-# output. Quiet mode drops PASSING gates' logs and prints a FAILING gate's output tail-bounded.
+# output. Quiet mode drops PASSING gates' logs; emit_failure_output owns failure retention.
 # This does not reintroduce the filtering the module docstring forbids: nothing here reads the
 # text to DECIDE anything -- the verdict is still the exit code alone; quiet only changes how much
 # of an already-decided gate's log gets echoed.
 QUIET_FAIL_TAIL_LINES = 400
 
 
-def emit_failure_output(name, data, tail_lines=QUIET_FAIL_TAIL_LINES):
-    """Print a failing gate's captured output, tail-bounded, naming the rerun for the full log."""
+def emit_failure_output(name, data, tail_lines=None):
+    """Keep full CI failure evidence; bound local output unless an explicit limit is supplied."""
     lines = data.splitlines(keepends=True)
+    if tail_lines is None:
+        # #2502: the CI runner disappears after failure, so a local rerun cannot recover its
+        # discarded evidence. Keep every failure line there; passing gates still stay quiet.
+        tail_lines = len(lines) if os.environ.get("GITHUB_ACTIONS") == "true" else QUIET_FAIL_TAIL_LINES
     if len(lines) > tail_lines:
         print(f"  [{name}: {len(lines) - tail_lines} earlier line(s) elided -- "
               f"rerun `pixi run {name}` for the full log]", flush=True)
@@ -360,7 +364,7 @@ def join_gates(procs, quiet=False):
     The re-print is byte-for-byte, no decode and no filter -- re-printing is where the filtering
     the module docstring describes creeps back in, so nothing here inspects the text. The verdict
     is the exit code alone. Under --quiet a passing gate's output is dropped and a failing (or
-    blocked) gate's is tail-bounded (#1560); the exit-code contract is unchanged.
+    blocked) gate's follows emit_failure_output's retention policy; the exit-code contract is unchanged.
     """
     failed = []
     blocked = []
@@ -415,7 +419,7 @@ def pixi_runner(name):
 
 def quiet_pixi_runner(name):
     # The --quiet counterpart (#1560): capture, and echo only a FAILING gate's output
-    # (tail-bounded). The decision is still the exit code -- captured text is never inspected.
+    # through emit_failure_output. The decision is still the exit code -- text is never inspected.
     proc = subprocess.run(["pixi", "run", name], check=False,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
@@ -1147,6 +1151,27 @@ def selftest():
     if b"line499" not in got or b"line0\n" in got:
         print("  control FAILED: the tail bound did not keep the tail / drop the head")
         ok = False
+
+    # #2502: CI must retain an early failure even when later diagnostics exceed the local tail.
+    prior_actions = os.environ.get("GITHUB_ACTIONS")
+    long_failure = b"EARLY_FAILURE\n" + b"later diagnostic\n" * 500
+    try:
+        for actions, keep_early in (("true", True), ("false", False)):
+            os.environ["GITHUB_ACTIONS"] = actions
+            captured.seek(0); captured.truncate()
+            sys.stdout = _Buf()  # type: ignore[assignment]
+            try:
+                emit_failure_output("test-no-build", long_failure)
+            finally:
+                sys.stdout = real_stdout
+            if (b"EARLY_FAILURE" in captured.getvalue()) != keep_early:
+                print(f"  control FAILED: failed-gate evidence retention for GITHUB_ACTIONS={actions}")
+                ok = False
+    finally:
+        if prior_actions is None:
+            os.environ.pop("GITHUB_ACTIONS", None)
+        else:
+            os.environ["GITHUB_ACTIONS"] = prior_actions
 
     # The gate receipt (#1636): a real git repo, not fakes -- the whole point is that tree/dirty
     # hashes come from real `git rev-parse`/`diff` output.
