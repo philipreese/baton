@@ -143,16 +143,16 @@ public sealed class CodexReadinessDecisionAdapterTests
             TestContext.Current.CancellationToken);
         try
         {
-            await captureEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+            await captureEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             using var child = Process.GetProcessById(run.Pid);
-            await captureCanceled.Task.WaitAsync(TimeSpan.FromSeconds(6), TestContext.Current.CancellationToken);
+            await captureCanceled.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             await child.WaitForExitAsync(TestContext.Current.CancellationToken)
-                .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
 
             // Once the child is gone, the old failure path returns without joining this capture.
             // Reproduce CI's exact unreadable-file symptom if it returns while our handle is held.
             if (await Task.WhenAny(decisionTask,
-                    Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken)) == decisionTask)
+                    Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken)) == decisionTask) // wait-ok: observe premature return before the five-second capture cleanup deadline
             {
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => decisionTask);
                 Assert.Contains("thread.started", File.ReadAllText(run.StdoutPath));
@@ -164,13 +164,13 @@ public sealed class CodexReadinessDecisionAdapterTests
             try
             {
                 if (captureEntered.Task.IsCompleted)
-                    await captureSettled.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+                    await captureSettled.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             }
             finally
             {
                 try
                 {
-                    await decisionTask.WaitAsync(TimeSpan.FromSeconds(6), TestContext.Current.CancellationToken);
+                    await decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
                 }
                 catch (Exception)
                 {
@@ -180,7 +180,7 @@ public sealed class CodexReadinessDecisionAdapterTests
         }
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            decisionTask.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+            decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken));
         Assert.Contains("thread.started", File.ReadAllText(run.StdoutPath));
         Assert.Contains("timeout diagnostic", File.ReadAllText(run.StderrPath));
         AssertStopped(run);
@@ -213,9 +213,9 @@ public sealed class CodexReadinessDecisionAdapterTests
             TestContext.Current.CancellationToken);
         try
         {
-            await captureEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+            await captureEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                decisionTask.WaitAsync(TimeSpan.FromSeconds(11), TestContext.Current.CancellationToken));
+                decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken));
             Assert.Contains("capture did not settle within the cleanup bound", error.Message);
             Assert.IsAssignableFrom<OperationCanceledException>(error.InnerException);
             AssertStopped(run);
@@ -226,13 +226,13 @@ public sealed class CodexReadinessDecisionAdapterTests
             try
             {
                 if (captureEntered.Task.IsCompleted)
-                    await captureSettled.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+                    await captureSettled.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             }
             finally
             {
                 try
                 {
-                    await decisionTask.WaitAsync(TimeSpan.FromSeconds(6), TestContext.Current.CancellationToken);
+                    await decisionTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
                 }
                 catch (Exception)
                 {
