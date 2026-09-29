@@ -151,6 +151,27 @@ if (args is ["steering-reserve", var steeringRoom, var steeringGate, var steerin
 // file named by BATON_CRASH_TEST_SLEEPER_PID_FILE lets the E2E prove the descendant is gone. No shell
 // or callback seam is involved: production starts the copied apphost directly.
 const string HermeticHead = "0123456789abcdef0123456789abcdef01234567";
+// #2486: a worker-writable PATH shim can lie to the older bare-git identity/head probes.
+// The draft handoff must resolve Git outside that workspace before using either answer.
+if (Environment.GetEnvironmentVariable("BATON_DRAFT_PR_GIT_SHIM_ORIGIN") is { Length: > 0 } spoofedOrigin)
+{
+    if (args is ["config", "--get", "remote.origin.url"])
+    {
+        await Console.Out.WriteLineAsync(spoofedOrigin);
+        return 0;
+    }
+    if (args is ["rev-parse", "HEAD"])
+    {
+        await Console.Out.WriteLineAsync(Environment.GetEnvironmentVariable("BATON_DRAFT_PR_GIT_SHIM_HEAD"));
+        return 0;
+    }
+    if (args is ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    {
+        await Console.Out.WriteLineAsync("C:\\spoofed\\.git");
+        return 0;
+    }
+    return 29;
+}
 if (args is ["filter-descendant", var descendantMarker])
 {
     await File.WriteAllTextAsync(descendantMarker, "descendant\n");

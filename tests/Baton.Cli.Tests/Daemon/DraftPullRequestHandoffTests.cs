@@ -6,6 +6,7 @@ using Baton.Queue;
 using Baton.Status;
 using Baton.Tests.Shared;
 using Baton.Vendors;
+using Baton.CrashTestHost;
 using System.Text.Json;
 using Xunit;
 
@@ -33,6 +34,8 @@ public sealed class DraftPullRequestHandoffTests
         public bool CreateThrows { get; set; }
         public bool HangCreate { get; set; }
         public int CreateExitCode { get; set; }
+        public string HeadSha { get; set; } = Head;
+        public GhCliResult RequiredChecksResult { get; set; } = new(true, 0, "[]", string.Empty);
         public int CreateCount { get; private set; }
         public Action<int>? OnAllStateRead { get; set; }
         private int _allStateReads;
@@ -50,14 +53,14 @@ public sealed class DraftPullRequestHandoffTests
                     if (HangCreate) return new TaskCompletionSource<GhCliResult>().Task;
                     if (CreateThrows) throw new IOException("fake caller died after the durable marker");
                     if (CreateProducesPullRequest)
-                        PullRequestJson = Pr(77, Head);
+                        PullRequestJson = Pr(77, HeadSha);
                     return Task.FromResult(new GhCliResult(true, CreateExitCode,
                         CreateExitCode == 0 ? "https://github.com/example/project/pull/77" : string.Empty,
                         CreateExitCode == 0 ? string.Empty : "create result uncertain"));
                 }
 
                 if (args is ["pr", "checks", ..])
-                    return Task.FromResult(new GhCliResult(true, 0, "[]", string.Empty));
+                    return Task.FromResult(RequiredChecksResult);
                 if (args is ["pr", "view", ..])
                     return Task.FromResult(PullRequestJson is null
                         ? new GhCliResult(true, 1, string.Empty, "not found")
@@ -94,6 +97,7 @@ public sealed class DraftPullRequestHandoffTests
         public string? LocalBranch { get; set; } = Branch;
         public string? MainHead { get; set; } = OtherHead;
         public QueueItem Item { get; private set; } = null!;
+        public string Home => _home;
 
         public Fixture()
         {
@@ -162,6 +166,10 @@ public sealed class DraftPullRequestHandoffTests
 
         private GhCliResult Git(IReadOnlyList<string> args)
         {
+            Assert.Equal(new[] { "-c", "core.fsmonitor=false" }, args.Take(2));
+            args = args.Skip(2).ToArray();
+            if (args is ["config", "--get", "remote.origin.url"])
+                return new GhCliResult(true, 0, "https://" + Repository, "");
             if (args is ["symbolic-ref", ..])
                 return new GhCliResult(LocalBranch is not null, LocalBranch is null ? 1 : 0, LocalBranch ?? "", "");
             if (args is ["status", ..]) return new GhCliResult(true, 0, Status, "");
@@ -206,6 +214,87 @@ public sealed class DraftPullRequestHandoffTests
         Assert.Contains(fixture.Forge.Calls, args => args.Contains("all") && args.Contains("--base"));
         Assert.Empty(await fixture.Advancer().AdvanceAsync(Now.AddMinutes(1), Ct));
         Assert.Equal(1, fixture.Forge.CreateCount);
+    }
+
+    [Theory]
+    [InlineData(8, "pending")]
+    [InlineData(1, "fail")]
+    public async Task Nonzero_exit_with_typed_required_checks_still_advances_draft_to_review(
+        int exitCode, string bucket)
+    {
+        using var fixture = new Fixture();
+        await fixture.SeedAsync();
+        fixture.Forge.RequiredChecksResult = new GhCliResult(true, exitCode,
+            $$$"""[{"bucket":"{{{bucket}}}","name":"build","state":"PENDING","workflow":"ci"}]""",
+            "required checks not complete");
+
+        var fact = Assert.Single(await fixture.Advancer().AdvanceAsync(Now, Ct));
+        Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
+        Assert.Equal(WorkStage.Review, (await fixture.ReadAsync()).Stage);
+        Assert.Equal(1, fixture.Forge.CreateCount);
+    }
+
+    [Fact]
+    public async Task Workspace_path_git_shim_cannot_authorize_a_draft_for_the_wrong_origin()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new Fixture();
+        await fixture.SeedAsync();
+        var workspace = fixture.Item.Workspace;
+        var realGit = OutsideWorkspaceExecutableResolver.TryResolve(
+            Environment.GetEnvironmentVariable("PATH"), workspace, "git", isWindows: true);
+        Assert.NotNull(realGit);
+        var bare = Path.Combine(fixture.Home, "actual-origin.git");
+        await GitAsync(realGit, fixture.Home, "init", "--bare", bare);
+        await GitAsync(realGit, workspace, "init", "--initial-branch", "main");
+        await GitAsync(realGit, workspace, "config", "user.email", "test@example.invalid");
+        await GitAsync(realGit, workspace, "config", "user.name", "Baton Test");
+        await File.WriteAllTextAsync(Path.Combine(workspace, ".gitignore"), ".baton-shim/\n", Ct);
+        await GitAsync(realGit, workspace, "add", ".gitignore");
+        await GitAsync(realGit, workspace, "commit", "-m", "fixture");
+        const string actualOrigin = "https://github.com/other/project";
+        await GitAsync(realGit, workspace, "remote", "add", "origin", actualOrigin);
+        await GitAsync(realGit, workspace, "config", $"url.{new Uri(bare).AbsoluteUri}.insteadOf", actualOrigin);
+        await GitAsync(realGit, workspace, "branch", Branch);
+        await GitAsync(realGit, workspace, "push", "origin", "main", Branch);
+        await GitAsync(realGit, workspace, "checkout", Branch);
+        var actualHead = (await GitAsync(realGit, workspace, "rev-parse", "HEAD")).Trim();
+        fixture.Forge.HeadSha = actualHead;
+
+        var shim = Path.Combine(workspace, ".baton-shim");
+        Directory.CreateDirectory(shim);
+        var hostOutput = Path.GetDirectoryName(typeof(Scenarios).Assembly.Location)!;
+        foreach (var source in Directory.EnumerateFiles(hostOutput, "Baton.CrashTestHost*"))
+            File.Copy(source, Path.Combine(shim, Path.GetFileName(source)));
+        File.Copy(Path.Combine(hostOutput, "Baton.dll"), Path.Combine(shim, "Baton.dll"));
+        File.Copy(Path.Combine(shim, "Baton.CrashTestHost.exe"), Path.Combine(shim, "git.exe"));
+
+        var priorPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", shim + Path.PathSeparator + priorPath);
+            Environment.SetEnvironmentVariable("BATON_DRAFT_PR_GIT_SHIM_ORIGIN", "https://" + Repository);
+            Environment.SetEnvironmentVariable("BATON_DRAFT_PR_GIT_SHIM_HEAD", actualHead);
+            var advancer = new WorkItemAdvancer(fixture.Forge, workspaceHead: null,
+                repositoryIdentity: RepositoryIdentityResolver.TryResolveAsync);
+            await advancer.AdvanceAsync(Now, Ct);
+            Assert.Null((await fixture.ReadAsync()).DraftPullRequestCreateMarker);
+            Assert.Equal(0, fixture.Forge.CreateCount);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("BATON_DRAFT_PR_GIT_SHIM_HEAD", null);
+            Environment.SetEnvironmentVariable("BATON_DRAFT_PR_GIT_SHIM_ORIGIN", null);
+            Environment.SetEnvironmentVariable("PATH", priorPath);
+        }
+    }
+
+    private static async Task<string> GitAsync(string git, string workingDirectory, params string[] args)
+    {
+        var result = await WorkspaceDeliveryProbe.SpawnAsync(git, workingDirectory, args, Ct);
+        Assert.True(result.Started && result.ExitCode == 0,
+            $"git {string.Join(' ', args)} failed: {result.Stderr}");
+        return result.Stdout;
     }
 
     [Theory]
@@ -304,6 +393,26 @@ public sealed class DraftPullRequestHandoffTests
         Assert.Equal(WorkStage.Implement, marked.Stage);
         Assert.True(marked.Halted);
         Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, marked.ReconciliationKind);
+        Assert.Equal(1, fixture.Forge.CreateCount);
+    }
+
+    [Fact]
+    public async Task Marked_recovery_after_opt_out_refuses_a_moved_local_head()
+    {
+        using var fixture = new Fixture();
+        await fixture.SeedAsync();
+        fixture.Forge.CreateProducesPullRequest = false;
+        await fixture.Advancer().AdvanceAsync(Now, Ct);
+        Assert.NotNull((await fixture.ReadAsync()).DraftPullRequestCreateMarker);
+        fixture.Forge.PullRequestJson = FakeForge.Pr(77, Head);
+        fixture.LocalHead = OtherHead;
+        await File.WriteAllTextAsync(BatonPaths.SettingsFile,
+            """{"Queue":{"DraftPullRequestHandoff":{"github.com/example/project":false}}}""", Ct);
+
+        Assert.Empty(await fixture.Advancer().AdvanceAsync(Now.AddMinutes(1), Ct));
+        var current = await fixture.ReadAsync();
+        Assert.Equal(WorkStage.Implement, current.Stage);
+        Assert.True(current.Halted);
         Assert.Equal(1, fixture.Forge.CreateCount);
     }
 

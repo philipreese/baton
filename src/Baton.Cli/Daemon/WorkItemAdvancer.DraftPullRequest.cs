@@ -180,9 +180,7 @@ public sealed partial class WorkItemAdvancer
     {
         if (item.Repository is null || item.Branch is null || !Directory.Exists(item.Workspace))
             return (null, "automatic draft PR refused: workspace or recorded identity is unavailable");
-        var persisted = RepositoryIdentity.From("https://" + item.Repository, null);
-        var actual = _repositoryIdentity is null ? persisted
-            : await _repositoryIdentity(item.Workspace, cancellationToken).ConfigureAwait(false);
+        var actual = await ReadTrustedDraftRepositoryIdentityAsync(item, cancellationToken).ConfigureAwait(false);
         if (!string.Equals(actual?.RemoteValue, item.Repository, StringComparison.Ordinal))
             return (null, "automatic draft PR refused: workspace origin differs from the recorded canonical repository");
 
@@ -223,6 +221,24 @@ public sealed partial class WorkItemAdvancer
 
     private static bool Good(GhCliResult result) => result.Started && result.ExitCode == 0;
 
+    // Every Git answer used to authorize this opt-in mutation comes from the same bounded,
+    // outside-workspace executable. The ordinary lifecycle probes have a weaker trust contract.
+    private async Task<RepositoryIdentity?> ReadTrustedDraftRepositoryIdentityAsync(
+        QueueItem item, CancellationToken cancellationToken)
+    {
+        var origin = await RunBoundedGitAsync(item,
+            ["config", "--get", "remote.origin.url"], cancellationToken).ConfigureAwait(false);
+        return Good(origin) ? RepositoryIdentity.From(origin.Stdout.Trim(), null) : null;
+    }
+
+    private async Task<string?> ReadTrustedDraftHeadAsync(QueueItem item, CancellationToken cancellationToken)
+    {
+        var head = await RunBoundedGitAsync(item, ["rev-parse", "--verify", "HEAD"], cancellationToken)
+            .ConfigureAwait(false);
+        var sha = head.Stdout.Trim();
+        return Good(head) && sha.Length == 40 && sha.All(char.IsAsciiHexDigit) ? sha : null;
+    }
+
     private async Task<GhCliResult> RunBoundedGitAsync(
         QueueItem item, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
@@ -235,7 +251,11 @@ public sealed partial class WorkItemAdvancer
         bound.CancelAfter(_draftCommandTimeout);
         try
         {
-            return await _git(executable, item.Workspace, args, bound.Token).WaitAsync(bound.Token).ConfigureAwait(false);
+            // Git status can execute a repository-configured fsmonitor hook. Never allow that
+            // worker-controlled command to run while proving the clean tree for PR creation.
+            var safeArgs = new[] { "-c", "core.fsmonitor=false" }.Concat(args).ToArray();
+            return await _git(executable, item.Workspace, safeArgs, bound.Token).WaitAsync(bound.Token)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -307,6 +327,19 @@ public sealed partial class WorkItemAdvancer
             return null;
         }
 
+        // Opt-out stops new creates, not recovery of a may-have-called marker. Recovery still
+        // needs trusted local identity and the exact pinned HEAD before it can release Review.
+        var actual = await ReadTrustedDraftRepositoryIdentityAsync(item, cancellationToken).ConfigureAwait(false);
+        var localHead = await ReadTrustedDraftHeadAsync(item, cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(actual?.RemoteValue, marker.Repository, StringComparison.Ordinal)
+            || !string.Equals(localHead, marker.HeadSha, StringComparison.OrdinalIgnoreCase))
+        {
+            await RetainDraftHandoffReasonAsync(item,
+                "draft PR create marker no longer matches the trusted workspace origin and local HEAD; operator reconciliation required")
+                .ConfigureAwait(false);
+            return null;
+        }
+
         var history = await ReadDraftPullRequestHistoryAsync(item, cancellationToken).ConfigureAwait(false);
         if (!history.Succeeded || history.PullRequests.Count != 1
             || history.PullRequests[0] is not { Number: { } number, IsOpen: true, IsDraft: true } found
@@ -360,7 +393,10 @@ public sealed partial class WorkItemAdvancer
         var checkResult = await RunBoundedGhAsync(item,
             RepositoryArgs(item, "pr", "checks", number.ToString(CultureInfo.InvariantCulture),
                 "--required", "--json", "bucket,name,state,workflow"), cancellationToken).ConfigureAwait(false);
-        var required = Good(checkResult) ? PullRequestChecks.TrySummarizeRequired(checkResult.Stdout) : null;
+        // gh pr checks exits nonzero for pending/failing checks even with valid typed JSON.
+        // Those states gate readiness later; they do not block the first review handoff.
+        var required = checkResult.Started
+            ? PullRequestChecks.TrySummarizeRequired(checkResult.Stdout) : null;
         if (required is null) return PullRequestObservation.Failed("pinned PR required checks are unreadable", before);
         var after = await SnapshotAsync().ConfigureAwait(false);
         return after.Succeeded && after.Number == before.Number && after.IsOpen == true && after.IsDraft == true
