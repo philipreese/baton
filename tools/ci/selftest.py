@@ -144,7 +144,7 @@ def check_aggregate_table() -> None:
         ("pull_request", "success", "false", "skipped", "success", "full"),
     ]
     for row in valid:
-        assert not verify_coverage(*row), row
+        assert not verify_coverage(*row, "false" if row[0] == "pull_request" else ""), row
 
     base = valid[1]
     mutations = [
@@ -162,7 +162,7 @@ def check_aggregate_table() -> None:
         ("pull_request", "success", "", "skipped", "success", "full"),
     ]
     for row in mutations:
-        assert verify_coverage(*row), row
+        assert verify_coverage(*row, "false" if row[0] == "pull_request" else ""), row
 
 
 def main() -> None:
