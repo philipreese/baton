@@ -119,8 +119,10 @@ public sealed class TaskSizeDeclarationJsonConverter : JsonConverter<TaskSizeDec
 
         if (string.Equals(size, "unknown", StringComparison.OrdinalIgnoreCase))
         {
-            return rationale is null ? TaskSizeDeclaration.Unknown
-                : new TaskSizeDeclaration(DeclaredTaskSize.Unknown, rationale);
+            if (rationale is null) return TaskSizeDeclaration.Unknown;
+            if (string.IsNullOrWhiteSpace(rationale))
+                throw new JsonException("An explicit unknown task size requires a non-blank rationale.");
+            return new TaskSizeDeclaration(DeclaredTaskSize.Unknown, rationale.Trim());
         }
 
         try

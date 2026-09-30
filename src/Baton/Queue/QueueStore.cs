@@ -436,6 +436,7 @@ public static class QueueStore
         try
         {
             var snapshot = JsonSerializer.Deserialize<QueueSnapshot>(text, SerializerOptions) ?? QueueSnapshot.Empty;
+            ValidateOwnedTaskDeclarations(snapshot);
             return NormalizeCleanupSchema(snapshot);
         }
         catch (JsonException ex)
@@ -471,6 +472,7 @@ public static class QueueStore
 
     private static void WriteUnlocked(string path, QueueSnapshot snapshot)
     {
+        ValidateOwnedTaskDeclarations(snapshot);
         // Written to a temp sibling and moved, not written in place: a torn write here is the
         // operator's whole work list, and a reader (`baton queue list`, the next tick) that catches a
         // half-written file would throw rather than degrade.
@@ -498,6 +500,21 @@ public static class QueueStore
             throw new QueueStoreException(
                 $"Could not perform {operation} for the queue at '{path}': {ex.GetType().Name} "
                 + $"(HResult 0x{ex.HResult:X8}): {ex.Message}", ex);
+        }
+    }
+
+    private static void ValidateOwnedTaskDeclarations(QueueSnapshot snapshot)
+    {
+        if (snapshot.Items is null)
+            throw new JsonException("Queue items must be an array.");
+        // The old queue contract reserves unknown-without-rationale for migration rows. An
+        // explicit unknown is meaningful only on a task-owned row; validation needs the whole
+        // row, which the declaration's JSON converter cannot see while reading that property.
+        foreach (var item in snapshot.Items)
+        {
+            if (item.DeclaredTaskSize is { Size: Baton.Domain.DeclaredTaskSize.Unknown, Rationale: not null }
+                && (item.OwnedTask is null || string.IsNullOrWhiteSpace(item.DeclaredTaskSize.Rationale)))
+                throw new JsonException($"Queue item '{item.Tag}' has an invalid explicit unknown task-size declaration.");
         }
     }
 

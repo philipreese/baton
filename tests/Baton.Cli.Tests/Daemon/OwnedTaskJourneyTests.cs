@@ -27,6 +27,7 @@ public sealed class OwnedTaskJourneyTests
         public bool HasPullRequest { get; set; }
         public bool Draft { get; set; } = true;
         public string CheckBucket { get; set; } = "pass";
+        public bool OptionalCheckFailing { get; set; }
         public int ReadyCalls { get; private set; }
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken token)
@@ -42,7 +43,10 @@ public sealed class OwnedTaskJourneyTests
             if (args is ["pr", "checks", ..])
                 return Task.FromResult(new GhCliResult(true, 0,
                     $$"""[{"name":"ci","bucket":"{{CheckBucket}}","state":"SUCCESS"}]""", string.Empty));
-            var pr = $$"""{"number":77,"state":"OPEN","isDraft":{{Draft.ToString().ToLowerInvariant()}},"headRefOid":"{{Head}}","headRefName":"44-lane","baseRefName":"main","isCrossRepository":false,"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"}]}""";
+            var rollup = OptionalCheckFailing
+                ? """[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"},{"name":"optional","conclusion":"FAILURE","status":"COMPLETED"}]"""
+                : """[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"}]""";
+            var pr = $$"""{"number":77,"state":"OPEN","isDraft":{{Draft.ToString().ToLowerInvariant()}},"headRefOid":"{{Head}}","headRefName":"44-lane","baseRefName":"main","isCrossRepository":false,"statusCheckRollup":{{rollup}}}""";
             if (args is ["pr", "view", ..])
                 return Task.FromResult(HasPullRequest
                     ? new GhCliResult(true, 0, pr, string.Empty)
@@ -178,6 +182,20 @@ public sealed class OwnedTaskJourneyTests
                 Id: ready.OwnedTask!.Id, Json: true), regressedStatus, Ct);
             using var regressedJson = JsonDocument.Parse(regressedStatus.ToString());
             Assert.Equal("stale", regressedJson.RootElement.GetProperty("state").GetString());
+
+            // Required CI recovers while an optional check fails. Aggregate display checks are
+            // failing, but the ordinary advancer restores exact-head readiness and clears Error.
+            forge.CheckBucket = "pass";
+            forge.OptionalCheckFailing = true;
+            await Scheduler().TickOnceAsync(Ct);
+            var recovered = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Null(recovered.Error);
+            Assert.Equal(PullRequestChecks.Failing, recovered.Checks);
+            var recoveredStatus = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status,
+                Id: ready.OwnedTask!.Id, Json: true), recoveredStatus, Ct);
+            using var recoveredJson = JsonDocument.Parse(recoveredStatus.ToString());
+            Assert.Equal("ready-as-of", recoveredJson.RootElement.GetProperty("state").GetString());
 
             // A later independent PR observation cannot make the old exact-head receipt current.
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with

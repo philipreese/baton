@@ -144,10 +144,11 @@ public static class TaskCommand
         var readiness = owner.Ready;
         var headChanged = readiness is not null && currentPr?.HeadSha is { } observedHead
             && !string.Equals(observedHead, readiness.HeadSha, StringComparison.Ordinal);
-        var readinessRegressed = readiness is not null && (item.Error is not null
-            || item.RequiredCheckEvidenceWait is not null
-            || item.ChecksObservedAt > readiness.ReadyObservedAt
-                && item.Checks is not null && item.Checks != PullRequestChecks.Passing);
+        // Checks is the aggregate display word, not required-check policy. An optional failure
+        // can coexist with passing required checks; the advancer's retained reconciliation error
+        // and required-check wait are the authority for a current readiness regression.
+        var readinessRegressed = readiness is not null
+            && (item.Error is not null || item.RequiredCheckEvidenceWait is not null);
         var state = item.Retirement is not null ? "retired"
             : item.State == QueueItemState.Cancelled ? "cancelled"
             : item.IssuePreparation?.State == TaskPreparationState.Preparing
