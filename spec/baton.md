@@ -517,6 +517,7 @@ carry is the conductor's own merging rules, which are the conductor's and never 
 | `keep` | `baton keep <room-dir>` | `KeepOptionsParser.cs` |
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
 | `memory` | `baton memory audit [--repository <id>\|fleet] [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
+| `memory` | `baton memory read [--repository <id>\|fleet] [--format text\|json] [--help]` | `MemoryReadOptionsParser.cs` |
 | `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>\|fleet]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
 | `memory` | `baton memory sync [--repository <id>\|fleet] [--apply \| --check] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
 | `memory` | `baton memory add --text <text> --kind <kind> [--repository <id>\|fleet] [--dry-run] [--help]` | `MemoryAddOptionsParser.cs` |
@@ -7208,6 +7209,21 @@ the counts. `MemoryAuditReport`'s remarks carry the derivation — which two fin
 mint about the tool's own write, and why the exclusion stops at the findings — and
 `MemoryFile.IsBatonProjection` is where the inventory records the same content test rather than a
 second one.
+
+**`baton memory read` is the explicit canonical consumer.** It reads only the fleet store and either
+the current checkout's resolved repository identity or the one named by `--repository`; a fleet-only
+selection reads only fleet. Repository reads put fleet entries first, following the same projection
+order and `ProjectionBudget.Default` usable-entry limits. Retractions and supersessions are applied
+through `MemoryStore.Resolve`; entries excluded by those rules or the budget are named with their id
+and reason. Provenance stays beside each usable entry. Malformed/null JSONL rows and entries, links,
+or retractions with invalid identity or the wrong repository subject refuse the whole read. The reader
+captures `MemoryCanonicalGeneration`, buffers the full report, then emits it only under `ReadCurrent`,
+so a concurrent canonical change produces a nonzero result with no usable partial output. The entry
+budget bounds usable sections, not omission metadata or total report bytes; no hard full-report limit or
+vendor context-size guarantee is claimed. Missing stores are reported as absent without creating files.
+This is an explicitly invoked, read-only retrieval path: it does not discover vendor roots, consult
+other projects, contact the network, or write vendor/native memory. Memory remains contextual evidence;
+checked-in repository truth outranks it, and it is never executable authority.
 
 **An archived-origin entry (`historical-note`) is projected and labelled, never dropped** — the
 projector's remarks carry the derivation; the register's part is that labelling rather than hiding is

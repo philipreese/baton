@@ -245,7 +245,8 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// With <paramref name="requireReadable"/>, only an open reporting a missing file/directory
     /// means empty; File.Exists must not disguise a denied or invalid canonical input as absence.
     /// </summary>
-    internal IReadOnlyList<TEntry> ReadAllUnlocked(string ledgerFilePath, bool requireReadable = false)
+    internal IReadOnlyList<TEntry> ReadAllUnlocked(
+        string ledgerFilePath, bool requireReadable = false, bool parseStrict = false)
     {
         if (!requireReadable && !File.Exists(ledgerFilePath))
         {
@@ -263,21 +264,40 @@ internal sealed class JsonLinesLedger<TEntry>(
         catch (DirectoryNotFoundException) { return []; }
 
         var result = new List<TEntry>();
-        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        var lines = text.Split('\n');
+        for (var index = 0; index < lines.Length; index++)
         {
+            var line = lines[index].Trim();
+            if (line.Length == 0)
+            {
+                continue;
+            }
             TEntry? entry;
             try
             {
                 entry = JsonSerializer.Deserialize<TEntry>(line, SerializerOptions);
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
+                if (parseStrict)
+                {
+                    throw new InvalidDataException(
+                        $"Canonical ledger '{ledgerFilePath}' contains malformed JSON at line {index + 1}.", ex);
+                }
+
                 continue;
             }
 
             if (entry is not null)
             {
                 result.Add(entry);
+                continue;
+            }
+
+            if (parseStrict)
+            {
+                throw new InvalidDataException(
+                    $"Canonical ledger '{ledgerFilePath}' contains a JSON null row at line {index + 1}.");
             }
         }
 

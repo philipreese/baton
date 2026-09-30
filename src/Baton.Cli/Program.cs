@@ -175,6 +175,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine(
         "              ('ledger --rebuild' is a different FILE from the other three -- 'baton ledger --help' says which)");
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {MemoryReadOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {MemoryAddOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {MemoryRetractOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {AuditLanesOptionsParser.Usage[7..]}");
@@ -375,6 +376,13 @@ try
                 .ExecuteAsync(memoryAuditOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
         }
 
+        if (args.Length >= 2 && args[1] == "read")
+        {
+            var memoryReadOptions = MemoryReadOptionsParser.Parse(args[2..]);
+            return await MemoryReadCommand
+                .ExecuteAsync(memoryReadOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
+        }
+
         if (args.Length >= 2 && args[1] == "import")
         {
             var memoryImportOptions = MemoryImportOptionsParser.Parse(args[2..]);
@@ -404,7 +412,7 @@ try
         }
 
         throw new CliArgumentException(
-            $"Unknown 'baton memory' sub-verb. {MemoryAddOptionsParser.Usage} " +
+            $"Unknown 'baton memory' sub-verb. {MemoryReadOptionsParser.Usage} {MemoryAddOptionsParser.Usage} " +
             $"{MemoryRetractOptionsParser.Usage} {MemoryAuditOptionsParser.Usage} " +
             $"{MemoryImportOptionsParser.Usage} {MemorySyncOptionsParser.Usage}");
     }
