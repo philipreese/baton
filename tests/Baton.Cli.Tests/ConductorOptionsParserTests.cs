@@ -3,6 +3,22 @@ namespace Baton.Cli.Tests;
 public sealed class ConductorOptionsParserTests
 {
     [Fact]
+    public void Parse_Act_requires_one_typed_action_and_a_full_head()
+    {
+        const string head = "0123456789abcdef0123456789abcdef01234567";
+        var options = ConductorOptionsParser.Parse(
+            ["act", "--obligation", "stopped-judgment:source", "--holder", "conductor-one",
+             "--action", "replace-review", "--expected-head", head]);
+        Assert.Equal(ConductorVerb.Act, options.Verb);
+        Assert.Equal("conductor-one", options.Holder);
+        Assert.Equal(head, options.ExpectedHead);
+        Assert.Throws<CliArgumentException>(() => ConductorOptionsParser.Parse(
+            ["act", "--obligation", "key", "--holder", "holder", "--action", "run", "--expected-head", head]));
+        Assert.Throws<CliArgumentException>(() => ConductorOptionsParser.Parse(
+            ["act", "--obligation", "key", "--holder", "holder", "--action", "replace-review", "--expected-head", "short"]));
+    }
+
+    [Fact]
     public void Parse_EmptyArgs_ThrowsCliArgumentExceptionWithUsage()
     {
         var ex = Assert.Throws<CliArgumentException>(() => ConductorOptionsParser.Parse([]));

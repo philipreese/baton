@@ -54,6 +54,7 @@ The [arm comparator](benchmarks/comparator.md) records the matched-brief routing
 | `baton queue list --recovery [--history] [--format text\|json]` | Inspect retained conductor requests without modifying them; [selection, paging and evidence limits](spec/baton.md). This is not a wake or retry command. |
 | `baton conductor claim <holder> [--workspace <dir>]` / `list [--json]` / `release <holder> [--workspace <dir>] --reason <text>` / `takeover <holder> [--workspace <dir>] --reason <text>` | Durable repository-claim register coordinating external conductor sessions across disjoint repositories (`spec/baton.md` §14). Mutation enforcement is deferred. |
 | `baton conductor prepare --request <file>` / `decide --obligation <key> --context <file>` | Manually prepare and record one exact-revision readiness decision under an existing claim. The response is advice only; the [typed file contract and recovery rule](spec/baton.md#one-shot-owned-readiness-advice-2484) govern the command. |
+| `baton conductor act --obligation <key> --holder <holder> --action replace-review --expected-head <full-sha>` | Explicitly authorize one ordinary-round replacement for a saved missing-verdict `Review` or `ReReview` halt. The queue remains subject to hold and normal admission. A durable action slot and independently verified exact-head verdict are required before the stopped-work obligation is marked observed. |
 | `baton mcp` / `baton daemon` | The stdio MCP server workers connect to (`fleet_status`, `yield`, `memory-edit-proposal`, `promote-artifact`, `room_detail`), and the narrowed background daemon (`spec/baton.md` §7). |
 
 `spec/baton.md` is the authority on every verb's exact contract — this table is an index, not a
@@ -74,8 +75,8 @@ mutations. The normative contract and recovery details are in
 
 An optional [stopped-work judgment handoff](spec/baton.md#stopped-work-judgment-handoff-2499)
 gives the repository's conductor one saved recommendation when a new lifecycle needs judgment.
-The site displays it as **advice only — no action taken**. It does not restart workers, apply a fix,
-merge, or wake your desktop chat. A recommendation leaves the request unresolved.
+The site displays a recommendation as **advice only — no action taken**. The recommendation itself
+does not restart workers, apply a fix, merge, or wake your desktop chat; it leaves the request unresolved.
 
 To opt in, merge this member into the existing `Queue` object in `~/.baton/settings.json`, preserving
 all other settings, and use your exact canonical repository key:
@@ -94,6 +95,11 @@ evidence; do not delete a launch marker or recreate the request to force a retry
 source makes old advice stale. The [contract](spec/baton.md#stopped-work-judgment-handoff-2499) owns the
 exact admission, recovery and provider limits. This prepares conductor-owned judgment handoffs without
 granting automatic execution authority.
+
+For a current missing-verdict `Review` or `ReReview` halt, the claim holder may explicitly issue the
+`conductor act ... --action replace-review` command listed above. It consumes one normal lifecycle
+round and remains subject to queue hold and worker admission. The request is completed only after
+Baton verifies a terminal, exact-head `approve` or `block` verdict from that replacement attempt.
 
 ## The conductor queue
 

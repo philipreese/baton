@@ -11,6 +11,7 @@ public enum ConductorVerb
     Takeover,
     Prepare,
     Decide,
+    Act,
 }
 
 /// <summary>
@@ -24,4 +25,6 @@ public sealed record ConductorOptions(
     bool Json = false,
     string? RequestFile = null,
     string? ObligationKey = null,
-    string? ContextFile = null);
+    string? ContextFile = null,
+    string? Action = null,
+    string? ExpectedHead = null);

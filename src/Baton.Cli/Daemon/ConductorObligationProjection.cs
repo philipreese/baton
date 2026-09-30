@@ -92,8 +92,28 @@ internal static class ConductorObligationProjection
             {
                 var view = advice?.GetValueOrDefault(row.IdempotencyKey);
                 var source = stoppedSources?.FirstOrDefault(item =>
-                    item.Halted && item.StoppedWorkJudgment?.Key == row.IdempotencyKey);
+                    item.StoppedWorkJudgment?.Key == row.IdempotencyKey);
                 projected["advice"] = ProjectAdvice(view, row.CreatedAt);
+                if (source?.ReplacementReviewAction is { } action)
+                {
+                    var actionState = row.Status == ConductorObligationStatus.ActionObserved
+                        && action.CompletionProof is not null ? "completed"
+                        : action.CompletionProof is not null ? "verified-pending-observation"
+                        : action.BlockedReason is not null ? "blocked"
+                        : source.State is QueueItemState.Cancelled or QueueItemState.Failed
+                            || source.Retirement is not null ? "blocked"
+                        : source.State == QueueItemState.Launched ? "running"
+                        : source.State == QueueItemState.Queued ? "queued" : "authorized";
+                    projected["action"] = new JsonObject
+                    {
+                        ["kind"] = "replace-review",
+                        ["state"] = actionState,
+                        ["owner"] = "Repository conductor",
+                        ["nextTrigger"] = action.BlockedReason is not null
+                            ? "Inspect retained replacement evidence and reconcile manually"
+                            : null,
+                    };
+                }
                 if (view?.Issue is > 0) projected["issue"] = view.Issue;
                 else if (source?.Issue is > 0) projected["issue"] = source.Issue;
                 var stage = view?.Stage ?? source?.StoppedWorkJudgment?.Stage ?? source?.Stage;

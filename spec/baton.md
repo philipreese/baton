@@ -8612,8 +8612,35 @@ introduce forge polling. Unknown, blocked, unsupported and uncertain evidence re
 projection omits private paths, prompts, transcripts and receipts, and treats explanation text as
 untrusted text, never executable markup. `ActionObserved` still requires independently verified action
 evidence; a recommendation alone cannot set it. This is a read-only advisory display, not a website
-decision or dispatch control. A future conductor action protocol must consume these saved requests
-under its own explicit permissions, not reinterpret advice as permission.
+decision or dispatch control. The explicit replacement-review command below consumes one saved
+request under its own bounded authority; no provider response grants permission to act.
+
+### Explicit replacement review for a missing verdict (#2518)
+
+An external conductor may explicitly run `baton conductor act --obligation <key> --holder
+<holder> --action replace-review --expected-head <full-sha>` against one complete, validated
+stopped-work advice response. This is a typed command, never an interpretation or automatic
+execution of the response's prose. The stable source obligation owns one action slot, bound to the
+advice digest, holder, repository, queue tag, terminal source attempt and stage, open PR and exact
+head. Identical requests replay the retained slot; changed identity conflicts.
+
+Admission is limited to a current `MissingVerdict` halt at `Review` or `ReReview` with a known
+terminal source, trustworthy round and automatic-fix history, a current conductor holder, and an
+exact open PR, workspace and head. A usable lifecycle verdict appearing before admission refuses
+the action, including a complete `block` without full-SHA proof when ordinary lifecycle policy
+accepts it. The held queue refuses new admission and launch. Launch rechecks owner, workspace,
+source and PR head after any wait. The replacement consumes the next ordinary round with the same
+stage grant, model selection, runway and execution limits; it does not reset the one automatic fix
+or the round ceiling. A paired fix and re-review remain subject to the existing lifecycle rule.
+
+The queue stores the replacement attempt and room before any launch may begin, then stores a
+completion proof before ordinary advancement clears the current attempt fields. A terminal
+replacement with a complete `approve` or `block` verdict explicitly naming the authorized full
+head, and a still-current exact open PR, proves only that a usable review was recovered. Ordinary
+lifecycle policy still determines fix, re-review and readiness. A lifecycle verdict without that
+stricter proof may advance normally but leaves the action unresolved. Reconciliation acknowledges
+the stopped-work obligation only from the durable proof; queued state, a receipt, launch and process
+exit alone cannot do so. Failed, stale and uncertain outcomes retain an owner and next trigger.
 
 ---
 

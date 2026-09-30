@@ -199,6 +199,13 @@ public sealed record QueueItem
     /// </summary>
     public StoppedWorkJudgment? StoppedWorkJudgment { get; init; }
 
+    /// <summary>
+    /// One explicit replacement review authorized against a stopped-work obligation. The source and
+    /// target identities survive ordinary advancement, which clears the current attempt and room.
+    /// Advice is identified by its retained digest, never interpreted as an instruction.
+    /// </summary>
+    public QueueReplacementReviewAction? ReplacementReviewAction { get; init; }
+
     /// <summary>A retained disposition, atomically recording kind, time, and reason.</summary>
     public QueueRetirement? Retirement { get; init; }
 
