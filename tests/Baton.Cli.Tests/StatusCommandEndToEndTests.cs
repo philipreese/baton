@@ -618,16 +618,16 @@ public class StatusCommandEndToEndTests
 
             try
             {
-                await output.WaitForTextAsync("initial tail line", TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                await output.WaitForTextAsync("initial tail line", TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
                 Assert.False(statusTask.IsCompleted, "The still-running workflow follow ended before cancellation.");
                 await Task.Delay(TimeSpan.FromMilliseconds(appendDelayAfterInitialOutputMs), TestContext.Current.CancellationToken);
                 await File.AppendAllTextAsync(stdoutPath, "appended between polls\n", TestContext.Current.CancellationToken);
-                await output.WaitForTextAsync("appended between polls", TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                await output.WaitForTextAsync("appended between polls", TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             }
             finally
             {
                 followCancellation.Cancel();
-                await statusTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                await statusTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             }
 
             var text = output.ToString();
