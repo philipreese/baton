@@ -625,7 +625,7 @@ def capture_daemon_identity(
         return None
     process_handle = None
     if bind_handle:
-        process_handle = deps.open_process_handle(rechecked) if deps.open_process_handle else None
+        process_handle = deps.open_process_handle(rechecked[0]) if deps.open_process_handle else None
         if process_handle is None or not process_handle_matches(process_handle, rechecked[0]):
             if process_handle is not None and deps.close_process_handle:
                 deps.close_process_handle(process_handle)
@@ -3222,6 +3222,29 @@ def _selftest_orphan_recovery_guards() -> bool:
         print("  FAILED: recovery captured a handle whose process identity changed")
         ok = False
 
+    def strict_handle(process: DaemonProcess) -> DaemonProcessHandle:
+        if not isinstance(process, DaemonProcess) or process != old_process:
+            raise AssertionError("handle opener did not receive the rechecked DaemonProcess")
+        return captured_handle
+
+    strict_deps = Deps(
+        run=run_identity,
+        baton_home="orphan-recovery-fixture",
+        dotnet_tools_root="orphan-recovery-dotnet-tools",
+        nuget_packages_root="orphan-recovery-nuget",
+        open_process_handle=strict_handle,
+    )
+    _assert_isolated(strict_deps)
+    try:
+        strict_identity = capture_daemon_identity(strict_deps, old_process, bind_handle=True)
+    except AssertionError as ex:
+        print(f"  FAILED: {ex}")
+        ok = False
+    else:
+        if strict_identity is None or strict_identity.process_handle is not captured_handle:
+            print("  FAILED: exact rechecked daemon process did not bind its handle")
+            ok = False
+
     if os.name == "nt":
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         child_handle: Optional[DaemonProcessHandle] = None
@@ -3232,6 +3255,41 @@ def _selftest_orphan_recovery_guards() -> bool:
                 print("  FAILED: disposable child process handle could not be opened")
                 ok = False
             else:
+                disposable_process = DaemonProcess(
+                    child.pid, child_handle.creation_time, child_handle.executable_path
+                )
+
+                def run_disposable(cmd: List[str]) -> CommandResult:
+                    if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
+                        return CommandResult(
+                            0,
+                            f"{disposable_process.pid}|{disposable_process.creation_time}|"
+                            f"{disposable_process.executable_path}|daemon\n",
+                        )
+                    if cmd == [disposable_process.executable_path, "--version"]:
+                        return CommandResult(0, "disposable-fixture\n")
+                    raise AssertionError(f"unexpected disposable process probe: {cmd}")
+
+                disposable_deps = Deps(
+                    run=run_disposable,
+                    baton_home="orphan-recovery-fixture",
+                    dotnet_tools_root="orphan-recovery-dotnet-tools",
+                    nuget_packages_root="orphan-recovery-nuget",
+                )
+                _assert_isolated(disposable_deps)
+                bound_identity = capture_daemon_identity(
+                    disposable_deps, disposable_process, bind_handle=True
+                )
+                if bound_identity is None or bound_identity.process_handle is None:
+                    print("  FAILED: real disposable process could not bind through capture_daemon_identity")
+                    ok = False
+                else:
+                    try:
+                        if not process_handle_matches(bound_identity.process_handle, disposable_process):
+                            print("  FAILED: real disposable capture bound a different process")
+                            ok = False
+                    finally:
+                        close_process_handle(bound_identity.process_handle)
                 if process_handle_matches(
                     child_handle,
                     DaemonProcess(child.pid, "2026-01-01T00:00:00.000000Z", child_handle.executable_path),
