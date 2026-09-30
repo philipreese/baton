@@ -28,6 +28,7 @@ public sealed class OwnedTaskJourneyTests
         public bool Draft { get; set; } = true;
         public string CheckBucket { get; set; } = "pass";
         public bool OptionalCheckFailing { get; set; }
+        public bool FailChecks { get; set; }
         public int ReadyCalls { get; private set; }
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken token)
@@ -41,8 +42,12 @@ public sealed class OwnedTaskJourneyTests
                 return Task.FromResult(new GhCliResult(true, 0, string.Empty, string.Empty));
             }
             if (args is ["pr", "checks", ..])
+            {
+                if (FailChecks)
+                    return Task.FromResult(new GhCliResult(true, 1, string.Empty, "transient required-check lookup failure"));
                 return Task.FromResult(new GhCliResult(true, 0,
                     $$"""[{"name":"ci","bucket":"{{CheckBucket}}","state":"SUCCESS"}]""", string.Empty));
+            }
             var rollup = OptionalCheckFailing
                 ? """[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"},{"name":"optional","conclusion":"FAILURE","status":"COMPLETED"}]"""
                 : """[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"}]""";
@@ -91,6 +96,7 @@ public sealed class OwnedTaskJourneyTests
 
             var forge = new Forge();
             var head = HeadA;
+            var now = Now;
             var launches = new List<QueueLaunchRequest>();
             var events = new List<FleetEventDraft>();
             Task<FleetEvent?> Append(FleetEventDraft draft, CancellationToken token)
@@ -122,7 +128,7 @@ public sealed class OwnedTaskJourneyTests
                     Directory.CreateDirectory(request.RoomDirectory);
                     return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
                 },
-                _ => Task.FromResult(0d), () => 16d, () => Now,
+                _ => Task.FromResult(0d), () => 16d, () => now,
                 advancer: Advancer(), appendFleetEvent: Append,
                 workspaceHead: (_, _) => Task.FromResult<string?>(head), workspaceLocks: _ => []);
 
@@ -196,6 +202,29 @@ public sealed class OwnedTaskJourneyTests
                 Id: ready.OwnedTask!.Id, Json: true), recoveredStatus, Ct);
             using var recoveredJson = JsonDocument.Parse(recoveredStatus.ToString());
             Assert.Equal("ready-as-of", recoveredJson.RootElement.GetProperty("state").GetString());
+
+            // Stable, non-draft Ready: a transient required-check read fails, then succeeds
+            // while an optional check remains red. This refreshes aggregate Checks after the old
+            // receipt without minting a new one; aggregate failure must not veto required CI.
+            Assert.False(forge.Draft);
+            var retainedReadyId = recovered.OwnedTask!.Ready!.Id;
+            now = Now.AddMinutes(2);
+            forge.FailChecks = true;
+            await Scheduler().TickOnceAsync(Ct);
+            Assert.NotNull(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Error);
+            now = Now.AddMinutes(3);
+            forge.FailChecks = false;
+            await Scheduler().TickOnceAsync(Ct);
+            var stableRecovered = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Null(stableRecovered.Error);
+            Assert.Equal(retainedReadyId, stableRecovered.OwnedTask?.Ready?.Id);
+            Assert.True(stableRecovered.ChecksObservedAt > stableRecovered.OwnedTask?.Ready?.ReadyObservedAt);
+            Assert.Equal(PullRequestChecks.Failing, stableRecovered.Checks);
+            var stableStatus = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status,
+                Id: ready.OwnedTask!.Id, Json: true), stableStatus, Ct);
+            using var stableJson = JsonDocument.Parse(stableStatus.ToString());
+            Assert.Equal("ready-as-of", stableJson.RootElement.GetProperty("state").GetString());
 
             // A later independent PR observation cannot make the old exact-head receipt current.
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
