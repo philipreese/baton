@@ -69,11 +69,58 @@ public sealed class CodexReadinessDecisionAdapterTests
     [InlineData("stderr-overflow", false)]
     public async Task Stream_overflow_is_bounded_and_terminates_the_owned_child(string mode, bool stdout)
     {
-        using var run = new FakeCodexRun(mode);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => run.Adapter.DecideAsync(
+        var writes = 0;
+        var started = Stopwatch.GetTimestamp();
+        async Task SimulateWriteThroughLatency(FileStream _, CancellationToken token)
+        {
+            Interlocked.Increment(ref writes);
+            await Task.Delay(TimeSpan.FromMilliseconds(75), token);
+        }
+
+        using var run = new FakeCodexRun(mode,
+            afterStdoutWriteForTests: stdout ? SimulateWriteThroughLatency : null,
+            afterStderrWriteForTests: stdout ? null : SimulateWriteThroughLatency);
+        var failure = await Record.ExceptionAsync(() => run.Adapter.DecideAsync(
             "obligation-1", Request, Context, run.Directory, TestContext.Current.CancellationToken));
+        var elapsed = Stopwatch.GetElapsedTime(started);
+        var stdoutBytes = new FileInfo(run.StdoutPath).Length;
+        var stderrBytes = new FileInfo(run.StderrPath).Length;
+        Assert.True(failure is InvalidOperationException
+                && failure.Message.Contains("exceeded 1 MiB", StringComparison.Ordinal),
+            $"Expected bounded-overflow InvalidOperationException; got {failure?.GetType().Name}: "
+            + $"{failure?.Message}; elapsed {elapsed}; durable writes {writes}; "
+            + $"stdout {stdoutBytes} bytes; stderr {stderrBytes} bytes.");
+        Assert.True(writes <= 32,
+            $"Capture needed {writes} WriteThrough writes in {elapsed}; stdout {stdoutBytes} bytes; "
+            + $"stderr {stderrBytes} bytes.");
         Assert.Equal(CodexReadinessDecisionAdapter.MaxStreamBytes,
             new FileInfo(stdout ? run.StdoutPath : run.StderrPath).Length);
+        AssertStopped(run);
+    }
+
+    [Fact]
+    public async Task A_failed_evidence_write_is_not_replayed_during_capture_cleanup()
+    {
+        var writes = 0;
+        long persistedAtFailure = 0;
+        Task FailAfterSecondWrite(FileStream evidence, CancellationToken _)
+        {
+            if (Interlocked.Increment(ref writes) == 2)
+            {
+                persistedAtFailure = evidence.Length;
+                return Task.FromException(new IOException("simulated post-write capture failure"));
+            }
+
+            return Task.CompletedTask;
+        }
+
+        using var run = new FakeCodexRun("stdout-overflow", afterStdoutWriteForTests: FailAfterSecondWrite);
+        var exception = await Assert.ThrowsAsync<IOException>(() => run.Adapter.DecideAsync(
+            "obligation-1", Request, Context, run.Directory, TestContext.Current.CancellationToken));
+        Assert.Contains("simulated post-write", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(2, writes);
+        Assert.True(persistedAtFailure > 0 && persistedAtFailure < CodexReadinessDecisionAdapter.MaxStreamBytes);
+        Assert.Equal(persistedAtFailure, new FileInfo(run.StdoutPath).Length);
         AssertStopped(run);
     }
 
@@ -264,7 +311,8 @@ internal sealed class FakeCodexRun : IDisposable
     public CodexReadinessDecisionAdapter Adapter { get; }
 
     public FakeCodexRun(string mode, TimeSpan? timeout = null,
-        Func<FileStream, CancellationToken, Task>? afterStdoutWriteForTests = null)
+        Func<FileStream, CancellationToken, Task>? afterStdoutWriteForTests = null,
+        Func<FileStream, CancellationToken, Task>? afterStderrWriteForTests = null)
     {
         _root = Path.Combine(Path.GetTempPath(), "baton-readiness-run-" + Guid.NewGuid().ToString("N"));
         System.IO.Directory.CreateDirectory(_root);
@@ -274,7 +322,7 @@ internal sealed class FakeCodexRun : IDisposable
             "Baton.CrashTestHost" + (OperatingSystem.IsWindows() ? ".exe" : string.Empty));
         Assert.True(File.Exists(executable), "the source-built crash test apphost must be present");
         Adapter = new CodexReadinessDecisionAdapter(executable, timeout ?? TimeSpan.FromSeconds(15),
-            afterStdoutWriteForTests);
+            afterStdoutWriteForTests, afterStderrWriteForTests);
     }
 
     public void Dispose()
