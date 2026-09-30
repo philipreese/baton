@@ -339,6 +339,41 @@ public class StatusCommandEndToEndTests
         public override string ToString() => _inner.ToString();
     }
 
+    private sealed class OutputSignalingTextWriter(params string[] signals) : TextWriter
+    {
+        private readonly StringWriter _inner = new();
+        private readonly Dictionary<string, TaskCompletionSource<bool>> _signals = signals
+            .ToDictionary(signal => signal, _ => new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+
+        public override System.Text.Encoding Encoding => _inner.Encoding;
+
+        public override void Write(string? value)
+        {
+            _inner.Write(value);
+            Signal(value);
+        }
+
+        public override void WriteLine(string? value)
+        {
+            _inner.WriteLine(value);
+            Signal(value);
+        }
+
+        private void Signal(string? value)
+        {
+            if (value is null) return;
+            foreach (var (signal, completion) in _signals)
+            {
+                if (value.Contains(signal, StringComparison.Ordinal)) completion.TrySetResult(true);
+            }
+        }
+
+        public Task WaitForTextAsync(string signal, TimeSpan emergencyTimeout, CancellationToken cancellationToken) =>
+            _signals[signal].Task.WaitAsync(emergencyTimeout, cancellationToken);
+
+        public override string ToString() => _inner.ToString();
+    }
+
     [Fact]
     public async Task Following_a_running_workflow_prints_new_events_as_they_land_and_exits_at_terminal()
     {
@@ -529,13 +564,15 @@ public class StatusCommandEndToEndTests
     /// loop's first poll must share offsets/assemblers, not each start from a fresh dictionary --
     /// otherwise the loop's first poll re-tails the whole stream from byte 0 and reprints exactly
     /// what the initial tail just printed. Asserts the initial content appears exactly ONCE across
-    /// the run and that content appended between polls appears exactly once too. Every line here
+    /// the run and that content appended between polls appears. Every line here
     /// is complete and newline-terminated, so this exercises the shared OFFSETS only; the shared
     /// StreamLineAssembler's stitching of a line split across two TailStreams calls is pinned by
     /// WorkerStreamJsonRenderingTests, not by this test.
     /// </summary>
-    [Fact]
-    public async Task Following_a_still_running_workflow_does_not_reprint_the_initial_tail_on_the_first_poll()
+    [Theory]
+    [InlineData(650)]
+    [InlineData(1800)]
+    public async Task Following_a_still_running_workflow_does_not_reprint_the_initial_tail_on_the_first_poll(int appendDelayAfterInitialOutputMs)
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-e2e-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
@@ -574,20 +611,24 @@ public class StatusCommandEndToEndTests
             var stdoutPath = Path.Combine(executionDir, Baton.Dispatch.ExecutionStreamLogger.StdoutLogFileName);
             await File.WriteAllTextAsync(stdoutPath, "initial tail line\n", TestContext.Current.CancellationToken);
 
-            // Long enough to survive the initial synchronous tail plus one full poll cycle
-            // (PollIntervalMs=500) before the appended bytes land, then a second poll cycle to pick
-            // those up, then cancel.
-            using var followCancellation = new CancellationTokenSource();
-            followCancellation.CancelAfter(TimeSpan.FromMilliseconds(1400));
-
-            var output = new StringWriter();
+            using var followCancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            var output = new OutputSignalingTextWriter("initial tail line", "appended between polls");
             var statusTask = StatusCommand.ExecuteAsync(
                 new StatusOptions(roomDirectory, Follow: true), output, followCancellation.Token);
 
-            await Task.Delay(700, TestContext.Current.CancellationToken); // wait-ok: waits out one PollIntervalMs poll cycle so the append below lands strictly between two polls
-            await File.AppendAllTextAsync(stdoutPath, "appended between polls\n", TestContext.Current.CancellationToken);
-
-            await statusTask;
+            try
+            {
+                await output.WaitForTextAsync("initial tail line", TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+                Assert.False(statusTask.IsCompleted, "The still-running workflow follow ended before cancellation.");
+                await Task.Delay(TimeSpan.FromMilliseconds(appendDelayAfterInitialOutputMs), TestContext.Current.CancellationToken);
+                await File.AppendAllTextAsync(stdoutPath, "appended between polls\n", TestContext.Current.CancellationToken);
+                await output.WaitForTextAsync("appended between polls", TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                followCancellation.Cancel();
+                await statusTask.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            }
 
             var text = output.ToString();
             var occurrences = System.Text.RegularExpressions.Regex.Matches(text, "initial tail line").Count;
