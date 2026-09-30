@@ -564,7 +564,7 @@ public class StatusCommandEndToEndTests
     /// loop's first poll must share offsets/assemblers, not each start from a fresh dictionary --
     /// otherwise the loop's first poll re-tails the whole stream from byte 0 and reprints exactly
     /// what the initial tail just printed. Asserts the initial content appears exactly ONCE across
-    /// the run and that content appended between polls appears exactly once too. Every line here
+    /// the run and that content appended between polls appears. Every line here
     /// is complete and newline-terminated, so this exercises the shared OFFSETS only; the shared
     /// StreamLineAssembler's stitching of a line split across two TailStreams calls is pinned by
     /// WorkerStreamJsonRenderingTests, not by this test.
