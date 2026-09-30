@@ -26,6 +26,7 @@ public sealed class OwnedTaskJourneyTests
         public string Head { get; set; } = HeadA;
         public bool HasPullRequest { get; set; }
         public bool Draft { get; set; } = true;
+        public string CheckBucket { get; set; } = "pass";
         public int ReadyCalls { get; private set; }
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken token)
@@ -34,13 +35,13 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(Repository, args[^1]);
             if (args is ["pr", "ready", ..])
             {
-                Draft = false;
-                ReadyCalls++;
+                Draft = args.Contains("--undo", StringComparer.Ordinal);
+                if (!Draft) ReadyCalls++;
                 return Task.FromResult(new GhCliResult(true, 0, string.Empty, string.Empty));
             }
             if (args is ["pr", "checks", ..])
                 return Task.FromResult(new GhCliResult(true, 0,
-                    """[{"name":"ci","bucket":"pass","state":"SUCCESS"}]""", string.Empty));
+                    $$"""[{"name":"ci","bucket":"{{CheckBucket}}","state":"SUCCESS"}]""", string.Empty));
             var pr = $$"""{"number":77,"state":"OPEN","isDraft":{{Draft.ToString().ToLowerInvariant()}},"headRefOid":"{{Head}}","headRefName":"44-lane","baseRefName":"main","isCrossRepository":false,"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"}]}""";
             if (args is ["pr", "view", ..])
                 return Task.FromResult(HasPullRequest
@@ -166,6 +167,17 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(ready.OwnedTask.Ready?.Id,
                 Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).OwnedTask?.Ready?.Id);
             Assert.True(forge.ReadyCalls <= 1);
+
+            forge.CheckBucket = "pending";
+            await Scheduler().TickOnceAsync(Ct);
+            var regressed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(WorkStage.Ready, regressed.Stage);
+            Assert.NotNull(regressed.Error);
+            var regressedStatus = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status,
+                Id: ready.OwnedTask!.Id, Json: true), regressedStatus, Ct);
+            using var regressedJson = JsonDocument.Parse(regressedStatus.ToString());
+            Assert.Equal("stale", regressedJson.RootElement.GetProperty("state").GetString());
 
             // A later independent PR observation cannot make the old exact-head receipt current.
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with

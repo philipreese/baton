@@ -378,6 +378,54 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Import_cannot_replace_a_legacy_issue_preparation_even_with_a_non_lifecycle_row()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2399");
+            var brief = Path.Combine(home, "brief.md");
+            var importFile = Path.Combine(home, "import.json");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(brief, "original", Ct);
+            await File.WriteAllTextAsync(importFile,
+                $$"""[{"tag":"2399-lane","role":"implement","workspace":"{{workspace.Replace("\\", "\\\\")}}"}]""", Ct);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repository, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                entered.SetResult();
+                await release.Task.WaitAsync(token);
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return new(workspace, "2399-lane");
+            }
+            var add = QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Add, Tag: "2399-lane",
+                Role: "implement", SpecFilePath: brief, Issue: 2399, Lifecycle: true,
+                DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue"), Requirements: []),
+                TextWriter.Null, Ct, project,
+                (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/example/repo", null)),
+                Provision);
+            await entered.Task.WaitAsync(Ct);
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Import, ImportFilePath: importFile), TextWriter.Null, Ct));
+            release.SetResult();
+            Assert.Equal(0, await add);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(WorkStage.Implement, retained.Stage);
+            Assert.Equal(TaskPreparationState.Prepared, retained.IssuePreparation?.State);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_refuses_an_explicit_workspace_with_a_narrow_ceiling_before_copying_its_spec()
     {
         var home = CreateTempHome();

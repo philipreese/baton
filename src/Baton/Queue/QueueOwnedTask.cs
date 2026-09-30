@@ -17,7 +17,8 @@ public sealed record QueueIssuePreparation(
     string? ExpectedBranch = null,
     string? ExpectedWorkspace = null,
     int? ProcessId = null,
-    DateTimeOffset? ProcessStartedAt = null);
+    DateTimeOffset? ProcessStartedAt = null,
+    string? ReservationId = null);
 
 /// <summary>Immutable caller input and judgment owner for a task-owned lifecycle.</summary>
 public sealed record OwnedTaskSubmission(

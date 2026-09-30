@@ -47,7 +47,8 @@ public static class TaskCommand
         var id = TaskId(identity.Value, issue);
         var specBytes = options.Spec is null ? [] : await File.ReadAllBytesAsync(options.Spec, cancellationToken)
             .ConfigureAwait(false);
-        var explicitHeader = $"{identity.Value}\n{issue}\n{options.Size!.Value.Size}\n{options.Size.Value.Rationale}\n";
+        var explicitHeader = $"{identity.Value}\n{issue}\n{options.Size!.Value.Size}\n{options.Size.Value.Rationale}\n"
+            + (options.Spec is null ? "no-spec\n" : "spec\n");
         var digest = Convert.ToHexString(SHA256.HashData([
             .. Encoding.UTF8.GetBytes(explicitHeader), .. specBytes])).ToLowerInvariant();
         var existing = (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
@@ -75,7 +76,8 @@ public static class TaskCommand
         try
         {
             await QueueCommand.ExecuteAsync(queueOptions, new StringWriter(), cancellationToken, project,
-                repositoryResolver, issueProvisioner, ownedTask: owned).ConfigureAwait(false);
+                repositoryResolver, issueProvisioner, ownedTask: owned,
+                capturedSpecBytes: options.Spec is null ? null : specBytes).ConfigureAwait(false);
         }
         catch (Exception) when (HasRetainedBlockedPreparation(id))
         {
@@ -142,15 +144,21 @@ public static class TaskCommand
         var readiness = owner.Ready;
         var headChanged = readiness is not null && currentPr?.HeadSha is { } observedHead
             && !string.Equals(observedHead, readiness.HeadSha, StringComparison.Ordinal);
+        var readinessRegressed = readiness is not null && (item.Error is not null
+            || item.RequiredCheckEvidenceWait is not null
+            || item.ChecksObservedAt > readiness.ReadyObservedAt
+                && item.Checks is not null && item.Checks != PullRequestChecks.Passing);
         var state = item.Retirement is not null ? "retired"
             : item.State == QueueItemState.Cancelled ? "cancelled"
             : item.IssuePreparation?.State == TaskPreparationState.Preparing
                 ? abandonedPreparation ? "blocked" : "preparing"
             : item.IssuePreparation?.State == TaskPreparationState.Blocked || item.Halted ? "blocked"
             : item.State == QueueItemState.Launched ? "running"
-            : readiness is not null ? item.Stage == WorkStage.Ready && !headChanged
+            : readiness is not null ? item.Stage == WorkStage.Ready && !headChanged && !readinessRegressed
                 ? "ready-as-of" : "stale"
             : "queued";
+        if (state == "stale")
+            reason = item.Error ?? (headChanged ? "observed-pr-head-changed" : "readiness-evidence-no-longer-current");
         var nextTrigger = state switch
         {
             "preparing" => "preparation-completion",
@@ -174,6 +182,13 @@ public static class TaskCommand
             attemptId = item.AttemptId?.Value,
             pullRequest = item.PullRequest,
             headSha = currentPr?.HeadSha,
+            latestChecks = new
+            {
+                state = item.Checks,
+                headSha = item.ChecksHeadSha,
+                observedAt = item.ChecksObservedAt,
+                error = item.Error
+            },
             pullRequestObservation = new
             {
                 observedAt = currentPr?.ObservedAt,
@@ -204,6 +219,10 @@ public static class TaskCommand
                 + (currentClaim?.Holder is { } current ? $", current {current}" : "") + ")");
             output.WriteLine($"  stage: {status.stage ?? "preparation"}; PR: {(item.PullRequest is null ? "none" : $"#{item.PullRequest}")}");
             output.WriteLine($"  next: {nextTrigger}; PR head: {status.headSha ?? "not observed"}");
+            if (item.ChecksObservedAt is not null || item.Error is not null)
+                output.WriteLine($"  latest checks: {item.Checks ?? "unknown"}"
+                    + (item.ChecksObservedAt is { } checksAt ? $" at {checksAt:O}" : "")
+                    + (item.Error is null ? "" : $"; {item.Error}"));
             output.WriteLine($"  daemon: {status.daemon.availability}"
                 + (heartbeat.ObservedAt is { } lastObserved ? $" (last observed {lastObserved:O})" : " (no observation)"));
             if (readiness is not null) output.WriteLine($"  ready receipt: {readiness.Id} at {readiness.ReadyObservedAt:O}");

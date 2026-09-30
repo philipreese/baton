@@ -73,17 +73,109 @@ public sealed class TaskCommandTests
             Assert.False(File.Exists(BatonPaths.QueueSpecFile(preparing.Tag)));
             Assert.Contains("preparing", secondOutput.ToString(), StringComparison.Ordinal);
 
+            await File.WriteAllTextAsync(spec, "changed during preparation", Ct);
             release.SetResult();
             Assert.Equal(0, await first);
             var prepared = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Prepared, prepared.IssuePreparation!.State);
             Assert.Equal("first immutable brief", prepared.Instructions);
+            var renderedBrief = await File.ReadAllTextAsync(prepared.SpecFile, Ct);
+            Assert.Contains("first immutable brief", renderedBrief, StringComparison.Ordinal);
+            Assert.DoesNotContain("changed during preparation", renderedBrief, StringComparison.Ordinal);
             await File.WriteAllTextAsync(spec, "changed explicit brief", Ct);
             var conflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
                 TaskCommand.ExecuteAsync(options, TextWriter.Null, Resolve, Provision, Ct));
             Assert.Contains(prepared.OwnedTask!.Id, conflict.Message, StringComparison.Ordinal);
             Assert.Equal(1, provisions);
             Assert.Equal("first immutable brief", Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Instructions);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancellation_during_provisioning_cannot_be_resurrected_by_preparation_commit()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w47");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "frozen", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(repository);
+            async Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                entered.SetResult();
+                await release.Task.WaitAsync(token);
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return new(workspace, "47-lane");
+            }
+            var submit = TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 47, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue"), spec),
+                TextWriter.Null, Resolve, Provision, Ct);
+            await entered.Task.WaitAsync(Ct);
+            var id = TaskCommand.TaskId(repository.Value, 47);
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: id), TextWriter.Null, Ct);
+            release.SetResult();
+            await Assert.ThrowsAsync<CliArgumentException>(() => submit);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Cancelled, retained.State);
+            Assert.NotNull(retained.CancelledAt);
+            Assert.Equal(id, retained.OwnedTask?.Id);
+            Assert.False(File.Exists(BatonPaths.QueueSpecFile(id)));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Empty_explicit_spec_is_not_the_same_submission_as_no_spec()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w48");
+            var spec = Path.Combine(home, "empty.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, string.Empty, Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "48-lane"));
+            }
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 48,
+                project, size, spec), TextWriter.Null, Resolve, Provision, Ct));
+            var conflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 48,
+                    project, size), TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Contains(TaskCommand.TaskId(repository.Value, 48), conflict.Message, StringComparison.Ordinal);
         }
         finally
         {

@@ -89,7 +89,8 @@ public static class QueueCommand
         Action<string, string>? writeSpecFile = null,
         IGhCliRunner? ghRunner = null,
         WorktreeApplyTestHooks? worktreeApplyTestHooks = null,
-        OwnedTaskSubmission? ownedTask = null)
+        OwnedTaskSubmission? ownedTask = null,
+        byte[]? capturedSpecBytes = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -100,7 +101,7 @@ public static class QueueCommand
         {
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken,
-                ownedTask),
+                ownedTask, capturedSpecBytes),
             QueueVerb.List => ListAsync(options, output, cancellationToken),
             QueueVerb.Worktrees => WorktreesAsync(
                 options.Format, options.Apply, output, repositoryDirectory, cancellationToken, worktreeApplyTestHooks),
@@ -124,7 +125,8 @@ public static class QueueCommand
         Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile,
         CancellationToken cancellationToken,
-        OwnedTaskSubmission? ownedTask)
+        OwnedTaskSubmission? ownedTask,
+        byte[]? capturedSpecBytes)
     {
         var tag = options.Tag!;
         if (options.Lifecycle && options.DeclaredTaskSize is null)
@@ -134,7 +136,11 @@ public static class QueueCommand
         }
 
         var specSource = options.SpecFilePath;
-        if (specSource is not null && !File.Exists(specSource))
+        if (capturedSpecBytes is not null && ownedTask is null)
+            throw new CliArgumentException("A captured spec snapshot is only valid for an owned task submission.");
+        if (ownedTask is not null && (specSource is null) != (capturedSpecBytes is null))
+            throw new CliArgumentException("Owned task brief snapshot does not match the declared --spec input.");
+        if (specSource is not null && capturedSpecBytes is null && !File.Exists(specSource))
         {
             throw new CliArgumentException(
                 $"Spec file '{specSource}' does not exist.",
@@ -245,6 +251,7 @@ public static class QueueCommand
         // provisioner can create a branch, worktree, or trust entry. Both task and legacy lifecycle
         // adds use this seam; a different tag cannot conceal the same issue's existing lifecycle.
         var reserved = false;
+        var reservationId = options.Lifecycle ? Guid.NewGuid().ToString("N") : null;
         if (options.Lifecycle)
         {
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
@@ -288,7 +295,7 @@ public static class QueueCommand
                     OwnedTask = ownedTask,
                     IssuePreparation = new QueueIssuePreparation(TaskPreparationState.Preparing, DateTimeOffset.UtcNow,
                         ProcessId: Environment.ProcessId,
-                        ProcessStartedAt: preparationProcess.StartTime.ToUniversalTime()),
+                        ProcessStartedAt: preparationProcess.StartTime.ToUniversalTime(), ReservationId: reservationId),
                 };
                 return snapshot with { Items = snapshot.Items.Append(placeholder).ToList() };
             }, cancellationToken).ConfigureAwait(false);
@@ -330,9 +337,12 @@ public static class QueueCommand
                 // workspace/branch to inspect. Neither case authorizes a second provision call.
                 await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
                 {
-                    Items = snapshot.Items.Select(i => i.Tag == tag
+                    Items = snapshot.Items.Select(i => i.Tag != tag ? i
+                        : i is { State: QueueItemState.Queued, CancelledAt: null, Retirement: null }
                         && i.IssuePreparation is { State: TaskPreparationState.Preparing } preparation
+                        && preparation.ReservationId == reservationId
                         && i.Repository == issueRepository && i.Issue == options.Issue
+                        && i.OwnedTask?.Id == ownedTask?.Id
                         ? i with
                         {
                             IssuePreparation = preparation with
@@ -341,7 +351,7 @@ public static class QueueCommand
                                 ExpectedWorkspace = workspace,
                             },
                         }
-                        : i).ToList(),
+                        : throw new CliArgumentException($"Issue preparation for '{tag}' changed before its provisioned result was recorded; side effects require reconciliation.")).ToList(),
                 }, cancellationToken).ConfigureAwait(false);
             }
 
@@ -419,7 +429,7 @@ public static class QueueCommand
                 IssuePreparation = options.Lifecycle
                     ? new QueueIssuePreparation(TaskPreparationState.Prepared, DateTimeOffset.UtcNow,
                         ExpectedBranch: retainedProof?.Branch ?? provisioned?.Branch,
-                        ExpectedWorkspace: workspace)
+                        ExpectedWorkspace: workspace, ReservationId: reservationId)
                     : null,
             };
 
@@ -434,7 +444,9 @@ public static class QueueCommand
                     ? await IssueWorktreeProvisioner.FetchIssueAsync(
                         options.Issue!.Value, sourceRepository, issueRepository!,
                         cancellationToken: cancellationToken).ConfigureAwait(false)
-                    : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
+                    : ($"Implement #{options.Issue}", capturedSpecBytes is null
+                        ? await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false)
+                        : ReadCapturedSpec(capturedSpecBytes));
 
                 // Captured on the ITEM as well as rendered into the brief -- QueueItem.Instructions' own
                 // remarks say why the brief cannot be the register for this.
@@ -458,7 +470,9 @@ public static class QueueCommand
                 var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
                 if (options.Lifecycle)
                 {
-                    if (existing?.IssuePreparation?.State != TaskPreparationState.Preparing
+                    if (existing is not { State: QueueItemState.Queued, CancelledAt: null, Retirement: null }
+                        || existing.IssuePreparation?.State != TaskPreparationState.Preparing
+                        || existing.IssuePreparation.ReservationId != reservationId
                         || existing.Repository != issueRepository || existing.Issue != options.Issue
                         || existing.OwnedTask?.Id != ownedTask?.Id)
                     {
@@ -503,7 +517,9 @@ public static class QueueCommand
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
             {
                 Items = snapshot.Items.Select(i => i.Tag == tag
+                    && i.State == QueueItemState.Queued && i.CancelledAt is null
                     && i.IssuePreparation?.State == TaskPreparationState.Preparing
+                    && i.IssuePreparation.ReservationId == reservationId
                     ? i with
                     {
                         IssuePreparation = i.IssuePreparation with
@@ -521,6 +537,15 @@ public static class QueueCommand
             }, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
+    }
+
+    private static string ReadCapturedSpec(byte[] bytes)
+    {
+        // Match File.ReadAllText's UTF-8 default and BOM detection, but read the bytes TaskCommand
+        // already hashed. The mutable source path is never reopened after reservation.
+        using var reader = new StreamReader(new MemoryStream(bytes, writable: false), Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
     }
 
     /// <summary>
@@ -2208,6 +2233,16 @@ public static class QueueCommand
             {
                 throw new CliArgumentException(
                     $"Item '{taskConflict.Tag}' belongs to retained task '{taskConflict.OwnedTask!.Id}'. Import cannot replace task evidence.");
+            }
+            var lifecycleConflict = snapshot.Items.FirstOrDefault(i => i.Stage is not null
+                && importedTags.Contains(i.Tag));
+            if (lifecycleConflict is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{lifecycleConflict.Tag}' retains an issue lifecycle"
+                    + (lifecycleConflict.IssuePreparation?.State == TaskPreparationState.Preparing
+                        ? " still preparing" : "")
+                    + "; scratchpad import cannot replace its reservation or stage evidence.");
             }
             var issueConflict = imported.FirstOrDefault(incoming => incoming.Stage is not null
                 && incoming.Issue is not null && incoming.Repository is not null
