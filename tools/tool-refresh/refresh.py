@@ -61,6 +61,7 @@ class DaemonProcess:
     pid: int
     creation_time: str
     executable_path: str
+    identity_accessible: bool = True
 
 
 class DaemonTaskState(Enum):
@@ -75,6 +76,7 @@ class DaemonExitState(Enum):
     TIMEOUT = "timeout"
     QUERY_FAILED = "query-failed"
     IDENTITY_CHANGED = "identity-changed"
+    IDENTITY_INACCESSIBLE = "identity-inaccessible"
 
 
 class DaemonVerificationState(Enum):
@@ -85,6 +87,7 @@ class DaemonVerificationState(Enum):
     WRONG_PATH = "wrong-path"
     VERSION_MISMATCH = "version-mismatch"
     IDENTITY_UNSTABLE = "identity-unstable"
+    IDENTITY_INACCESSIBLE = "identity-inaccessible"
     UNHEALTHY = "unhealthy"
 
 
@@ -387,21 +390,29 @@ def install_launcher(deps: Deps, dry_run: bool, print_fn: Callable[[str], None])
 
 
 def daemon_process_query_cmd() -> List[str]:
-    """The CIM query used to find live baton.exe daemon processes for identity and replacement
-    checks, so those checks cannot drift about what counts as 'the daemon process'."""
+    """Find daemon rows and retain baton.exe rows whose command line is inaccessible.
+
+    The latter are not assumed to be daemons, but they prevent absence from being claimed and
+    prevent refresh from stopping or starting a process whose identity cannot be proved.
+    """
     return [
         "powershell", "-NoProfile", "-Command",
         "Get-CimInstance -ClassName Win32_Process -Filter \"Name='baton.exe'\" | "
         # Anchored on the verb position (first arg after the executable) rather than a bare
         # '*daemon*' substring match, which would also catch e.g. `baton dispatch --spec-text
         # "... daemon ..."` and kill an unrelated live process on every refresh (#1777 fix round F2).
-        "Where-Object { $_.CommandLine -match '^(\"[^\"]+\"|\\S+)\\s+daemon(\\s|$)' } | "
-        "ForEach-Object { \"{0}|{1}|{2}\" -f $_.ProcessId, $_.CreationDate.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture), $_.ExecutablePath }",
+        "Where-Object { [string]::IsNullOrWhiteSpace($_.CommandLine) -or "
+        "$_.CommandLine -match '^(\"[^\"]+\"|\\S+)\\s+daemon(\\s|$)' } | "
+        "ForEach-Object { \"{0}|{1}|{2}|{3}\" -f $_.ProcessId, "
+        "$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture) } else { '' }), "
+        "$_.ExecutablePath, "
+        "$(if ([string]::IsNullOrWhiteSpace($_.CommandLine) -or $null -eq $_.CreationDate -or "
+        "[string]::IsNullOrWhiteSpace([string]$_.ExecutablePath)) { 'inaccessible' } else { 'daemon' }) }",
     ]
 
 
 def query_daemon_processes(deps: Deps) -> Optional[List[DaemonProcess]]:
-    """Returns daemon processes, or None when the process query itself failed."""
+    """Returns daemon and unclassifiable baton.exe rows, or None when querying failed."""
     result = deps.run(daemon_process_query_cmd())
     if result.returncode != 0:
         return None
@@ -410,14 +421,21 @@ def query_daemon_processes(deps: Deps) -> Optional[List[DaemonProcess]]:
         line = line.strip()
         if "|" not in line:
             continue
-        fields = [field.strip() for field in line.split("|")]
+        fields = [field.strip() for field in line.split("|", maxsplit=3)]
         if len(fields) == 3:
+            # Legacy fixture shape: all returned rows are known daemon processes.
             pid_str, creation_time, path = fields
+            identity_accessible = True
+        elif len(fields) == 4:
+            pid_str, creation_time, path, classification = fields
+            if classification not in {"daemon", "inaccessible"}:
+                continue
+            identity_accessible = classification == "daemon"
         else:
             continue
         if not pid_str.isdigit():
             continue
-        processes.append(DaemonProcess(int(pid_str), creation_time, path))
+        processes.append(DaemonProcess(int(pid_str), creation_time, path, identity_accessible))
     return processes
 
 
@@ -447,7 +465,7 @@ def capture_daemon_identity(
     deps: Deps, process: DaemonProcess, expected_version: Optional[str] = None
 ) -> Optional[DaemonIdentity]:
     """Read and immediately revalidate one process as a single stable identity."""
-    if not process.creation_time:
+    if not process.identity_accessible or not process.creation_time or not process.executable_path:
         return None
     first_version = daemon_version(deps, process.executable_path)
     if first_version is None or (expected_version and first_version != expected_version):
@@ -494,6 +512,8 @@ def wait_for_daemon_exit(
         if processes is None:
             print_fn("tool-refresh: could not query daemon identity while waiting for the old daemon to exit")
             return DaemonExitState.QUERY_FAILED
+        if any(not process.identity_accessible for process in processes):
+            return DaemonExitState.IDENTITY_INACCESSIBLE
         old_identity_present = any(
             process.pid == old_identity.pid
             and process.creation_time == old_identity.creation_time
@@ -707,6 +727,8 @@ def verify_daemon_replacement_result(
         processes = query_daemon_processes(deps)
         if processes is None:
             return DaemonVerification(DaemonVerificationState.QUERY_FAILED)
+        if any(not process.identity_accessible for process in processes):
+            return DaemonVerification(DaemonVerificationState.IDENTITY_INACCESSIBLE)
         if not processes:
             last_state = DaemonVerificationState.NO_CANDIDATE
         elif len(processes) != 1:
@@ -1015,6 +1037,12 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
                             "tool-refresh: daemon identity query failed while waiting for the old "
                             "daemon to exit. Refusing to start or accept a replacement."
                         )
+                    elif exit_state == DaemonExitState.IDENTITY_INACCESSIBLE:
+                        print_fn(
+                            "tool-refresh: a baton.exe process has inaccessible identity metadata "
+                            "while waiting for the old daemon to exit. Refusing to start or accept "
+                            "a replacement."
+                        )
                     elif exit_state == DaemonExitState.IDENTITY_CHANGED:
                         print_fn(
                             "tool-refresh: the pre-restart daemon identity changed while waiting "
@@ -1046,10 +1074,17 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
                     if verification.state == DaemonVerificationState.ACCEPTED:
                         break
                     if verification.state != DaemonVerificationState.NO_CANDIDATE:
-                        print_fn(
-                            f"tool-refresh: first-start verification failed distinctly: "
-                            f"{verification.state.value}; refusing a second start"
-                        )
+                        if verification.state == DaemonVerificationState.IDENTITY_INACCESSIBLE:
+                            print_fn(
+                                "tool-refresh: a baton.exe process was observed, but its daemon "
+                                "identity metadata is inaccessible; refusing a second start and "
+                                "making no replacement claim"
+                            )
+                        else:
+                            print_fn(
+                                f"tool-refresh: first-start verification failed distinctly: "
+                                f"{verification.state.value}; refusing a second start"
+                            )
                         return 1
                     if start_attempt + 1 < DAEMON_START_ATTEMPTS:
                         print_fn(
@@ -2379,6 +2414,15 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
             active_prefix + ["start"] + healthy_replacement,
         ),
         (
+            "inaccessible pre-restart identity", "inaccessible-old", 0, False, "could not capture",
+            ["task-query", "identity-process"],
+        ),
+        (
+            "inaccessible replacement identity", "inaccessible-replacement", 1, False,
+            "identity metadata is inaccessible",
+            active_prefix + ["start", "replacement-process"],
+        ),
+        (
             "swallowed first start", "swallowed", 2, True, "active",
             active_prefix + ["start"] + ["replacement-process"] * 15
             + ["start"] + healthy_replacement,
@@ -2453,9 +2497,13 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
 
             def process_rows() -> str:
                 if state["phase"] == "old":
+                    if outcome == "inaccessible-old":
+                        return f"100|{old_creation}||inaccessible\n"
                     return f"100|{old_creation}|{old_path}\n"
                 if state["phase"] == "stopped":
                     return ""
+                if outcome == "inaccessible-replacement":
+                    return f"200|{new_creation}||inaccessible\n"
                 if outcome == "duplicate":
                     return f"200|{new_creation}|{new_path}\n201|{new_creation}|{new_path}\n"
                 if outcome == "wrong-path":
@@ -2627,6 +2675,12 @@ def _selftest_daemon_query_serializes_invariant_creation_time() -> bool:
     if expected_format not in query[3]:
         print(f"  FAILED: process query does not serialize CreationDate invariantly: {query[3]!r}")
         ok = False
+    if "[string]::IsNullOrWhiteSpace($_.CommandLine)" not in query[3]:
+        print(f"  FAILED: process query drops rows with inaccessible command lines: {query[3]!r}")
+        ok = False
+    if "\\s+daemon(\\s|$)" not in query[3]:
+        print(f"  FAILED: process query no longer excludes accessible non-daemon commands: {query[3]!r}")
+        ok = False
 
     creation_time = "2026-09-27T08:27:27.2997980Z"
     executable_path = r"C:\baton\tools\new\baton.exe"
@@ -2640,6 +2694,14 @@ def _selftest_daemon_query_serializes_invariant_creation_time() -> bool:
     expected = [DaemonProcess(134756, creation_time, executable_path)]
     if processes != expected or calls != [query]:
         print(f"  FAILED: invariant query fixture parsed as {processes!r}, calls={calls!r}")
+        ok = False
+
+    inaccessible = query_daemon_processes(Deps(run=lambda _cmd: CommandResult(
+        0, f"134756|{creation_time}||inaccessible\n"
+    )))
+    expected_inaccessible = [DaemonProcess(134756, creation_time, "", identity_accessible=False)]
+    if inaccessible != expected_inaccessible:
+        print(f"  FAILED: unreadable process identity was lost or treated as verified: {inaccessible!r}")
         ok = False
     return ok
 

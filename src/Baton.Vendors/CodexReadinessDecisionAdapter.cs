@@ -13,6 +13,7 @@ public sealed class CodexReadinessDecisionAdapter
     private readonly string? _testExecutable;
     private readonly TimeSpan _timeout;
     private readonly Func<FileStream, CancellationToken, Task>? _afterStdoutWriteForTests;
+    private readonly Func<FileStream, CancellationToken, Task>? _afterStderrWriteForTests;
     private readonly Action<string>? _promptObserverForTests;
 
     public CodexReadinessDecisionAdapter() => _timeout = Timeout;
@@ -20,11 +21,13 @@ public sealed class CodexReadinessDecisionAdapter
     // Test-only direct-executable seam. Production always resolves the installed Codex CLI.
     internal CodexReadinessDecisionAdapter(string executable, TimeSpan timeout,
         Func<FileStream, CancellationToken, Task>? afterStdoutWriteForTests = null,
+        Func<FileStream, CancellationToken, Task>? afterStderrWriteForTests = null,
         Action<string>? promptObserverForTests = null)
     {
         _testExecutable = Path.GetFullPath(executable);
         _timeout = timeout;
         _afterStdoutWriteForTests = afterStdoutWriteForTests;
+        _afterStderrWriteForTests = afterStderrWriteForTests;
         _promptObserverForTests = promptObserverForTests;
     }
 
@@ -159,7 +162,7 @@ public sealed class CodexReadinessDecisionAdapter
         var stdoutTask = ReadBoundedAsync(child.StandardOutput, stdoutEvidence, MaxStreamBytes, child,
             timeout.Token, _afterStdoutWriteForTests);
         var stderrTask = ReadBoundedAsync(child.StandardError, stderrEvidence, MaxStreamBytes, child,
-            timeout.Token);
+            timeout.Token, _afterStderrWriteForTests);
         try
         {
             await child.Process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
@@ -402,6 +405,50 @@ public sealed class CodexReadinessDecisionAdapter
         var buffer = new char[4096];
         var text = new StringBuilder();
         var bytes = 0;
+        const int evidenceBatchBytes = 64 * 1024;
+        using var evidenceBatch = new MemoryStream(evidenceBatchBytes);
+        var wroteFirstChunk = false;
+
+        async Task WriteEvidenceAsync(ReadOnlyMemory<byte> chunk, bool invokeTestHook = true)
+        {
+            await evidence.WriteAsync(chunk, CancellationToken.None).ConfigureAwait(false);
+            if (invokeTestHook && afterWriteForTests is not null)
+                await afterWriteForTests(evidence, token).ConfigureAwait(false);
+        }
+
+        async Task FlushEvidenceBatchAsync(bool invokeTestHook = true)
+        {
+            if (evidenceBatch.Length == 0) return;
+            var pendingBytes = checked((int)evidenceBatch.Length);
+            var pending = evidenceBatch.GetBuffer().AsMemory(0, pendingBytes);
+            // A failed async write may have made partial progress. Do not retry the same bytes
+            // while draining a failed capture; that could duplicate retained evidence.
+            evidenceBatch.SetLength(0);
+            await evidence.WriteAsync(pending, CancellationToken.None).ConfigureAwait(false);
+            if (invokeTestHook && afterWriteForTests is not null)
+                await afterWriteForTests(evidence, token).ConfigureAwait(false);
+        }
+
+        async Task BufferEvidenceAsync(ReadOnlyMemory<byte> chunk)
+        {
+            if (!wroteFirstChunk)
+            {
+                await WriteEvidenceAsync(chunk).ConfigureAwait(false);
+                wroteFirstChunk = true;
+                return;
+            }
+
+            var offset = 0;
+            while (offset < chunk.Length)
+            {
+                var count = Math.Min(evidenceBatchBytes - checked((int)evidenceBatch.Length), chunk.Length - offset);
+                evidenceBatch.Write(chunk.Span.Slice(offset, count));
+                offset += count;
+                if (evidenceBatch.Length == evidenceBatchBytes)
+                    await FlushEvidenceBatchAsync().ConfigureAwait(false);
+            }
+        }
+
         try
         {
             int count;
@@ -412,26 +459,38 @@ public sealed class CodexReadinessDecisionAdapter
                 {
                     var remaining = maxBytes - bytes;
                     if (remaining > 0)
-                        await evidence.WriteAsync(chunk.AsMemory(0, remaining), CancellationToken.None)
-                            .ConfigureAwait(false);
+                        await BufferEvidenceAsync(chunk.AsMemory(0, remaining)).ConfigureAwait(false);
+                    await FlushEvidenceBatchAsync().ConfigureAwait(false);
                     await evidence.FlushAsync(CancellationToken.None).ConfigureAwait(false);
                     throw new InvalidOperationException("Codex output stream exceeded 1 MiB.");
                 }
 
-                await evidence.WriteAsync(chunk, CancellationToken.None).ConfigureAwait(false);
-                if (afterWriteForTests is not null)
-                    await afterWriteForTests(evidence, token).ConfigureAwait(false);
+                await BufferEvidenceAsync(chunk).ConfigureAwait(false);
                 bytes += chunk.Length;
                 text.Append(buffer, 0, count);
             }
 
+            await FlushEvidenceBatchAsync().ConfigureAwait(false);
             await evidence.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             evidence.Flush(flushToDisk: true);
             return text.ToString();
         }
-        catch
+        catch (Exception captureFailure)
         {
             child.Terminate();
+            try
+            {
+                await FlushEvidenceBatchAsync(invokeTestHook: false).ConfigureAwait(false);
+                await evidence.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+                evidence.Flush(flushToDisk: true);
+            }
+            catch (Exception persistenceFailure) when (persistenceFailure is IOException
+                or UnauthorizedAccessException or ObjectDisposedException)
+            {
+                throw new IOException("Codex evidence could not be flushed after capture failed.",
+                    new AggregateException(captureFailure, persistenceFailure));
+            }
+
             throw;
         }
     }
