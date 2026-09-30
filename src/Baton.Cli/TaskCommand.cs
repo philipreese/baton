@@ -226,7 +226,8 @@ public static class TaskCommand
             return (sameProcess && now >= observedAt && now - observedAt < TimeSpan.FromSeconds(90), observedAt);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
-            or KeyNotFoundException or InvalidOperationException or ArgumentException)
+            or KeyNotFoundException or InvalidOperationException or ArgumentException
+            or System.ComponentModel.Win32Exception)
         {
             return (false, null);
         }
