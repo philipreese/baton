@@ -322,7 +322,7 @@ public sealed partial class ConductorObligationStore
         string idempotencyKey,
         string actionProof,
         CancellationToken cancellationToken = default) =>
-        IsOwnedReadinessKey(idempotencyKey)
+        RequiresDecisionLock(idempotencyKey)
             ? WithReadinessExclusiveAsync(idempotencyKey,
                 () => ObserveActionCoreAsync(idempotencyKey, actionProof, cancellationToken), cancellationToken)
             : ObserveActionCoreAsync(idempotencyKey, actionProof, cancellationToken);
@@ -375,7 +375,7 @@ public sealed partial class ConductorObligationStore
         string idempotencyKey,
         string reason,
         CancellationToken cancellationToken = default) =>
-        IsOwnedReadinessKey(idempotencyKey)
+        RequiresDecisionLock(idempotencyKey)
             ? WithReadinessExclusiveAsync(idempotencyKey,
                 () => BlockCoreAsync(idempotencyKey, reason, cancellationToken), cancellationToken)
             : BlockCoreAsync(idempotencyKey, reason, cancellationToken);

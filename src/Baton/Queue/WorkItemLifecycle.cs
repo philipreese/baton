@@ -191,14 +191,16 @@ public static class WorkItemLifecycle
         {
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the ready item's verdict has no completed review assertion for PR #{observation.PullRequest}; "
-                + "the queue will not preserve a ready signal without that evidence"));
+                + "the queue will not preserve a ready signal without that evidence",
+                haltCause: StoppedWorkHaltCause.MissingVerdict));
         }
 
         if (observation.Verdict is not { Decision: ReviewDecision.Approve } verdict)
         {
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the ready item has no readable approving verdict for PR #{observation.PullRequest}; "
-                + "the queue will not preserve a ready signal without that evidence"));
+                + "the queue will not preserve a ready signal without that evidence",
+                haltCause: StoppedWorkHaltCause.MissingVerdict));
         }
 
         if (!HasCanonicalFullSha(verdict.ReviewedRef))
@@ -270,7 +272,8 @@ public static class WorkItemLifecycle
             // and reading silence as APPROVE would merge on the strength of a missing file.
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} but wrote no readable "
-                + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}"));
+                + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}",
+                haltCause: StoppedWorkHaltCause.MissingVerdict));
         }
 
         if (verdict.Completion != ReviewCompletion.Complete)
@@ -278,7 +281,7 @@ public static class WorkItemLifecycle
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane's verdict does not assert completed review work "
                 + "— retain the evidence without spending a round or automatic fix; "
-                + Recovery(observation.Stage)));
+                + Recovery(observation.Stage), haltCause: StoppedWorkHaltCause.MissingVerdict));
         }
 
         // Never a guess from the findings. A decision-less verdict reaches a person with the findings
@@ -291,7 +294,7 @@ public static class WorkItemLifecycle
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane's verdict carries no decision — "
                 + $"read its {verdict.Findings.Count} finding(s) and the room's report.md, then carry the round by "
-                + $"hand; {Recovery(observation.Stage)}"));
+                + $"hand; {Recovery(observation.Stage)}", haltCause: StoppedWorkHaltCause.MissingVerdict));
         }
 
         if (decision == ReviewDecision.Approve)
@@ -301,7 +304,7 @@ public static class WorkItemLifecycle
                 return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                     $"the approving verdict has noncanonical reviewedRef {DescribeReviewedRef(verdict.ReviewedRef)}; "
                     + "a lifecycle approval must name exactly one full 40-character hexadecimal PR head SHA; "
-                    + Recovery(observation.Stage)));
+                    + Recovery(observation.Stage), haltCause: StoppedWorkHaltCause.MissingVerdict));
             }
 
             if (!ReviewCoversCurrentHead(verdict, observation.PullRequestHeadSha))
@@ -336,11 +339,11 @@ public static class WorkItemLifecycle
             true => WorkItemTransition.NeedsOperator(
                 $"the review blocked after the item's one automatic fix was already dispatched — read its "
                 + $"{verdict.Findings.Count} finding(s) and the room's report.md, then decide the next round by hand; "
-                + Recovery(observation.Stage)),
+                + Recovery(observation.Stage), haltCause: StoppedWorkHaltCause.ExhaustedRepairAllowance),
             null => WorkItemTransition.NeedsOperator(
                 $"the review blocked but this legacy item has no trustworthy automatic-fix history — read its "
                 + $"{verdict.Findings.Count} finding(s) and the room's report.md, then decide the next round by hand; "
-                + Recovery(observation.Stage)),
+                + Recovery(observation.Stage), haltCause: StoppedWorkHaltCause.ExhaustedRepairAllowance),
         });
     }
 
@@ -396,10 +399,12 @@ public static class WorkItemLifecycle
                     $"({DescribeUnpushed(observation)}) — finish and push them")),
                 false => EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                     $"the {WorkStages.Token(observation.Stage)} lane was arrested with measured no workspace change — " +
-                    "another automatic continuation has no observed work to recover; " + Recovery(observation.Stage))),
+                    "another automatic continuation has no observed work to recover; " + Recovery(observation.Stage),
+                    haltCause: StoppedWorkHaltCause.UnavailableSourceEvidence)),
                 null => EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                     $"the {WorkStages.Token(observation.Stage)} lane was arrested but workspace change was unmeasurable — " +
-                    "the queue will not spend an automatic continuation without observed work; " + Recovery(observation.Stage))),
+                    "the queue will not spend an automatic continuation without observed work; " + Recovery(observation.Stage),
+                    haltCause: StoppedWorkHaltCause.UnavailableSourceEvidence)),
             };
         }
 
@@ -609,7 +614,8 @@ public sealed record WorkItemTransition(
     string Reason,
     bool UsesAutomaticFix = false,
     PullRequestReadinessAction PullRequestAction = PullRequestReadinessAction.None,
-    QueueReconciliationKind? ReconciliationKind = null)
+    QueueReconciliationKind? ReconciliationKind = null,
+    StoppedWorkHaltCause HaltCause = StoppedWorkHaltCause.Other)
 {
     internal static WorkItemTransition None(string reason) =>
         new(WorkItemTransitionKind.None, null, 0, reason);
@@ -623,9 +629,10 @@ public sealed record WorkItemTransition(
         new(WorkItemTransitionKind.Stop, stage, 0, reason, PullRequestAction: pullRequestAction);
 
     internal static WorkItemTransition NeedsOperator(
-        string reason, QueueReconciliationKind? reconciliationKind = null) =>
+        string reason, QueueReconciliationKind? reconciliationKind = null,
+        StoppedWorkHaltCause haltCause = StoppedWorkHaltCause.Other) =>
         new(WorkItemTransitionKind.NeedsOperator, null, 0, reason,
-            ReconciliationKind: reconciliationKind);
+            ReconciliationKind: reconciliationKind, HaltCause: haltCause);
 }
 
 /// <summary>
