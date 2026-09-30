@@ -475,9 +475,11 @@ public static class QueueStore
         // operator's whole work list, and a reader (`baton queue list`, the next tick) that catches a
         // half-written file would throw rather than degrade.
         var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        var operation = "temporary snapshot write";
         try
         {
             File.WriteAllText(tempPath, JsonSerializer.Serialize(snapshot, SerializerOptions));
+            operation = "queue replacement";
             File.Move(tempPath, path, overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -493,7 +495,9 @@ public static class QueueStore
                 // failure below with a cleanup one.
             }
 
-            throw new QueueStoreException($"Could not write the queue at '{path}': {ex.Message}", ex);
+            throw new QueueStoreException(
+                $"Could not perform {operation} for the queue at '{path}': {ex.GetType().Name} "
+                + $"(HResult 0x{ex.HResult:X8}): {ex.Message}", ex);
         }
     }
 

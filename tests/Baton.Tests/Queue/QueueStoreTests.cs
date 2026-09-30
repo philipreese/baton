@@ -244,6 +244,39 @@ public sealed class QueueStoreTests
     }
 
     [Fact]
+    public async Task A_held_queue_replacement_preserves_bytes_and_failure_diagnostics()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows share-mode exclusion is required");
+
+        var path = TempQueuePath();
+        try
+        {
+            await QueueStore.MutateAsync(path, snapshot => snapshot with { Items = [Item("original")] }, Ct);
+            var originalBytes = await File.ReadAllBytesAsync(path, Ct);
+
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                var exception = await Assert.ThrowsAsync<QueueStoreException>(() =>
+                    QueueStore.MutateAsync(path, snapshot => snapshot with { Items = [Item("replacement")] }, Ct));
+
+                var cause = Assert.IsAssignableFrom<Exception>(exception.InnerException);
+                Assert.True(cause is IOException or UnauthorizedAccessException,
+                    $"Expected IOException or UnauthorizedAccessException, got {cause.GetType()}");
+                Assert.Contains("replace", exception.Message, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains(cause.GetType().Name, exception.Message, StringComparison.Ordinal);
+                Assert.Contains($"0x{cause.HResult:X8}", exception.Message, StringComparison.OrdinalIgnoreCase);
+            }
+
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(path, Ct));
+            Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp"));
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
     public async Task An_absent_or_null_legacy_declaration_reloads_and_resaves_as_explicit_unknown()
     {
         var path = TempQueuePath();
