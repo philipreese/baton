@@ -6575,6 +6575,12 @@ old unreferenced tool directories. It requires no drain wait and writes no drain
 `tool-refresh --dry-run` reports planned commands and a preview target, never a completed restart,
 installation, pointer flip, or active-daemon verification; only the real refresh reports those facts.
 
+`pixi run tool-refresh --recover-orphan` is an explicit recovery opt-in. The default refresh remains fail-closed when
+the captured old daemon survives the bounded stop wait. Recovery may proceed only after a fresh scheduler query proves
+the task is not `Running` or `Queued`; it terminates the originally captured process object, never a later PID lookup,
+and requires observed exit before the existing replacement and heartbeat verification. Identity, task-state, termination,
+and observed-exit failures refuse replacement. Dry-run never terminates or starts a process.
+
 **Manual drain marker.** Draining is retained solely as an operator-invoked stop: an explicit `{BATON_HOME}/draining.json`
 marker causes `baton dispatch`, `baton redispatch`, and `baton resume` to refuse with `ValidationRefused` (2) fail-closed;
 `pixi run tool-refresh --abort` clears it. `InstalledVersionDrift` continues to warn on stderr when the installed version is behind

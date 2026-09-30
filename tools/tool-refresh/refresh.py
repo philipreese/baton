@@ -11,10 +11,11 @@ Replaces the single-global-tool drain cycle (#1645) with isolated side-by-side i
 - Prune unreferenced versions older than the top 3 installs.
 - No drain wait; no `draining.json` write. Keep `draining.json` honoured by dispatch as an operator-invoked stop only.
 
-Usage:      pixi run tool-refresh [--dry-run] | pixi run tool-refresh --abort
+Usage:      pixi run tool-refresh [--dry-run] [--recover-orphan] | pixi run tool-refresh --abort
 Selftest:   pixi run tool-refresh-selftest   (python tools/tool-refresh/refresh.py --selftest)
 """
 import argparse
+import ctypes
 import datetime as dt
 import json
 import os
@@ -26,6 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from ctypes import wintypes
 from typing import Callable, List, Optional, Sequence, Set
 
 VERSION_ELEMENT = re.compile(r"<Version>\s*(?P<version>\S+?)\s*</Version>")
@@ -49,11 +51,22 @@ class CommandResult:
 
 
 @dataclass(frozen=True)
+class DaemonProcessHandle:
+    """A handle bound to one inspected Windows process object."""
+
+    native_handle: int
+    pid: int
+    creation_time: str
+    executable_path: str
+
+
+@dataclass(frozen=True)
 class DaemonIdentity:
     pid: int
     creation_time: str
     executable_path: str
     version: str
+    process_handle: Optional[DaemonProcessHandle] = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -64,11 +77,130 @@ class DaemonProcess:
     identity_accessible: bool = True
 
 
+def _windows_filetime_to_timestamp(filetime: object) -> Optional[str]:
+    if not hasattr(filetime, "dwHighDateTime") or not hasattr(filetime, "dwLowDateTime"):
+        return None
+    ticks = (int(filetime.dwHighDateTime) << 32) | int(filetime.dwLowDateTime)
+    try:
+        instant = dt.datetime.fromtimestamp(
+            (ticks - 116444736000000000) / 10_000_000,
+            tz=dt.timezone.utc,
+        )
+    except (OSError, OverflowError, ValueError):
+        return None
+    return instant.strftime("%Y-%m-%dT%H:%M:%S.") + f"{instant.microsecond:06d}Z"
+
+
+def open_daemon_process_handle(process: DaemonProcess) -> Optional[DaemonProcessHandle]:
+    """Open and inspect a handle once; later termination uses this handle, never the PID."""
+    if os.name != "nt" or not process.identity_accessible:
+        return None
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessId.argtypes = [ctypes.c_void_p]
+    kernel32.GetProcessId.restype = ctypes.c_uint32
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_wchar),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = ctypes.c_int
+
+    # QUERY_LIMITED_INFORMATION + TERMINATE + SYNCHRONIZE. The returned kernel handle owns
+    # the process object even if its PID is reused after the original process exits.
+    access = 0x1000 | 0x0001 | 0x00100000
+    native_handle = kernel32.OpenProcess(access, 0, process.pid)
+    if not native_handle:
+        return None
+
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel_time = wintypes.FILETIME()
+    user_time = wintypes.FILETIME()
+    path_buffer = ctypes.create_unicode_buffer(32768)
+    path_length = ctypes.c_uint32(len(path_buffer))
+    if (
+        kernel32.GetProcessId(native_handle) != process.pid
+        or not kernel32.GetProcessTimes(
+            native_handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        )
+        or not kernel32.QueryFullProcessImageNameW(
+            native_handle, 0, path_buffer, ctypes.byref(path_length)
+        )
+    ):
+        kernel32.CloseHandle(native_handle)
+        return None
+
+    creation_time = _windows_filetime_to_timestamp(creation)
+    executable_path = path_buffer.value
+    if not creation_time or not executable_path:
+        kernel32.CloseHandle(native_handle)
+        return None
+    return DaemonProcessHandle(native_handle, process.pid, creation_time, executable_path)
+
+
+def process_handle_matches(handle: DaemonProcessHandle, process: DaemonProcess) -> bool:
+    return (
+        handle.pid == process.pid
+        and _canonical_timestamp(handle.creation_time) == _canonical_timestamp(process.creation_time)
+        and os.path.normcase(os.path.normpath(handle.executable_path))
+        == os.path.normcase(os.path.normpath(process.executable_path))
+    )
+
+
+def process_handle_exited(handle: DaemonProcessHandle) -> Optional[bool]:
+    if os.name != "nt":
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    result = kernel32.WaitForSingleObject(handle.native_handle, 0)
+    if result == 0:
+        return True
+    if result == 0x102:
+        return False
+    return None
+
+
+def terminate_process_handle(handle: DaemonProcessHandle) -> bool:
+    if os.name != "nt":
+        return False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.TerminateProcess.restype = ctypes.c_int
+    return bool(kernel32.TerminateProcess(handle.native_handle, 1))
+
+
+def close_process_handle(handle: DaemonProcessHandle) -> None:
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle(handle.native_handle)
+
+
 class DaemonTaskState(Enum):
     QUERY_FAILED = "query-failed"
     ABSENT = "absent"
     DISABLED = "disabled"
-    ACTIVE = "active"
+    READY = "ready"
+    RUNNING = "running"
+    QUEUED = "queued"
 
 
 class DaemonExitState(Enum):
@@ -121,6 +253,10 @@ class Deps:
     monotonic: Callable[[], float] = time.monotonic
     clock: Callable[[], float] = time.time
     out: "Sequence[str]" = field(default_factory=list)
+    open_process_handle: Optional[Callable[[DaemonProcess], Optional[DaemonProcessHandle]]] = None
+    process_handle_exited: Optional[Callable[[DaemonProcessHandle], Optional[bool]]] = None
+    terminate_process_handle: Optional[Callable[[DaemonProcessHandle], bool]] = None
+    close_process_handle: Optional[Callable[[DaemonProcessHandle], None]] = None
 
     def __post_init__(self) -> None:
         if not self.repo_root:
@@ -136,6 +272,14 @@ class Deps:
         if not self.nuget_packages_root:
             self.nuget_packages_root = os.environ.get(
                 "NUGET_PACKAGES", os.path.join(os.path.expanduser("~"), ".nuget", "packages"))
+        if self.open_process_handle is None:
+            self.open_process_handle = open_daemon_process_handle
+        if self.process_handle_exited is None:
+            self.process_handle_exited = process_handle_exited
+        if self.terminate_process_handle is None:
+            self.terminate_process_handle = terminate_process_handle
+        if self.close_process_handle is None:
+            self.close_process_handle = close_process_handle
 
 
 def default_repo_root() -> str:
@@ -462,7 +606,10 @@ def _same_daemon_process(left: DaemonProcess, right: DaemonProcess) -> bool:
 
 
 def capture_daemon_identity(
-    deps: Deps, process: DaemonProcess, expected_version: Optional[str] = None
+    deps: Deps,
+    process: DaemonProcess,
+    expected_version: Optional[str] = None,
+    bind_handle: bool = False,
 ) -> Optional[DaemonIdentity]:
     """Read and immediately revalidate one process as a single stable identity."""
     if not process.identity_accessible or not process.creation_time or not process.executable_path:
@@ -476,23 +623,37 @@ def capture_daemon_identity(
     second_version = daemon_version(deps, rechecked[0].executable_path)
     if second_version is None or second_version != first_version:
         return None
+    process_handle = None
+    if bind_handle:
+        process_handle = deps.open_process_handle(rechecked[0]) if deps.open_process_handle else None
+        if process_handle is None or not process_handle_matches(process_handle, rechecked[0]):
+            if process_handle is not None and deps.close_process_handle:
+                deps.close_process_handle(process_handle)
+            return None
     return DaemonIdentity(
         rechecked[0].pid,
         rechecked[0].creation_time,
         rechecked[0].executable_path,
         second_version,
+        process_handle,
     )
 
 
-def capture_daemon_identities(deps: Deps) -> Optional[List[DaemonIdentity]]:
-    """Captures stable PID, creation time, executable, and version before a scheduler stop."""
+def capture_daemon_identities(
+    deps: Deps, bind_handles: bool = False
+) -> Optional[List[DaemonIdentity]]:
+    """Captures stable identity, optionally retaining a handle to each inspected process object."""
     processes = query_daemon_processes(deps)
     if processes is None:
         return None
     identities: List[DaemonIdentity] = []
     for process in processes:
-        identity = capture_daemon_identity(deps, process)
+        identity = capture_daemon_identity(deps, process, bind_handle=bind_handles)
         if identity is None:
+            if deps.close_process_handle:
+                for captured in identities:
+                    if captured.process_handle is not None:
+                        deps.close_process_handle(captured.process_handle)
             return None
         identities.append(identity)
     return identities
@@ -508,6 +669,15 @@ def wait_for_daemon_exit(
 ) -> DaemonExitState:
     """Proves that the exact pre-restart identity disappeared without force-killing it."""
     for attempt in range(DAEMON_OLD_EXIT_RETRIES):
+        if old_identity.process_handle is not None and deps.process_handle_exited:
+            handle_state = deps.process_handle_exited(old_identity.process_handle)
+            if handle_state is True:
+                waited = attempt * DAEMON_OLD_EXIT_BACKOFF_S
+                print_fn(f"tool-refresh: old daemon pid={old_identity.pid} exited after ~{waited:.0f}s")
+                return DaemonExitState.EXITED
+            if handle_state is None:
+                print_fn("tool-refresh: could not query the captured old daemon process handle")
+                return DaemonExitState.QUERY_FAILED
         processes = query_daemon_processes(deps)
         if processes is None:
             print_fn("tool-refresh: could not query daemon identity while waiting for the old daemon to exit")
@@ -536,6 +706,49 @@ def wait_for_daemon_exit(
         if attempt < DAEMON_OLD_EXIT_RETRIES - 1:
             deps.sleep(DAEMON_OLD_EXIT_BACKOFF_S)
     return DaemonExitState.TIMEOUT
+
+
+def recover_orphan_daemon(
+    deps: Deps, old_identity: DaemonIdentity, print_fn: Callable[[str], None]
+) -> bool:
+    """Terminate only the captured process object after proving the task is no longer active."""
+    process_handle = old_identity.process_handle
+    if process_handle is None or not deps.terminate_process_handle:
+        print_fn(
+            "tool-refresh: orphan recovery requires a handle bound to the captured old daemon; "
+            "refusing termination"
+        )
+        return False
+
+    task_state = daemon_task_state(deps)
+    if task_state == DaemonTaskState.QUERY_FAILED:
+        print_fn("tool-refresh: could not re-query the scheduled task before orphan recovery; refusing termination")
+        return False
+    if task_state in (DaemonTaskState.RUNNING, DaemonTaskState.QUEUED):
+        print_fn(
+            f"tool-refresh: scheduled task is {task_state.value}; refusing orphan recovery while it "
+            "may still own live work"
+        )
+        return False
+
+    if not deps.terminate_process_handle(process_handle):
+        print_fn(
+            f"tool-refresh: could not terminate the captured old daemon process object "
+            f"(pid={old_identity.pid}); refusing replacement"
+        )
+        return False
+    print_fn(
+        f"tool-refresh: requested termination of the captured old daemon process object "
+        f"(pid={old_identity.pid}); waiting for observed exit"
+    )
+    exit_state = wait_for_daemon_exit(deps, old_identity, print_fn)
+    if exit_state != DaemonExitState.EXITED:
+        print_fn(
+            f"tool-refresh: captured old daemon survived orphan recovery ({exit_state.value}); "
+            "refusing replacement"
+        )
+        return False
+    return True
 
 
 def _parse_datetime(value: object) -> Optional[dt.datetime]:
@@ -688,7 +901,11 @@ def daemon_task_state(deps: Deps) -> DaemonTaskState:
         return DaemonTaskState.QUERY_FAILED
     if state == "disabled":
         return DaemonTaskState.DISABLED
-    return DaemonTaskState.ACTIVE
+    return {
+        "ready": DaemonTaskState.READY,
+        "running": DaemonTaskState.RUNNING,
+        "queued": DaemonTaskState.QUEUED,
+    }[state]
 
 
 DAEMON_VERIFY_RETRIES = 30
@@ -850,7 +1067,12 @@ def prune_tools(deps: Deps, dry_run: bool, print_fn: Callable[[str], None], keep
     return pruned
 
 
-def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
+def refresh(
+    deps: Deps,
+    dry_run: bool,
+    print_fn: Callable[[str], None],
+    recover_orphan: bool = False,
+) -> int:
     """Executes the side-by-side refresh: pack -> install -> verify -> flip pointer -> launcher -> daemon -> prune."""
     version = read_repo_version(deps.repo_root)
     if version is None:
@@ -991,7 +1213,7 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
                     "post-restart verify; installation-only success (daemon activity not claimed)"
                 )
             else:
-                pre_restart = capture_daemon_identities(deps)
+                pre_restart = capture_daemon_identities(deps, bind_handles=recover_orphan)
                 if pre_restart is None:
                     print_fn(
                         "tool-refresh: could not capture the pre-restart daemon PID, executable, and "
@@ -1007,6 +1229,10 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
                         f"tool-refresh: found multiple pre-restart daemon identities ({listing}); "
                         "singleton ownership is already violated. Refusing to restart."
                     )
+                    if deps.close_process_handle:
+                        for identity in pre_restart:
+                            if identity.process_handle is not None:
+                                deps.close_process_handle(identity.process_handle)
                     return 1
 
                 old_identity = pre_restart[0] if pre_restart else None
@@ -1024,12 +1250,23 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
                         f"tool-refresh: scheduled-task stop failed (exit {stop_result.returncode}); "
                         "the daemon was not restarted. Check Task Scheduler and re-run."
                     )
+                    if old_identity is not None and old_identity.process_handle is not None:
+                        if deps.close_process_handle:
+                            deps.close_process_handle(old_identity.process_handle)
                     return 1
 
                 if old_identity is not None:
                     exit_state = wait_for_daemon_exit(deps, old_identity, print_fn)
                 else:
                     exit_state = DaemonExitState.EXITED
+                if exit_state != DaemonExitState.EXITED:
+                    if (
+                        recover_orphan
+                        and exit_state == DaemonExitState.TIMEOUT
+                        and old_identity is not None
+                        and recover_orphan_daemon(deps, old_identity, print_fn)
+                    ):
+                        exit_state = DaemonExitState.EXITED
                 if exit_state != DaemonExitState.EXITED:
                     ceiling = DAEMON_OLD_EXIT_RETRIES * DAEMON_OLD_EXIT_BACKOFF_S
                     if exit_state == DaemonExitState.QUERY_FAILED:
@@ -1055,7 +1292,14 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
                             "to start or accept a replacement; do not force-kill by default. Check "
                             "daemon.log/Task Scheduler, close any holder, and re-run tool-refresh."
                         )
+                    if old_identity is not None and old_identity.process_handle is not None:
+                        if deps.close_process_handle:
+                            deps.close_process_handle(old_identity.process_handle)
                     return 1
+
+                if old_identity is not None and old_identity.process_handle is not None:
+                    if deps.close_process_handle:
+                        deps.close_process_handle(old_identity.process_handle)
 
                 replacement: Optional[DaemonIdentity] = None
                 polls_per_attempt = max(1, DAEMON_VERIFY_RETRIES // DAEMON_START_ATTEMPTS)
@@ -1149,6 +1393,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--abort", action="store_true",
         help="remove a manual drain marker and do nothing else")
+    parser.add_argument(
+        "--recover-orphan",
+        action="store_true",
+        help="after a bounded old-daemon timeout, terminate only the captured process object when the task is ready",
+    )
     parser.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -1158,7 +1407,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.abort:
         return abort(Deps(), print, args.dry_run)
 
-    return refresh(Deps(), args.dry_run, print)
+    return refresh(Deps(), args.dry_run, print, recover_orphan=args.recover_orphan)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2477,8 +2726,17 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
             task_and_identity + ["stop"] + ["old-exit-process", "old-exit-version"] * 15,
         ),
     ]
+    cases = [(*case, False) for case in cases]
+    cases.append(
+        (
+            "orphan recovery", "old-exit-timeout", 1, True, "requested termination",
+            task_and_identity + ["stop"] + ["old-exit-process", "old-exit-version"] * 15
+            + ["task-query", "start"] + healthy_replacement,
+            True,
+        )
+    )
     ok = True
-    for label, outcome, expected_starts, expected_success, expected_text, expected_trace in cases:
+    for label, outcome, expected_starts, expected_success, expected_text, expected_trace, recover in cases:
         with tempfile.TemporaryDirectory() as td:
             baton_home = os.path.join(td, "baton")
             tools_root = os.path.join(baton_home, "tools")
@@ -2490,7 +2748,11 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
             new_path = os.path.join(tools_root, "newsha1", "baton.exe")
             old_creation = "2026-01-01T00:00:00+00:00"
             new_creation = "2026-01-01T00:01:00+00:00"
-            state = {"phase": "old", "starts": 0, "process_queries": 0, "new_version_calls": 0}
+            state = {
+                "phase": "old", "starts": 0, "process_queries": 0, "new_version_calls": 0,
+                "terminated": False,
+            }
+            old_handle = DaemonProcessHandle(1000, 100, old_creation, old_path)
             commands: List[List[str]] = []
             daemon_trace: List[str] = []
             stop_requested = False
@@ -2587,15 +2849,29 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
                     return CommandResult(0)
                 raise AssertionError(f"unexpected command in {label} selftest: {cmd}")
 
+            def open_handle(_process: DaemonProcess) -> DaemonProcessHandle:
+                return old_handle
+
+            def terminate_handle(handle: DaemonProcessHandle) -> bool:
+                if handle is not old_handle:
+                    raise AssertionError("full-refresh recovery did not terminate the captured handle")
+                state["terminated"] = True
+                state["phase"] = "stopped"
+                return True
+
             deps = Deps(
                 run=run, baton_home=baton_home, rooms_root=rooms_root,
                 tools_root=tools_root, dotnet_tools_root=dotnet_tools_root,
                 nuget_packages_root=nuget_root, repo_root=repo_root,
                 sleep=lambda _seconds: None,
+                open_process_handle=open_handle if recover else None,
+                process_handle_exited=(lambda _handle: state["terminated"]) if recover else None,
+                terminate_process_handle=terminate_handle if recover else None,
+                close_process_handle=lambda _handle: None,
             )
             _assert_isolated(deps)
             messages: List[str] = []
-            code = refresh(deps, dry_run=False, print_fn=messages.append)
+            code = refresh(deps, dry_run=False, print_fn=messages.append, recover_orphan=recover)
             joined = "\n".join(messages)
             pointer_path = os.path.join(tools_root, "current")
             pointer = open(pointer_path, encoding="utf-8").read().strip() if os.path.isfile(pointer_path) else None
@@ -2631,14 +2907,14 @@ def _selftest_full_refresh_daemon_outcomes() -> bool:
             ):
                 print(f"  FAILED ({label}): installation-only/refusal path ran start or stop: {daemon_trace!r}")
                 ok = False
-            if outcome == "old-exit-timeout" and "start" in daemon_trace:
+            if outcome == "old-exit-timeout" and not recover and "start" in daemon_trace:
                 print(f"  FAILED ({label}): old-exit timeout still ran a start: {daemon_trace!r}")
                 ok = False
             if outcome == "nonzero-start" and state["process_queries"] != 3:
                 print(f"  FAILED ({label}): nonzero start ran replacement probes: {state}")
                 ok = False
 
-    normal_trace = cases[0][-1]
+    normal_trace = cases[0][5]
     swapped_trace = normal_trace.copy()
     stop_index = swapped_trace.index("stop")
     start_index = swapped_trace.index("start")
@@ -2760,7 +3036,9 @@ def _selftest_scheduler_protocol_and_heartbeat_identity() -> bool:
         ("provider/access failure", CommandResult(1, TASK_ERROR_MARKER + "\n", "access denied"), DaemonTaskState.QUERY_FAILED),
         ("explicit absence", CommandResult(0, TASK_NOT_FOUND_MARKER + "\n"), DaemonTaskState.ABSENT),
         ("disabled", CommandResult(0, TASK_STATE_PREFIX + "Disabled\n"), DaemonTaskState.DISABLED),
-        ("ready", CommandResult(0, TASK_STATE_PREFIX + "Ready\n"), DaemonTaskState.ACTIVE),
+        ("ready", CommandResult(0, TASK_STATE_PREFIX + "Ready\n"), DaemonTaskState.READY),
+        ("running", CommandResult(0, TASK_STATE_PREFIX + "Running\n"), DaemonTaskState.RUNNING),
+        ("queued", CommandResult(0, TASK_STATE_PREFIX + "Queued\n"), DaemonTaskState.QUEUED),
         ("unknown state", CommandResult(0, TASK_STATE_PREFIX + "Mystery\n"), DaemonTaskState.QUERY_FAILED),
         ("malformed", CommandResult(0, "Ready\n"), DaemonTaskState.QUERY_FAILED),
         ("multiple states", CommandResult(0, TASK_STATE_PREFIX + "Ready\n" + TASK_STATE_PREFIX + "Running\n"), DaemonTaskState.QUERY_FAILED),
@@ -2830,6 +3108,210 @@ def _selftest_scheduler_protocol_and_heartbeat_identity() -> bool:
     return ok
 
 
+def _selftest_orphan_recovery_contract() -> bool:
+    """The recovery path must be explicit and distinguish a task ready to start from active work."""
+    import inspect
+
+    ok = True
+    if "recover_orphan" not in inspect.signature(refresh).parameters:
+        print("  FAILED: refresh has no explicit recover_orphan opt-in")
+        ok = False
+    if not hasattr(DaemonTaskState, "READY"):
+        print("  FAILED: scheduler state does not distinguish Ready from running/queued")
+        ok = False
+    return ok
+
+
+def _selftest_orphan_recovery_guards() -> bool:
+    """Recovery uses the captured handle, requires a ready task, and observes exit."""
+    ok = True
+    old_process = DaemonProcess(77, "2026-01-01T00:00:00.000000Z", r"C:\old\baton.exe")
+    captured_handle = DaemonProcessHandle(1234, old_process.pid, old_process.creation_time, old_process.executable_path)
+    old_identity = DaemonIdentity(
+        old_process.pid,
+        old_process.creation_time,
+        old_process.executable_path,
+        "1.0.0",
+        captured_handle,
+    )
+
+    for scheduler_state in ("Running", "Queued"):
+        terminations: List[DaemonProcessHandle] = []
+
+        def run_active(_cmd: List[str], scheduler_state: str = scheduler_state) -> CommandResult:
+            return CommandResult(0, TASK_STATE_PREFIX + scheduler_state + "\n")
+
+        active_deps = Deps(
+            run=run_active,
+            baton_home="orphan-recovery-fixture",
+            dotnet_tools_root="orphan-recovery-dotnet-tools",
+            nuget_packages_root="orphan-recovery-nuget",
+            terminate_process_handle=terminations.append,
+        )
+        _assert_isolated(active_deps)
+        if recover_orphan_daemon(active_deps, old_identity, lambda _m: None):
+            print(f"  FAILED: orphan recovery accepted a {scheduler_state.casefold()} scheduled task")
+            ok = False
+        if terminations:
+            print(f"  FAILED: orphan recovery terminated a {scheduler_state.casefold()} task")
+            ok = False
+
+    task_queries = {"n": 0}
+    terminated = {"value": False}
+    closed: List[DaemonProcessHandle] = []
+
+    def run_ready(cmd: List[str]) -> CommandResult:
+        if cmd[0] == "powershell" and "Get-ScheduledTask" in cmd[3]:
+            task_queries["n"] += 1
+            return CommandResult(0, TASK_STATE_PREFIX + "Ready\n")
+        if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
+            return CommandResult(0, "") if terminated["value"] else CommandResult(
+                0, f"{old_process.pid}|{old_process.creation_time}|{old_process.executable_path}\n"
+            )
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return CommandResult(0, "1.0.0\n")
+        raise AssertionError(f"unexpected command in orphan recovery guard: {cmd}")
+
+    def terminate(handle: DaemonProcessHandle) -> bool:
+        if handle is not captured_handle:
+            raise AssertionError("orphan recovery did not use the captured process handle")
+        terminated["value"] = True
+        return True
+
+    ready_deps = Deps(
+        run=run_ready,
+        baton_home="orphan-recovery-fixture",
+        dotnet_tools_root="orphan-recovery-dotnet-tools",
+        nuget_packages_root="orphan-recovery-nuget",
+        terminate_process_handle=terminate,
+        process_handle_exited=lambda handle: terminated["value"],
+        close_process_handle=closed.append,
+        sleep=lambda _seconds: None,
+    )
+    _assert_isolated(ready_deps)
+    if not recover_orphan_daemon(ready_deps, old_identity, lambda _m: None):
+        print("  FAILED: exact captured process handle was not recoverable after task became ready")
+        ok = False
+    if task_queries["n"] != 1:
+        print(f"  FAILED: recovery queried scheduler {task_queries['n']} time(s), want 1")
+        ok = False
+
+    def wrong_handle(_process: DaemonProcess) -> DaemonProcessHandle:
+        return DaemonProcessHandle(1234, old_process.pid, "2026-01-01T00:00:01.000000Z", old_process.executable_path)
+
+    identity_calls = {"n": 0}
+
+    def run_identity(cmd: List[str]) -> CommandResult:
+        if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
+            identity_calls["n"] += 1
+            return CommandResult(0, f"{old_process.pid}|{old_process.creation_time}|{old_process.executable_path}\n")
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return CommandResult(0, "1.0.0\n")
+        raise AssertionError(f"unexpected command in identity guard: {cmd}")
+
+    wrong_deps = Deps(
+        run=run_identity,
+        baton_home="orphan-recovery-fixture",
+        dotnet_tools_root="orphan-recovery-dotnet-tools",
+        nuget_packages_root="orphan-recovery-nuget",
+        open_process_handle=wrong_handle,
+        close_process_handle=closed.append,
+    )
+    _assert_isolated(wrong_deps)
+    if capture_daemon_identity(wrong_deps, old_process, bind_handle=True) is not None:
+        print("  FAILED: recovery captured a handle whose process identity changed")
+        ok = False
+
+    def strict_handle(process: DaemonProcess) -> DaemonProcessHandle:
+        if not isinstance(process, DaemonProcess) or process != old_process:
+            raise AssertionError("handle opener did not receive the rechecked DaemonProcess")
+        return captured_handle
+
+    strict_deps = Deps(
+        run=run_identity,
+        baton_home="orphan-recovery-fixture",
+        dotnet_tools_root="orphan-recovery-dotnet-tools",
+        nuget_packages_root="orphan-recovery-nuget",
+        open_process_handle=strict_handle,
+    )
+    _assert_isolated(strict_deps)
+    try:
+        strict_identity = capture_daemon_identity(strict_deps, old_process, bind_handle=True)
+    except AssertionError as ex:
+        print(f"  FAILED: {ex}")
+        ok = False
+    else:
+        if strict_identity is None or strict_identity.process_handle is not captured_handle:
+            print("  FAILED: exact rechecked daemon process did not bind its handle")
+            ok = False
+
+    if os.name == "nt":
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        child_handle: Optional[DaemonProcessHandle] = None
+        try:
+            child_process = DaemonProcess(child.pid, "untrusted-placeholder", sys.executable)
+            child_handle = open_daemon_process_handle(child_process)
+            if child_handle is None:
+                print("  FAILED: disposable child process handle could not be opened")
+                ok = False
+            else:
+                disposable_process = DaemonProcess(
+                    child.pid, child_handle.creation_time, child_handle.executable_path
+                )
+
+                def run_disposable(cmd: List[str]) -> CommandResult:
+                    if cmd[0] == "powershell" and "Win32_Process" in cmd[3]:
+                        return CommandResult(
+                            0,
+                            f"{disposable_process.pid}|{disposable_process.creation_time}|"
+                            f"{disposable_process.executable_path}|daemon\n",
+                        )
+                    if cmd == [disposable_process.executable_path, "--version"]:
+                        return CommandResult(0, "disposable-fixture\n")
+                    raise AssertionError(f"unexpected disposable process probe: {cmd}")
+
+                disposable_deps = Deps(
+                    run=run_disposable,
+                    baton_home="orphan-recovery-fixture",
+                    dotnet_tools_root="orphan-recovery-dotnet-tools",
+                    nuget_packages_root="orphan-recovery-nuget",
+                )
+                _assert_isolated(disposable_deps)
+                bound_identity = capture_daemon_identity(
+                    disposable_deps, disposable_process, bind_handle=True
+                )
+                if bound_identity is None or bound_identity.process_handle is None:
+                    print("  FAILED: real disposable process could not bind through capture_daemon_identity")
+                    ok = False
+                else:
+                    try:
+                        if not process_handle_matches(bound_identity.process_handle, disposable_process):
+                            print("  FAILED: real disposable capture bound a different process")
+                            ok = False
+                    finally:
+                        close_process_handle(bound_identity.process_handle)
+                if process_handle_matches(
+                    child_handle,
+                    DaemonProcess(child.pid, "2026-01-01T00:00:00.000000Z", child_handle.executable_path),
+                ):
+                    print("  FAILED: wrong creation time was accepted for the disposable child")
+                    ok = False
+                if not terminate_process_handle(child_handle):
+                    print("  FAILED: exact disposable child process handle could not be terminated")
+                    ok = False
+                child.wait(timeout=5)
+                if process_handle_exited(child_handle) is not True:
+                    print("  FAILED: disposable child handle did not report observed exit")
+                    ok = False
+        finally:
+            if child_handle is not None:
+                close_process_handle(child_handle)
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+    return ok
+
+
 def selftest() -> int:
     arms = [
         ("version compare", _selftest_version_compare),
@@ -2849,6 +3331,8 @@ def selftest() -> int:
         ("daemon process query serializes invariant UTC creation time", _selftest_daemon_query_serializes_invariant_creation_time),
         ("timestamp parsing is equivalent and fail closed", _selftest_timestamp_parsing),
         ("scheduler protocol and heartbeat identity are fail closed", _selftest_scheduler_protocol_and_heartbeat_identity),
+        ("orphan recovery is explicit and scheduler-state guarded", _selftest_orphan_recovery_contract),
+        ("orphan recovery handle and scheduler guards", _selftest_orphan_recovery_guards),
     ]
     ok = True
     for name, fn in arms:
