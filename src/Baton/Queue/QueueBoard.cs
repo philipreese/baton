@@ -144,7 +144,8 @@ public static class QueueBoard
                 Halted: item.Halted,
                 Arm: ArmLabel(item),
                 TwinIssue: null,
-                DeclaredTaskSize: item.DeclaredTaskSize));
+                DeclaredTaskSize: item.DeclaredTaskSize,
+                Task: PublicTask(item)));
         }
 
         // Issue membership AND a stage, both -- the stage read is not redundant with TwinIssues. That
@@ -223,7 +224,8 @@ public static class QueueBoard
                 Arm: ArmLabel(item),
                 TwinIssue: item.Issue is { } prIssue && twinIssues.Contains(prIssue) ? prIssue : null,
                 Retirement: item.Retirement,
-                DeclaredTaskSize: item.DeclaredTaskSize))
+                DeclaredTaskSize: item.DeclaredTaskSize,
+                Task: PublicTask(item)))
                 .ToList();
             var view = new QueuePullRequestView(
                 Repository: repository,
@@ -263,7 +265,8 @@ public static class QueueBoard
                 item.Issue,
                 item.PullRequest,
                 item.Retirement!,
-                item.DeclaredTaskSize))
+                item.DeclaredTaskSize,
+                PublicTask(item)))
             .ToList();
 
         return new QueueBoardView(
@@ -302,6 +305,16 @@ public static class QueueBoard
         QueueDecisionEntry? lastDecision,
         Func<QueueItem, bool> briefExists)
     {
+        if (item.IssuePreparation is { State: TaskPreparationState.Preparing })
+        {
+            return QueueBoardWaitReasons.Preparing;
+        }
+
+        if (item.IssuePreparation is { State: TaskPreparationState.Blocked })
+        {
+            return QueueBoardWaitReasons.PreparationBlocked;
+        }
+
         if (item.Halted)
         {
             return QueueBoardWaitReasons.Halted;
@@ -413,6 +426,12 @@ public static class QueueBoard
         var parts = new[] { item.Adapter, item.Model, item.Effort }.Where(p => p is { Length: > 0 }).ToList();
         return parts.Count == 0 ? null : string.Join(" ", parts);
     }
+
+    private static QueueTaskPublicView? PublicTask(QueueItem item) => item.OwnedTask is { } task
+        ? new QueueTaskPublicView(task.Id, task.Repository, task.Issue, task.ConductorHolder,
+            item.IssuePreparation?.State.ToString().ToLowerInvariant() ?? "unknown",
+            task.Ready?.Id, task.Ready?.HeadSha, task.Blocked?.ReasonCode)
+        : null;
 }
 
 /// <summary>
@@ -423,6 +442,8 @@ public static class QueueBoard
 /// </summary>
 public static class QueueBoardWaitReasons
 {
+    public const string Preparing = "preparing";
+    public const string PreparationBlocked = "preparation-blocked";
     /// <summary>A started lifecycle transition took priority over this new-work head.</summary>
     public const string FinishFirst = "finish-first";
     /// <summary>The head or the item going next, with no gate shut against it as of the last recorded evaluation.</summary>
@@ -460,7 +481,10 @@ public sealed record QueueLiveLane(
     string? Adapter,
     [property: JsonPropertyName("weight")] double Weight,
     [property: JsonPropertyName("declaredTaskSize")]
-    TaskSizeDeclaration DeclaredTaskSize = default);
+    TaskSizeDeclaration DeclaredTaskSize = default,
+    [property: JsonPropertyName("task")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    QueueTaskPublicView? Task = null);
 
 /// <summary>The weighted-slot row: the cap, what is live against it, and the memory floor beside the
 /// reading it is compared with.</summary>
@@ -526,7 +550,24 @@ public sealed record QueuePendingView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? TwinIssue,
     [property: JsonPropertyName("declaredTaskSize")]
-    TaskSizeDeclaration DeclaredTaskSize = default);
+    TaskSizeDeclaration DeclaredTaskSize = default,
+    [property: JsonPropertyName("task")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    QueueTaskPublicView? Task = null);
+
+/// <summary>Safe owned-task identity and disposition for the existing Glass queue surface.</summary>
+public sealed record QueueTaskPublicView(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("repository")] string Repository,
+    [property: JsonPropertyName("issue")] int Issue,
+    [property: JsonPropertyName("conductorHolder")] string ConductorHolder,
+    [property: JsonPropertyName("preparation")] string Preparation,
+    [property: JsonPropertyName("readyReceiptId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ReadyReceiptId,
+    [property: JsonPropertyName("readyHeadSha")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ReadyHeadSha,
+    [property: JsonPropertyName("blocker")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Blocker);
 
 /// <summary>One retained lane link beneath a repository-qualified PR row.</summary>
 /// <param name="Verdict">Whatever the caller's <c>verdictDecision</c> delegate returned — its own
@@ -575,7 +616,10 @@ public sealed record QueuePullRequestLaneView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     QueueRetirement? Retirement,
     [property: JsonPropertyName("declaredTaskSize")]
-    TaskSizeDeclaration DeclaredTaskSize = default);
+    TaskSizeDeclaration DeclaredTaskSize = default,
+    [property: JsonPropertyName("task")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    QueueTaskPublicView? Task = null);
 
 /// <summary>One retired lifecycle row retained for Fleet Glass history.</summary>
 public sealed record QueueRetiredView(
@@ -592,7 +636,10 @@ public sealed record QueueRetiredView(
     int? PullRequest,
     [property: JsonPropertyName("retirement")] QueueRetirement Retirement,
     [property: JsonPropertyName("declaredTaskSize")]
-    TaskSizeDeclaration DeclaredTaskSize = default);
+    TaskSizeDeclaration DeclaredTaskSize = default,
+    [property: JsonPropertyName("task")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    QueueTaskPublicView? Task = null);
 
 /// <summary>One repository-qualified PR observation and all retained lanes that refer to it.</summary>
 public sealed record QueuePullRequestView(

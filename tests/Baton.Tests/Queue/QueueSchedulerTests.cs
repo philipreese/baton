@@ -67,6 +67,25 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void A_reserved_task_cannot_launch_until_preparation_is_verified()
+    {
+        var preparing = Item("preparing") with
+        {
+            Stage = WorkStage.Implement,
+            IssuePreparation = new QueueIssuePreparation(TaskPreparationState.Preparing, DateTimeOffset.UtcNow),
+        };
+        var prepared = preparing with
+        {
+            IssuePreparation = preparing.IssuePreparation! with { State = TaskPreparationState.Prepared },
+        };
+
+        Assert.Equal(QueueWaitReason.NoItems,
+            QueueScheduler.Decide(LocalAt(12), [preparing], 0, 8.0, Defaults, null, held: false).WaitReason);
+        Assert.Equal(QueueDecisionKind.Launch,
+            QueueScheduler.Decide(LocalAt(12), [prepared], 0, 8.0, Defaults, null, held: false).Kind);
+    }
+
+    [Fact]
     public void A_stage_less_dispatch_request_is_unchanged_by_the_ready_guard()
     {
         var decision = QueueScheduler.Decide(LocalAt(12), [Item()], 0, 8.0, Defaults, null, held: false);

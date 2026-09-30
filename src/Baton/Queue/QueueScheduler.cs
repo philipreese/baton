@@ -264,7 +264,8 @@ public static class QueueScheduler
     /// <summary>The one candidacy predicate: queued, not external, not <c>ready</c>. Both
     /// <see cref="Candidate(IReadOnlyList{QueueItem})"/> and the pass-through pick read it.</summary>
     private static bool IsEligible(QueueItem item) =>
-        item.State == QueueItemState.Queued && !item.External && item.Retirement is null && !IsReady(item);
+        item.State == QueueItemState.Queued && !item.External && item.Retirement is null && !IsReady(item)
+        && item.IssuePreparation?.State is null or TaskPreparationState.Prepared;
 
     /// <summary>
     /// A work item the reviewer approved. <b>Never launched</b>: spec/baton.md §13's "the queue records

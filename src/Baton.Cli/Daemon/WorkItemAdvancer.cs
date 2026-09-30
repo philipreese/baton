@@ -765,6 +765,33 @@ public sealed partial class WorkItemAdvancer
         DateTimeOffset now,
         string? room)
     {
+        TaskReadyReceipt? taskReceipt = null;
+        if (item.OwnedTask is { } task)
+        {
+            // Protected invariant: readiness names the exact approving review attempt, verdict
+            // bytes, PR head and required-check observation that the existing lifecycle accepted.
+            // The advancer clears AttemptId at this transition, so capture it before the CAS.
+            var path = verdictPath ?? item.LastVerdict;
+            if (path is null || !File.Exists(path) || pr.Number is not { } prNumber
+                || pr.HeadSha is not { Length: 40 } head || !head.All(Uri.IsHexDigit)
+                || pr.RequiredChecks != PullRequestChecks.Passing)
+                throw new QueueStoreException($"Task '{task.Id}' cannot retain a ready receipt without exact PR, verdict, head and passing required checks.");
+            var bytes = File.ReadAllBytes(path);
+            if (!ReviewVerdictSchema.TryParse(bytes, out var approved, out _)
+                || approved is not { Completion: ReviewCompletion.Complete, Decision: ReviewDecision.Approve }
+                || !string.Equals(approved.ReviewedRef, head, StringComparison.OrdinalIgnoreCase))
+                throw new QueueStoreException($"Task '{task.Id}' ready verdict no longer approves its exact PR head.");
+            var reviewAttempt = item.AttemptId?.Value ?? task.Ready?.ReviewAttemptId;
+            if (reviewAttempt is null)
+                throw new QueueStoreException($"Task '{task.Id}' has no retained review attempt for readiness.");
+            var verdictDigest = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+            var checksId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"{task.Repository}\0{prNumber}\0{head}\0{pr.RequiredChecks}\0{now:O}"))).ToLowerInvariant();
+            var receiptId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"{task.Id}\0{head}\0{reviewAttempt}\0{verdictDigest}\0{checksId}"))).ToLowerInvariant();
+            taskReceipt = new TaskReadyReceipt(receiptId, task.Id, task.Repository, task.Issue,
+                prNumber, head, reviewAttempt, verdictDigest, pr.RequiredChecks, checksId, now, now);
+        }
         var stopped = await TryMarkAsync(item, existing => existing with
         {
             Stage = WorkStage.Ready,
@@ -792,6 +819,8 @@ public sealed partial class WorkItemAdvancer
             Error = null,
             ReconciliationKind = null,
             ReadinessMutationClaim = null,
+            OwnedTask = existing.OwnedTask is null || taskReceipt is null ? existing.OwnedTask
+                : existing.OwnedTask with { Ready = taskReceipt, Blocked = null },
         }).ConfigureAwait(false);
 
         return stopped ? Fact(item, from, WorkStage.Ready, transition, now, room) : null;
@@ -858,6 +887,12 @@ public sealed partial class WorkItemAdvancer
             Halted = true,
             ReadinessMutationClaim = null,
             StoppedWorkJudgment = stoppedJudgment ?? existing.StoppedWorkJudgment,
+            OwnedTask = existing.OwnedTask is null ? null : existing.OwnedTask with
+            {
+                Blocked = new TaskBlockedDisposition(
+                    transition.HaltCause.ToString().ToLowerInvariant(), transition.Reason, now,
+                    stoppedJudgment?.Key),
+            },
         }).ConfigureAwait(false);
 
         return failed ? new QueueDecisionEntry(
@@ -880,12 +915,12 @@ public sealed partial class WorkItemAdvancer
             && (item.AttemptId is null || prior.AttemptId == item.AttemptId && prior.Stage == stage)
             || item.StoppedWorkJudgment is not null && item.AttemptId is null
             || item.Repository is not { Length: > 0 } repository
-            || !IsStoppedWorkAdviceEnabledNow(repository))
+            || item.OwnedTask is null && !IsStoppedWorkAdviceEnabledNow(repository))
         {
             return null;
         }
 
-        var holder = default(string);
+        var holder = item.OwnedTask?.ConductorHolder;
         var blockedReasons = new List<string>();
         try
         {
@@ -894,10 +929,15 @@ public sealed partial class WorkItemAdvancer
                 ? null
                 : await ConductorClaimStore.GetClaimAsync(identity, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
-            holder = claim?.Holder;
-            if (string.IsNullOrWhiteSpace(holder))
+            if (item.OwnedTask is null) holder = claim?.Holder;
+            if (string.IsNullOrWhiteSpace(claim?.Holder))
             {
                 blockedReasons.Add("repository has no recorded conductor holder");
+            }
+            else if (item.OwnedTask is not null
+                && !string.Equals(claim.Holder, holder, StringComparison.Ordinal))
+            {
+                blockedReasons.Add($"conductor ownership drifted from recorded holder '{holder}' to '{claim.Holder}'");
             }
         }
         catch (ConductorClaimException)

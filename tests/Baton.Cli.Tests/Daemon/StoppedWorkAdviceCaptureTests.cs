@@ -162,6 +162,56 @@ public sealed class StoppedWorkAdviceCaptureTests
     }
 
     [Fact]
+    public async Task Task_owned_halt_keeps_recorded_owner_and_durable_obligation_with_advice_disabled()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await ConductorClaimStore.ClaimAsync(Identity, "recorded-owner", home, cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            var attempt = new FleetAttemptId("owned-stopped-attempt");
+            var seed = await SeedAsync(home, WorkStage.Review, room, attempt);
+            var owned = new OwnedTaskSubmission("task-owned", Repository, 1934,
+                "explicit-input-digest", "recorded-owner", Now);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seed with { OwnedTask = owned }],
+            }, Ct);
+
+            await new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head))
+                .AdvanceAsync(Now, Ct);
+            var halted = await ReadBackAsync();
+            var intent = Assert.IsType<StoppedWorkJudgment>(halted.StoppedWorkJudgment);
+            Assert.Equal("recorded-owner", intent.Holder);
+            Assert.Equal(StoppedWorkJudgmentKey.For(Repository, seed.Tag, attempt, WorkStage.Review), intent.Key);
+            Assert.Equal(intent.Key, halted.OwnedTask?.Blocked?.ObligationKey);
+            Assert.True(halted.Halted);
+
+            var adviceCalls = 0;
+            var store = Store();
+            var scheduler = Scheduler(store,
+                new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head)),
+                (_, _, _, _, _) =>
+                {
+                    Interlocked.Increment(ref adviceCalls);
+                    throw new InvalidOperationException("Advice is disabled for this repository.");
+                });
+            await scheduler.TickOnceAsync(Ct);
+            await scheduler.TickOnceAsync(Ct);
+            var obligation = await store.ReadAsync(intent.Key!, Ct);
+            Assert.Equal(ConductorObligationStatus.Pending, obligation?.Status);
+            Assert.Equal("recorded-owner", obligation?.Owner);
+            Assert.Equal(0, adviceCalls);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_missing_holder_and_attempt_capture_a_blocked_intent_without_guessing_identity()
     {
         var home = CreateTempHome();

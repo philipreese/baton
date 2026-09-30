@@ -125,6 +125,13 @@ public sealed record QueueItem
     /// it — every brief it renders and every PR it looks for is that issue's.</summary>
     public int? Issue { get; init; }
 
+    /// <summary>Shared issue-lifecycle reservation. A task or legacy issue add must prepare under
+    /// this identity before it becomes schedulable.</summary>
+    public QueueIssuePreparation? IssuePreparation { get; init; }
+
+    /// <summary>Present only for a task submitted through the owned task front door.</summary>
+    public OwnedTaskSubmission? OwnedTask { get; init; }
+
     /// <summary>
     /// Where this item is in the lifecycle, or <see langword="null"/> for a slice-1 dispatch request —
     /// see this record's own remarks for why that null is the whole discriminator.

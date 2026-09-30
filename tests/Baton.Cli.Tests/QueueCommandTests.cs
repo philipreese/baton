@@ -362,7 +362,11 @@ public sealed class QueueCommandTests
             Assert.Contains("file-write", refusal.Message, StringComparison.Ordinal);
             Assert.Contains("WriteFiles", refusal.Message, StringComparison.Ordinal);
             Assert.Contains("NetworkAccess", refusal.Message, StringComparison.Ordinal);
-            Assert.False(File.Exists(BatonPaths.QueueFile));
+            // The issue identity is reserved before provisioning. A post-provision ceiling refusal
+            // retains that reservation as blocked evidence so retry cannot create a second lane.
+            var blocked = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(TaskPreparationState.Blocked, blocked.IssuePreparation?.State);
+            Assert.Equal(2353, blocked.Issue);
             Assert.False(File.Exists(BatonPaths.QueueSpecFile("2353-lane")));
         }
         finally

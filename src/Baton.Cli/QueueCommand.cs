@@ -88,7 +88,8 @@ public static class QueueCommand
         Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile = null,
         IGhCliRunner? ghRunner = null,
-        WorktreeApplyTestHooks? worktreeApplyTestHooks = null)
+        WorktreeApplyTestHooks? worktreeApplyTestHooks = null,
+        OwnedTaskSubmission? ownedTask = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -98,7 +99,8 @@ public static class QueueCommand
         return options.Verb switch
         {
             QueueVerb.Add => AddAsync(
-                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
+                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken,
+                ownedTask),
             QueueVerb.List => ListAsync(options, output, cancellationToken),
             QueueVerb.Worktrees => WorktreesAsync(
                 options.Format, options.Apply, output, repositoryDirectory, cancellationToken, worktreeApplyTestHooks),
@@ -121,7 +123,8 @@ public static class QueueCommand
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        OwnedTaskSubmission? ownedTask)
     {
         var tag = options.Tag!;
         if (options.Lifecycle && options.DeclaredTaskSize is null)
@@ -206,8 +209,11 @@ public static class QueueCommand
         // raised, which is the exact record that refusal exists to protect. This read is the early
         // half; the mutate re-checks under the file lock, which is where the authority stays.
         var queueSnapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        RefuseIfNotReplaceable(
-            queueSnapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)), tag);
+        if (ownedTask is null)
+        {
+            RefuseIfNotReplaceable(
+                queueSnapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)), tag);
+        }
 
         var sourceRepository = repositoryDirectory ?? Directory.GetCurrentDirectory();
         var effectiveWorktreeRoot = options.Issue is not null
@@ -216,6 +222,10 @@ public static class QueueCommand
         var issueRepository = options.Issue is not null
             ? await ResolveIssueRepositoryAsync(sourceRepository, repositoryResolver, cancellationToken).ConfigureAwait(false)
             : null;
+        if (ownedTask is not null && (issueRepository != ownedTask.Repository || options.Issue != ownedTask.Issue))
+        {
+            throw new CliArgumentException("Task identity does not match the canonical issue repository.");
+        }
         if (requestsMemoryAdd && issueRepository is null)
         {
             throw new CliArgumentException("'--require memory-add' requires --issue so the grant has one canonical repository.");
@@ -231,8 +241,69 @@ public static class QueueCommand
                 .ConfigureAwait(false)
             : null;
 
+        // Reserve the canonical repository/issue while the queue mutex is held, before the
+        // provisioner can create a branch, worktree, or trust entry. Both task and legacy lifecycle
+        // adds use this seam; a different tag cannot conceal the same issue's existing lifecycle.
+        var reserved = false;
+        if (options.Lifecycle)
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+            {
+                var owner = snapshot.Items.FirstOrDefault(i => i.Stage is not null
+                    && i.Issue == options.Issue
+                    && string.Equals(i.Repository, issueRepository, StringComparison.OrdinalIgnoreCase));
+                if (owner is not null)
+                {
+                    if (ownedTask is not null && owner.OwnedTask is { } prior
+                        && prior.Id == ownedTask.Id && prior.InputDigest == ownedTask.InputDigest)
+                    {
+                        return snapshot;
+                    }
+
+                    throw new CliArgumentException(
+                        $"Issue {options.Issue} in '{issueRepository}' is already owned by queue item '{owner.Tag}'"
+                        + (owner.OwnedTask is null ? "." : $" (task {owner.OwnedTask.Id})."));
+                }
+
+                var byTag = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
+                RefuseIfNotReplaceable(byTag, tag);
+                if (byTag is not null)
+                {
+                    throw new CliArgumentException($"Tag '{tag}' is already in use; issue reservations cannot replace it.");
+                }
+
+                reserved = true;
+                using var preparationProcess = Process.GetCurrentProcess();
+                var placeholder = new QueueItem
+                {
+                    Tag = tag,
+                    Role = options.Role!,
+                    Workspace = string.Empty,
+                    SpecFile = BatonPaths.QueueSpecFile(tag),
+                    Repository = issueRepository,
+                    Issue = options.Issue,
+                    Stage = WorkStage.Implement,
+                    DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
+                    AddedAt = DateTimeOffset.UtcNow,
+                    OwnedTask = ownedTask,
+                    IssuePreparation = new QueueIssuePreparation(TaskPreparationState.Preparing, DateTimeOffset.UtcNow,
+                        ProcessId: Environment.ProcessId,
+                        ProcessStartedAt: preparationProcess.StartTime.ToUniversalTime()),
+                };
+                return snapshot with { Items = snapshot.Items.Append(placeholder).ToList() };
+            }, cancellationToken).ConfigureAwait(false);
+
+            if (!reserved)
+            {
+                output.WriteLine($"Task '{ownedTask!.Id}' is already retained as '{tag}'.");
+                return 0;
+            }
+        }
+
         // Fresh issue adds retain their original provisioning route. Explicit retained reuse never
         // invokes this delegate, so it cannot create a suffix or alter the path's trust record.
+        try
+        {
         var provisioned = options.Issue is { } issue && !retained
             ? await issueProvisioner(
                 issue,
@@ -322,6 +393,12 @@ public static class QueueCommand
                     retainedProof.Ceiling.InheritedFrom),
                 retainedProof.TerminalPredecessorTags),
             AddedAt = DateTimeOffset.UtcNow,
+            OwnedTask = ownedTask,
+            IssuePreparation = options.Lifecycle
+                ? new QueueIssuePreparation(TaskPreparationState.Prepared, DateTimeOffset.UtcNow,
+                    ExpectedBranch: retainedProof?.Branch ?? provisioned?.Branch,
+                    ExpectedWorkspace: workspace)
+                : null,
         };
 
         string specContents;
@@ -357,7 +434,19 @@ public static class QueueCommand
             // operator is editing their list); re-adding one that has LAUNCHED is refused, because the
             // running lane's own record would be overwritten.
             var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
-            RefuseIfNotReplaceable(existing, tag);
+            if (options.Lifecycle)
+            {
+                if (existing?.IssuePreparation?.State != TaskPreparationState.Preparing
+                    || existing.Repository != issueRepository || existing.Issue != options.Issue
+                    || existing.OwnedTask?.Id != ownedTask?.Id)
+                {
+                    throw new CliArgumentException($"Issue preparation for '{tag}' changed before commit; its side effects require reconciliation.");
+                }
+            }
+            else
+            {
+                RefuseIfNotReplaceable(existing, tag);
+            }
 
             if (retainedProof is not null)
             {
@@ -386,6 +475,30 @@ public static class QueueCommand
         }
 
         return 0;
+        }
+        catch (Exception ex) when (options.Lifecycle && reserved && ex is not OperationCanceledException)
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(i => i.Tag == tag
+                    && i.IssuePreparation?.State == TaskPreparationState.Preparing
+                    ? i with
+                    {
+                        IssuePreparation = i.IssuePreparation with
+                        {
+                            State = TaskPreparationState.Blocked,
+                            Reason = $"preparation-failed: {ex.GetType().Name}: {ex.Message}",
+                        },
+                        OwnedTask = i.OwnedTask is null ? null : i.OwnedTask with
+                        {
+                            Blocked = new TaskBlockedDisposition("preparation-failed", ex.Message,
+                                DateTimeOffset.UtcNow, null),
+                        },
+                    }
+                    : i).ToList(),
+            }, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
@@ -479,6 +592,19 @@ public static class QueueCommand
     /// </remarks>
     private static void RefuseIfNotReplaceable(QueueItem? existing, string tag)
     {
+        if (existing?.OwnedTask is { } task)
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' belongs to retained task '{task.Id}'. Re-adding it would erase task ownership and evidence.",
+                $"inspect 'baton task status {task.Id}' instead.");
+        }
+
+        if (existing?.IssuePreparation is { State: not TaskPreparationState.Prepared })
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' has an unfinished issue preparation reservation. Re-adding it could repeat external side effects.");
+        }
+
         if (existing?.DraftPullRequestCreateMarker is not null)
         {
             throw new CliArgumentException(
@@ -2047,6 +2173,34 @@ public static class QueueCommand
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var importedTags = imported.Select(i => i.Tag).ToHashSet(StringComparer.Ordinal);
+            var taskConflict = snapshot.Items.FirstOrDefault(i => i.OwnedTask is not null
+                && importedTags.Contains(i.Tag));
+            if (taskConflict is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{taskConflict.Tag}' belongs to retained task '{taskConflict.OwnedTask!.Id}'. Import cannot replace task evidence.");
+            }
+            var issueConflict = imported.FirstOrDefault(incoming => incoming.Stage is not null
+                && incoming.Issue is not null && incoming.Repository is not null
+                && snapshot.Items.Any(current => current.Stage is not null
+                    && current.Issue == incoming.Issue
+                    && string.Equals(current.Repository, incoming.Repository, StringComparison.OrdinalIgnoreCase)));
+            if (issueConflict is not null)
+            {
+                var owner = snapshot.Items.First(current => current.Stage is not null
+                    && current.Issue == issueConflict.Issue
+                    && string.Equals(current.Repository, issueConflict.Repository, StringComparison.OrdinalIgnoreCase));
+                throw new CliArgumentException(
+                    $"Issue {issueConflict.Issue} in '{issueConflict.Repository}' is already owned by '{owner.Tag}'"
+                    + (owner.OwnedTask is null ? "." : $" (task {owner.OwnedTask.Id})."));
+            }
+            var duplicateImport = imported.Where(i => i.Stage is not null && i.Issue is not null && i.Repository is not null)
+                .GroupBy(i => $"{i.Repository!.ToLowerInvariant()}#{i.Issue}", StringComparer.Ordinal)
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicateImport is not null)
+            {
+                throw new CliArgumentException($"Import contains duplicate issue lifecycle '{duplicateImport.Key}'.");
+            }
             var claimed = snapshot.Items.FirstOrDefault(
                 item => (item.ReadinessMutationClaim is { Length: > 0 }
                     || item.DraftPullRequestCreateMarker is not null) && importedTags.Contains(item.Tag));
