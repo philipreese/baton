@@ -38,6 +38,8 @@ public static class ConductorCommand
                 cancellationToken: cancellationToken),
             ConductorVerb.Decide => ReadinessConductorCommand.DecideAsync(options.ObligationKey!,
                 options.ContextFile!, stdout, root, cancellationToken: cancellationToken),
+            ConductorVerb.Act => ReplacementReviewConductorCommand.ExecuteAsync(
+                options, stdout, root, cancellationToken: cancellationToken),
             _ => throw new ArgumentOutOfRangeException(nameof(options)),
         };
     }

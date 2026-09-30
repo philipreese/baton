@@ -534,7 +534,7 @@ public static class QueueCommand
         $"Could not write the queue spec at '{path}': {exception.Message}",
         "make the queue-spec path writable, then retry 'baton queue add'.");
 
-    private static void WriteSpecFileAtomically(string destination, string contents)
+    internal static void WriteSpecFileAtomically(string destination, string contents)
     {
         var temporary = $"{destination}.{Guid.NewGuid():N}.tmp";
         try
@@ -603,6 +603,13 @@ public static class QueueCommand
         {
             throw new CliArgumentException(
                 $"Item '{tag}' has an unfinished issue preparation reservation. Re-adding it could repeat external side effects.");
+        }
+
+        if (existing?.ReplacementReviewAction is not null)
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' retains a replacement-review action. Re-adding it would erase its single-use identity.",
+                "inspect the retained action and choose a different tag for new work.");
         }
 
         if (existing?.DraftPullRequestCreateMarker is not null)
@@ -2203,11 +2210,12 @@ public static class QueueCommand
             }
             var claimed = snapshot.Items.FirstOrDefault(
                 item => (item.ReadinessMutationClaim is { Length: > 0 }
-                    || item.DraftPullRequestCreateMarker is not null) && importedTags.Contains(item.Tag));
+                    || item.DraftPullRequestCreateMarker is not null
+                    || item.ReplacementReviewAction is not null) && importedTags.Contains(item.Tag));
             if (claimed is not null)
             {
                 throw new CliArgumentException(
-                    $"Item '{claimed.Tag}' retains an in-flight readiness or may-have-called draft PR operation. "
+                    $"Item '{claimed.Tag}' retains a readiness, draft PR, or replacement-review action. "
                     + "Importing it would erase durable external-action evidence.",
                     "remove that tag from the import and reconcile the existing queue row.");
             }

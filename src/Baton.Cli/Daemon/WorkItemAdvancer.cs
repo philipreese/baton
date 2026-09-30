@@ -240,6 +240,11 @@ public sealed partial class WorkItemAdvancer
             ? await ReadTrustedDraftHeadAsync(item, cancellationToken).ConfigureAwait(false)
             : await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
 
+        var replacementProofItem = await TryPersistReplacementReviewProofAsync(item, sentinel, verdictPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (replacementProofItem is null) return null;
+        item = replacementProofItem;
+
         if (IsAwaitingCheckEvidenceRecovery(item))
         {
             // Green is permission to release this one typed halt, never to bypass lifecycle or

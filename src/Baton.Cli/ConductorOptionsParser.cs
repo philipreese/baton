@@ -10,7 +10,8 @@ public static class ConductorOptionsParser
                                 "       baton conductor release <holder> [--workspace <dir>] --reason <text>\n" +
                                 "       baton conductor takeover <holder> [--workspace <dir>] --reason <text>\n" +
                                 "       baton conductor prepare --request <file>\n" +
-                                "       baton conductor decide --obligation <key> --context <file>";
+                                "       baton conductor decide --obligation <key> --context <file>\n" +
+                                "       baton conductor act --obligation <key> --holder <holder> --action replace-review --expected-head <full-sha>";
 
     public static ConductorOptions Parse(string[] args)
     {
@@ -30,8 +31,40 @@ public static class ConductorOptionsParser
             "takeover" => ParseTakeover(args[1..]),
             "prepare" => ParseReadiness(args[1..], ConductorVerb.Prepare),
             "decide" => ParseReadiness(args[1..], ConductorVerb.Decide),
+            "act" => ParseAct(args[1..]),
             _ => throw new CliArgumentException($"Unknown 'baton conductor' sub-verb '{args[0]}'.\n{Usage}"),
         };
+    }
+
+    private static ConductorOptions ParseAct(string[] args)
+    {
+        string? obligation = null;
+        string? holder = null;
+        string? action = null;
+        string? head = null;
+        for (var i = 0; i < args.Length; i++)
+        {
+            var option = args[i];
+            if (option is not ("--obligation" or "--holder" or "--action" or "--expected-head")
+                || i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                throw new CliArgumentException($"Invalid conductor action arguments.\n{Usage}");
+            var value = args[++i];
+            if (string.IsNullOrWhiteSpace(value))
+                throw new CliArgumentException($"'{option}' requires a non-blank value.\n{Usage}");
+            switch (option)
+            {
+                case "--obligation" when obligation is null: obligation = value; break;
+                case "--holder" when holder is null: holder = value; break;
+                case "--action" when action is null: action = value; break;
+                case "--expected-head" when head is null: head = value; break;
+                default: throw new CliArgumentException($"Duplicate option '{option}'.\n{Usage}");
+            }
+        }
+        if (obligation is null || holder is null || action != "replace-review"
+            || head is not { Length: 40 } || !head.All(Uri.IsHexDigit))
+            throw new CliArgumentException($"Invalid conductor action arguments.\n{Usage}");
+        return new(ConductorVerb.Act, Holder: holder, ObligationKey: obligation,
+            Action: action, ExpectedHead: head);
     }
 
     private static ConductorOptions ParseReadiness(string[] args, ConductorVerb verb)

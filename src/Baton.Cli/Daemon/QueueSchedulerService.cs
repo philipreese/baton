@@ -259,6 +259,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
             await ReconcileContinuationObligationsAsync(cancellationToken).ConfigureAwait(false);
             await ReconcileStoppedWorkAdviceAsync(cancellationToken).ConfigureAwait(false);
+            await ReconcileReplacementReviewActionsAsync(cancellationToken).ConfigureAwait(false);
 
             QueueSnapshot snapshot;
             using (DaemonLoopDriver.EnterPhase("queue-store"))
@@ -578,6 +579,23 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 await _beforeLaunchClaim(cancellationToken).ConfigureAwait(false);
             }
 
+            if (item.ReplacementReviewAction is { } replacement)
+            {
+                try
+                {
+                    await ValidateReplacementReviewLaunchAsync(item, replacement, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+                {
+                    await BlockReplacementReviewAsync(item.Tag, replacement.ObligationKey,
+                        "replacement launch evidence changed or is unavailable: " + ex.Message,
+                        "Re-establish owner, workspace and exact open PR head; inspect retained action.")
+                        .ConfigureAwait(false);
+                    continue;
+                }
+            }
+
             // Re-check Queued under QueueStore's mutation lock, rather than trusting the snapshot this
             // tick read above: `baton queue cancel` owns the same seam. A cancellation that gets there
             // first wins and this scheduler never starts a lane from its stale candidate.
@@ -589,7 +607,12 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 {
                     var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                     if (current?.State != QueueItemState.Queued
-                        || current.Retirement is not null)
+                        || current.Retirement is not null || snapshot.Held
+                        || current.ReplacementReviewAction is { } currentAction
+                            && (item.ReplacementReviewAction is null
+                                || currentAction.ObligationKey != item.ReplacementReviewAction.ObligationKey
+                                || currentAction.ReplacementAttemptId is not null
+                                || currentAction != item.ReplacementReviewAction))
                     {
                         return snapshot;
                     }
@@ -638,6 +661,13 @@ public sealed partial class QueueSchedulerService : BackgroundService
                         LastAdmission = admission,
                         AttemptId = attemptId,
                         AttemptBaseRevision = attemptBaseRevision,
+                        ReplacementReviewAction = existing.ReplacementReviewAction is { } action
+                            ? action with
+                            {
+                                ReplacementAttemptId = attemptId,
+                                ReplacementRoomDirectory = roomDirectory,
+                            }
+                            : null,
                     });
                     return snapshot with
                     {
@@ -1543,6 +1573,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
             if (current?.State != QueueItemState.Queued
                 || current.AttemptEnvelope is not null
                 || current.Retirement is not null
+                || snapshot.Held && current.ReplacementReviewAction is not null
+                || current.ReplacementReviewAction != item.ReplacementReviewAction
                 || !HasSameAdmissionDeclaration(current, item))
             {
                 return snapshot;
@@ -1657,6 +1689,10 @@ public sealed partial class QueueSchedulerService : BackgroundService
                         AttemptId = null,
                         AttemptBaseRevision = null,
                         AttemptEnvelope = null,
+                        ReplacementReviewAction = current.ReplacementReviewAction is { } action
+                            && action.ReplacementAttemptId == attemptId
+                            ? action with { ReplacementAttemptId = null, ReplacementRoomDirectory = null }
+                            : current.ReplacementReviewAction,
                         AttemptAdmissionFactDurable = false,
                         AttemptStartedFactDurable = false,
                         AttemptRefusedFactDurable = false,
