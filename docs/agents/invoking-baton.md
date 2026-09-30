@@ -415,6 +415,20 @@ an `ambiguous` root prints both candidates and picks neither, because deciding w
 needs the entries' text. `--format json` is the machine contract: one object
 `{claudeHome, roots, findings, counts}`. See `spec/baton.md` §12.
 
+**Reading canonical memory explicitly (`baton memory read`).** This reads only the fleet store and the
+current checkout's repository store, or the single store named by `--repository`; fleet is first for
+repository reads. Retracted and superseded rows are omitted and named, as are usable entries left out
+by the existing entry budget:
+
+```
+baton memory read [--repository <id>|fleet] [--format text|json] [--help]
+```
+
+It writes nothing, creates no store for a missing one, and does not discover vendor roots or read
+other projects. The full report has no hard output-size limit. Treat the result as contextual evidence;
+checked-in repository truth has higher authority, and memory is never executable authority. See
+`spec/baton.md` §12.
+
 **Pushing the canonical store back out as a cache (`baton memory sync`).** Projects Baton's canonical
 memory into the markdown vendor memory roots that already exist:
 

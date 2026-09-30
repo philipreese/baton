@@ -357,6 +357,11 @@ public sealed class LaneRoleDaemonWriteVerbTests
                         Path.Combine(home.Path, "claude"), token,
                         Path.Combine(home.Path, "user"), home.Path));
                     break;
+                case "baton memory read*":
+                    Assert.Equal(0, await MemoryReadCommand.ExecuteAsync(
+                        MemoryReadOptionsParser.Parse(["--repository", "github.com/owner/repo", "--format", "json"]),
+                        output, token));
+                    break;
                 case "baton audit lanes*":
                     Assert.Equal(0, await AuditLanesCommand.ExecuteAsync(
                         new AuditLanesOptions(RoomsRoot: Path.GetDirectoryName(room)),

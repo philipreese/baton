@@ -156,15 +156,15 @@ public static class MemoryStore
 
     /// <summary>Strict rows for settlement and projection; I/O failure cannot become an empty snapshot.</summary>
     public static Task<IReadOnlyList<MemoryEntry>> ReadAllStrictAsync(
-        string entriesFilePath, CancellationToken cancellationToken = default) =>
+        string entriesFilePath, CancellationToken cancellationToken = default, bool parseStrict = false) =>
         Ledger.RunUnderLockAsync(
-            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath, requireReadable: true), cancellationToken);
+            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath, requireReadable: true, parseStrict), cancellationToken);
 
     /// <summary>Strict link rows for durable import settlement; I/O failure must retain the intent.</summary>
     public static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksStrictAsync(
-        string linksFilePath, CancellationToken cancellationToken = default) =>
+        string linksFilePath, CancellationToken cancellationToken = default, bool parseStrict = false) =>
         LinkLedger.RunUnderLockAsync(
-            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath, requireReadable: true), cancellationToken);
+            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath, requireReadable: true, parseStrict), cancellationToken);
 
     /// <summary>
     /// Appends the subset of <paramref name="links"/> whose <see cref="MemorySupersessionLink.Id"/> is
@@ -211,9 +211,10 @@ public static class MemoryStore
 
     /// <summary>Retractions for publication; a failed read must not restore retracted facts.</summary>
     public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsStrictAsync(
-        string retractionsFilePath, CancellationToken cancellationToken = default) =>
+        string retractionsFilePath, CancellationToken cancellationToken = default, bool parseStrict = false) =>
         RetractionLedger.RunUnderLockAsync(
-            retractionsFilePath, () => RetractionLedger.ReadAllUnlocked(retractionsFilePath, requireReadable: true), cancellationToken);
+            retractionsFilePath, () => RetractionLedger.ReadAllUnlocked(
+                retractionsFilePath, requireReadable: true, parseStrict), cancellationToken);
 
     /// <summary>A resolved snapshot whose every canonical input propagates read failures.</summary>
     public static async Task<IReadOnlyList<MemoryEntry>> ReadResolvedStrictAsync(
