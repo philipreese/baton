@@ -90,7 +90,7 @@ public sealed class MemoryReadTests : IDisposable
         Assert.Equal(1, await ReadAsync(output));
         Assert.Equal(string.Empty, output.ToString());
 
-        File.Delete(links);
+        FileCleanup.EnsureDeleted(links);
         await MemoryStore.AppendRetractionsAsync(
             [MemoryRetraction.Create("unknown-id", "github.com/owner/other", "fixture reason", "operator", DateTime.UnixEpoch)],
             retractions, TestContext.Current.CancellationToken);
