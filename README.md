@@ -247,6 +247,9 @@ pixi run fmt
 `baton` is distributed as a self-built, unpublished `dotnet tool` — there is no public NuGet feed;
 a single-developer project doesn't need one.
 
+The default refresh remains fail-closed. The explicit `pixi run tool-refresh --recover-orphan` recovery
+contract is documented in [`spec/baton.md`](spec/baton.md) §8.
+
 **First install, or refreshing an already-installed tool: `pixi run tool-refresh`.** Installs side-by-side
 per-commit versions under `~/.baton/tools/<sha>` with a lightweight PATH launcher in `~/.dotnet/tools`
 resolving `current` at process start — see [`spec/baton.md`](spec/baton.md) §8 (*Installation and versioning*)
