@@ -7951,6 +7951,41 @@ catalog default is the deliberate policy change. Conductor sessions are outside 
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.
 
+### Conductor-owned issue tasks (#2521)
+
+`baton task submit --issue <n> --project <dir> --declared-size small|medium|large|unknown
+--size-rationale <why> [--spec <file>]` is the ordinary project-work entry point. It accepts exactly
+one canonical remote repository and issue under an existing conductor claim and returns a stable
+`task-` ID. `unknown` is an explicit size declaration requiring a rationale, not an omitted field.
+The supplied size and rationale constrain and explain the existing worker admission policy; they do
+not override model, permission, runway, or queue limits. `baton task status <id> [--json]` reads the
+retained queue task, including the recorded claim holder, stage, PR, readiness proof, blocker, and
+daemon observation. Submission is not a synchronous worker call: a held queue or unavailable daemon
+leaves the task accepted and queued with that reason, never described as running. There is no
+`--wait` in this slice, no new scheduler, no automatic merge, and no replacement-review authority.
+`run` and `dispatch` remain explicitly standalone, one-lane commands.
+
+The identity is the canonical repository plus issue, independent of checkout path or queue tag.
+Task and legacy `queue add --issue --lifecycle` admissions reserve that identity under the same
+queue lock **before** branch/worktree creation, trust entries, or brief copies. A reservation records
+the preparing process and is never launchable. A preparation failure or dead owner is retained as
+blocked uncertainty rather than assumed to mean no external side effect; retries cannot provision
+a second branch. The prepared row retains the explicit-input digest and the frozen rendered brief.
+An identical submission returns that same row at any stage; a differing declaration or spec bytes
+is a conflict. Import cannot erase task-owned rows or a matching issue lifecycle. These checks
+protect the pre-provisioning window as well as the later queue lifecycle.
+
+The existing daemon drives implement → PR → review → one allowed fix → re-review → ready without
+another operator prompt. Readiness requires the existing exact-current-head approval and passing
+required-check evidence. Before ordinary stage fields are cleared, a task-owned ready receipt retains
+the review attempt, verdict digest, PR/head, checks observation, and observation time. The receipt
+is proof for that head and readiness occurrence, not a permanent completion certificate: an observed
+changed head or a new review round makes the previous receipt historical and status reports stale.
+Later checks are not inferred from the old receipt. Unrecoverable preparation or lifecycle failure retains a typed blocker. For task-owned
+halts the existing stopped-work obligation is recorded even when optional paid advice is disabled;
+recording the obligation never launches an extra model call or silently takes its recommended action.
+Claim changes do not rewrite the task's original holder or bypass ordinary authorization checks.
+
 ### Work items: the lifecycle the queue drives (slice 2)
 
 `baton queue add --issue <n> --lifecycle [--spec <file>]` adds a **work item**. `--lifecycle` is the

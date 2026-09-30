@@ -111,6 +111,12 @@ public static class TaskCommand
             ?? throw new CliArgumentException($"No retained task has ID '{id}'.");
         var owner = item.OwnedTask!;
         var now = DateTimeOffset.UtcNow;
+        var repository = RepositoryIdentity.From("https://" + owner.Repository, null)
+            ?? throw new QueueStoreException($"Task '{id}' has an invalid retained repository identity.");
+        var currentClaim = await ConductorClaimStore.GetClaimAsync(repository, cancellationToken: token)
+            .ConfigureAwait(false);
+        var ownership = currentClaim?.Holder is null ? "unclaimed"
+            : currentClaim.Holder == owner.ConductorHolder ? "recorded-holder-current" : "holder-changed";
         var heartbeat = ReadDaemonObservation(now);
         var abandonedPreparation = item.IssuePreparation is { State: TaskPreparationState.Preparing } preparing
             && !TaskPreparationLiveness.IsOwnerAlive(preparing);
@@ -141,28 +147,51 @@ public static class TaskCommand
             : item.IssuePreparation?.State == TaskPreparationState.Preparing
                 ? abandonedPreparation ? "blocked" : "preparing"
             : item.IssuePreparation?.State == TaskPreparationState.Blocked || item.Halted ? "blocked"
-            : readiness is not null ? headChanged ? "stale" : "ready-as-of"
             : item.State == QueueItemState.Launched ? "running"
+            : readiness is not null ? item.Stage == WorkStage.Ready && !headChanged
+                ? "ready-as-of" : "stale"
             : "queued";
+        var nextTrigger = state switch
+        {
+            "preparing" => "preparation-completion",
+            "queued" or "running" => "daemon-tick",
+            "blocked" => "conductor-judgment",
+            "stale" => "conductor-reassessment",
+            _ => "none",
+        };
         var status = new
         {
             taskId = owner.Id,
             repository = owner.Repository,
             issue = owner.Issue,
             conductorHolder = owner.ConductorHolder,
+            currentConductorHolder = currentClaim?.Holder,
+            ownership,
             state,
             reason,
+            nextTrigger,
             stage = item.Stage is { } stage ? WorkStages.Token(stage) : null,
             attemptId = item.AttemptId?.Value,
             pullRequest = item.PullRequest,
             headSha = currentPr?.HeadSha,
+            pullRequestObservation = new
+            {
+                observedAt = currentPr?.ObservedAt,
+                ageSeconds = currentPr?.ObservedAt is { } prObservedAt
+                    ? (int?)(now - prObservedAt).TotalSeconds : null,
+                missingEvidence = currentPr is null ? "no-current-pr-observation" : currentPr.Error,
+            },
             ready = readiness,
             blocked = owner.Blocked,
             haltCause = item.StoppedWorkJudgment?.HaltCause.ToString(),
             obligationKey = item.StoppedWorkJudgment?.Key,
-            daemon = new { availability = heartbeat.Available ? "recently-observed" : "unavailable",
-                observedAt = heartbeat.ObservedAt, ageSeconds = heartbeat.ObservedAt is { } at
-                    ? (int?)(now - at).TotalSeconds : null },
+            daemon = new
+            {
+                availability = heartbeat.Available ? "recently-observed" : "unavailable",
+                observedAt = heartbeat.ObservedAt,
+                ageSeconds = heartbeat.ObservedAt is { } at
+                    ? (int?)(now - at).TotalSeconds : null
+            },
         };
         if (json)
         {
@@ -171,8 +200,10 @@ public static class TaskCommand
         else
         {
             output.WriteLine($"Task {owner.Id}: {state}" + (reason is null ? "" : $" ({reason})"));
-            output.WriteLine($"  issue: {owner.Repository}#{owner.Issue}; conductor: {owner.ConductorHolder}");
+            output.WriteLine($"  issue: {owner.Repository}#{owner.Issue}; conductor: {owner.ConductorHolder} ({ownership}"
+                + (currentClaim?.Holder is { } current ? $", current {current}" : "") + ")");
             output.WriteLine($"  stage: {status.stage ?? "preparation"}; PR: {(item.PullRequest is null ? "none" : $"#{item.PullRequest}")}");
+            output.WriteLine($"  next: {nextTrigger}; PR head: {status.headSha ?? "not observed"}");
             output.WriteLine($"  daemon: {status.daemon.availability}"
                 + (heartbeat.ObservedAt is { } lastObserved ? $" (last observed {lastObserved:O})" : " (no observation)"));
             if (readiness is not null) output.WriteLine($"  ready receipt: {readiness.Id} at {readiness.ReadyObservedAt:O}");

@@ -304,177 +304,199 @@ public static class QueueCommand
         // invokes this delegate, so it cannot create a suffix or alter the path's trust record.
         try
         {
-        var provisioned = options.Issue is { } issue && !retained
-            ? await issueProvisioner(
-                issue,
-                sourceRepository,
-                effectiveWorktreeRoot,
-                issueRepository!,
-                options.Lifecycle,
-                output,
-                cancellationToken).ConfigureAwait(false)
-            : null;
-        var workspace = retainedProof?.Workspace ?? provisioned?.Workspace ?? Path.GetFullPath(options.WorkspaceDirectory!);
+            var provisioned = options.Issue is { } issue && !retained
+                ? await issueProvisioner(
+                    issue,
+                    sourceRepository,
+                    effectiveWorktreeRoot,
+                    issueRepository!,
+                    options.Lifecycle,
+                    output,
+                    cancellationToken).ConfigureAwait(false)
+                : null;
+            var workspace = retainedProof?.Workspace ?? provisioned?.Workspace ?? Path.GetFullPath(options.WorkspaceDirectory!);
 
-        if (!Directory.Exists(workspace))
-        {
-            throw new CliArgumentException(
-                $"Workspace '{workspace}' does not exist.",
-                "create it, or pass --issue <n> to have the queue provision a worktree for you.");
-        }
+            if (!Directory.Exists(workspace))
+            {
+                throw new CliArgumentException(
+                    $"Workspace '{workspace}' does not exist.",
+                    "create it, or pass --issue <n> to have the queue provision a worktree for you.");
+            }
 
-        // A recorded project ceiling is part of the effective grant, not a permission request.
-        // Refuse before spec/queue/WIP writes. --issue may already have provisioned the named path.
-        var projectAdmission = retainedProof?.Admission ?? RecordedProjectCeilingAdmission.Evaluate(
-            admissionItem with { Workspace = workspace }, role, settings.Queue.RequireDeclaredRequirements);
-        if (projectAdmission.Admission.Result == TaskRequirementAdmission.Refused)
-        {
-            throw new CliArgumentException(
-                projectAdmission.RefusalMessage(workspace, options.Role!),
-                $"choose a role that fits this ceiling, or explicitly trust that exact workspace for the needed categories, then re-add '{tag}'; a provisioned worktree remains.");
-        }
-
-        admission = projectAdmission.Admission;
-
-        // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
-        // times in one evening (#1934 body); an item that launched days later against whatever the
-        // file had become is the failure this copy exists to stop.
-        EnsureQueueSpecsDirectory();
-        var specDestination = BatonPaths.QueueSpecFile(tag);
-
-        // Shipped pools remain one candidate in this migration. Freeze that exact tuple now so a
-        // later tier-file edit cannot change the worker between queue display and launch.
-        var frozenAssignment = FrozenWorkerAssignment.ForLegacyTier(tier, DateTimeOffset.UtcNow);
-        var item = new QueueItem
-        {
-            Tag = tag,
-            Role = options.Role!,
-            Workspace = workspace,
-            SpecFile = specDestination,
-            ScopeClass = options.ScopeClass?.ToLowerInvariant(),
-            Adapter = adapter,
-            Model = options.Model,
-            Effort = options.Effort,
-            WorkerAssignment = frozenAssignment,
-            DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
-            Skills = options.Skills,
-            Requirements = requirements,
-            MemoryAddGrant = requestsMemoryAdd
-                ? new MemoryAddDispatchGrant(Guid.NewGuid().ToString("N"), issueRepository!)
-                : null,
-            LastAdmission = admission,
-            StageSelections = stageSelections,
-            LifecyclePin = options.LifecyclePin,
-            LifecycleReason = options.LifecycleReason,
-            TimeoutMinutes = options.TimeoutMinutes,
-            MaxToolSteps = options.MaxToolSteps,
-            MaxRepeatedToolSteps = options.MaxRepeatedToolSteps,
-            TokenBudget = options.TokenBudget,
-            OverrideRunwayReason = options.OverrideRunwayReason,
-            Reason = options.Reason,
-            Issue = options.Issue,
-            Stage = options.Lifecycle ? WorkStage.Implement : null,
-            // Every --issue row needs the provisioner's exact branch. Lifecycle rows use it for
-            // advancement; ordinary rows retain the same durable anchor for later PR discovery.
-            Branch = retainedProof?.Branch ?? provisioned?.Branch,
-            Repository = issueRepository,
-            // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
-            // whose persisted history has no trustworthy automatic-fix budget.
-            AutomaticFixUsed = options.Lifecycle ? false : null,
-            // A retained checkout was supplied by the operator. Baton proved it safe to reuse, but
-            // did not create it and therefore must never later treat it as cleanup-owned.
-            WorkspaceOrigin = retainedProof is not null
-                ? WorkspaceOrigins.OperatorSupplied
-                : options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
-            RetainedWorktreeReuse = retainedProof is null ? null : new RetainedWorktreeReuse(
-                retainedProof.Repository, retainedProof.Branch, retainedProof.Head, new RetainedWorktreeCeiling(
-                    retainedProof.Ceiling.ReadFiles, retainedProof.Ceiling.WriteFiles,
-                    retainedProof.Ceiling.RunShellCommands, retainedProof.Ceiling.NetworkAccess,
-                    retainedProof.Ceiling.InheritedFrom),
-                retainedProof.TerminalPredecessorTags),
-            AddedAt = DateTimeOffset.UtcNow,
-            OwnedTask = ownedTask,
-            IssuePreparation = options.Lifecycle
-                ? new QueueIssuePreparation(TaskPreparationState.Prepared, DateTimeOffset.UtcNow,
-                    ExpectedBranch: retainedProof?.Branch ?? provisioned?.Branch,
-                    ExpectedWorkspace: workspace)
-                : null,
-        };
-
-        string specContents;
-        if (options.Lifecycle)
-        {
-            // The templates are the product (operator ruling 2026-09-06): a work item's brief is
-            // RENDERED here, not written by hand and copied. A --spec is still honoured -- its text
-            // becomes the template's "## Do" section -- so an operator who has already written the
-            // instructions keeps them, and gets the standing rules and the ship block for free.
-            var (title, body) = specSource is null
-                ? await IssueWorktreeProvisioner.FetchIssueAsync(
-                    options.Issue!.Value, sourceRepository, issueRepository!,
-                    cancellationToken: cancellationToken).ConfigureAwait(false)
-                : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
-
-            // Captured on the ITEM as well as rendered into the brief -- QueueItem.Instructions' own
-            // remarks say why the brief cannot be the register for this.
-            item = item with { Instructions = body.Trim() };
-
-            specContents = QueueBriefTemplates.Compose(
-                WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim()));
-        }
-        else
-        {
-            specContents = await File.ReadAllTextAsync(specSource!, cancellationToken).ConfigureAwait(false);
-        }
-
-        var replaced = false;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
-        {
-            // A tag is an identity, not just a label: it names one spec file, so two items sharing one
-            // would silently share a brief. Re-adding a tag that is still QUEUED replaces it (the
-            // operator is editing their list); re-adding one that has LAUNCHED is refused, because the
-            // running lane's own record would be overwritten.
-            var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
             if (options.Lifecycle)
             {
-                if (existing?.IssuePreparation?.State != TaskPreparationState.Preparing
-                    || existing.Repository != issueRepository || existing.Issue != options.Issue
-                    || existing.OwnedTask?.Id != ownedTask?.Id)
+                // Persist the provisioner's exact result before further admission/brief work. A
+                // crash before this checkpoint remains uncertain; a crash after it has a concrete
+                // workspace/branch to inspect. Neither case authorizes a second provision call.
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
                 {
-                    throw new CliArgumentException($"Issue preparation for '{tag}' changed before commit; its side effects require reconciliation.");
-                }
+                    Items = snapshot.Items.Select(i => i.Tag == tag
+                        && i.IssuePreparation is { State: TaskPreparationState.Preparing } preparation
+                        && i.Repository == issueRepository && i.Issue == options.Issue
+                        ? i with
+                        {
+                            IssuePreparation = preparation with
+                            {
+                                ExpectedBranch = retainedProof?.Branch ?? provisioned?.Branch,
+                                ExpectedWorkspace = workspace,
+                            },
+                        }
+                        : i).ToList(),
+                }, cancellationToken).ConfigureAwait(false);
+            }
+
+            // A recorded project ceiling is part of the effective grant, not a permission request.
+            // Refuse before spec/queue/WIP writes. --issue may already have provisioned the named path.
+            var projectAdmission = retainedProof?.Admission ?? RecordedProjectCeilingAdmission.Evaluate(
+                admissionItem with { Workspace = workspace }, role, settings.Queue.RequireDeclaredRequirements);
+            if (projectAdmission.Admission.Result == TaskRequirementAdmission.Refused)
+            {
+                throw new CliArgumentException(
+                    projectAdmission.RefusalMessage(workspace, options.Role!),
+                    $"choose a role that fits this ceiling, or explicitly trust that exact workspace for the needed categories, then re-add '{tag}'; a provisioned worktree remains.");
+            }
+
+            admission = projectAdmission.Admission;
+
+            // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
+            // times in one evening (#1934 body); an item that launched days later against whatever the
+            // file had become is the failure this copy exists to stop.
+            EnsureQueueSpecsDirectory();
+            var specDestination = BatonPaths.QueueSpecFile(tag);
+
+            // Shipped pools remain one candidate in this migration. Freeze that exact tuple now so a
+            // later tier-file edit cannot change the worker between queue display and launch.
+            var frozenAssignment = FrozenWorkerAssignment.ForLegacyTier(tier, DateTimeOffset.UtcNow);
+            var item = new QueueItem
+            {
+                Tag = tag,
+                Role = options.Role!,
+                Workspace = workspace,
+                SpecFile = specDestination,
+                ScopeClass = options.ScopeClass?.ToLowerInvariant(),
+                Adapter = adapter,
+                Model = options.Model,
+                Effort = options.Effort,
+                WorkerAssignment = frozenAssignment,
+                DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
+                Skills = options.Skills,
+                Requirements = requirements,
+                MemoryAddGrant = requestsMemoryAdd
+                    ? new MemoryAddDispatchGrant(Guid.NewGuid().ToString("N"), issueRepository!)
+                    : null,
+                LastAdmission = admission,
+                StageSelections = stageSelections,
+                LifecyclePin = options.LifecyclePin,
+                LifecycleReason = options.LifecycleReason,
+                TimeoutMinutes = options.TimeoutMinutes,
+                MaxToolSteps = options.MaxToolSteps,
+                MaxRepeatedToolSteps = options.MaxRepeatedToolSteps,
+                TokenBudget = options.TokenBudget,
+                OverrideRunwayReason = options.OverrideRunwayReason,
+                Reason = options.Reason,
+                Issue = options.Issue,
+                Stage = options.Lifecycle ? WorkStage.Implement : null,
+                // Every --issue row needs the provisioner's exact branch. Lifecycle rows use it for
+                // advancement; ordinary rows retain the same durable anchor for later PR discovery.
+                Branch = retainedProof?.Branch ?? provisioned?.Branch,
+                Repository = issueRepository,
+                // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
+                // whose persisted history has no trustworthy automatic-fix budget.
+                AutomaticFixUsed = options.Lifecycle ? false : null,
+                // A retained checkout was supplied by the operator. Baton proved it safe to reuse, but
+                // did not create it and therefore must never later treat it as cleanup-owned.
+                WorkspaceOrigin = retainedProof is not null
+                    ? WorkspaceOrigins.OperatorSupplied
+                    : options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
+                RetainedWorktreeReuse = retainedProof is null ? null : new RetainedWorktreeReuse(
+                    retainedProof.Repository, retainedProof.Branch, retainedProof.Head, new RetainedWorktreeCeiling(
+                        retainedProof.Ceiling.ReadFiles, retainedProof.Ceiling.WriteFiles,
+                        retainedProof.Ceiling.RunShellCommands, retainedProof.Ceiling.NetworkAccess,
+                        retainedProof.Ceiling.InheritedFrom),
+                    retainedProof.TerminalPredecessorTags),
+                AddedAt = DateTimeOffset.UtcNow,
+                OwnedTask = ownedTask,
+                IssuePreparation = options.Lifecycle
+                    ? new QueueIssuePreparation(TaskPreparationState.Prepared, DateTimeOffset.UtcNow,
+                        ExpectedBranch: retainedProof?.Branch ?? provisioned?.Branch,
+                        ExpectedWorkspace: workspace)
+                    : null,
+            };
+
+            string specContents;
+            if (options.Lifecycle)
+            {
+                // The templates are the product (operator ruling 2026-09-06): a work item's brief is
+                // RENDERED here, not written by hand and copied. A --spec is still honoured -- its text
+                // becomes the template's "## Do" section -- so an operator who has already written the
+                // instructions keeps them, and gets the standing rules and the ship block for free.
+                var (title, body) = specSource is null
+                    ? await IssueWorktreeProvisioner.FetchIssueAsync(
+                        options.Issue!.Value, sourceRepository, issueRepository!,
+                        cancellationToken: cancellationToken).ConfigureAwait(false)
+                    : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
+
+                // Captured on the ITEM as well as rendered into the brief -- QueueItem.Instructions' own
+                // remarks say why the brief cannot be the register for this.
+                item = item with { Instructions = body.Trim() };
+
+                specContents = QueueBriefTemplates.Compose(
+                    WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim()));
             }
             else
             {
-                RefuseIfNotReplaceable(existing, tag);
+                specContents = await File.ReadAllTextAsync(specSource!, cancellationToken).ConfigureAwait(false);
             }
 
-            if (retainedProof is not null)
+            var replaced = false;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
-                RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership(
-                    snapshot.Items, retainedProof.Workspace, retainedProof.Branch);
+                // A tag is an identity, not just a label: it names one spec file, so two items sharing one
+                // would silently share a brief. Re-adding a tag that is still QUEUED replaces it (the
+                // operator is editing their list); re-adding one that has LAUNCHED is refused, because the
+                // running lane's own record would be overwritten.
+                var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
+                if (options.Lifecycle)
+                {
+                    if (existing?.IssuePreparation?.State != TaskPreparationState.Preparing
+                        || existing.Repository != issueRepository || existing.Issue != options.Issue
+                        || existing.OwnedTask?.Id != ownedTask?.Id)
+                    {
+                        throw new CliArgumentException($"Issue preparation for '{tag}' changed before commit; its side effects require reconciliation.");
+                    }
+                }
+                else
+                {
+                    RefuseIfNotReplaceable(existing, tag);
+                }
+
+                if (retainedProof is not null)
+                {
+                    RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership(
+                        snapshot.Items, retainedProof.Workspace, retainedProof.Branch);
+                }
+
+                // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
+                // inside the queue's authoritative mutation so a cancellation that wins the same lock is
+                // refused before it can overwrite the retained brief.
+                WriteSpecFile(specDestination, specContents, writeSpecFile ?? WriteSpecFileAtomically);
+
+                replaced = existing is not null;
+                var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
+                items.Add(item);
+                return snapshot with { Items = items };
+            }, cancellationToken).ConfigureAwait(false);
+
+            output.WriteLine($"{(replaced ? "Replaced" : "Queued")} '{tag}' ({item.Role}) in {workspace}");
+            output.WriteLine($"  spec: {specDestination}");
+            output.WriteLine($"  tier: {DescribeTier(tier, adapterFromModel)}");
+            output.WriteLine($"  assignment: {frozenAssignment.Adapter}/{frozenAssignment.Model ?? "role-default"}/{frozenAssignment.Effort ?? "role-default"} ({frozenAssignment.DecisionId})");
+            if (tier.IsOverride)
+            {
+                output.WriteLine($"  override: {tier.OverrideReason}");
             }
 
-            // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
-            // inside the queue's authoritative mutation so a cancellation that wins the same lock is
-            // refused before it can overwrite the retained brief.
-            WriteSpecFile(specDestination, specContents, writeSpecFile ?? WriteSpecFileAtomically);
-
-            replaced = existing is not null;
-            var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
-            items.Add(item);
-            return snapshot with { Items = items };
-        }, cancellationToken).ConfigureAwait(false);
-
-        output.WriteLine($"{(replaced ? "Replaced" : "Queued")} '{tag}' ({item.Role}) in {workspace}");
-        output.WriteLine($"  spec: {specDestination}");
-        output.WriteLine($"  tier: {DescribeTier(tier, adapterFromModel)}");
-        output.WriteLine($"  assignment: {frozenAssignment.Adapter}/{frozenAssignment.Model ?? "role-default"}/{frozenAssignment.Effort ?? "role-default"} ({frozenAssignment.DecisionId})");
-        if (tier.IsOverride)
-        {
-            output.WriteLine($"  override: {tier.OverrideReason}");
-        }
-
-        return 0;
+            return 0;
         }
         catch (Exception ex) when (options.Lifecycle && reserved && ex is not OperationCanceledException)
         {

@@ -134,6 +134,16 @@ public sealed class TaskCommandTests
             Assert.Equal("queued", json.RootElement.GetProperty("state").GetString());
             Assert.Equal("queue-held", json.RootElement.GetProperty("reason").GetString());
             Assert.Equal("conductor-one", json.RootElement.GetProperty("conductorHolder").GetString());
+            Assert.Equal("recorded-holder-current", json.RootElement.GetProperty("ownership").GetString());
+            await ConductorClaimStore.TakeoverAsync(repository, "conductor-two", "handoff", home,
+                cancellationToken: Ct);
+            var afterTakeover = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), afterTakeover,
+                Resolve, Provision, Ct);
+            using var changed = JsonDocument.Parse(afterTakeover.ToString());
+            Assert.Equal("conductor-one", changed.RootElement.GetProperty("conductorHolder").GetString());
+            Assert.Equal("conductor-two", changed.RootElement.GetProperty("currentConductorHolder").GetString());
+            Assert.Equal("holder-changed", changed.RootElement.GetProperty("ownership").GetString());
         }
         finally
         {
@@ -186,6 +196,63 @@ public sealed class TaskCommandTests
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), status, Ct);
             using var json = JsonDocument.Parse(status.ToString());
             Assert.Equal("blocked", json.RootElement.GetProperty("state").GetString());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Task_and_legacy_lifecycle_share_issue_reservation_before_provisioning()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w46");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            var provisions = 0;
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                provisions++;
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "46-lane"));
+            }
+            var task = new TaskOptions(TaskVerb.Submit, 46, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue"), spec);
+            var legacy = new QueueOptions(QueueVerb.Add, Tag: "legacy-46", Role: "implement",
+                SpecFilePath: spec, Issue: 46, Lifecycle: true, Requirements: []);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "legacy-46", Role = "implement", Workspace = workspace,
+                    SpecFile = BatonPaths.QueueSpecFile("legacy-46"),
+                    Repository = repository.Value, Issue = 46, Stage = WorkStage.Implement,
+                }],
+            }, Ct);
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(task, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(0, provisions);
+
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Items = [] }, Ct);
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(task, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(1, provisions);
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                QueueCommand.ExecuteAsync(legacy, TextWriter.Null, Ct, project, Resolve, Provision));
+            Assert.Equal(1, provisions);
         }
         finally
         {

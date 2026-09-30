@@ -166,6 +166,20 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(ready.OwnedTask.Ready?.Id,
                 Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).OwnedTask?.Ready?.Id);
             Assert.True(forge.ReadyCalls <= 1);
+
+            // A later independent PR observation cannot make the old exact-head receipt current.
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                PullRequestObservations = [new QueuePullRequestObservation(Repository, 77, "open",
+                    HeadA, Now, Now, null)],
+            }, Ct);
+            var staleStatus = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status,
+                Id: ready.OwnedTask!.Id, Json: true), staleStatus, Ct);
+            using var status = JsonDocument.Parse(staleStatus.ToString());
+            Assert.Equal("stale", status.RootElement.GetProperty("state").GetString());
+            Assert.Equal(ready.OwnedTask!.Ready!.Id,
+                status.RootElement.GetProperty("ready").GetProperty("Id").GetString());
         }
         finally
         {

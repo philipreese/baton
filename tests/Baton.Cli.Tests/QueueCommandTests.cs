@@ -366,6 +366,8 @@ public sealed class QueueCommandTests
             // retains that reservation as blocked evidence so retry cannot create a second lane.
             var blocked = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Blocked, blocked.IssuePreparation?.State);
+            Assert.Equal(workspace, blocked.IssuePreparation?.ExpectedWorkspace);
+            Assert.Equal("2353-lane", blocked.IssuePreparation?.ExpectedBranch);
             Assert.Equal(2353, blocked.Issue);
             Assert.False(File.Exists(BatonPaths.QueueSpecFile("2353-lane")));
         }
