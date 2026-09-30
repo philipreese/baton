@@ -43,13 +43,21 @@ public static class SteerOptionsParser
     }
 }
 
-/// <summary>One-shot exact-execution steering and durable receipt lookup; never starts a vendor.</summary>
+/// <summary>One-shot exact-execution steering and durable receipt lookup.</summary>
 public static class SteerCommand
 {
     public static async Task<int> ExecuteAsync(SteerOptions options, TextWriter output,
         CancellationToken cancellationToken = default)
     {
         var room = BatonPaths.RecordKey(options.Room);
+        if (new ExecutionCorrectionStore(room).Query(options.ExecutionId) is not null)
+            return await ClaudeCorrectionCommand.ExecuteAsync(options, output, cancellationToken);
+        if (!options.Receipt)
+        {
+            var adapterIdentity = await InspectTargetAsync(room, options.ExecutionId, cancellationToken);
+            if (string.Equals(adapterIdentity.Adapter, "claude", StringComparison.OrdinalIgnoreCase))
+                return await ClaudeCorrectionCommand.ExecuteAsync(options, output, cancellationToken);
+        }
         var store = new SteeringMessageStore(room);
         var endpoint = CodexSteeringEndpoint.TryRead(room, options.ExecutionId);
 
@@ -84,7 +92,7 @@ public static class SteerCommand
                 state = "unsupported",
                 executionId = options.ExecutionId,
                 adapter = target.Adapter,
-                reason = "This slice only supports the running Codex app-server broker."
+                reason = "Local steering supports running Codex broker turns and verified Claude executions; this adapter is unsupported."
             })
                 .ConfigureAwait(false);
             return 1;
@@ -214,7 +222,7 @@ public static class SteerCommand
         && request.BrokerIncarnation == endpoint.BrokerIncarnation
         && request.ThreadId == endpoint.ThreadId && request.TurnId == endpoint.TurnId;
 
-    private static async Task<(bool Live, string? Adapter, uint Pid, DateTime? StartUtc)> InspectTargetAsync(
+    internal static async Task<(bool Live, string? Adapter, uint Pid, DateTime? StartUtc)> InspectTargetAsync(
         string room, string executionId, CancellationToken cancellationToken)
     {
         var journal = await new FlowEventLogReader(Path.Combine(room, BatonPaths.FlowLogFileName))

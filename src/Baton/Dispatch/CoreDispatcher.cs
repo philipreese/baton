@@ -101,7 +101,9 @@ public sealed record CoreDispatchTarget(
     // #2002: the adapter may interpret each complete, line-framed stdout record and return the one
     // typed fact the outcome classifier needs. Core never parses vendor envelopes or retains their
     // unbounded stream; the adapter owns its bounded structured state.
-    Func<string, OutstandingToolAtTerminalSuccess?>? DetectsOutstandingToolAtTerminalSuccess = null)
+    Func<string, OutstandingToolAtTerminalSuccess?>? DetectsOutstandingToolAtTerminalSuccess = null,
+    // Adapter-owned observation of process stdout, scoped to an execution, not a mutable artifact.
+    Func<string, Action<string>>? CreateExecutionStdoutObserver = null)
 {
     /// <summary>Returns a target whose broker is restricted to the named declared-output tools.</summary>
     public CoreDispatchTarget WithArtifactOnlyOutputs(IReadOnlyList<string> outputNames)
@@ -1060,10 +1062,18 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         var detectsTerminalSuccess = target.DetectsTerminalSuccess;
         var detectsTerminalResult = target.DetectsTerminalResult;
         var detectsOutstandingTool = target.DetectsOutstandingToolAtTerminalSuccess;
-        Action<string>? stdoutLineSink = target.OnStdoutLine;
+        var executionObserver = pathVariables.TryGetValue("BATON_OUTPUT_DIR", out var observerOutput)
+            ? target.CreateExecutionStdoutObserver?.Invoke(observerOutput) : null;
+        Action<string>? progressSink = target.OnStdoutLine;
+        if (executionObserver is not null)
+        {
+            var inner = progressSink;
+            progressSink = line => { executionObserver(line); inner?.Invoke(line); };
+        }
+        Action<string>? stdoutLineSink = progressSink;
         if (detectsTerminalSuccess is not null || detectsTerminalResult is not null || detectsOutstandingTool is not null)
         {
-            var innerProgress = target.OnStdoutLine;
+            var innerProgress = progressSink;
             stdoutLineSink = line =>
             {
                 innerProgress?.Invoke(line);

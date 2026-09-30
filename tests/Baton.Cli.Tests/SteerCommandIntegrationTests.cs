@@ -151,7 +151,7 @@ public sealed class SteerCommandIntegrationTests
     public async Task Unsupported_adapter_and_stale_turn_never_send_native_bytes()
     {
         if (!OperatingSystem.IsWindows()) return;
-        var (unsupportedRoom, unsupportedOutput, textFile) = await SetUpRoomAsync("claude");
+        var (unsupportedRoom, unsupportedOutput, textFile) = await SetUpRoomAsync("agy");
         try
         {
             using var nativeInput = new ConcurrentTextWriter();

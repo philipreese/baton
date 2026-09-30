@@ -22,6 +22,11 @@ if (args.Length == 1 && args[0] == "--version")
 // boundary): none of that applies, and this needs to stay a fast, dependency-free stdin round trip
 // since PreToolUse blocks the model's turn until it returns. Not listed in the usage banner below --
 // an operator never types this, Claude Code does.
+if (args.Length == 1 && args[0] == "claude-correction-address")
+    return ClaudeCorrectionCommand.PublishAddress(Console.In, Console.Error);
+if (args.Length == 2 && args[0] == "claude-correction-guard")
+    return await ClaudeCorrectionCommand.GuardAsync(args[1], Console.In, Console.Out);
+
 if (args.Length >= 1 && args[0] == "hook-check")
 {
     var deniedTools = Environment.GetEnvironmentVariable(HookCheckCommand.DeniedToolsEnvironmentVariable);

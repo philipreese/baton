@@ -346,7 +346,8 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         return new CoreDispatchTarget(
             "claude", [.. args], invocation.WorkingDirectory, PromptText: prompt,
             Environment: [.. environment], OversizePromptWrapper: OversizePromptWrapperText,
-            SeedCopies: skillSeedCopies);
+            SeedCopies: skillSeedCopies,
+            CreateExecutionStdoutObserver: ClaudeCorrectionEndpoint.CreateObserver);
     }
 
     /// <summary>
@@ -619,6 +620,16 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         {
             hooks = new
             {
+                SessionStart = new[]
+                {
+                    new
+                    {
+                        hooks = new[]
+                        {
+                            new { type = "command", command = "dotnet", args = new[] { hookAssemblyPath, "claude-correction-address" } },
+                        },
+                    },
+                },
                 PreToolUse = new[]
                 {
                     new

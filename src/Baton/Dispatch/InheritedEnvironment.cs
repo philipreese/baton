@@ -42,7 +42,7 @@ namespace Baton.Dispatch;
 /// chooses everywhere.
 /// </para>
 /// </remarks>
-internal static class InheritedEnvironment
+public static class InheritedEnvironment
 {
     /// <summary>Meaningful on every platform AER runs on.</summary>
     private static readonly string[] Common =
