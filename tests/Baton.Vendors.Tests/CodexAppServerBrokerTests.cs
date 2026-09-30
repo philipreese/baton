@@ -354,36 +354,64 @@ public sealed class CodexAppServerBrokerTests
         Assert.Equal(string.Empty, error.ToString());
     }
 
-    [Fact]
-    public async Task Production_cleanup_observes_a_stderr_drain_that_faults_after_its_deadline()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Production_cleanup_observes_a_stderr_drain_that_faults_after_its_deadline(bool faultBeforeCleanup)
     {
         var processExited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var process = StartSleepingProcess();
         process.EnableRaisingEvents = true;
         process.Exited += (_, _) => processExited.TrySetResult();
         var stderrDrain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var error = new SignalingStringWriter("stderr drain failed after its deadline");
+        var releaseCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // A drain that has already faulted can propagate through the outer cleanup observer.
+        // Its exception must be retained; the winning observer's phase label is not the contract.
+        using var error = new SignalingStringWriter("late stderr fault");
         var stopwatch = Stopwatch.StartNew();
 
-        var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
-            _ => Task.FromResult(new JsonObject { ["ok"] = true }),
-            token => CodexAppServerBroker.StopRateLimitsProcessAsync(
-                process, stderrDrain.Task, error, token),
-            error,
-            TimeSpan.FromSeconds(60),
-            TimeSpan.FromMilliseconds(50),
-            TestContext.Current.CancellationToken);
+        try
+        {
+            var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+                _ => Task.FromResult(new JsonObject { ["ok"] = true }),
+                async token =>
+                {
+                    if (faultBeforeCleanup)
+                        await releaseCleanup.Task;
+                    await CodexAppServerBroker.StopRateLimitsProcessAsync(process, stderrDrain.Task, error, token);
+                },
+                error,
+                TimeSpan.FromSeconds(60),
+                TimeSpan.FromMilliseconds(50), // wait-ok: deliberately expire cleanup before releasing the fixture
+                TestContext.Current.CancellationToken);
 
-        stopwatch.Stop();
-        Assert.True(result!["ok"]!.GetValue<bool>());
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"elapsed {stopwatch.Elapsed}");
-        Assert.Contains("cleanup did not finish within", error.ToString(), StringComparison.Ordinal);
-        await processExited.Task.WaitAsync(
-            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            stopwatch.Stop();
+            Assert.True(result!["ok"]!.GetValue<bool>());
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"elapsed {stopwatch.Elapsed}");
+            Assert.Contains("cleanup did not finish within", error.ToString(), StringComparison.Ordinal);
+            if (faultBeforeCleanup)
+            {
+                process.Kill(entireProcessTree: true);
+                await processExited.Task.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+                stderrDrain.SetException(new IOException("late stderr fault"));
+            }
+            releaseCleanup.SetResult();
+            await processExited.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); // wait-ok: preserve the original child-exit assertion bound
 
-        stderrDrain.SetException(new IOException("late stderr fault"));
-        await error.Signal.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
-        Assert.Contains("late stderr fault", error.ToString(), StringComparison.Ordinal);
+            if (!faultBeforeCleanup)
+                stderrDrain.SetException(new IOException("late stderr fault"));
+            await error.Signal.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            Assert.Contains("late stderr fault", error.ToString(), StringComparison.Ordinal);
+            if (faultBeforeCleanup)
+                Assert.Contains("cleanup failed after its deadline", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            // An earlier assertion must not strand the owned cleanup behind the test gate.
+            releaseCleanup.TrySetResult();
+            stderrDrain.TrySetException(new IOException("late stderr fault"));
+        }
     }
 
     [Fact]
