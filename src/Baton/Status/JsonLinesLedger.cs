@@ -244,6 +244,8 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// nesting ledger mutexes, provided it propagates sharing/I/O failures as a publication fence.
     /// With <paramref name="requireReadable"/>, only an open reporting a missing file/directory
     /// means empty; File.Exists must not disguise a denied or invalid canonical input as absence.
+    /// <paramref name="parseStrict"/> rejects invalid UTF-8, blank rows, malformed JSON, and null rows;
+    /// ordinary callers retain the historical tolerant behavior.
     /// </summary>
     internal IReadOnlyList<TEntry> ReadAllUnlocked(
         string ledgerFilePath, bool requireReadable = false, bool parseStrict = false)
@@ -257,11 +259,27 @@ internal sealed class JsonLinesLedger<TEntry>(
         try
         {
             using var stream = new FileStream(ledgerFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new StreamReader(stream, Encoding.UTF8);
+            using var reader = new StreamReader(
+                stream,
+                parseStrict ? new UTF8Encoding(false, true) : Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: !parseStrict);
             text = reader.ReadToEnd();
         }
         catch (FileNotFoundException) { return []; }
         catch (DirectoryNotFoundException) { return []; }
+        catch (DecoderFallbackException ex) when (parseStrict)
+        {
+            throw new InvalidDataException(
+                $"Canonical ledger '{ledgerFilePath}' is not valid UTF-8.", ex);
+        }
+
+        // Keep strict input UTF-8 even when a BOM is present: StreamReader's BOM detection can
+        // replace the throwing decoder with a permissive one. Decode as UTF-8 and remove only its
+        // optional leading BOM instead.
+        if (parseStrict && text.Length > 0 && text[0] == '\uFEFF')
+        {
+            text = text[1..];
+        }
 
         var result = new List<TEntry>();
         var lines = text.Split('\n');
@@ -270,6 +288,15 @@ internal sealed class JsonLinesLedger<TEntry>(
             var line = lines[index].Trim();
             if (line.Length == 0)
             {
+                var isFinalLineTerminator = index == lines.Length - 1
+                    && text.Length > 0
+                    && text.EndsWith('\n');
+                if (parseStrict && text.Length > 0 && !isFinalLineTerminator)
+                {
+                    throw new InvalidDataException(
+                        $"Canonical ledger '{ledgerFilePath}' contains a blank or whitespace-only row at line {index + 1}.");
+                }
+
                 continue;
             }
             TEntry? entry;

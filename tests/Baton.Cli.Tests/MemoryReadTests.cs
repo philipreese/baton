@@ -3,6 +3,7 @@ using Baton.Cli;
 using Baton.Memory;
 using Baton.Status;
 using Baton.Tests.Shared;
+using System.Text;
 using System.Text.Json;
 
 namespace Baton.Cli.Tests;
@@ -116,6 +117,58 @@ public sealed class MemoryReadTests : IDisposable
         var output = new StringWriter();
         Assert.Equal(1, await ReadAsync(output));
         Assert.Equal(string.Empty, output.ToString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Invalid_utf8_inside_a_retraction_id_refuses_without_resurrecting_the_entry(bool includeUtf8Bom)
+    {
+        var entry = Entry(Repository, "fixture withdrawn memory");
+        await MemoryStore.AppendAsync([entry], Entries(Repository), TestContext.Current.CancellationToken);
+        var retractions = BatonPaths.MemoryRetractionsFile(Slug(Repository));
+        Directory.CreateDirectory(Path.GetDirectoryName(retractions)!);
+        var prefix = Encoding.UTF8.GetBytes("{\"entryId\":\"");
+        var suffix = Encoding.UTF8.GetBytes("\",\"repository\":\"github.com/owner/repo\",\"reason\":\"fixture\",\"retractedBy\":\"operator\",\"retractedAtUtc\":\"1970-01-01T00:00:00Z\"}\n");
+        var bom = includeUtf8Bom ? new byte[] { 0xEF, 0xBB, 0xBF } : [];
+        File.WriteAllBytes(retractions, [.. bom, .. prefix, 0xFF, .. suffix]);
+
+        var output = new StringWriter();
+        var exitCode = await ReadAsync(output);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+    }
+
+    [Fact]
+    public async Task Whitespace_only_retraction_rows_refuse_without_output()
+    {
+        await MemoryStore.AppendAsync([Entry(Repository, "fixture withdrawn memory")], Entries(Repository),
+            TestContext.Current.CancellationToken);
+        var retractions = BatonPaths.MemoryRetractionsFile(Slug(Repository));
+        Directory.CreateDirectory(Path.GetDirectoryName(retractions)!);
+        File.WriteAllText(retractions, " \t\n");
+
+        var output = new StringWriter();
+        var exitCode = await ReadAsync(output);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+    }
+
+    [Fact]
+    public async Task Empty_retraction_ledger_is_valid_and_keeps_the_entry_usable()
+    {
+        var entry = Entry(Repository, "fixture canonical memory");
+        await MemoryStore.AppendAsync([entry], Entries(Repository), TestContext.Current.CancellationToken);
+        var retractions = BatonPaths.MemoryRetractionsFile(Slug(Repository));
+        Directory.CreateDirectory(Path.GetDirectoryName(retractions)!);
+        File.WriteAllText(retractions, string.Empty);
+
+        var output = new StringWriter();
+        Assert.Equal(0, await ReadAsync(output));
+
+        Assert.Contains("fixture canonical memory", output.ToString());
     }
 
     [Fact]
