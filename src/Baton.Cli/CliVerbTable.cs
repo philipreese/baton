@@ -52,6 +52,8 @@ public static class CliVerbTable
         new("daemon", false, [], ["baton daemon"]),
         new("--version", true, [new("baton --version*", typeof(VersionInfo))], []),
         new("hook-check", true, [], ["baton hook-check"]),
+        new("claude-correction-address", true, [], ["baton claude-correction-address"]),
+        new("claude-correction-guard", true, [], ["baton claude-correction-guard C:/rooms/other-room/steering/contract.json"]),
         new("agy-hook-check", true, [], ["baton agy-hook-check"]),
         new("codex-broker", true, [], ["baton codex-broker"]),
     ];

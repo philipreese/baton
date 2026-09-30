@@ -6448,7 +6448,7 @@ and for which realization does what to a package's bytes.
   `baton steer <room-dir> --execution <id> --message-id <id> --file <text-file>` routes a text
   correction to the exact *running Codex app-server broker turn* already owned by Baton on
   Windows. It neither
-  starts a worker nor changes its frozen permission grant. Claude and AGY return `unsupported`;
+  starts a worker nor changes its frozen permission grant. AGY returns `unsupported`;
   desktop-session injection, phone/Glass writes, and automatic continuation remain out of scope.
   A conductor may query `baton steer <room-dir> --execution <id> --message-id <id> --receipt`.
   The room journal owns immutable request, write-ahead send-started, and semantic transport-response
@@ -6462,6 +6462,27 @@ and for which realization does what to a package's bytes.
   incarnation, thread and turn. A descriptor is routing, not authentication. Existing older Baton
   binaries are not compatible with these new room-event variants: use isolated unregistered rooms
   until every reader on a room is upgraded.
+  **Claude correction exception (#2513, operator approved 2026-09-30):** the same command may send
+  one explicit correction to an exact already-running Baton-owned Claude execution on Windows.
+  Native delivery may cause one peer-origin follow-up before that same process exits; the worker's
+  frozen permissions, process lifetime, and remaining execution budget do not reset or expand.
+  No exited execution is restarted or resumed. A native SessionStart hook publishes only the inbox
+  address and session identity; the dispatcher independently observes native init from actual stdout.
+  Their matching identity lives outside the writable outbox and must agree with the authoritative
+  execution journal, live PID/start time, and OS principal. This is grant-boundary separation, not an
+  OS security boundary against unrestricted same-user shell access. No native credential is read.
+  A separate native subscription courier uses Haiku with `--max-turns 2`, a USD 0.20 native spend
+  limit, and a 70-second process-tree timeout. The native result's `num_turns` counter is not a
+  Baton-enforced turn bound. Its only tool is SendMessage; an exact-target/payload
+  hook durably admits that tool once after rechecking the receiver. The courier's bounded transcript,
+  including native usage results when present, remains under the room's steering directory.
+  One correction claim per execution is fsynced before courier launch; a separate fsynced admission
+  precedes native send. These side journals use room-events.lock but are not compacted room events.
+  Conflicting submissions fail, identical submissions only return retained evidence, and unanswered
+  or interrupted attempts remain `outcomeUnknown`; they never authorize retry or retargeting.
+  A matched native message receipt yields `transportAcknowledged`, not consumption or compliance.
+  Receipt lookup starts no model. General automated continuation, remote writes, and desktop injection
+  remain excluded; only this explicitly requested same-process peer follow-up is permitted.
 - **Phone pairing and remote *viewing* infrastructure built for a paired client.** `PairedClientsStore`
   and WebSocket broadcast (§7) are archived; the mailbox (§6) is the harness-era replacement for
   "something remote learns what happened," not a client-pairing model. The tailnet drill-down page
