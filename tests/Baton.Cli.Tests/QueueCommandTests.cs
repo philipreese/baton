@@ -2167,27 +2167,70 @@ public sealed class QueueCommandTests
         }
     }
 
-    [Fact]
-    public async Task List_fails_when_a_stale_remedy_references_an_unreadable_room()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task List_text_keeps_healthy_rows_when_room_evidence_is_unavailable(bool damagedRowFirst)
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
+            const string healthyError = "ordinary historical failure";
+            const string damagedError = "settled indeterminate — awaiting conductor resolution";
+            var damagedRoom = Path.Combine(home, "missing-room");
+            var healthy = SettlementQueueItem("healthy", roomDirectory: null, error: healthyError);
+            var damaged = SettlementQueueItem("damaged", damagedRoom, damagedError);
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
             {
-                Items = [new QueueItem
-                {
-                    Tag = "unreadable-room", Role = "implement", Workspace = home,
-                    SpecFile = BatonPaths.QueueSpecFile("unreadable-room"), State = QueueItemState.Failed,
-                    RoomDirectory = Path.Combine(home, "missing-room"),
-                    Error = "settled indeterminate — awaiting conductor resolution",
-                }],
+                Held = true,
+                Items = damagedRowFirst ? [damaged, healthy] : [healthy, damaged],
+            }, Ct);
+            var queueBytes = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct));
+
+            var printed = output.ToString();
+            Assert.Contains("Queue is HELD", printed, StringComparison.Ordinal);
+            Assert.Contains("healthy  failed  implement", printed, StringComparison.Ordinal);
+            Assert.Contains("damaged  failed  implement", printed, StringComparison.Ordinal);
+            Assert.Contains($"error: {healthyError}", printed, StringComparison.Ordinal);
+            Assert.Contains($"error: {damagedError}", printed, StringComparison.Ordinal);
+            Assert.Contains("room evidence unavailable: Could not read durable terminal state", printed, StringComparison.Ordinal);
+            Assert.DoesNotContain("settlement: conductor", printed, StringComparison.Ordinal);
+            var healthyIndex = printed.IndexOf("healthy  failed", StringComparison.Ordinal);
+            var damagedIndex = printed.IndexOf("damaged  failed", StringComparison.Ordinal);
+            Assert.True(damagedRowFirst ? damagedIndex < healthyIndex : healthyIndex < damagedIndex);
+            Assert.Equal(queueBytes, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_text_reports_typed_corrupt_room_evidence_without_fabricating_settlement()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string stale = "settled indeterminate — awaiting conductor resolution";
+            var room = await CreateCaptureRoomAsync(home, "corrupt-room", accepted: true);
+            await File.AppendAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{broken\n", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [SettlementQueueItem("corrupt-room", room, stale)],
             }, Ct);
 
-            var ex = await Assert.ThrowsAsync<QueueStoreException>(() => QueueCommand.ExecuteAsync(
-                new QueueOptions(QueueVerb.List), TextWriter.Null, Ct));
-            Assert.Contains("Could not read durable terminal state", ex.Message, StringComparison.Ordinal);
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct));
+
+            Assert.Contains($"error: {stale}", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("room evidence unavailable: Could not read durable terminal state", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("settlement: conductor", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {

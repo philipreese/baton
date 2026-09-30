@@ -989,7 +989,9 @@ public static class QueueCommand
         }
 
         var rows = await QueueInspectionProjection
-            .ProjectAsync(items, snapshot.PullRequestObservations, decisions, cancellationToken)
+            .ProjectAsync(
+                items, snapshot.PullRequestObservations, decisions, cancellationToken,
+                captureUnavailableRoomEvidence: true)
             .ConfigureAwait(false);
         var settings = snapshot.Items.Any(i => i.Stage is not null)
             ? (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false)).Queue
@@ -1076,6 +1078,10 @@ public static class QueueCommand
             else if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");
+            }
+            if (row.Room.ObservationError is { Length: > 0 } observationError)
+            {
+                output.WriteLine($"  room evidence unavailable: {observationError}");
             }
             output.WriteLine(row.Requirements.Declared is null
                 ? "  requirements: unknown (legacy migration row)"
