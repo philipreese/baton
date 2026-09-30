@@ -74,7 +74,7 @@ public sealed class CodexReadinessDecisionAdapterTests
         async Task SimulateWriteThroughLatency(FileStream _, CancellationToken token)
         {
             Interlocked.Increment(ref writes);
-            await Task.Delay(TimeSpan.FromMilliseconds(75), token);
+            await Task.Delay(TimeSpan.FromMilliseconds(75), token); // wait-ok: injected per-write storage latency, not a completion ceiling
         }
 
         using var run = new FakeCodexRun(mode,
