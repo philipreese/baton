@@ -7,23 +7,19 @@ using Baton.Vendors;
 namespace Baton.Cli.Tests;
 
 /// <summary>
-/// The ordering <c>QueueLauncher</c> reads as a discriminator: every pre-provision refusal
-/// <see cref="DispatchCommand.ExecuteAsync"/> can make happens <em>above</em> its
-/// <c>Directory.CreateDirectory(options.RoomDirectoryPath)</c>, so "the room now exists" tells a
-/// refusal apart from a launch (<c>QueueLauncher.LaunchAsync</c>'s refusal-window poll, and the
-/// <see cref="QueueLauncher.RefusalWindow"/> backstop behind it).
+/// The direct dispatch method refuses before its own provisioning line. The CLI boundary may then
+/// write a validation sentinel into that directory, so <c>QueueLauncher</c> uses a real flow ledger
+/// to tell a launch apart from a refusal; this suite pins the dispatch method's ordering only.
 /// <para>
 /// Pinned here because that claim was prose only (#1939 review, first round's LOW and second round's):
-/// nothing failed if a future edit provisioned earlier, and the launcher would then have reported a
-/// refusal as a running lane — an item marked launched against a worker that never started, resolvable
-/// only by the roomless sweep it no longer qualifies for.
+/// nothing failed if a future edit provisioned earlier, potentially changing which facts a refused
+/// child leaves for the launcher to classify.
 /// </para>
 /// <para>
 /// The arms assert on the <b>directory</b>, not on <c>bindings.json</c> (which
-/// <c>RunwayHoldDispatchTests</c> checks for its own, narrower purpose): the directory is what the
-/// launcher actually polls, and a room created empty would pass a file-level check while breaking the
-/// discriminator. The runway-hold arm is the load-bearing one — it is the refusal that sits closest to
-/// the provisioning line — and the admitted control below is what rules out the whole class of "the
+/// <c>RunwayHoldDispatchTests</c> checks for its own, narrower purpose): an empty room would pass a
+/// file-level check while changing the dispatch ordering. The runway-hold arm is the load-bearing
+/// one — it sits closest to the provisioning line — and the admitted control below rules out "the
 /// dispatch never got far enough to create anything".
 /// </para>
 /// </summary>
@@ -97,7 +93,7 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
             Assert.Contains(expectedInMessage, refused.Message, StringComparison.Ordinal);
             Assert.False(
                 Directory.Exists(options.RoomDirectoryPath),
-                $"'{refusal}' refused after provisioning the room, so QueueLauncher would read it as a launch.");
+                $"'{refusal}' refused after DispatchCommand provisioned the room.");
         }
         finally
         {

@@ -8378,10 +8378,13 @@ cannot distinguish a runway hold from a bad spec. What that bought was measured 
 the daemon exited 70 with two lanes live: a pump that is a task inside the daemon cannot outlive it,
 and its workers sat in a job the daemon owned, so both lanes died with it, both rooms kept
 `flow.lock` with no pump, and one worktree kept five uncommitted files. The exit-code objection is
-answered without an exit code: every pre-provision refusal happens before the room directory exists
-(`DispatchPreProvisionOrderingTests`), so a child that exits with no room refused, and whether it
-refused for a **hold** is read off the **runway admission ledger** — the `held` row the child wrote
-against that very room before refusing (§7's runway hold; `QueueLauncher.ClassifyPreProvisionExit`).
+answered without an exit code: a child that exits without a real flow ledger never started a worker.
+The CLI may write a pre-ledger validation sentinel, creating the room directory even for a refusal;
+directory existence alone is not a launch signal (#2524). While the child runs, the launcher waits
+for either its exit or a real flow ledger, with a bounded fallback for a still-unresolved child.
+Whether a pre-ledger exit was refused for a **hold** is read off the **runway admission ledger** —
+the `held` row the child wrote against that very room before refusing (§7's runway hold;
+`QueueLauncher.ClassifyPreProvisionExit`).
 A row against another room or a `held-overridden` row does not count, and an unreadable ledger
 degrades to a failed item carrying the child's own last stderr lines rather than a hold nothing
 recorded.
