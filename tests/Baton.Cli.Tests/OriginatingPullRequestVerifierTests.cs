@@ -414,7 +414,8 @@ public sealed class OriginatingPullRequestVerifierTests
     [InlineData("duplicate-placement")]
     public async Task Preserved_continuation_accepts_only_a_bound_prior_engine_placement(string scenario)
     {
-        using var home = new IsolatedBatonHome();
+        // Relative-path evidence must resolve to the same file even when TEMP is on another drive.
+        using var home = new IsolatedBatonHome(scenario == "relative-manifest" ? Directory.GetCurrentDirectory() : null);
         var workspace = Directory.CreateDirectory(Path.Combine(home.Path, "workspace")).FullName;
         await RunRealGitAsync(workspace, "init", "-q");
         await RunRealGitAsync(workspace, "config", "user.name", "Baton Test");
@@ -507,6 +508,7 @@ public sealed class OriginatingPullRequestVerifierTests
                 {
                     var relativePlacement = Path.GetRelativePath(Directory.GetCurrentDirectory(), projected);
                     Assert.False(Path.IsPathFullyQualified(relativePlacement));
+                    Assert.Equal(projected, Path.GetFullPath(relativePlacement));
                     await using var relative = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
                     await relative.AppendAsync(new FlowEvent.EngineFilesPlaced(new ExecutionId("placed-execution"),
                         [new EnginePlacedFile(relativePlacement, EnginePlacedFile.TryDigest(projected))], []),
