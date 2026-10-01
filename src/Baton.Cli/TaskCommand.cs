@@ -166,6 +166,11 @@ public static class TaskCommand
             reason = string.IsNullOrWhiteSpace(item.Error) ? "task-failed" : item.Error;
         if (state == "stale")
             reason = item.Error ?? (headChanged ? "observed-pr-head-changed" : "readiness-evidence-no-longer-current");
+        // Retirement is the current disposition; an older attempt error remains history, not its
+        // reason. Legacy records with no reason say so without inventing delivery or recovery.
+        if (item.Retirement is { } retirement)
+            reason = string.IsNullOrWhiteSpace(retirement.Reason)
+                ? "retirement-reason-unavailable" : retirement.Reason;
         var nextTrigger = state switch
         {
             "preparing" => "preparation-completion",
@@ -184,6 +189,7 @@ public static class TaskCommand
             ownership,
             state,
             reason,
+            retirement = item.Retirement,
             nextTrigger,
             stage = item.Stage is { } stage ? WorkStages.Token(stage) : null,
             attemptId = item.AttemptId?.Value,
@@ -224,10 +230,12 @@ public static class TaskCommand
             output.WriteLine($"Task {owner.Id}: {state}" + (reason is null ? "" : $" ({reason})"));
             output.WriteLine($"  issue: {owner.Repository}#{owner.Issue}; conductor: {owner.ConductorHolder} ({ownership}"
                 + (currentClaim?.Holder is { } current ? $", current {current}" : "") + ")");
+            if (item.Retirement is { } recordedRetirement)
+                output.WriteLine($"  retirement: {recordedRetirement.Kind} at {recordedRetirement.At:O}; reason: {reason}");
             output.WriteLine($"  stage: {status.stage ?? "preparation"}; PR: {(item.PullRequest is null ? "none" : $"#{item.PullRequest}")}");
             output.WriteLine($"  next: {nextTrigger}; PR head: {status.headSha ?? "not observed"}");
             if (item.ChecksObservedAt is not null || item.Error is not null)
-                output.WriteLine($"  latest checks: {item.Checks ?? "unknown"}"
+                output.WriteLine($"  latest checks{(item.Retirement is null ? "" : " (historical)")}: {item.Checks ?? "unknown"}"
                     + (item.ChecksObservedAt is { } checksAt ? $" at {checksAt:O}" : "")
                     + (item.Error is null ? "" : $"; {item.Error}"));
             output.WriteLine($"  daemon: {status.daemon.availability}"

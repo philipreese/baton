@@ -7968,6 +7968,11 @@ Failed task launches display as blocked with their retained error (or `task-fail
 and `conductor-judgment` as the next trigger, never as queued work awaiting a daemon tick (#2530).
 Retirement, cancellation and preparation retain their existing precedence. Reading status does not
 create a blocked receipt or mutate the queue; any earlier ready receipt remains historical evidence.
+For a retired task, status exposes the retained retirement kind, time, and recorded reason; a nonblank
+retirement reason is the current status reason. If a legacy retirement has no nonblank reason, status
+uses the neutral `retirement-reason-unavailable` fallback without inventing a merge or success.
+The text view labels any retained attempt error as historical; retirement remains terminal with
+`nextTrigger: none` and does not rewrite the queue row or its earlier failure evidence.
 
 The identity is the canonical repository plus issue, independent of checkout path or queue tag.
 Task and legacy `queue add --issue --lifecycle` admissions reserve that identity under the same

@@ -293,10 +293,16 @@ public sealed class TaskCommandTests
             Assert.Equal(expectedTrigger, json.RootElement.GetProperty("nextTrigger").GetString());
             Assert.Equal("recorded-owner", json.RootElement.GetProperty("conductorHolder").GetString());
             Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("blocked").ValueKind);
+            Assert.Equal(retired ? JsonValueKind.Object : JsonValueKind.Null,
+                json.RootElement.GetProperty("retirement").ValueKind);
             var text = new StringWriter();
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), text, Ct);
             Assert.Contains(expectedState, text.ToString(), StringComparison.Ordinal);
             Assert.Contains($"next: {expectedTrigger}", text.ToString(), StringComparison.Ordinal);
+            if (retired)
+                Assert.Equal("retained", json.RootElement.GetProperty("reason").GetString());
+            else
+                Assert.DoesNotContain("latest checks (historical)", text.ToString(), StringComparison.Ordinal);
             if (expectedState == "blocked")
             {
                 var expectedReason = string.IsNullOrWhiteSpace(error) ? "task-failed" : error;
@@ -304,6 +310,73 @@ public sealed class TaskCommandTests
                 Assert.Contains(expectedReason, text.ToString(), StringComparison.Ordinal);
             }
             Assert.Equal(before, await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(QueueRetirement.Operator, "operator handled the failed attempt", "operator handled the failed attempt")]
+    [InlineData(QueueRetirement.Merged, "merged PR #50", "merged PR #50")]
+    [InlineData(QueueRetirement.Operator, null, "retirement-reason-unavailable")]
+    [InlineData(QueueRetirement.Merged, " ", "retirement-reason-unavailable")]
+    public async Task Retired_task_status_reports_disposition_and_labels_old_attempt_error_as_history(
+        string kind, string? recordedReason, string expectedReason)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            const string oldError = "earlier launch failed";
+            var id = TaskCommand.TaskId(repository, 50);
+            var retiredAt = new DateTimeOffset(2026, 9, 29, 21, 0, 0, TimeSpan.Zero);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id,
+                    Role = "implement",
+                    Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id),
+                    Repository = repository,
+                    Issue = 50,
+                    Stage = WorkStage.Continue,
+                    State = QueueItemState.Failed,
+                    Halted = true,
+                    Error = oldError,
+                    Retirement = new QueueRetirement(kind, retiredAt, recordedReason!),
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 50, "digest", "recorded-owner", retiredAt),
+                }],
+            }, Ct);
+            var before = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            var status = json.RootElement;
+            Assert.Equal("retired", status.GetProperty("state").GetString());
+            Assert.Equal(expectedReason, status.GetProperty("reason").GetString());
+            Assert.Equal("none", status.GetProperty("nextTrigger").GetString());
+            var retirement = status.GetProperty("retirement");
+            Assert.Equal(kind, retirement.GetProperty("kind").GetString());
+            Assert.Equal(retiredAt, retirement.GetProperty("at").GetDateTimeOffset());
+            Assert.Equal(recordedReason, retirement.GetProperty("reason").GetString());
+            Assert.Equal(oldError, status.GetProperty("latestChecks").GetProperty("error").GetString());
+            Assert.Equal(JsonValueKind.Null, status.GetProperty("ready").ValueKind);
+            Assert.Equal(JsonValueKind.Null, status.GetProperty("blocked").ValueKind);
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            var text = textOutput.ToString();
+            Assert.Contains($"retirement: {kind} at {retiredAt:O}; reason: {expectedReason}", text,
+                StringComparison.Ordinal);
+            Assert.Contains($"latest checks (historical): unknown; {oldError}", text, StringComparison.Ordinal);
+            Assert.Contains("next: none", text, StringComparison.Ordinal);
+            Assert.Equal(before, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
         }
         finally
         {
