@@ -42,6 +42,8 @@ public static class CliVerbTable
                 "baton memory retract 0123456789abcdef0123456789abcdef --reason x"]),
         new("audit", false, [new("baton audit lanes*", typeof(AuditLanesCommand))], []),
         new("queue", false, [], ["baton queue add fix-2114 --role implement --spec brief.md --issue 2114", "baton queue hold"]),
+        new("task", false, [new("baton task status*", typeof(TaskCommand))],
+            ["baton task submit --issue 2521 --project C:/repo --declared-size large --size-rationale multi-seam"]),
         new("janitor", false, [], ["baton janitor now"]),
         new("conductor", false, [], [
             "baton conductor claim holder-1",

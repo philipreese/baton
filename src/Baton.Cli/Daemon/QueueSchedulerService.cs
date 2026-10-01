@@ -198,6 +198,36 @@ public sealed partial class QueueSchedulerService : BackgroundService
         }
     }
 
+    private static async Task ReconcileAbandonedPreparationsAsync(CancellationToken cancellationToken)
+    {
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var abandoned = snapshot.Items.Where(i => i.IssuePreparation is { State: TaskPreparationState.Preparing } p
+            && !TaskPreparationLiveness.IsOwnerAlive(p)).Select(i => i.Tag).ToHashSet(StringComparer.Ordinal);
+        if (abandoned.Count == 0) return;
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+        {
+            Items = current.Items.Select(item => abandoned.Contains(item.Tag)
+                && item.IssuePreparation is { State: TaskPreparationState.Preparing } preparation
+                && !TaskPreparationLiveness.IsOwnerAlive(preparation)
+                ? item with
+                {
+                    IssuePreparation = preparation with
+                    {
+                        State = TaskPreparationState.Blocked,
+                        Reason = "preparation-owner-exited-unverified",
+                    },
+                    OwnedTask = item.OwnedTask is null ? null : item.OwnedTask with
+                    {
+                        Blocked = new TaskBlockedDisposition("preparation-owner-exited-unverified",
+                            "The preparation process exited before a verified queue commit; branch/worktree side effects are unknown.",
+                            DateTimeOffset.UtcNow, null),
+                    },
+                }
+                : item).ToList(),
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<TimeSpan> EvaluateAsync(CancellationToken cancellationToken)
     {
         var settings = (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
@@ -211,6 +241,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
         {
             await _fleetOutbox.PumpAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         }
+
+        await ReconcileAbandonedPreparationsAsync(cancellationToken).ConfigureAwait(false);
 
         // A claim can be lost to an operator cancellation after a candidate is chosen. One fresh pass
         // keeps the next static candidate launchable in this tick; further churn returns to the daemon

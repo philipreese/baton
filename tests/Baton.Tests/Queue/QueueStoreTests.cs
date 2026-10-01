@@ -309,6 +309,33 @@ public sealed class QueueStoreTests
         }
     }
 
+    [Fact]
+    public async Task Explicit_unknown_with_rationale_round_trips_only_on_an_owned_task()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            var at = new DateTimeOffset(2026, 9, 30, 18, 0, 0, TimeSpan.Zero);
+            var declaration = new TaskSizeDeclaration(DeclaredTaskSize.Unknown, "scope still being measured");
+            await QueueStore.MutateAsync(path, snapshot => snapshot with
+            {
+                Items = [Item("task") with
+                {
+                    DeclaredTaskSize = declaration,
+                    OwnedTask = new OwnedTaskSubmission("task-id", "github.com/example/repo", 48,
+                        "digest", "conductor", at),
+                }],
+            }, Ct);
+            var read = Assert.Single((await QueueStore.LoadAsync(path, Ct)).Items);
+            Assert.Equal(declaration, read.DeclaredTaskSize);
+            Assert.NotNull(read.OwnedTask);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
     [Theory]
     [InlineData("{}")]
     [InlineData("{\"size\":\"small\"}")]

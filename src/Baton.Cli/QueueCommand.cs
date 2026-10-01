@@ -88,7 +88,9 @@ public static class QueueCommand
         Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile = null,
         IGhCliRunner? ghRunner = null,
-        WorktreeApplyTestHooks? worktreeApplyTestHooks = null)
+        WorktreeApplyTestHooks? worktreeApplyTestHooks = null,
+        OwnedTaskSubmission? ownedTask = null,
+        byte[]? capturedSpecBytes = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -98,7 +100,8 @@ public static class QueueCommand
         return options.Verb switch
         {
             QueueVerb.Add => AddAsync(
-                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
+                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken,
+                ownedTask, capturedSpecBytes),
             QueueVerb.List => ListAsync(options, output, cancellationToken),
             QueueVerb.Worktrees => WorktreesAsync(
                 options.Format, options.Apply, output, repositoryDirectory, cancellationToken, worktreeApplyTestHooks),
@@ -121,7 +124,9 @@ public static class QueueCommand
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         Func<int, string, string?, string, bool, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        OwnedTaskSubmission? ownedTask,
+        byte[]? capturedSpecBytes)
     {
         var tag = options.Tag!;
         if (options.Lifecycle && options.DeclaredTaskSize is null)
@@ -131,7 +136,11 @@ public static class QueueCommand
         }
 
         var specSource = options.SpecFilePath;
-        if (specSource is not null && !File.Exists(specSource))
+        if (capturedSpecBytes is not null && ownedTask is null)
+            throw new CliArgumentException("A captured spec snapshot is only valid for an owned task submission.");
+        if (ownedTask is not null && (specSource is null) != (capturedSpecBytes is null))
+            throw new CliArgumentException("Owned task brief snapshot does not match the declared --spec input.");
+        if (specSource is not null && capturedSpecBytes is null && !File.Exists(specSource))
         {
             throw new CliArgumentException(
                 $"Spec file '{specSource}' does not exist.",
@@ -206,8 +215,11 @@ public static class QueueCommand
         // raised, which is the exact record that refusal exists to protect. This read is the early
         // half; the mutate re-checks under the file lock, which is where the authority stays.
         var queueSnapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        RefuseIfNotReplaceable(
-            queueSnapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)), tag);
+        if (ownedTask is null)
+        {
+            RefuseIfNotReplaceable(
+                queueSnapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)), tag);
+        }
 
         var sourceRepository = repositoryDirectory ?? Directory.GetCurrentDirectory();
         var effectiveWorktreeRoot = options.Issue is not null
@@ -216,6 +228,10 @@ public static class QueueCommand
         var issueRepository = options.Issue is not null
             ? await ResolveIssueRepositoryAsync(sourceRepository, repositoryResolver, cancellationToken).ConfigureAwait(false)
             : null;
+        if (ownedTask is not null && (issueRepository != ownedTask.Repository || options.Issue != ownedTask.Issue))
+        {
+            throw new CliArgumentException("Task identity does not match the canonical issue repository.");
+        }
         if (requestsMemoryAdd && issueRepository is null)
         {
             throw new CliArgumentException("'--require memory-add' requires --issue so the grant has one canonical repository.");
@@ -231,161 +247,305 @@ public static class QueueCommand
                 .ConfigureAwait(false)
             : null;
 
-        // Fresh issue adds retain their original provisioning route. Explicit retained reuse never
-        // invokes this delegate, so it cannot create a suffix or alter the path's trust record.
-        var provisioned = options.Issue is { } issue && !retained
-            ? await issueProvisioner(
-                issue,
-                sourceRepository,
-                effectiveWorktreeRoot,
-                issueRepository!,
-                options.Lifecycle,
-                output,
-                cancellationToken).ConfigureAwait(false)
-            : null;
-        var workspace = retainedProof?.Workspace ?? provisioned?.Workspace ?? Path.GetFullPath(options.WorkspaceDirectory!);
-
-        if (!Directory.Exists(workspace))
-        {
-            throw new CliArgumentException(
-                $"Workspace '{workspace}' does not exist.",
-                "create it, or pass --issue <n> to have the queue provision a worktree for you.");
-        }
-
-        // A recorded project ceiling is part of the effective grant, not a permission request.
-        // Refuse before spec/queue/WIP writes. --issue may already have provisioned the named path.
-        var projectAdmission = retainedProof?.Admission ?? RecordedProjectCeilingAdmission.Evaluate(
-            admissionItem with { Workspace = workspace }, role, settings.Queue.RequireDeclaredRequirements);
-        if (projectAdmission.Admission.Result == TaskRequirementAdmission.Refused)
-        {
-            throw new CliArgumentException(
-                projectAdmission.RefusalMessage(workspace, options.Role!),
-                $"choose a role that fits this ceiling, or explicitly trust that exact workspace for the needed categories, then re-add '{tag}'; a provisioned worktree remains.");
-        }
-
-        admission = projectAdmission.Admission;
-
-        // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
-        // times in one evening (#1934 body); an item that launched days later against whatever the
-        // file had become is the failure this copy exists to stop.
-        EnsureQueueSpecsDirectory();
-        var specDestination = BatonPaths.QueueSpecFile(tag);
-
-        // Shipped pools remain one candidate in this migration. Freeze that exact tuple now so a
-        // later tier-file edit cannot change the worker between queue display and launch.
-        var frozenAssignment = FrozenWorkerAssignment.ForLegacyTier(tier, DateTimeOffset.UtcNow);
-        var item = new QueueItem
-        {
-            Tag = tag,
-            Role = options.Role!,
-            Workspace = workspace,
-            SpecFile = specDestination,
-            ScopeClass = options.ScopeClass?.ToLowerInvariant(),
-            Adapter = adapter,
-            Model = options.Model,
-            Effort = options.Effort,
-            WorkerAssignment = frozenAssignment,
-            DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
-            Skills = options.Skills,
-            Requirements = requirements,
-            MemoryAddGrant = requestsMemoryAdd
-                ? new MemoryAddDispatchGrant(Guid.NewGuid().ToString("N"), issueRepository!)
-                : null,
-            LastAdmission = admission,
-            StageSelections = stageSelections,
-            LifecyclePin = options.LifecyclePin,
-            LifecycleReason = options.LifecycleReason,
-            TimeoutMinutes = options.TimeoutMinutes,
-            MaxToolSteps = options.MaxToolSteps,
-            MaxRepeatedToolSteps = options.MaxRepeatedToolSteps,
-            TokenBudget = options.TokenBudget,
-            OverrideRunwayReason = options.OverrideRunwayReason,
-            Reason = options.Reason,
-            Issue = options.Issue,
-            Stage = options.Lifecycle ? WorkStage.Implement : null,
-            // Every --issue row needs the provisioner's exact branch. Lifecycle rows use it for
-            // advancement; ordinary rows retain the same durable anchor for later PR discovery.
-            Branch = retainedProof?.Branch ?? provisioned?.Branch,
-            Repository = issueRepository,
-            // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
-            // whose persisted history has no trustworthy automatic-fix budget.
-            AutomaticFixUsed = options.Lifecycle ? false : null,
-            // A retained checkout was supplied by the operator. Baton proved it safe to reuse, but
-            // did not create it and therefore must never later treat it as cleanup-owned.
-            WorkspaceOrigin = retainedProof is not null
-                ? WorkspaceOrigins.OperatorSupplied
-                : options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
-            RetainedWorktreeReuse = retainedProof is null ? null : new RetainedWorktreeReuse(
-                retainedProof.Repository, retainedProof.Branch, retainedProof.Head, new RetainedWorktreeCeiling(
-                    retainedProof.Ceiling.ReadFiles, retainedProof.Ceiling.WriteFiles,
-                    retainedProof.Ceiling.RunShellCommands, retainedProof.Ceiling.NetworkAccess,
-                    retainedProof.Ceiling.InheritedFrom),
-                retainedProof.TerminalPredecessorTags),
-            AddedAt = DateTimeOffset.UtcNow,
-        };
-
-        string specContents;
+        // Reserve the canonical repository/issue while the queue mutex is held, before the
+        // provisioner can create a branch, worktree, or trust entry. Both task and legacy lifecycle
+        // adds use this seam; a different tag cannot conceal the same issue's existing lifecycle.
+        var reserved = false;
+        var reservationId = options.Lifecycle ? Guid.NewGuid().ToString("N") : null;
         if (options.Lifecycle)
         {
-            // The templates are the product (operator ruling 2026-09-06): a work item's brief is
-            // RENDERED here, not written by hand and copied. A --spec is still honoured -- its text
-            // becomes the template's "## Do" section -- so an operator who has already written the
-            // instructions keeps them, and gets the standing rules and the ship block for free.
-            var (title, body) = specSource is null
-                ? await IssueWorktreeProvisioner.FetchIssueAsync(
-                    options.Issue!.Value, sourceRepository, issueRepository!,
-                    cancellationToken: cancellationToken).ConfigureAwait(false)
-                : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
-
-            // Captured on the ITEM as well as rendered into the brief -- QueueItem.Instructions' own
-            // remarks say why the brief cannot be the register for this.
-            item = item with { Instructions = body.Trim() };
-
-            specContents = QueueBriefTemplates.Compose(
-                WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim()));
-        }
-        else
-        {
-            specContents = await File.ReadAllTextAsync(specSource!, cancellationToken).ConfigureAwait(false);
-        }
-
-        var replaced = false;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
-        {
-            // A tag is an identity, not just a label: it names one spec file, so two items sharing one
-            // would silently share a brief. Re-adding a tag that is still QUEUED replaces it (the
-            // operator is editing their list); re-adding one that has LAUNCHED is refused, because the
-            // running lane's own record would be overwritten.
-            var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
-            RefuseIfNotReplaceable(existing, tag);
-
-            if (retainedProof is not null)
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
-                RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership(
-                    snapshot.Items, retainedProof.Workspace, retainedProof.Branch);
+                var owner = snapshot.Items.FirstOrDefault(i => i.Stage is not null
+                    && i.Issue == options.Issue
+                    && string.Equals(i.Repository, issueRepository, StringComparison.OrdinalIgnoreCase));
+                if (owner is not null)
+                {
+                    if (ownedTask is not null && owner.OwnedTask is { } prior
+                        && prior.Id == ownedTask.Id && prior.InputDigest == ownedTask.InputDigest)
+                    {
+                        return snapshot;
+                    }
+
+                    throw new CliArgumentException(
+                        $"Issue {options.Issue} in '{issueRepository}' is already owned by queue item '{owner.Tag}'"
+                        + (owner.OwnedTask is null ? "." : $" (task {owner.OwnedTask.Id})."));
+                }
+
+                var byTag = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
+                RefuseIfNotReplaceable(byTag, tag);
+                if (byTag is not null)
+                {
+                    throw new CliArgumentException($"Tag '{tag}' is already in use; issue reservations cannot replace it.");
+                }
+
+                reserved = true;
+                using var preparationProcess = Process.GetCurrentProcess();
+                var placeholder = new QueueItem
+                {
+                    Tag = tag,
+                    Role = options.Role!,
+                    Workspace = string.Empty,
+                    SpecFile = BatonPaths.QueueSpecFile(tag),
+                    Repository = issueRepository,
+                    Issue = options.Issue,
+                    Stage = WorkStage.Implement,
+                    DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
+                    AddedAt = DateTimeOffset.UtcNow,
+                    OwnedTask = ownedTask,
+                    IssuePreparation = new QueueIssuePreparation(TaskPreparationState.Preparing, DateTimeOffset.UtcNow,
+                        ProcessId: Environment.ProcessId,
+                        ProcessStartedAt: preparationProcess.StartTime.ToUniversalTime(), ReservationId: reservationId),
+                };
+                return snapshot with { Items = snapshot.Items.Append(placeholder).ToList() };
+            }, cancellationToken).ConfigureAwait(false);
+
+            if (!reserved)
+            {
+                output.WriteLine($"Task '{ownedTask!.Id}' is already retained as '{tag}'.");
+                return 0;
+            }
+        }
+
+        // Fresh issue adds retain their original provisioning route. Explicit retained reuse never
+        // invokes this delegate, so it cannot create a suffix or alter the path's trust record.
+        try
+        {
+            var provisioned = options.Issue is { } issue && !retained
+                ? await issueProvisioner(
+                    issue,
+                    sourceRepository,
+                    effectiveWorktreeRoot,
+                    issueRepository!,
+                    options.Lifecycle,
+                    output,
+                    cancellationToken).ConfigureAwait(false)
+                : null;
+            var workspace = retainedProof?.Workspace ?? provisioned?.Workspace ?? Path.GetFullPath(options.WorkspaceDirectory!);
+
+            if (!Directory.Exists(workspace))
+            {
+                throw new CliArgumentException(
+                    $"Workspace '{workspace}' does not exist.",
+                    "create it, or pass --issue <n> to have the queue provision a worktree for you.");
             }
 
-            // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
-            // inside the queue's authoritative mutation so a cancellation that wins the same lock is
-            // refused before it can overwrite the retained brief.
-            WriteSpecFile(specDestination, specContents, writeSpecFile ?? WriteSpecFileAtomically);
+            if (options.Lifecycle)
+            {
+                // Persist the provisioner's exact result before further admission/brief work. A
+                // crash before this checkpoint remains uncertain; a crash after it has a concrete
+                // workspace/branch to inspect. Neither case authorizes a second provision call.
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = snapshot.Items.Select(i => i.Tag != tag ? i
+                        : i is { State: QueueItemState.Queued, CancelledAt: null, Retirement: null }
+                        && i.IssuePreparation is { State: TaskPreparationState.Preparing } preparation
+                        && preparation.ReservationId == reservationId
+                        && i.Repository == issueRepository && i.Issue == options.Issue
+                        && i.OwnedTask?.Id == ownedTask?.Id
+                        ? i with
+                        {
+                            IssuePreparation = preparation with
+                            {
+                                ExpectedBranch = retainedProof?.Branch ?? provisioned?.Branch,
+                                ExpectedWorkspace = workspace,
+                            },
+                        }
+                        : throw new CliArgumentException($"Issue preparation for '{tag}' changed before its provisioned result was recorded; side effects require reconciliation.")).ToList(),
+                }, cancellationToken).ConfigureAwait(false);
+            }
 
-            replaced = existing is not null;
-            var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
-            items.Add(item);
-            return snapshot with { Items = items };
-        }, cancellationToken).ConfigureAwait(false);
+            // A recorded project ceiling is part of the effective grant, not a permission request.
+            // Refuse before spec/queue/WIP writes. --issue may already have provisioned the named path.
+            var projectAdmission = retainedProof?.Admission ?? RecordedProjectCeilingAdmission.Evaluate(
+                admissionItem with { Workspace = workspace }, role, settings.Queue.RequireDeclaredRequirements);
+            if (projectAdmission.Admission.Result == TaskRequirementAdmission.Refused)
+            {
+                throw new CliArgumentException(
+                    projectAdmission.RefusalMessage(workspace, options.Role!),
+                    $"choose a role that fits this ceiling, or explicitly trust that exact workspace for the needed categories, then re-add '{tag}'; a provisioned worktree remains.");
+            }
 
-        output.WriteLine($"{(replaced ? "Replaced" : "Queued")} '{tag}' ({item.Role}) in {workspace}");
-        output.WriteLine($"  spec: {specDestination}");
-        output.WriteLine($"  tier: {DescribeTier(tier, adapterFromModel)}");
-        output.WriteLine($"  assignment: {frozenAssignment.Adapter}/{frozenAssignment.Model ?? "role-default"}/{frozenAssignment.Effort ?? "role-default"} ({frozenAssignment.DecisionId})");
-        if (tier.IsOverride)
-        {
-            output.WriteLine($"  override: {tier.OverrideReason}");
+            admission = projectAdmission.Admission;
+
+            // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
+            // times in one evening (#1934 body); an item that launched days later against whatever the
+            // file had become is the failure this copy exists to stop.
+            EnsureQueueSpecsDirectory();
+            var specDestination = BatonPaths.QueueSpecFile(tag);
+
+            // Shipped pools remain one candidate in this migration. Freeze that exact tuple now so a
+            // later tier-file edit cannot change the worker between queue display and launch.
+            var frozenAssignment = FrozenWorkerAssignment.ForLegacyTier(tier, DateTimeOffset.UtcNow);
+            var item = new QueueItem
+            {
+                Tag = tag,
+                Role = options.Role!,
+                Workspace = workspace,
+                SpecFile = specDestination,
+                ScopeClass = options.ScopeClass?.ToLowerInvariant(),
+                Adapter = adapter,
+                Model = options.Model,
+                Effort = options.Effort,
+                WorkerAssignment = frozenAssignment,
+                DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
+                Skills = options.Skills,
+                Requirements = requirements,
+                MemoryAddGrant = requestsMemoryAdd
+                    ? new MemoryAddDispatchGrant(Guid.NewGuid().ToString("N"), issueRepository!)
+                    : null,
+                LastAdmission = admission,
+                StageSelections = stageSelections,
+                LifecyclePin = options.LifecyclePin,
+                LifecycleReason = options.LifecycleReason,
+                TimeoutMinutes = options.TimeoutMinutes,
+                MaxToolSteps = options.MaxToolSteps,
+                MaxRepeatedToolSteps = options.MaxRepeatedToolSteps,
+                TokenBudget = options.TokenBudget,
+                OverrideRunwayReason = options.OverrideRunwayReason,
+                Reason = options.Reason,
+                Issue = options.Issue,
+                Stage = options.Lifecycle ? WorkStage.Implement : null,
+                // Every --issue row needs the provisioner's exact branch. Lifecycle rows use it for
+                // advancement; ordinary rows retain the same durable anchor for later PR discovery.
+                Branch = retainedProof?.Branch ?? provisioned?.Branch,
+                Repository = issueRepository,
+                // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
+                // whose persisted history has no trustworthy automatic-fix budget.
+                AutomaticFixUsed = options.Lifecycle ? false : null,
+                // A retained checkout was supplied by the operator. Baton proved it safe to reuse, but
+                // did not create it and therefore must never later treat it as cleanup-owned.
+                WorkspaceOrigin = retainedProof is not null
+                    ? WorkspaceOrigins.OperatorSupplied
+                    : options.Issue is not null ? WorkspaceOrigins.IssueProvisioned : WorkspaceOrigins.OperatorSupplied,
+                RetainedWorktreeReuse = retainedProof is null ? null : new RetainedWorktreeReuse(
+                    retainedProof.Repository, retainedProof.Branch, retainedProof.Head, new RetainedWorktreeCeiling(
+                        retainedProof.Ceiling.ReadFiles, retainedProof.Ceiling.WriteFiles,
+                        retainedProof.Ceiling.RunShellCommands, retainedProof.Ceiling.NetworkAccess,
+                        retainedProof.Ceiling.InheritedFrom),
+                    retainedProof.TerminalPredecessorTags),
+                AddedAt = DateTimeOffset.UtcNow,
+                OwnedTask = ownedTask,
+                IssuePreparation = options.Lifecycle
+                    ? new QueueIssuePreparation(TaskPreparationState.Prepared, DateTimeOffset.UtcNow,
+                        ExpectedBranch: retainedProof?.Branch ?? provisioned?.Branch,
+                        ExpectedWorkspace: workspace, ReservationId: reservationId)
+                    : null,
+            };
+
+            string specContents;
+            if (options.Lifecycle)
+            {
+                // The templates are the product (operator ruling 2026-09-06): a work item's brief is
+                // RENDERED here, not written by hand and copied. A --spec is still honoured -- its text
+                // becomes the template's "## Do" section -- so an operator who has already written the
+                // instructions keeps them, and gets the standing rules and the ship block for free.
+                var (title, body) = specSource is null
+                    ? await IssueWorktreeProvisioner.FetchIssueAsync(
+                        options.Issue!.Value, sourceRepository, issueRepository!,
+                        cancellationToken: cancellationToken).ConfigureAwait(false)
+                    : ($"Implement #{options.Issue}", capturedSpecBytes is null
+                        ? await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false)
+                        : ReadCapturedSpec(capturedSpecBytes));
+
+                // Captured on the ITEM as well as rendered into the brief -- QueueItem.Instructions' own
+                // remarks say why the brief cannot be the register for this.
+                item = item with { Instructions = body.Trim() };
+
+                specContents = QueueBriefTemplates.Compose(
+                    WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim()));
+            }
+            else
+            {
+                specContents = await File.ReadAllTextAsync(specSource!, cancellationToken).ConfigureAwait(false);
+            }
+
+            var replaced = false;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+            {
+                // A tag is an identity, not just a label: it names one spec file, so two items sharing one
+                // would silently share a brief. Re-adding a tag that is still QUEUED replaces it (the
+                // operator is editing their list); re-adding one that has LAUNCHED is refused, because the
+                // running lane's own record would be overwritten.
+                var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
+                if (options.Lifecycle)
+                {
+                    if (existing is not { State: QueueItemState.Queued, CancelledAt: null, Retirement: null }
+                        || existing.IssuePreparation?.State != TaskPreparationState.Preparing
+                        || existing.IssuePreparation.ReservationId != reservationId
+                        || existing.Repository != issueRepository || existing.Issue != options.Issue
+                        || existing.OwnedTask?.Id != ownedTask?.Id)
+                    {
+                        throw new CliArgumentException($"Issue preparation for '{tag}' changed before commit; its side effects require reconciliation.");
+                    }
+                }
+                else
+                {
+                    RefuseIfNotReplaceable(existing, tag);
+                }
+
+                if (retainedProof is not null)
+                {
+                    RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership(
+                        snapshot.Items, retainedProof.Workspace, retainedProof.Branch);
+                }
+
+                // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
+                // inside the queue's authoritative mutation so a cancellation that wins the same lock is
+                // refused before it can overwrite the retained brief.
+                WriteSpecFile(specDestination, specContents, writeSpecFile ?? WriteSpecFileAtomically);
+
+                replaced = existing is not null;
+                var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
+                items.Add(item);
+                return snapshot with { Items = items };
+            }, cancellationToken).ConfigureAwait(false);
+
+            output.WriteLine($"{(replaced ? "Replaced" : "Queued")} '{tag}' ({item.Role}) in {workspace}");
+            output.WriteLine($"  spec: {specDestination}");
+            output.WriteLine($"  tier: {DescribeTier(tier, adapterFromModel)}");
+            output.WriteLine($"  assignment: {frozenAssignment.Adapter}/{frozenAssignment.Model ?? "role-default"}/{frozenAssignment.Effort ?? "role-default"} ({frozenAssignment.DecisionId})");
+            if (tier.IsOverride)
+            {
+                output.WriteLine($"  override: {tier.OverrideReason}");
+            }
+
+            return 0;
         }
+        catch (Exception ex) when (options.Lifecycle && reserved && ex is not OperationCanceledException)
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(i => i.Tag == tag
+                    && i.State == QueueItemState.Queued && i.CancelledAt is null
+                    && i.IssuePreparation?.State == TaskPreparationState.Preparing
+                    && i.IssuePreparation.ReservationId == reservationId
+                    ? i with
+                    {
+                        IssuePreparation = i.IssuePreparation with
+                        {
+                            State = TaskPreparationState.Blocked,
+                            Reason = $"preparation-failed: {ex.GetType().Name}: {ex.Message}",
+                        },
+                        OwnedTask = i.OwnedTask is null ? null : i.OwnedTask with
+                        {
+                            Blocked = new TaskBlockedDisposition("preparation-failed", ex.Message,
+                                DateTimeOffset.UtcNow, null),
+                        },
+                    }
+                    : i).ToList(),
+            }, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+    }
 
-        return 0;
+    private static string ReadCapturedSpec(byte[] bytes)
+    {
+        // Match File.ReadAllText's UTF-8 default and BOM detection, but read the bytes TaskCommand
+        // already hashed. The mutable source path is never reopened after reservation.
+        using var reader = new StreamReader(new MemoryStream(bytes, writable: false), Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
     }
 
     /// <summary>
@@ -479,6 +639,19 @@ public static class QueueCommand
     /// </remarks>
     private static void RefuseIfNotReplaceable(QueueItem? existing, string tag)
     {
+        if (existing?.OwnedTask is { } task)
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' belongs to retained task '{task.Id}'. Re-adding it would erase task ownership and evidence.",
+                $"inspect 'baton task status {task.Id}' instead.");
+        }
+
+        if (existing?.IssuePreparation is { State: not TaskPreparationState.Prepared })
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' has an unfinished issue preparation reservation. Re-adding it could repeat external side effects.");
+        }
+
         if (existing?.ReplacementReviewAction is not null)
         {
             throw new CliArgumentException(
@@ -2054,6 +2227,44 @@ public static class QueueCommand
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var importedTags = imported.Select(i => i.Tag).ToHashSet(StringComparer.Ordinal);
+            var taskConflict = snapshot.Items.FirstOrDefault(i => i.OwnedTask is not null
+                && importedTags.Contains(i.Tag));
+            if (taskConflict is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{taskConflict.Tag}' belongs to retained task '{taskConflict.OwnedTask!.Id}'. Import cannot replace task evidence.");
+            }
+            var lifecycleConflict = snapshot.Items.FirstOrDefault(i => i.Stage is not null
+                && importedTags.Contains(i.Tag));
+            if (lifecycleConflict is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{lifecycleConflict.Tag}' retains an issue lifecycle"
+                    + (lifecycleConflict.IssuePreparation?.State == TaskPreparationState.Preparing
+                        ? " still preparing" : "")
+                    + "; scratchpad import cannot replace its reservation or stage evidence.");
+            }
+            var issueConflict = imported.FirstOrDefault(incoming => incoming.Stage is not null
+                && incoming.Issue is not null && incoming.Repository is not null
+                && snapshot.Items.Any(current => current.Stage is not null
+                    && current.Issue == incoming.Issue
+                    && string.Equals(current.Repository, incoming.Repository, StringComparison.OrdinalIgnoreCase)));
+            if (issueConflict is not null)
+            {
+                var owner = snapshot.Items.First(current => current.Stage is not null
+                    && current.Issue == issueConflict.Issue
+                    && string.Equals(current.Repository, issueConflict.Repository, StringComparison.OrdinalIgnoreCase));
+                throw new CliArgumentException(
+                    $"Issue {issueConflict.Issue} in '{issueConflict.Repository}' is already owned by '{owner.Tag}'"
+                    + (owner.OwnedTask is null ? "." : $" (task {owner.OwnedTask.Id})."));
+            }
+            var duplicateImport = imported.Where(i => i.Stage is not null && i.Issue is not null && i.Repository is not null)
+                .GroupBy(i => $"{i.Repository!.ToLowerInvariant()}#{i.Issue}", StringComparer.Ordinal)
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicateImport is not null)
+            {
+                throw new CliArgumentException($"Import contains duplicate issue lifecycle '{duplicateImport.Key}'.");
+            }
             var claimed = snapshot.Items.FirstOrDefault(
                 item => (item.ReadinessMutationClaim is { Length: > 0 }
                     || item.DraftPullRequestCreateMarker is not null

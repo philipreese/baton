@@ -185,6 +185,9 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {MemoryRetractOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {AuditLanesOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {QueueOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {TaskOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine("              (task submit retains ownership through review and ready handoff; it does not launch or merge)");
+    Console.Error.WriteLine("              (dispatch/run remain standalone one-lane commands without task lifecycle ownership)");
     // #1934: the one thing the grammar does not say — the queue does not launch anything; the daemon
     // does, on its own schedule, and records why (spec/baton.md §13).
     Console.Error.WriteLine(
@@ -446,6 +449,12 @@ try
         var queueOptions = QueueOptionsParser.Parse(args[1..]);
         return await QueueCommand
             .ExecuteAsync(queueOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
+    }
+
+    if (args[0] == "task")
+    {
+        var taskOptions = TaskOptionsParser.Parse(args[1..]);
+        return await TaskCommand.ExecuteAsync(taskOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
     }
 
     if (args[0] == "janitor")
@@ -746,6 +755,11 @@ catch (BatonFlowException ex)
     // SessionId recorded, an ambiguous or unresolvable worker, a still-running target) are exactly
     // #1356's ValidationRefused shape: refused before anything new was dispatched.
     if (args[0] == "resume")
+    {
+        return (int)RunExitCode.ValidationRefused;
+    }
+
+    if (args[0] == "task" && ex is CliArgumentException)
     {
         return (int)RunExitCode.ValidationRefused;
     }

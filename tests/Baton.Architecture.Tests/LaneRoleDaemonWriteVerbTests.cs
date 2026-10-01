@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Baton.Cli;
 using Baton.Cli.Tests.TestSupport;
+using Baton.Queue;
 using Baton.Status;
 using Baton.Vendors;
 
@@ -322,10 +323,27 @@ public sealed class LaneRoleDaemonWriteVerbTests
         var ledger = BatonPaths.CostLedgerFile("read-probe");
         Directory.CreateDirectory(Path.GetDirectoryName(ledger)!);
         File.WriteAllText(ledger, "");
+        var token = TestContext.Current.CancellationToken;
+        const string taskId = "task-read-probe";
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = [new QueueItem
+            {
+                Tag = taskId,
+                Role = "implement",
+                Workspace = string.Empty,
+                SpecFile = BatonPaths.QueueSpecFile(taskId),
+                Repository = "github.com/example/repo",
+                Issue = 45,
+                Stage = WorkStage.Implement,
+                OwnedTask = new OwnedTaskSubmission(
+                    taskId, "github.com/example/repo", 45, "read-probe-digest",
+                    "recorded-owner", DateTimeOffset.UtcNow),
+            }],
+        }, token);
         var before = SnapshotFiles(home.Path);
         Assert.NotEmpty(before);
         Assert.NotEmpty(File.ReadAllBytes(fixture.LogPath));
-        var token = TestContext.Current.CancellationToken;
 
         foreach (var read in ReadOnlyVerbs)
         {
@@ -335,6 +353,11 @@ public sealed class LaneRoleDaemonWriteVerbTests
                 case "baton status*":
                     await StatusCommand.ExecuteAsync(
                         StatusOptionsParser.Parse([room, "--json"]), output, token);
+                    break;
+                case "baton task status*":
+                    Assert.Equal(0, await TaskCommand.ExecuteAsync(
+                        TaskOptionsParser.Parse(["status", taskId, "--json"]), output, token));
+                    Assert.Contains(taskId, output.ToString(), StringComparison.Ordinal);
                     break;
                 case "baton templates*":
                     Assert.Equal(0, await TemplatesCommand.ExecuteAsync(["--json"], output, token));
