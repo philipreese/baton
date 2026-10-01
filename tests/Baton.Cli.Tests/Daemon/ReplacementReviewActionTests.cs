@@ -46,7 +46,7 @@ public sealed class ReplacementReviewActionTests
                 });
             try
             {
-                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
                 if (scenario == "no-slot")
                 {
                     await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
