@@ -444,21 +444,29 @@ internal static class OriginatingPullRequestVerifier
                 var journal = Path.Combine(room, BatonPaths.FlowLogFileName);
                 if (!IsLinkFreeFile(room, journal) || !IsCompleteJournal(journal)) return false;
                 var flow = await new FlowEventLogReader(journal).ReadAllAsync(cancellationToken).ConfigureAwait(false);
-                var accepted = flow.OfType<FlowEvent.ExecutionRequestAccepted>()
-                    .Select(e => e.Request.ExecutionId).ToHashSet();
-                foreach (var entry in flow.OfType<FlowEvent.EngineFilesPlaced>())
+                var accepted = new HashSet<ExecutionId>();
+                foreach (var fact in flow)
                 {
-                    if (!accepted.Contains(entry.ExecutionId) || entry.Files is null) return false;
-                    foreach (var file in entry.Files)
+                    if (fact is FlowEvent.ExecutionRequestAccepted request)
                     {
-                        if (file is null || !Path.IsPathFullyQualified(file.Path)
-                            || file.Sha256 is not { Length: 64 } digest
-                            || !digest.All(char.IsAsciiHexDigit)
-                            || !IsStrictChild(workspace, file.Path)) return false;
-                        var path = Path.GetFullPath(file.Path);
-                        if (placed.TryGetValue(path, out var prior)
-                            && !string.Equals(prior, digest, StringComparison.OrdinalIgnoreCase)) return false;
-                        placed[path] = digest;
+                        if (!accepted.Add(request.Request.ExecutionId)) return false;
+                    }
+                    else if (fact is FlowEvent.EngineFilesPlaced entry)
+                    {
+                        // A placement is owned evidence only after one acceptance in this room.
+                        // Crash replay may place identical files twice for that execution ID.
+                        if (!accepted.Contains(entry.ExecutionId) || entry.Files is null) return false;
+                        foreach (var file in entry.Files)
+                        {
+                            if (file is null || !Path.IsPathFullyQualified(file.Path)
+                                || file.Sha256 is not { Length: 64 } digest
+                                || !digest.All(char.IsAsciiHexDigit)
+                                || !IsStrictChild(workspace, file.Path)) return false;
+                            var path = Path.GetFullPath(file.Path);
+                            if (placed.TryGetValue(path, out var prior)
+                                && !string.Equals(prior, digest, StringComparison.OrdinalIgnoreCase)) return false;
+                            placed[path] = digest;
+                        }
                     }
                 }
             }

@@ -408,6 +408,9 @@ public sealed class OriginatingPullRequestVerifierTests
     [InlineData("room-envelope-drift")]
     [InlineData("relative-manifest")]
     [InlineData("linked-file")]
+    [InlineData("placement-before-acceptance")]
+    [InlineData("duplicate-acceptance")]
+    [InlineData("duplicate-placement")]
     public async Task Preserved_continuation_accepts_only_a_bound_prior_engine_placement(string scenario)
     {
         using var home = new IsolatedBatonHome();
@@ -429,13 +432,21 @@ public sealed class OriginatingPullRequestVerifierTests
         await using (var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName)))
         {
             var execution = new ExecutionId("placed-execution");
-            await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
+            var acceptance = new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
                 execution, new WorkflowId("dispatch-review"), new StepId("review"), "review",
                 Inputs: [], Outputs: [], Timeout: TimeSpan.FromMinutes(5), Environment: [],
-                UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>())), TestContext.Current.CancellationToken);
-            await writer.AppendAsync(new FlowEvent.EngineFilesPlaced(execution,
-                [new EnginePlacedFile(projected, EnginePlacedFile.TryDigest(projected))], []),
-                TestContext.Current.CancellationToken);
+                UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>()));
+            var placement = new FlowEvent.EngineFilesPlaced(execution,
+                [new EnginePlacedFile(projected, EnginePlacedFile.TryDigest(projected))], []);
+            if (scenario == "placement-before-acceptance")
+                await writer.AppendAsync(placement, TestContext.Current.CancellationToken);
+            await writer.AppendAsync(acceptance, TestContext.Current.CancellationToken);
+            if (scenario == "duplicate-acceptance")
+                await writer.AppendAsync(acceptance, TestContext.Current.CancellationToken);
+            if (scenario != "placement-before-acceptance")
+                await writer.AppendAsync(placement, TestContext.Current.CancellationToken);
+            if (scenario == "duplicate-placement")
+                await writer.AppendAsync(placement, TestContext.Current.CancellationToken);
         }
         var log = new FleetEventLog(BatonPaths.FleetEventsFile, BatonPaths.FleetEventsRolloverFile, 100_000);
         var at = DateTimeOffset.UtcNow.AddMinutes(-2);
@@ -586,7 +597,7 @@ public sealed class OriginatingPullRequestVerifierTests
             "wrong-invoking-branch" => recovery with { OriginatingPullRequestBranch = "other-branch" },
             _ => recovery,
         };
-        if (scenario == "valid")
+        if (scenario is "valid" or "duplicate-placement")
         {
             await OriginatingPullRequestVerifier.ValidatePreservedContinuationAsync(
                 workspace, claimedHead, head, TestContext.Current.CancellationToken, recovery);
