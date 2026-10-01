@@ -227,6 +227,15 @@ Baton is a personal tool. It is not offered as a product or a service, and it do
 resell, or proxy access to any provider — you bring a CLI you have already signed into yourself.
 Each vendor CLI remains subject to its own provider's terms, between the operator and that provider.
 
+### Codex adapter configuration root
+
+The Codex adapter uses a persistent, otherwise-empty configuration root at `~/.baton/codex-home`
+(or `$BATON_HOME/codex-home` if `BATON_HOME` is set). This isolated home contains no operator config,
+instructions, skills, plugins, or credentials. The operator establishes Codex subscription authentication
+once in that root by running Codex's own login process — see
+[`docs/vendor-codex-probe-2026-09-04.md#authentication-and-executable`](docs/vendor-codex-probe-2026-09-04.md#authentication-and-executable)
+for the full procedure and technical details.
+
 ## Prerequisites
 
 - **[pixi](https://pixi.sh)** — task runner.
