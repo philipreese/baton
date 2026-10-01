@@ -67,10 +67,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVERS = os.path.join(HERE, "servers")
@@ -120,8 +123,16 @@ _CURRENT = None      # name of the check being run, so run() knows whether to do
 _FULL_MODEL = False  # --full-model: run everything as originally measured
 
 
-def check(name, group, claim, safety="safe", sentinel=False, local=False):
+def check(name, group, claim, safety="safe", sentinel=False, local=False, opt_in=False):
     """Register a check.
+
+    `opt_in=True` (#2537) marks a check selectable ONLY by its exact full name on `--only` -- never by
+    the default (no-argument) run, never by `--sentinels`, and never by a group or prefix match on
+    `--only`. This exists for a check whose cost or blast radius is categorically different from the
+    rest of its group (a PAID live run gated separately from this suite's usual "every check spends
+    real usage" posture), so adding it must never silently widen what an existing invocation already
+    runs. `sentinel=False` is not this: sentinel only controls `--sentinels`, and `--only agy` or
+    `--only agy.` would still have pulled an opt-in agy check into an ordinary group run without this.
 
     `local=True` marks a check that reads the FILESYSTEM rather than driving a vendor CLI (#1852
     phase A2). It spends no subscription usage, starts no model, and is the only kind of check in
@@ -149,9 +160,22 @@ def check(name, group, claim, safety="safe", sentinel=False, local=False):
     """
     def deco(fn):
         CHECKS[name] = {"fn": fn, "group": group, "claim": claim, "safety": safety,
-                        "sentinel": sentinel, "local": local}
+                        "sentinel": sentinel, "local": local, "opt_in": opt_in}
         return fn
     return deco
+
+
+def select_checks(only, sentinels):
+    """The exact selection rule `main()` applies to `--only`/`--sentinels` -- factored out (#2537) so
+    `--selftest` can assert the opt-in exclusion directly, without spawning a subprocess to parse argv.
+    """
+    return {n: c for n, c in sorted(CHECKS.items())
+            if (not only or c["group"] == only or n.startswith(only))
+            and (not sentinels or c["sentinel"])
+            # An opt-in check ignores a group/prefix match -- only an EXACT `--only <name>` selects
+            # it, so a plain `--only agy` (or the no-argument default, or `--sentinels`) can never
+            # pull a paid check into a run nobody asked for by that name.
+            and (not c["opt_in"] or only == n)}
 
 
 def model_flags(binary):
@@ -4124,6 +4148,582 @@ def _claude_allowedtools_space_before_paren():
     return FAIL, f"space-before-paren no longer grants -- reversal of the #1515 measurement -- {detail}"
 
 
+# ================================================================ #2537: agy stream follow-up
+# One explicit-opt-in, PAID check: does a subsequent turn sent on agy's `--input-format stream-json`
+# stdin get CONSUMED by the model under Baton's own resolved read-only grant (ReadFiles only; no
+# declared outputs) -- not same-turn steering (#2180's settled, still-open question), but the bounded
+# two-message next-boundary follow-up #2180's comment history measured by hand. This reproduces that
+# measurement through `AgyWorkerAdapter.Resolve`'s REAL argv/env/hook/timeout via `Baton.GateProbe`,
+# never a second hand-typed approximation of it -- the same discipline every other `agy.*` check in
+# this file already follows.
+#
+# ZERO LIVE CALLS FROM THIS LANE OR ITS REVIEW. Registered `opt_in=True` below -- excluded from the
+# default run, `--sentinels`, and any group/prefix `--only` -- so nothing but a conductor naming this
+# check's exact full name can ever start it. See `check()`'s own doc for the mechanism.
+#
+# ENVELOPE PROVENANCE, STATED RATHER THAN HIDDEN. The stream-json line shapes below are read off
+# #2180's comment history (the "AGY streaming control refusal", "AGY next-boundary stream delivery
+# measured", and "AGY input during an active streamed response" owner measurements) -- not
+# independently re-measured in this lane, which runs no live agy call at all. Every required fact the
+# classifier checks is checked for PRESENCE before anything is checked for ORDER, so a wrong envelope
+# constant reports INCONCLUSIVE on the conductor's later live run rather than a false PASS.
+AGY_STREAM_INPUT_EVENT = "user/message"          # stdin envelope: {"event": ..., "content": text}
+AGY_STREAM_OUTPUT_INIT = "init"
+AGY_STREAM_OUTPUT_STEP_UPDATE = "step_update"
+AGY_STREAM_OUTPUT_USER_INPUT = "user_input"
+AGY_STREAM_OUTPUT_RESULT = "result"
+AGY_STREAM_ACTIVE_STATUS = "ACTIVE"
+AGY_STREAM_SUCCESS_STATUS = "SUCCESS"
+
+# Mirrors AgyWorkerAdapter.VerdictLedgerVariable and GrantDecisionLog.FileName exactly -- both are
+# public wire-contract names a reader relies on elsewhere, not vendor literals this file is guessing
+# at (contrast the deliberately-vendor-measured literals like AGY_DENIED_TOOLS_FOR_A_SHELL_WITHHELD_GRANT
+# above).
+AGY_VERDICT_LEDGER_ENV_VAR = "BATON_HOOK_VERDICT_LEDGER"
+AGY_GRANTS_LOG_FILE_NAME = ".baton-grants.ndjson"
+
+# Env var NAMES this check refuses to run beside -- never their VALUES, which this check never reads
+# or logs (#2537 acceptance: "reject inherited API/billing environment names without logging
+# values"). Subscription auth only; any of these present means this run would not be measuring what
+# Baton actually ships operators (CHEAP's agy entry, subscription-authenticated, no API key path).
+AGY_FORBIDDEN_INHERITED_ENV_NAMES = (
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY", "ANTIGRAVITY_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AGY_API_KEY",
+    "GEMINI_BILLING_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT",
+)
+
+
+def _agy_stream_follow_up_identify(raw):
+    """Mirrors `GrantDecision.Identify` exactly -- sha256, lowercase hex, first 16 characters -- so
+    this check's own computed hash can be compared against the hook's recorded one rather than
+    assumed equal."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _agy_stream_follow_up_detect_drift(args, agy_workspace_hook_path):
+    """Pure given a resolved argv and a real hooks.json path -- no vendor CLI, no model. Config drift
+    (#2537 acceptance) means `Resolve` or the workspace it writes no longer carry what this check
+    depends on, checked BEFORE a live launch would spend usage on an invocation that cannot test what
+    it claims to. Returns a description of the drift, or `None` when none is found.
+    """
+    for flag, value in (("--input-format", "stream-json"), ("--output-format", "stream-json")):
+        if flag not in args or args[args.index(flag) + 1:args.index(flag) + 2] != [value]:
+            return f"resolved argv is missing '{flag} {value}' after the stream-json transform"
+
+    if "-p" in args:
+        return "resolved argv still carries '-p' after the stream-json transform"
+
+    if "--print-timeout" not in args:
+        return "resolved argv carries no --print-timeout -- AgyWorkerAdapter's timeout rule changed"
+
+    if "--disable-slash-commands" not in args:
+        return "resolved argv no longer disables slash commands"
+
+    if not os.path.isfile(agy_workspace_hook_path):
+        return f"the real agy-workspace hooks.json is missing at {agy_workspace_hook_path}"
+
+    try:
+        with open(agy_workspace_hook_path, encoding="utf-8") as f:
+            hooks = json.load(f)
+        # Keyed by an arbitrary NAME at the root (today "baton-permission-gate",
+        # AgyWorkerAdapter.BuildHooksJson) -- read structurally rather than hardcoding that literal a
+        # second time in this file (`_agy_hook_json`'s own fixture helper above uses a different root
+        # key, "baton", precisely because the name is arbitrary and no check should assume either one).
+        root_key = next(iter(hooks))
+        command = hooks[root_key]["PreToolUse"][0]["hooks"][0]["command"]
+    except (KeyError, IndexError, TypeError, StopIteration, json.JSONDecodeError, OSError) as exc:
+        return f"the real agy-workspace hooks.json does not have the expected shape: {exc!r}"
+
+    if "agy-hook-check" not in command:
+        return f"the generated hook command no longer names agy-hook-check: {command!r}"
+
+    return None
+
+
+def _agy_stream_follow_up_transform_to_stream_input(args, resolved_prompt_text):
+    """The one permitted transform of `Resolve`'s own argv (#2537): replace exactly the resolved
+    `-p <prompt>` pair with `--input-format stream-json`, leaving every other flag -- the hook
+    `--add-dir`s, `--output-format stream-json`, `--model`, `--print-timeout`,
+    `--disable-slash-commands` -- untouched and in place. Matched against `resolved_prompt_text`
+    (what `BuildPrompt` actually produced, carried back as `promptText`), never the short text this
+    check asked for, since `BuildPrompt` appends boilerplate the caller's own string does not carry.
+    A shape this check does not recognize is refused rather than guessed at. Returns
+    `(transformed_args, failure)`.
+    """
+    if len(args) < 2 or args[0] != "-p" or args[1] != resolved_prompt_text:
+        return None, (f"resolved argv does not start with the expected ['-p', <resolved prompt>] "
+                      f"pair: {args[:2]!r}")
+    return ["--input-format", "stream-json"] + args[2:], None
+
+
+def _agy_stream_follow_up_resolve(prompt_text, baton_home, working_directory, timeout_seconds=45):
+    """Runs the real `AgyWorkerAdapter.Resolve` through `Baton.GateProbe` for a read-only grant
+    (ReadFiles only; WriteFiles/RunShellCommands/NetworkAccess/AllowsSubagents withheld, no declared
+    outputs), with `BATON_HOME` redirected to a disposable root so `EnsureAgyWorkspace`'s hooks.json
+    and every seed path this run touches live under `baton_home`, never the operator's real one. The
+    returned `target["args"]` has already had `_agy_stream_follow_up_transform_to_stream_input`
+    applied -- every caller downstream sees the stream-input shape, never the raw `-p` one.
+
+    Deliberately does NOT pass a working directory into the resolved invocation -- see
+    `Baton.GateProbe.Program`'s own doc for why that would route through `ProjectCeilingGate` and
+    refuse on an unseen directory (decision 0004). `working_directory` here is only this probe
+    subprocess's own `cwd`; the vendor cwd for the later live launch is supplied the same way every
+    other check in this file already does, via `extra_env`/`cwd` at the spawn site, never through
+    `Resolve`. Returns `(target, failure)` -- `target` is `None` on failure.
+    """
+    if (failure := build_gate_probe()) is not None:
+        return None, failure
+    cmd = ["dotnet", "exec", GATE_PROBE, "agy", "--prompt", prompt_text, "--stream-json",
+           "--no-outputs", "--model", CHEAP["agy"][1], "--timeout", str(timeout_seconds)]
+    rc, out, err = run(cmd, cwd=working_directory, extra_env={"BATON_HOME": baton_home})
+    if rc != 0:
+        return None, f"Baton.GateProbe failed rc={rc}: {(out + err)[-300:]}"
+    try:
+        target = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        return None, f"Baton.GateProbe printed no parseable JSON: {exc!r}: {(out + err)[-300:]}"
+
+    transformed, failure = _agy_stream_follow_up_transform_to_stream_input(
+        target["args"], target["promptText"])
+    if transformed is None:
+        return None, failure
+    target["args"] = transformed
+    return target, None
+
+
+def _agy_stream_follow_up_offline_controls(target, baton_home, working_directory, outbox_dir):
+    """Runs the REAL generated hook command -- read out of the hooks.json `AgyWorkerAdapter` actually
+    wrote, never a hand-typed approximation of it (matching every `agy.hook-*` check in this file) --
+    against two synthetic payloads: an exact forbidden `write_to_file` attempt, and an allowed
+    `view_file` read. These are the offline deny/allow controls #2537 requires to precede a live
+    launch. Returns `(deny_decision, allow_decision, forbidden_target_path, failure)`.
+    """
+    def expand(s):
+        return (s.replace("%BATON_OUTPUT_DIR%", outbox_dir).replace("$BATON_OUTPUT_DIR", outbox_dir)
+                 .replace("%BATON_ARTIFACTS_ROOT%", working_directory)
+                 .replace("$BATON_ARTIFACTS_ROOT", working_directory))
+
+    workspace = next((a for a in target["args"]
+                       if a.replace("\\", "/").rstrip("/").endswith("/agy-workspace")), None)
+    if workspace is None:
+        return None, None, None, "resolved argv carries no agy-workspace --add-dir"
+    hooks_path = os.path.join(workspace, ".agents", "hooks.json")
+
+    if (drift := _agy_stream_follow_up_detect_drift(target["args"], hooks_path)) is not None:
+        return None, None, None, "config drift: " + drift
+
+    with open(hooks_path, encoding="utf-8") as f:
+        hooks = json.load(f)
+    command = hooks[next(iter(hooks))]["PreToolUse"][0]["hooks"][0]["command"]
+
+    env = {k: expand(v) for k, v in target["environment"].items()}
+    env["BATON_OUTPUT_DIR"] = outbox_dir
+    env["BATON_ARTIFACTS_ROOT"] = working_directory
+    env["BATON_HOME"] = baton_home
+
+    # A PATH, never a directory this check creates: the write must be denied before it would land,
+    # so nothing needs to exist on disk for either the offline control or the live attempt -- creating
+    # a real directory here would be a disposable resource this function then has to remember to
+    # clean up, for no check anywhere that reads it.
+    forbidden_target = os.path.join(
+        tempfile.gettempdir(), f"v-2537-forbidden-{uuid.uuid4().hex[:12]}",
+        "exact-write-target.txt").replace("\\", "/")
+
+    def invoke(payload):
+        shell_cmd = ["cmd", "/c", command] if os.name == "nt" else ["sh", "-c", command]
+        rc, out, err = run_stdin(shell_cmd, json.dumps(payload), extra_env=env)
+        try:
+            return json.loads(out.strip().splitlines()[-1]) if out.strip() else None
+        except (ValueError, IndexError):
+            return None
+
+    deny = invoke({"toolCall": {"name": "write_to_file", "args": {"TargetFile": forbidden_target}}})
+    allow = invoke({"toolCall": {"name": "view_file",
+                                  "args": {"AbsolutePath": os.path.join(working_directory, "readme.txt")}}})
+    return deny, allow, forbidden_target, None
+
+
+def _agy_stream_follow_up_file_baseline(path):
+    """Byte length of a file that may not exist yet -- 0 for 'not created'. Both files this check
+    baselines (the grant log and the verdict ledger) are append-only, so a byte length can only grow;
+    this is simply that growth's starting point."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _agy_stream_follow_up_new_lines(path, baseline_len):
+    """Every complete line appended to `path` after its first `baseline_len` bytes -- the NDJSON tail
+    this check classifies evidence from, never the file's full history (which may predate this run on
+    a shared ledger path, though #2537's disposable-directory binding means it should not)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(baseline_len)
+            tail = f.read()
+    except OSError:
+        return []
+    return [line for line in tail.decode("utf-8", errors="replace").splitlines() if line.strip()]
+
+
+def _agy_stream_follow_up_deliver(writer, expected_execution_id, execution_id, message):
+    """Writes `message` (newline-terminated, utf-8) to `writer` ONLY when `execution_id` matches
+    `expected_execution_id`; otherwise writes zero bytes and returns 0 without raising. #2537's
+    "a synthetic wrong execution-ID test must deliver zero bytes" rests on this one function, which
+    the live controller and the offline selftest both call -- never two copies of the same rule.
+    Returns the number of bytes actually written.
+    """
+    if execution_id != expected_execution_id:
+        return 0
+    data = (message + "\n").encode("utf-8")
+    writer.write(data)
+    try:
+        writer.flush()
+    except (OSError, ValueError):
+        pass
+    return len(data)
+
+
+def _kill_process_tree(pid):
+    """Best-effort, and deliberately silent on failure -- called only at the 110s outer bound or after
+    the two-result terminal condition, when the process may already be exiting on its own."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _agy_stream_follow_up_conversation_id(event):
+    payload = event["payload"]
+    if "conversation_id" in payload:
+        return payload["conversation_id"]
+    inner = payload.get("result")
+    return inner.get("conversation_id") if isinstance(inner, dict) else None
+
+
+def _agy_stream_follow_up_result_status(event):
+    payload = event["payload"]
+    inner = payload.get("result")
+    if isinstance(inner, dict) and "status" in inner:
+        return inner["status"]
+    return payload.get("status")
+
+
+def _agy_stream_follow_up_result_text(event):
+    payload = event["payload"]
+    inner = payload.get("result")
+    if isinstance(inner, dict):
+        return str(inner.get("response", ""))
+    return str(payload.get("response", ""))
+
+
+class _AgyStreamFollowUpController:
+    """Spawns the real `agy` process from a fully resolved+expanded argv/env, feeds it at most two
+    stdin messages (the second only once an ACTIVE `step_update` is observed), and merges stdout
+    lines and new `.baton-grants.ndjson` lines into ONE ordinal sequence under a single lock -- so
+    "did X happen before Y" is answered by an allocation order this process itself controls, never by
+    OS-clock timestamps Windows is free to tie (#2537). Caps each stream at `cap_bytes`, stops the
+    whole process tree at `timeout_s` regardless of state, and never retries a send.
+    """
+
+    def __init__(self, argv, cwd, env, grants_path, cap_bytes=1024 * 1024, timeout_s=110,
+                 poll_interval=0.05):
+        self.argv = argv
+        self.cwd = cwd
+        self.env = env
+        self.grants_path = grants_path
+        self.cap_bytes = cap_bytes
+        self.timeout_s = timeout_s
+        self.poll_interval = poll_interval
+        self._lock = threading.Lock()
+        self._ordinal = 0
+        self.events = []
+        self.proc = None
+
+    def _next_ordinal(self):
+        with self._lock:
+            self._ordinal += 1
+            return self._ordinal
+
+    def _seen(self, kind):
+        with self._lock:
+            return any(e["kind"] == kind for e in self.events)
+
+    def _record(self, source, kind, payload):
+        ordv = self._next_ordinal()
+        with self._lock:
+            self.events.append({"ordinal": ordv, "source": source, "kind": kind,
+                                 "payload": payload, "t": time.monotonic()})
+        return ordv
+
+    def _reader(self, stream, source):
+        total = 0
+        try:
+            for raw_line in iter(stream.readline, b""):
+                if not raw_line:
+                    break
+                total += len(raw_line)
+                if source == "stdout":
+                    self._classify_stdout_line(raw_line.decode("utf-8", errors="replace").strip())
+                if total >= self.cap_bytes:
+                    break
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def _classify_stdout_line(self, text):
+        if not text:
+            return
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            return
+        event = obj.get("event")
+        if event == AGY_STREAM_OUTPUT_INIT:
+            self._record("stdout", "init", obj)
+        elif event == AGY_STREAM_OUTPUT_STEP_UPDATE and obj.get("status") == AGY_STREAM_ACTIVE_STATUS:
+            self._record("stdout", "active", obj)
+        elif event == AGY_STREAM_OUTPUT_USER_INPUT:
+            self._record("stdout", "second_user_input" if self._seen("first_user_input")
+                         else "first_user_input", obj)
+        elif event == AGY_STREAM_OUTPUT_RESULT:
+            self._record("stdout", "second_result" if self._seen("first_result")
+                         else "first_result", obj)
+
+    def _poll_grants(self, baseline_len, forbidden_target_hash):
+        size = _agy_stream_follow_up_file_baseline(self.grants_path)
+        if size <= baseline_len or self._seen("exact_tool_attempt"):
+            return
+        for line in _agy_stream_follow_up_new_lines(self.grants_path, baseline_len):
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if (obj.get("type") == "baton.grant" and obj.get("vendor") == "agy"
+                    and obj.get("tool") == "write_to_file" and obj.get("decision") == "deny"
+                    and obj.get("rule") == "withheld-tool" and obj.get("input") == forbidden_target_hash):
+                self._record("grants", "exact_tool_attempt", obj)
+                return
+
+    def run(self, first_message, second_message, forbidden_target_hash, grants_baseline_len):
+        self.proc = subprocess.Popen(
+            self.argv, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        t_out = threading.Thread(target=self._reader, args=(self.proc.stdout, "stdout"), daemon=True)
+        t_err = threading.Thread(target=self._reader, args=(self.proc.stderr, "stderr"), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        first_line = json.dumps({"event": AGY_STREAM_INPUT_EVENT, "content": first_message})
+        written = _agy_stream_follow_up_deliver(self.proc.stdin, "controller", "controller", first_line)
+        self._record("stdin", "first_message_flush", {"bytes": written})
+
+        deadline = time.monotonic() + self.timeout_s
+        second_sent = False
+        while time.monotonic() < deadline:
+            self._poll_grants(grants_baseline_len, forbidden_target_hash)
+            if not second_sent and self._seen("active"):
+                second_line = json.dumps({"event": AGY_STREAM_INPUT_EVENT, "content": second_message})
+                written = _agy_stream_follow_up_deliver(
+                    self.proc.stdin, "controller", "controller", second_line)
+                self._record("stdin", "correction_flush", {"bytes": written})
+                second_sent = True
+            if second_sent and self._seen("second_result"):
+                break
+            if self.proc.poll() is not None and not (t_out.is_alive() or t_err.is_alive()):
+                break
+            time.sleep(self.poll_interval)
+
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        if self.proc.poll() is None:
+            _kill_process_tree(self.proc.pid)
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+        self._poll_grants(grants_baseline_len, forbidden_target_hash)  # final catch-up read
+
+        exit_code = self.proc.poll()
+        with self._lock:
+            return list(self.events), exit_code
+
+
+def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_hash, ledger_before_len,
+                                    ledger_after_len, config_drift=None, write_landed=False):
+    """Pure -- #2537's required offline classifier. Every fact comes from `events` (the controller's
+    own ordinal-tagged, lock-serialized sequence), the two ledger byte counts, or `write_landed` (a
+    plain `os.path.exists` the CALLER takes on the exact forbidden path -- this function never
+    touches a filesystem itself); nothing here re-derives order from a wall-clock timestamp (events
+    may carry one for diagnostics, ignored here), and nothing here drives a vendor CLI. Missing
+    evidence is INCONCLUSIVE; an explicit grant or identity violation is FAIL.
+    """
+    if write_landed:
+        return FAIL, "the exact forbidden path exists on disk -- the denied write landed anyway"
+
+    if config_drift:
+        return FAIL, f"config drift before launch: {config_drift}"
+
+    by_kind = {}
+    for e in events:
+        by_kind.setdefault(e["kind"], e)   # first occurrence of each kind, in ordinal order
+
+    required_order = [
+        "first_message_flush", "init", "active", "correction_flush", "first_result",
+        "second_user_input", "exact_tool_attempt", "second_result",
+    ]
+    missing = [k for k in required_order if k not in by_kind]
+    if missing:
+        return INCONCLUSIVE, f"missing required event(s): {', '.join(missing)}"
+
+    ordinals = [by_kind[k]["ordinal"] for k in required_order]
+    if any(a >= b for a, b in zip(ordinals, ordinals[1:])):
+        return FAIL, (f"required events are not strictly ordered: "
+                      f"{dict(zip(required_order, ordinals))}")
+
+    init, first_result, second_result = by_kind["init"], by_kind["first_result"], by_kind["second_result"]
+    conversation_ids = {_agy_stream_follow_up_conversation_id(init),
+                         _agy_stream_follow_up_conversation_id(first_result),
+                         _agy_stream_follow_up_conversation_id(second_result)}
+    conversation_ids.discard(None)
+    if len(conversation_ids) != 1:
+        return FAIL, f"conversation id is not identical across init/result events: {conversation_ids}"
+
+    status1 = _agy_stream_follow_up_result_status(first_result)
+    status2 = _agy_stream_follow_up_result_status(second_result)
+    if status1 != AGY_STREAM_SUCCESS_STATUS or status2 != AGY_STREAM_SUCCESS_STATUS:
+        return FAIL, f"a result event was not SUCCESS (first={status1!r} second={status2!r})"
+
+    if expected_nonces:
+        text = (_agy_stream_follow_up_result_text(first_result) + " "
+                + _agy_stream_follow_up_result_text(second_result))
+        missing_nonces = [n for n in expected_nonces if n not in text]
+        if missing_nonces:
+            return FAIL, f"expected nonce(s) not found in the two result texts: {missing_nonces}"
+
+    attempt = by_kind["exact_tool_attempt"]["payload"]
+    if attempt.get("decision") != "deny" or attempt.get("rule") != "withheld-tool":
+        return FAIL, f"the exact write_to_file attempt was not a withheld-tool deny: {attempt}"
+    if attempt.get("input") != forbidden_target_hash:
+        return FAIL, (f"the observed deny names a different target hash ({attempt.get('input')}) "
+                      f"than the exact path this check sent ({forbidden_target_hash})")
+
+    if ledger_after_len <= ledger_before_len:
+        return FAIL, "the hook verdict ledger gained no new line during the live run"
+
+    return PASS, (
+        "ordered subsequent-turn consumption observed: " +
+        " < ".join(f"{k}({by_kind[k]['ordinal']})" for k in required_order) +
+        f"; one conversation {conversation_ids.pop()}, two SUCCESS results, the exact write_to_file "
+        "attempt was denied as withheld-tool with the matching target hash, and the hook ledger "
+        "gained a new verdict line")
+
+
+@check("agy.stream-follow-up-under-resolved-grant", "agy",
+       "a subsequent turn sent on agy's `--input-format stream-json` stdin is actually CONSUMED by "
+       "the model under Baton's own resolved read-only grant (ReadFiles only; no declared outputs) -- "
+       "not same-turn steering (#2180), a bounded two-message next-boundary follow-up reproduced "
+       "through AgyWorkerAdapter.Resolve's real argv, with the real generated PreToolUse hook denying "
+       "an exact forbidden write_to_file attempt mid-conversation. PAID: drives one live agy call "
+       "under existing subscription auth. Excluded from the default run, --sentinels, and any "
+       "group/prefix --only -- select it by this exact name",
+       safety="safe", opt_in=True)
+def _agy_stream_follow_up():
+    """#2537. Every offline piece above (`_agy_stream_follow_up_classify`, `_detect_drift`,
+    `_deliver`, the controller's ordinal allocator) is exercised by `--selftest`'s synthetic suite
+    with NO agy process involved -- see `_selftest_agy_stream_follow_up`. This function is the one
+    place that actually launches agy, and this check's `opt_in=True` registration (see `check()`'s
+    own doc) is what keeps the baton-implement lane that wrote it from ever calling it: the default
+    run, `--sentinels`, and a group/prefix `--only` all exclude it. The conductor runs it later by
+    this exact name.
+    """
+    present = [name for name in AGY_FORBIDDEN_INHERITED_ENV_NAMES if os.environ.get(name)]
+    if present:
+        return INCONCLUSIVE, (
+            "refusing to run: an inherited API/billing environment variable is set "
+            f"({', '.join(present)}) -- this check measures subscription-authenticated delivery "
+            "only, and a value is deliberately never read or logged")
+
+    print("DISCLOSURE: agy has no native per-invocation token/money cap (unlike claude's reported "
+          "list-price ceiling); this check bounds cost only via the resolved --print-timeout, a "
+          "110s outer process-tree stop, and a two-message cap -- not a spend ceiling.")
+
+    baton_home = tempfile.mkdtemp(prefix="v-2537-home-")
+    working_directory = tempfile.mkdtemp(prefix="v-2537-wd-")
+    outbox_dir = os.path.join(working_directory, "outbox")
+    os.makedirs(outbox_dir, exist_ok=True)
+    try:
+        nonce1 = "quince-" + uuid.uuid4().hex[:12]
+        nonce2 = "zinnia-" + uuid.uuid4().hex[:12]
+        prompt = (f"Reply with only this phrase, exactly, and nothing else: {nonce1}. "
+                  "After replying, wait for a follow-up message in this same conversation.")
+
+        target, failure = _agy_stream_follow_up_resolve(prompt, baton_home, working_directory)
+        if target is None:
+            return INCONCLUSIVE, failure
+
+        deny, allow, forbidden_target, failure = _agy_stream_follow_up_offline_controls(
+            target, baton_home, working_directory, outbox_dir)
+        if failure is not None:
+            return INCONCLUSIVE, failure
+        if deny is None or deny.get("decision") != "deny":
+            return INCONCLUSIVE, f"offline control: the real generated hook did not deny the forbidden write: {deny}"
+        if allow is None or allow.get("decision") != "allow":
+            return INCONCLUSIVE, f"offline control: the real generated hook did not allow the read control: {allow}"
+
+        forbidden_hash = _agy_stream_follow_up_identify(forbidden_target)
+        grants_path = os.path.join(outbox_dir, AGY_GRANTS_LOG_FILE_NAME)
+        ledger_path = next(
+            (v.replace("%BATON_OUTPUT_DIR%", outbox_dir).replace("$BATON_OUTPUT_DIR", outbox_dir)
+             for k, v in target["environment"].items() if k == AGY_VERDICT_LEDGER_ENV_VAR), None)
+        if ledger_path is None:
+            return INCONCLUSIVE, "resolved environment carries no BATON_HOOK_VERDICT_LEDGER entry"
+
+        # Baselined AFTER the offline controls above (which themselves wrote real lines) and BEFORE
+        # the live launch -- #2537's required order, so "a new line arrived" can only mean it arrived
+        # from the LIVE run, never from the offline control that already proved the mechanism fires.
+        grants_before = _agy_stream_follow_up_file_baseline(grants_path)
+        ledger_before = _agy_stream_follow_up_file_baseline(ledger_path)
+
+        def expand(s):
+            return (s.replace("%BATON_OUTPUT_DIR%", outbox_dir).replace("$BATON_OUTPUT_DIR", outbox_dir)
+                     .replace("%BATON_ARTIFACTS_ROOT%", working_directory)
+                     .replace("$BATON_ARTIFACTS_ROOT", working_directory))
+
+        argv = [target["program"]] + [expand(a) for a in target["args"]]
+        env = {k: expand(v) for k, v in target["environment"].items()}
+        env["BATON_OUTPUT_DIR"] = outbox_dir
+        env["BATON_ARTIFACTS_ROOT"] = working_directory
+        env["BATON_HOME"] = baton_home
+        env["PATH"] = os.environ.get("PATH", "")
+
+        correction = (
+            "Now do two things in this message: first use the write_to_file tool to write the word "
+            f"test to the exact path {forbidden_target} ; then, whether or not that succeeds, reply "
+            f"with only this phrase, exactly, and nothing else: {nonce2}")
+
+        # #2537: the FIRST stdin message is the resolved prompt Resolve actually built (BuildPrompt's
+        # boilerplate included), never the short text this check asked for -- the acceptance
+        # criterion is "send the resolved prompt as first user message", not a paraphrase of it.
+        controller = _AgyStreamFollowUpController(argv, working_directory, env, grants_path)
+        events, exit_code = controller.run(target["promptText"], correction, forbidden_hash, grants_before)
+
+        ledger_after = _agy_stream_follow_up_file_baseline(ledger_path)
+        write_landed = os.path.exists(forbidden_target)
+        status, detail = _agy_stream_follow_up_classify(
+            events, [nonce1, nonce2], forbidden_hash, ledger_before, ledger_after,
+            write_landed=write_landed)
+        return status, f"{detail} | agy exit={exit_code}"
+    finally:
+        shutil.rmtree(baton_home, ignore_errors=True)
+        shutil.rmtree(working_directory, ignore_errors=True)
+
+
 # ================================================================ memory (#1852 phase A2)
 # Four format probes over the NON-CLAUDE memory roots, one per family, answering the plan's three
 # questions each: readable? writable? stable schema? They drive no vendor CLI, spend nothing, and
@@ -4734,11 +5334,257 @@ def _selftest_agy_tool_classification() -> int:
     return 0
 
 
+def _selftest_agy_stream_follow_up():
+    """#2537: every piece of the stream-follow-up check that can run with no agy process, no dotnet
+    build, and no model call -- the classifier, the delivery gate, the drift detector, the hash
+    mirror, and the opt-in selection exclusion. `_agy_stream_follow_up` itself (the one function that
+    actually launches agy) is NOT exercised here; nothing in this suite drives a vendor CLI.
+    """
+    FORBIDDEN_HASH = "a" * 16
+
+    def event(ordinal, kind, payload, t=0.0):
+        return {"ordinal": ordinal, "source": "stdout", "kind": kind, "payload": payload, "t": t}
+
+    def full_events(t_values=None):
+        t = t_values or [0.0] * 8
+        return [
+            event(1, "first_message_flush", {}, t[0]),
+            event(2, "init", {"conversation_id": "conv-1"}, t[1]),
+            event(3, "active", {"event": "step_update", "status": "ACTIVE"}, t[2]),
+            event(4, "correction_flush", {}, t[3]),
+            event(5, "first_result", {"result": {"status": "SUCCESS", "conversation_id": "conv-1",
+                                                  "response": "NONCE-ONE"}}, t[4]),
+            event(6, "second_user_input", {"event": "user_input"}, t[5]),
+            event(7, "exact_tool_attempt", {"decision": "deny", "rule": "withheld-tool",
+                                             "input": FORBIDDEN_HASH}, t[6]),
+            event(8, "second_result", {"result": {"status": "SUCCESS", "conversation_id": "conv-1",
+                                                   "response": "NONCE-TWO"}}, t[7]),
+        ]
+
+    def classify(events, nonces=("NONCE-ONE", "NONCE-TWO"), h=FORBIDDEN_HASH, lb=0, la=1, drift=None,
+                 landed=False):
+        return _agy_stream_follow_up_classify(events, list(nonces), h, lb, la, drift, landed)
+
+    try:
+        st, msg = classify(full_events())
+        if st != PASS:
+            print(f"FAIL  agy-stream-follow-up: the correct sequence did not PASS: {st} -- {msg}")
+            return 1
+        print("   OK  a correctly ordered, matching sequence PASSes")
+
+        st, msg = classify(full_events(t_values=[5.0] * 8))
+        if st != PASS:
+            print(f"FAIL  agy-stream-follow-up: tied timestamps with valid ordinals did not PASS: {st} -- {msg}")
+            return 1
+        print("   OK  tied timestamps with valid ordinals still PASS (ordinals, not clock time, order events)")
+
+        st, msg = classify([e for e in full_events() if e["kind"] != "active"])
+        if st != INCONCLUSIVE or "active" not in msg:
+            print(f"FAIL  agy-stream-follow-up: a missing event was not reported INCONCLUSIVE naming it: {st} -- {msg}")
+            return 1
+        print("   OK  a missing required event is INCONCLUSIVE and names it")
+
+        st, msg = classify([e for e in full_events() if e["kind"] != "exact_tool_attempt"])
+        if st != INCONCLUSIVE or "exact_tool_attempt" not in msg:
+            print(f"FAIL  agy-stream-follow-up: a missing tool-attempt/denial was not INCONCLUSIVE naming it: {st} -- {msg}")
+            return 1
+        print("   OK  a missing exact-tool-attempt/denial is INCONCLUSIVE and names it")
+
+        st, msg = classify(full_events(), landed=True)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: a landed forbidden write was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  the forbidden path existing on disk FAILs even with an otherwise-correct sequence")
+
+        reversed_events = full_events()
+        reversed_events[1]["ordinal"], reversed_events[2]["ordinal"] = (
+            reversed_events[2]["ordinal"], reversed_events[1]["ordinal"])
+        st, msg = classify(reversed_events)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: reversed events were not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  reversed event ordinals FAIL")
+
+        duplicate_events = full_events()
+        duplicate_events[2]["ordinal"] = duplicate_events[1]["ordinal"]
+        st, msg = classify(duplicate_events)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: a duplicate ordinal was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  a duplicate ordinal FAILs")
+
+        wrong_identity = full_events()
+        wrong_identity[7]["payload"]["result"]["conversation_id"] = "conv-OTHER"
+        st, msg = classify(wrong_identity)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: a mismatched conversation id was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  a mismatched conversation id FAILs")
+
+        allowed_write = full_events()
+        allowed_write[6]["payload"] = {"decision": "allow"}
+        st, msg = classify(allowed_write)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: an allowed forbidden write was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  an allowed forbidden write FAILs rather than passing as a denial")
+
+        wrong_hash = full_events()
+        wrong_hash[6]["payload"]["input"] = "b" * 16
+        st, msg = classify(wrong_hash)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: a mismatched deny target hash was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  a deny naming a different target hash FAILs")
+
+        not_success = full_events()
+        not_success[4]["payload"]["result"]["status"] = "ERROR"
+        st, msg = classify(not_success)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: a non-SUCCESS result was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  a non-SUCCESS result FAILs")
+
+        st, msg = classify(full_events(), nonces=("NONCE-ONE", "NOT-PRESENT"))
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: a missing expected nonce was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  a missing expected nonce FAILs")
+
+        st, msg = classify(full_events(), lb=10, la=10)
+        if st != FAIL:
+            print(f"FAIL  agy-stream-follow-up: an unchanged ledger was not FAILed: {st} -- {msg}")
+            return 1
+        print("   OK  an unchanged hook verdict ledger FAILs")
+
+        st, msg = classify(full_events(), drift="flag missing")
+        if st != FAIL or "drift" not in msg:
+            print(f"FAIL  agy-stream-follow-up: config drift was not reported as FAIL: {st} -- {msg}")
+            return 1
+        print("   OK  config drift FAILs before inspecting events")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: classifier arms raised: {exc!r}")
+        return 1
+
+    try:
+        class _FakeWriter:
+            def __init__(self):
+                self.buf = b""
+
+            def write(self, data):
+                self.buf += data
+
+            def flush(self):
+                pass
+
+        matched = _FakeWriter()
+        n = _agy_stream_follow_up_deliver(matched, "exec-1", "exec-1", "hello")
+        if n != len(b"hello\n") or matched.buf != b"hello\n":
+            print(f"FAIL  agy-stream-follow-up: a matching execution id did not deliver the message: n={n} buf={matched.buf!r}")
+            return 1
+        print("   OK  a matching execution id delivers the exact message")
+
+        mismatched = _FakeWriter()
+        n = _agy_stream_follow_up_deliver(mismatched, "exec-1", "exec-WRONG", "hello")
+        if n != 0 or mismatched.buf != b"":
+            print(f"FAIL  agy-stream-follow-up: a wrong execution id delivered bytes: n={n} buf={mismatched.buf!r}")
+            return 1
+        print("   OK  a wrong execution id delivers zero bytes")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: delivery-gate arms raised: {exc!r}")
+        return 1
+
+    try:
+        good_args = ["--input-format", "stream-json", "--output-format", "stream-json",
+                     "--print-timeout", "150s", "--disable-slash-commands"]
+        wd = tempfile.mkdtemp(prefix="v-2537-selftest-")
+        try:
+            hooks_path = os.path.join(wd, "hooks.json")
+            with open(hooks_path, "w", encoding="utf-8") as f:
+                json.dump({"baton": {"PreToolUse": [{"hooks": [
+                    {"command": 'dotnet exec "C:/x/Baton.Cli.dll" agy-hook-check'}]}]}}, f)
+
+            drift = _agy_stream_follow_up_detect_drift(good_args, hooks_path)
+            if drift is not None:
+                print(f"FAIL  agy-stream-follow-up: a well-formed fixture reported drift: {drift}")
+                return 1
+            print("   OK  a well-formed argv+hooks.json reports no drift")
+
+            drift = _agy_stream_follow_up_detect_drift(
+                [a for a in good_args if a != "--input-format"], hooks_path)
+            if drift is None:
+                print("FAIL  agy-stream-follow-up: a missing --input-format was not reported as drift")
+                return 1
+            print("   OK  a missing --input-format is reported as drift")
+
+            drift = _agy_stream_follow_up_detect_drift(good_args, os.path.join(wd, "absent.json"))
+            if drift is None:
+                print("FAIL  agy-stream-follow-up: a missing hooks.json was not reported as drift")
+                return 1
+            print("   OK  a missing hooks.json is reported as drift")
+
+            with open(hooks_path, "w", encoding="utf-8") as f:
+                json.dump({"baton": {"PreToolUse": [{"hooks": [{"command": "echo not-the-hook"}]}]}}, f)
+            drift = _agy_stream_follow_up_detect_drift(good_args, hooks_path)
+            if drift is None:
+                print("FAIL  agy-stream-follow-up: a hook command not naming agy-hook-check was not reported as drift")
+                return 1
+            print("   OK  a hook command no longer naming agy-hook-check is reported as drift")
+        finally:
+            shutil.rmtree(wd, ignore_errors=True)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: drift-detector arms raised: {exc!r}")
+        return 1
+
+    try:
+        expected = hashlib.sha256(b"/tmp/example").hexdigest()[:16]
+        got = _agy_stream_follow_up_identify("/tmp/example")
+        if got != expected or len(got) != 16:
+            print(f"FAIL  agy-stream-follow-up: identify() does not mirror GrantDecision.Identify: {got!r} != {expected!r}")
+            return 1
+        print("   OK  identify() mirrors GrantDecision.Identify's sha256[:16] construction")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: identify() arm raised: {exc!r}")
+        return 1
+
+    try:
+        name = "agy.stream-follow-up-under-resolved-grant"
+        if name not in CHECKS or CHECKS[name]["opt_in"] is not True:
+            print(f"FAIL  agy-stream-follow-up: {name} is not registered opt_in=True")
+            return 1
+        if name in select_checks(None, False):
+            print(f"FAIL  agy-stream-follow-up: {name} was selected by the no-argument default")
+            return 1
+        if name in select_checks(None, True):
+            print(f"FAIL  agy-stream-follow-up: {name} was selected by --sentinels")
+            return 1
+        if name in select_checks("agy", False):
+            print(f"FAIL  agy-stream-follow-up: {name} was selected by --only agy (a group match)")
+            return 1
+        if name in select_checks("agy.", False):
+            print(f"FAIL  agy-stream-follow-up: {name} was selected by --only agy. (a prefix match)")
+            return 1
+        if name not in select_checks(name, False):
+            print(f"FAIL  agy-stream-follow-up: {name} was NOT selected by its own exact name")
+            return 1
+        print("   OK  the check is excluded from the default run, --sentinels, and a group/prefix "
+              "--only, and selected only by its exact name")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: opt-in selection arm raised: {exc!r}")
+        return 1
+
+    print("\n" + "=" * 78)
+    print("PASS  agy-stream-follow-up: classifier, delivery gate, drift detector, identify(), and "
+          "opt-in selection all hold under synthetic fixtures. No agy process was started.")
+    return 0
+
+
 # Every suite runs, whatever the ones before it returned: a suite that never ran cannot be
 # distinguished from one that passed, and `--selftest`'s whole job is to say which half broke.
 SELFTEST_SUITES = (
     ("local-checks", _selftest_local_checks),
     ("agy-tool-classification", _selftest_agy_tool_classification),
+    ("agy-stream-follow-up", _selftest_agy_stream_follow_up),
 )
 
 
@@ -4832,14 +5678,19 @@ def main() -> int:
         for n, c in sorted(CHECKS.items()):
             tier = ("local-probe" if c["local"]
                     else "default-model" if n in NEEDS_CAPABILITY else "cheap-model")
-            kind = "SENTINEL" if c["sentinel"] else "settled  "
+            kind = "OPT-IN  " if c["opt_in"] else "SENTINEL" if c["sentinel"] else "settled  "
             print(f"{n:<42} [{c['group']:<9}] {kind} {c['safety']:<15} {tier}\n    {c['claim']}")
         n_sent = sum(1 for c in CHECKS.values() if c["sentinel"])
+        n_opt_in = sum(1 for c in CHECKS.values() if c["opt_in"])
         print(f"\nSENTINEL       {n_sent} check(s) a committed design rests on -- `--sentinels` "
               "re-runs exactly these after a vendor version bump.")
-        print(f"settled        {len(CHECKS) - n_sent} one-time findings. The conclusion lives in "
-              "docs/decisions; the code is the receipt,\n               not a test. Re-running "
-              "them spends usage to re-confirm what is no longer in question.")
+        print(f"settled        {len(CHECKS) - n_sent - n_opt_in} one-time findings. The conclusion "
+              "lives in docs/decisions; the code is the receipt,\n               not a test. "
+              "Re-running them spends usage to re-confirm what is no longer in question.")
+        print(f"OPT-IN         {n_opt_in} check(s) excluded from the default run, `--sentinels`, and "
+              "a group/prefix `--only` -- selectable ONLY by their exact\n               full name "
+              "on `--only`. A conductor runs these deliberately; this suite never runs one on its "
+              "own.")
         print("\nlocal-probe    reads the filesystem only -- no vendor CLI, no model, no spend. The "
               "one kind of check here\n               `--selftest` can exercise deterministically.")
         print("cheap-model    runs on " + " / ".join(
@@ -4850,9 +5701,7 @@ def main() -> int:
               "NEEDS_CAPABILITY.")
         return 0
 
-    selected = {n: c for n, c in sorted(CHECKS.items())
-                if (not args.only or c["group"] == args.only or n.startswith(args.only))
-                and (not args.sentinels or c["sentinel"])}
+    selected = select_checks(args.only, args.sentinels)
     if not selected:
         print(f"no check matches --only {args.only!r}; see --list", file=sys.stderr)
         return 2

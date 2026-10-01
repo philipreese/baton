@@ -32,6 +32,17 @@ namespace Baton.GateProbe;
 /// produces, and <c>CoreDispatcher</c> expands them at dispatch. The caller substitutes its own
 /// directories, which keeps this honest about what the adapter emits.
 /// </para>
+/// <para>
+/// <c>--stream-json</c>, <c>--no-outputs</c>, <c>--model</c> and <c>--timeout</c> (#2537) exist for
+/// one caller: a check that needs the SAME resolved invocation a real read-only StreamJson binding
+/// would get (model, hook, env, timeout, seed files) so it can transform delivery without
+/// hand-writing a second approximation of <c>Resolve</c>'s output. Each is additive and defaults to
+/// the prior behaviour untouched. Deliberately no <c>--working-directory</c>: setting
+/// <see cref="WorkerInvocation.WorkingDirectory"/> routes through <see cref="ProjectCeilingGate"/>,
+/// which refuses any directory with no recorded trust-store entry (decision 0004) — a caller that
+/// wants a vendor cwd passes it to the spawned process directly, as every existing check here
+/// already does, rather than through the resolved invocation.
+/// </para>
 /// </remarks>
 public static class Program
 {
@@ -41,7 +52,9 @@ public static class Program
         {
             Console.Error.WriteLine(
                 "usage: Baton.GateProbe <claude|gemini> [--grant-writes] [--prompt <text>]\n" +
-                "Prints {program, args, environment} for the adapter's resolved invocation.");
+                "    [--stream-json] [--no-outputs] [--model <name>] [--timeout <seconds>]\n" +
+                "Prints {program, args, environment, promptText, seedFiles,\n" +
+                "    hookVerdictLedgerFileName} for the adapter's resolved invocation.");
             return 2;
         }
 
@@ -49,6 +62,14 @@ public static class Program
         var grantWrites = args.Contains("--grant-writes");
         var promptIndex = Array.IndexOf(args, "--prompt");
         var prompt = promptIndex >= 0 && promptIndex + 1 < args.Length ? args[promptIndex + 1] : "Say OK.";
+        var streamJson = args.Contains("--stream-json");
+        var noOutputs = args.Contains("--no-outputs");
+        var modelIndex = Array.IndexOf(args, "--model");
+        var model = modelIndex >= 0 && modelIndex + 1 < args.Length ? args[modelIndex + 1] : null;
+        var timeoutIndex = Array.IndexOf(args, "--timeout");
+        TimeSpan? timeout = timeoutIndex >= 0 && timeoutIndex + 1 < args.Length
+            ? TimeSpan.FromSeconds(double.Parse(args[timeoutIndex + 1]))
+            : null;
 
         // Reads withheld too, so the denied-tools channel carries something on every arm and the
         // difference between arms is exactly the one category under test.
@@ -63,14 +84,18 @@ public static class Program
         };
 
         var target = adapter.Resolve(
-            new WorkerInvocation(prompt, PermissionGrant: grant),
-            new WorkerContract("probe", [], [new ProducedOutput("out.txt")], []));
+            new WorkerInvocation(prompt, Model: model, PermissionGrant: grant, StreamJson: streamJson, Timeout: timeout),
+            new WorkerContract(
+                "probe", [], noOutputs ? [] : [new ProducedOutput("out.txt")], []));
 
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             program = target.Program,
             args = target.Args,
             environment = (target.Environment ?? []).ToDictionary(e => e.Name, e => e.Value),
+            promptText = target.PromptText,
+            seedFiles = (target.SeedFiles ?? []).Select(f => new { path = f.PathTemplate, content = f.Content }),
+            hookVerdictLedgerFileName = target.HookVerdictLedgerFileName,
         }));
 
         return 0;
