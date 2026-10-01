@@ -153,11 +153,17 @@ public static class TaskCommand
             : item.State == QueueItemState.Cancelled ? "cancelled"
             : item.IssuePreparation?.State == TaskPreparationState.Preparing
                 ? abandonedPreparation ? "blocked" : "preparing"
-            : item.IssuePreparation?.State == TaskPreparationState.Blocked || item.Halted ? "blocked"
+            : item.IssuePreparation?.State == TaskPreparationState.Blocked || item.Halted
+                || item.State == QueueItemState.Failed ? "blocked"
             : item.State == QueueItemState.Launched ? "running"
             : readiness is not null ? item.Stage == WorkStage.Ready && !headChanged && !readinessRegressed
                 ? "ready-as-of" : "stale"
             : "queued";
+        // Failed rows are not scheduler candidates. Report retained failure evidence without
+        // inventing a blocked receipt or promising a daemon retry (#2530).
+        if (state == "blocked" && item.State == QueueItemState.Failed
+            && item.IssuePreparation?.State is not (TaskPreparationState.Preparing or TaskPreparationState.Blocked))
+            reason = string.IsNullOrWhiteSpace(item.Error) ? "task-failed" : item.Error;
         if (state == "stale")
             reason = item.Error ?? (headChanged ? "observed-pr-head-changed" : "readiness-evidence-no-longer-current");
         var nextTrigger = state switch
