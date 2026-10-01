@@ -1,8 +1,11 @@
 # Invoking Baton against another repo
 
-For the **cold invoking agent**: you have been told to run a Baton lane over some repository, you
-have no prior session context, and your job is to get one worker to produce one file. This page is
-the working invocation and the edges around it, as they actually are today.
+For the **cold invoking agent**: choose the ownership boundary before starting work.
+For ordinary issue-backed project work, use the owned-task entry point in the
+[`README` verb index](../../README.md#verbs); its contract is
+[`spec/baton.md` §13](../../spec/baton.md).
+For advice, experiments, or a caller deliberately supervising one standalone lane, use the
+`run` and `dispatch` guidance below. Standalone calls do not acquire task lifecycle ownership.
 
 It is **not** for developing Baton — that is [`docs/agents/developing-baton.md`](developing-baton.md) — and it is not the
 reference for `baton dispatch`, which is [`docs/dispatch.md`](../dispatch.md). Where those own a fact,
@@ -53,7 +56,7 @@ add.
 
 ---
 
-## 1. The one invocation that works today
+## 1. Starting one standalone workflow
 
 ```
 baton run <workflow-file> --bindings <bindings-file> --room-dir <fresh-dir> --echo-worker
@@ -62,7 +65,7 @@ baton run <workflow-file> --bindings <bindings-file> --room-dir <fresh-dir> --ec
 Two files you author, one directory you name. `--echo-worker` streams the worker's stdout so you can
 see it is alive; drop it and you see nothing until the run settles.
 
-`baton dispatch` is the intended front door and needs no JSON from you. Read §6 before choosing it —
+`baton dispatch` starts a standalone role without requiring JSON from you. Read §6 before choosing it —
 an audited role/adapter pair now auto-provisions its own worktree rather than refusing, which is a
 real consequence for what the worker runs against, not a formality (§6 has the per-vendor detail and
 the line dispatch prints). `baton run`
@@ -744,9 +747,9 @@ A role's declared outputs — the `Outputs`/`ProducedOutputs` pair you need for 
 in `WorkerRoles.json`, and the table above lists them. `--output <path>` copies the primary one out to
 `<path>` once the room reaches Terminal; see `docs/dispatch.md` for its validation rules.
 
-## 7. Queueing work instead of dispatching it
+## 7. Standalone queue requests and legacy lifecycle admission
 
-Everything above starts a lane **now**. `baton queue` instead records a durable request that the
+The standalone examples above start a lane **now**. `baton queue` instead records a durable request that the
 running daemon starts on its own schedule — nothing in the `queue` verbs launches anything, so a
 machine with no daemon accumulates a work list and runs none of it.
 
@@ -756,13 +759,17 @@ Two shapes. A **dispatch request** is one lane, exactly as you would have dispat
 baton queue add my-tag --role review --spec ./brief.md --workspace /repos/thing --scope engine
 ```
 
-A **work item** is anchored on a GitHub issue and has a lifecycle the daemon drives — implement, then
+A **legacy work item** is anchored on a GitHub issue and has a lifecycle the daemon drives — implement, then
 review, then a fix round carrying the reviewer's findings, then a re-review, then `ready` for a person
 to merge:
 
 ```
 baton queue add --issue 1934 --lifecycle --scope engine
 ```
+
+For ordinary new project work, prefer the owned-task entry linked above. Submission retained,
+worker running, review-ready and merged are different outcomes; consult that contract rather than
+reading command success as completed work. Queue holds and daemon availability still govern launch.
 
 `--lifecycle` provisions and trusts the worktree, renders the implement brief from the issue body into
 `~/.baton/queue/specs/`, and needs no `--role` (the stage picks it) and no tag (it defaults to
