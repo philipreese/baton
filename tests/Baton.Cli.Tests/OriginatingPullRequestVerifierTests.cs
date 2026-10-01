@@ -8,6 +8,7 @@ using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
+using Baton.Tests.Shared;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
@@ -485,7 +486,7 @@ public sealed class OriginatingPullRequestVerifierTests
                 await File.WriteAllTextAsync(Path.Combine(workspace, "README.md"), "modified", TestContext.Current.CancellationToken);
                 break;
             case "missing-journal":
-                File.Delete(Path.Combine(room, BatonPaths.FlowLogFileName));
+                FileCleanup.EnsureDeleted(Path.Combine(room, BatonPaths.FlowLogFileName));
                 break;
             case "torn-journal":
                 await File.AppendAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{", TestContext.Current.CancellationToken);
@@ -579,7 +580,7 @@ public sealed class OriginatingPullRequestVerifierTests
             case "linked-file":
                 var referent = Path.Combine(home.Path, "referent.txt");
                 await File.WriteAllTextAsync(referent, "engine-owned", TestContext.Current.CancellationToken);
-                File.Delete(projected);
+                FileCleanup.EnsureDeleted(projected);
                 try { File.CreateSymbolicLink(projected, referent); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
@@ -624,9 +625,8 @@ public sealed class OriginatingPullRequestVerifierTests
         };
         foreach (var arg in args) start.ArgumentList.Add(arg);
         using var process = Process.Start(start)!;
-        var stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-        var stderr = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
-        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+        var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+            process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         Assert.True(process.ExitCode == 0, stderr);
         return stdout.Trim();
     }
