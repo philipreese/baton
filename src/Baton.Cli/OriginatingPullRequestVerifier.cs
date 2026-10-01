@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Baton.Domain;
+using Baton.Cli.Daemon;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
@@ -17,7 +18,7 @@ internal static class OriginatingPullRequestVerifier
 
     public static async Task<OriginatingPullRequestOwnership> VerifyAsync(
         string reference, string workspace, CancellationToken cancellationToken, string? expectedBranch = null,
-        string? expectedHead = null)
+        string? expectedHead = null, DispatchOptions? recoveryOptions = null)
     {
         var (repository, number) = ParseReference(reference);
         if (expectedHead is not null && !IsCanonicalSha(expectedHead))
@@ -34,7 +35,7 @@ internal static class OriginatingPullRequestVerifier
         if (expectedHead is not null)
         {
             await ValidatePreservedContinuationAsync(
-                workspace, expectedHead, launchHead, cancellationToken).ConfigureAwait(false);
+                workspace, expectedHead, launchHead, cancellationToken, recoveryOptions).ConfigureAwait(false);
         }
 
         var gh = ResolveExecutable(workspace, Environment.GetEnvironmentVariable("PATH"), OperatingSystem.IsWindows());
@@ -345,8 +346,9 @@ internal static class OriginatingPullRequestVerifier
         }
     }
 
-    private static async Task ValidatePreservedContinuationAsync(
-        string workspace, string expectedHead, string launchHead, CancellationToken cancellationToken)
+    internal static async Task ValidatePreservedContinuationAsync(
+        string workspace, string expectedHead, string launchHead, CancellationToken cancellationToken,
+        DispatchOptions? recoveryOptions = null)
     {
         if (!IsCanonicalSha(launchHead))
         {
@@ -362,7 +364,9 @@ internal static class OriginatingPullRequestVerifier
         var status = await RunGitAsync(
             git, workspace, ["status", "--porcelain=v1", "--untracked-files=all"], cancellationToken)
             .ConfigureAwait(false);
-        if (!status.Started || status.ExitCode != 0 || status.Stdout.Trim().Length > 0)
+        if (!status.Started || status.ExitCode != 0
+            || status.Stdout.Length > 0 && !await HasOnlyBoundEngineFilesAsync(
+                workspace, expectedHead, status.Stdout, recoveryOptions, cancellationToken).ConfigureAwait(false))
         {
             throw new CliArgumentException(
                 "The preserved continuation workspace must be clean and readable; ownership was refused before launch.");
@@ -376,6 +380,167 @@ internal static class OriginatingPullRequestVerifier
             throw new CliArgumentException(
                 "The current workspace HEAD is not a readable descendant of the retained continuation head; ownership was refused before launch.");
         }
+    }
+
+    /// <summary>
+    /// Protected invariant: only literal, untracked, link-free files whose current bytes match
+    /// placement facts in this task's exact prior attempt chain can be excluded. Paths, directory
+    /// names, and matching bytes without that lineage never grant continuation ownership.
+    /// </summary>
+    private static async Task<bool> HasOnlyBoundEngineFilesAsync(
+        string workspace, string expectedHead, string porcelain, DispatchOptions? recoveryOptions,
+        CancellationToken cancellationToken)
+    {
+        if (recoveryOptions is null) return false;
+        try
+        {
+            var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var owners = queue.Items.Where(i => i is
+            {
+                State: QueueItemState.Launched, Stage: WorkStage.Continue,
+                AttemptId: not null, ParentAttemptId: not null, AttemptEnvelope: not null,
+                OriginatingPullRequestRecoveryClaim: not null,
+            } && RecoveryEvidenceMatches(recoveryOptions, workspace, i)
+                && i.AttemptId == i.OriginatingPullRequestRecoveryClaim
+                && i.AttemptEnvelope!.AttemptId == i.AttemptId
+                && i.AttemptEnvelope.Stage == WorkStage.Continue
+                && i.AttemptEnvelope.ParentAttemptId == i.ParentAttemptId
+                && string.Equals(i.AttemptEnvelope.WorkId, i.Tag, StringComparison.Ordinal)
+                && i.AttemptEnvelope.RoomDirectory is { Length: > 0 } envelopeRoom
+                && SameWorkspace(envelopeRoom, recoveryOptions.RoomDirectoryPath)
+                && (i.RoomDirectory is null || SameWorkspace(i.RoomDirectory, envelopeRoom))
+                && string.Equals(i.ExpectedOriginatingPullRequestHead, expectedHead, StringComparison.OrdinalIgnoreCase)
+                ).ToArray();
+            if (owners.Length != 1) return false;
+            var owner = owners[0];
+            var fleet = await FleetEventLog.OpenOperational().ReadRetainedForInspection(cancellationToken)
+                .ConfigureAwait(false);
+            var rooms = new List<string>();
+            var visited = new HashSet<FleetAttemptId>();
+            for (var ancestor = owner.ParentAttemptId; ancestor is { } id;)
+            {
+                if (!visited.Add(id)) return false;
+                var facts = fleet.Where(e => e.AttemptId == id).ToArray();
+                if (facts.Any(e => e.WorkId?.Value != owner.Tag)) return false;
+                var starts = facts.Where(e => e.Kind == FleetEventKind.AttemptStarted).ToArray();
+                var settles = facts.Where(e => e.Kind == FleetEventKind.AttemptSettled).ToArray();
+                if (starts.Length != 1 || settles.Length != 1
+                    || starts[0].RoomId is not { Value.Length: > 0 } roomId
+                    || settles[0].RoomId != roomId
+                    || starts[0].ParentAttemptId != settles[0].ParentAttemptId
+                    || settles[0].At < starts[0].At) return false;
+                var room = BatonPaths.RecordKey(roomId.Value);
+                if (!BatonPaths.RecordKeyComparer.Equals(room, roomId.Value)
+                    || !IsStrictChild(BatonPaths.Rooms, room)
+                    || !HasLinkFreeExistingPath(room)) return false;
+                rooms.Add(room);
+                ancestor = starts[0].ParentAttemptId;
+            }
+
+            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var placed = new Dictionary<string, string>(comparer);
+            foreach (var room in rooms)
+            {
+                var journal = Path.Combine(room, BatonPaths.FlowLogFileName);
+                if (!IsLinkFreeFile(room, journal) || !IsCompleteJournal(journal)) return false;
+                var flow = await new FlowEventLogReader(journal).ReadAllAsync(cancellationToken).ConfigureAwait(false);
+                var accepted = new HashSet<ExecutionId>();
+                foreach (var fact in flow)
+                {
+                    if (fact is FlowEvent.ExecutionRequestAccepted request)
+                    {
+                        if (!accepted.Add(request.Request.ExecutionId)) return false;
+                    }
+                    else if (fact is FlowEvent.EngineFilesPlaced entry)
+                    {
+                        // A placement is owned evidence only after one acceptance in this room.
+                        // Crash replay may place identical files twice for that execution ID.
+                        if (!accepted.Contains(entry.ExecutionId) || entry.Files is null) return false;
+                        foreach (var file in entry.Files)
+                        {
+                            if (file is null || !Path.IsPathFullyQualified(file.Path)
+                                || file.Sha256 is not { Length: 64 } digest
+                                || !digest.All(char.IsAsciiHexDigit)
+                                || !IsStrictChild(workspace, file.Path)) return false;
+                            var path = Path.GetFullPath(file.Path);
+                            if (placed.TryGetValue(path, out var prior)
+                                && !string.Equals(prior, digest, StringComparison.OrdinalIgnoreCase)) return false;
+                            placed[path] = digest;
+                        }
+                    }
+                }
+            }
+
+            var lines = porcelain.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length == 0) return false;
+            foreach (var line in lines)
+            {
+                // Porcelain v1's quoted names and rename/copy records are not unambiguous
+                // single-file claims; tracked edits and unrelated untracked files also refuse.
+                if (!line.StartsWith("?? ", StringComparison.Ordinal) || line.Length <= 3
+                    || line[3] == '"' || line.Contains(" -> ", StringComparison.Ordinal)
+                    || line[3..].Any(char.IsControl)) return false;
+                var relative = line[3..];
+                if (Path.IsPathRooted(relative) || relative.Contains('\\')) return false;
+                var path = Path.GetFullPath(Path.Combine(workspace, relative));
+                if (!IsStrictChild(workspace, path) || !IsLinkFreeFile(workspace, path)
+                    || !placed.TryGetValue(path, out var digest)
+                    || !string.Equals(EnginePlacedFile.TryDigest(path), digest, StringComparison.OrdinalIgnoreCase)
+                    || !IsLinkFreeFile(workspace, path)) return false;
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+            or InvalidDataException or BatonFlowException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsStrictChild(string root, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
+        return relative.Length > 0 && relative != "." && !Path.IsPathRooted(relative)
+            && relative != ".."
+            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            && !relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal);
+    }
+
+    private static bool IsLinkFreeFile(string root, string path)
+    {
+        if (!IsStrictChild(root, path) || !HasLinkFreeExistingPath(root)) return false;
+        var current = Path.GetFullPath(root);
+        var parts = Path.GetRelativePath(root, path).Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (parts[i] is "." or "..") return false;
+            current = Path.Combine(current, parts[i]);
+            if (i < parts.Length - 1)
+            {
+                var directory = new DirectoryInfo(current);
+                directory.Refresh();
+                if (!directory.Exists || directory.LinkTarget is not null
+                    || (directory.Attributes & FileAttributes.ReparsePoint) != 0) return false;
+            }
+            else
+            {
+                var file = new FileInfo(current);
+                file.Refresh();
+                if (!file.Exists || file.LinkTarget is not null
+                    || (file.Attributes & FileAttributes.ReparsePoint) != 0) return false;
+            }
+        }
+        return parts.Length > 0;
+    }
+
+    private static bool IsCompleteJournal(string path)
+    {
+        using var stream = File.OpenRead(path);
+        if (stream.Length == 0) return false;
+        stream.Seek(-1, SeekOrigin.End);
+        return stream.ReadByte() == '\n';
     }
 
     private static bool IsCanonicalSha(string value) =>

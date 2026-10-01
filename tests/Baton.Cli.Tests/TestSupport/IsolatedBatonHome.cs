@@ -31,9 +31,9 @@ public sealed class IsolatedBatonHome : IDisposable
 {
     private readonly IDisposable _scope;
 
-    public IsolatedBatonHome()
+    public IsolatedBatonHome(string? baseDirectory = null)
     {
-        Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"baton-home-{Guid.NewGuid():N}");
+        Path = System.IO.Path.Combine(baseDirectory ?? System.IO.Path.GetTempPath(), $"baton-home-{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path);
         _scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = Path });
     }
