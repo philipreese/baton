@@ -129,13 +129,13 @@ Whether the prompt can move **off** the command line — delivered via stdin —
   a piped context block, agy reports it received nothing on stdin). Within `-p`/print mode there is no
   `--input-format` and no prompt-file flag. Guarded by `verify.py::lifecycle.agy-print-requires-prompt-argument`.
 
-Consequence: stdin lifts the command-line ceiling for `claude`, but a large `agy` prompt stays
-argv-bound until agy grows an off-argv path. Both checks carry a prompt-as-argument control arm that
+Consequence: stdin lifts the command-line ceiling for `claude -p`; `agy -p` keeps its prompt
+argv-bound. Both checks carry a prompt-as-argument control arm that
 must pass first, so each verdict reflects real stdin behaviour rather than a harness artifact.
 
 **This is distinct from agy's separate `--input-format stream-json` mode**, which does not take `-p`
-at all and is not a prompt-delivery alternative to the row above — it is a subsequent-turn stdin
-channel on its own invocation shape, registered as the explicit opt-in check
+at all and accepts initial and subsequent user messages on stdin in its own invocation shape.
+Reproduction under Baton's resolved grant is registered as the explicit opt-in check
 `verify.py::agy.stream-follow-up-under-resolved-grant` (#2537, part of #2180). See that check's own
 claim string for what it measures and does not; this paragraph does not restate it.
 

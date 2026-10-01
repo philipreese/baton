@@ -4167,10 +4167,11 @@ def _claude_allowedtools_space_before_paren():
 # independently re-measured in this lane, which runs no live agy call at all. Every required fact the
 # classifier checks is checked for PRESENCE before anything is checked for ORDER, so a wrong envelope
 # constant reports INCONCLUSIVE on the conductor's later live run rather than a false PASS.
-AGY_STREAM_INPUT_EVENT = "user/message"          # stdin envelope: {"event": ..., "content": text}
+AGY_STREAM_INPUT_EVENT = "user"                  # stdin: {"event": "user", "message": {"content": text}}
 AGY_STREAM_OUTPUT_INIT = "init"
 AGY_STREAM_OUTPUT_STEP_UPDATE = "step_update"
-AGY_STREAM_OUTPUT_USER_INPUT = "user_input"
+AGY_STREAM_USER_INPUT_STEP = "user_input"
+AGY_STREAM_AGENT_RESPONSE_STEP = "agent_response"
 AGY_STREAM_OUTPUT_RESULT = "result"
 AGY_STREAM_ACTIVE_STATUS = "ACTIVE"
 AGY_STREAM_SUCCESS_STATUS = "SUCCESS"
@@ -4418,6 +4419,9 @@ def _agy_stream_follow_up_identities(event):
         values.append(payload["conversation_id"])
     if isinstance(inner, dict) and "conversation_id" in inner:
         values.append(inner["conversation_id"])
+    step = payload.get("step_update")
+    if isinstance(step, dict) and "conversation_id" in step:
+        values.append(step["conversation_id"])
     return [v for v in values if isinstance(v, str) and v.strip()]
 
 
@@ -4432,7 +4436,7 @@ def _agy_stream_follow_up_safe_event(event, nonces):
     payload = event["payload"]
     safe = {}
     allowed = {
-        "event": {"init", "step_update", "user_input", "result"},
+        "event": {"init", "step_update", "result"},
         "status": {"ACTIVE", "SUCCESS", "ERROR", "FAILURE", "CANCELLED"},
         "decision": {"deny", "allow"}, "rule": {"withheld-tool"},
         "type": {"baton.grant"}, "vendor": {"agy"},
@@ -4455,6 +4459,17 @@ def _agy_stream_follow_up_safe_event(event, nonces):
 
     if "conversation_id" in payload:
         safe["conversation_id"] = identity(payload)
+    step = payload.get("step_update")
+    if isinstance(step, dict):
+        safe["step_update"] = {
+            "state": step.get("state") if step.get("state") in ("ACTIVE", "DONE") else "other",
+            "step_type": step.get("step_type") if step.get("step_type") in
+                         ("agent_response", "user_input") else "other",
+        }
+        if isinstance(step.get("step_index"), int):
+            safe["step_update"]["step_index"] = step["step_index"]
+        if "conversation_id" in step:
+            safe["step_update"]["conversation_id"] = identity(step)
     inner = payload.get("result")
     if isinstance(inner, dict):
         safe["result"] = {"status": inner.get("status") if inner.get("status") in
@@ -4503,6 +4518,10 @@ class _AgyStreamFollowUpController:
         self.timeout_s = timeout_s
         self.poll_interval = poll_interval
         self._lock = threading.RLock()
+        # Separate from the event lock: a blocked write must not hold up the watchdog/evidence.
+        # Stdout acquisition and the write+flush observation share this lock so a fast reply cannot
+        # acquire an ordinal between completed delivery and its completion marker.
+        self._delivery_lock = threading.RLock()
         self._ordinal = 0
         self.events = []
         self.proc = None
@@ -4570,6 +4589,10 @@ class _AgyStreamFollowUpController:
                 pass
 
     def _classify_stdout_line(self, text):
+        with self._delivery_lock:
+            self._acquire_stdout_line(text)
+
+    def _acquire_stdout_line(self, text):
         if not text:
             return
         try:
@@ -4583,11 +4606,19 @@ class _AgyStreamFollowUpController:
         event = obj.get("event")
         if event == AGY_STREAM_OUTPUT_INIT:
             self._record("stdout", "init", obj)
-        elif event == AGY_STREAM_OUTPUT_STEP_UPDATE and obj.get("status") == AGY_STREAM_ACTIVE_STATUS:
-            self._record("stdout", "active", obj)
-        elif event == AGY_STREAM_OUTPUT_USER_INPUT:
-            self._record("stdout", "second_user_input" if self._seen("first_user_input")
-                         else "first_user_input", obj)
+        elif event == AGY_STREAM_OUTPUT_STEP_UPDATE:
+            step = obj.get("step_update")
+            if not isinstance(step, dict):
+                self._record("stdout", "protocol_incomplete", {})
+            elif step.get("state") == AGY_STREAM_ACTIVE_STATUS and step.get("step_type") == AGY_STREAM_AGENT_RESPONSE_STEP:
+                # Retain the native identity on observed response updates; the event cap also
+                # bounds streams containing many text deltas.
+                self._record("stdout", "active", obj)
+            elif step.get("state") == "DONE" and step.get("step_type") == AGY_STREAM_USER_INPUT_STEP:
+                self._record("stdout", "second_user_input" if self._seen("first_user_input")
+                             else "first_user_input", obj)
+        elif event == "user_input":
+            self._record("stdout", "protocol_incomplete", {})
         elif event == AGY_STREAM_OUTPUT_RESULT:
             # Drain audit arrivals before allocating the result ordinal. Polling only from the
             # main loop could place an already-written denial after a fast terminal result.
@@ -4653,9 +4684,10 @@ class _AgyStreamFollowUpController:
             done = threading.Event()
             def write():
                 try:
-                    line = json.dumps({"event": AGY_STREAM_INPUT_EVENT, "content": message})
-                    written = _agy_stream_follow_up_deliver(self.proc.stdin, "controller", "controller", line)
-                    self._record("stdin", kind, {"bytes": written})
+                    line = json.dumps({"event": AGY_STREAM_INPUT_EVENT, "message": {"content": message}})
+                    with self._delivery_lock:
+                        written = _agy_stream_follow_up_deliver(self.proc.stdin, "controller", "controller", line)
+                        self._record("stdin", kind, {"bytes": written})
                 except Exception:
                     self._record("stdin", "delivery_incomplete", {})
                     self._stop.set()
@@ -4678,6 +4710,9 @@ class _AgyStreamFollowUpController:
                 while not self._stop.is_set() and time.monotonic() < deadline:
                     self._poll_grants(grants_baseline_len, forbidden_target_hash)
                     if not second_sent and self._seen("active"):
+                        if self._seen("first_result"):
+                            self._record("controller", "delivery_boundary_incomplete", {})
+                            break
                         second_sent = True
                         if not deliver(second_message, "correction_flush"):
                             break
@@ -4829,7 +4864,8 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
     identities = []
     missing_identity = []
     for e in events:
-        if e["kind"] in ("init", "first_result", "second_result"):
+        if e["kind"] in ("init", "first_result", "second_result", "active",
+                         "first_user_input", "second_user_input"):
             values = _agy_stream_follow_up_identities(e)
             if not values:
                 missing_identity.append(e["kind"])
@@ -4838,6 +4874,13 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
             containers = [payload]
             if isinstance(payload.get("result"), dict):
                 containers.append(payload["result"])
+            if isinstance(payload.get("step_update"), dict):
+                containers.append(payload["step_update"])
+            native = (payload.get("result") if e["kind"] in ("first_result", "second_result")
+                      else payload if e["kind"] == "init" else payload.get("step_update"))
+            if not (isinstance(native, dict) and isinstance(native.get("conversation_id"), str)
+                    and native["conversation_id"].strip()):
+                missing_identity.append(e["kind"])
             if any("conversation_id" in p and not
                    (isinstance(p["conversation_id"], str) and p["conversation_id"].strip())
                    for p in containers):
@@ -4860,6 +4903,8 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
         return INCONCLUSIVE, f"missing required event(s): {', '.join(missing)}"
 
     ordinals = [by_kind[k]["ordinal"] for k in required_order]
+    if by_kind["first_result"]["ordinal"] <= by_kind["correction_flush"]["ordinal"]:
+        return INCONCLUSIVE, "delivery/first-result boundary was not proven before completion"
     if any(a >= b for a, b in zip(ordinals, ordinals[1:])):
         return FAIL, (f"required events are not strictly ordered: "
                       f"{dict(zip(required_order, ordinals))}")
@@ -5640,29 +5685,37 @@ elif mode == "newline-free":
 else:
     def emit(event, **extra):
         print(json.dumps(dict(event=event, **extra)), flush=True)
-    sys.stdin.readline()
+    def user_input():
+        envelope = json.loads(sys.stdin.readline())
+        assert envelope.get("event") == "user", "wrong native input event"
+        assert isinstance(envelope.get("message"), dict), "missing native message"
+        assert isinstance(envelope["message"].get("content"), str), "missing native content"
+    def step(index, state, kind):
+        emit("step_update", step_update=dict(conversation_id="offline-conversation",
+             step_index=index, state=state, step_type=kind))
+    user_input()
     emit("init", conversation_id="offline-conversation")
-    emit("user_input")
-    emit("step_update", status="ACTIVE")
-    sys.stdin.readline()
-    time.sleep(.05)
+    step(0, "DONE", "user_input")
+    step(1, "ACTIVE", "agent_response")
+    user_input()
+    if mode != "no-delay": time.sleep(.05)
     emit("result", result=dict(status="SUCCESS", conversation_id="offline-conversation", response="NONCE-ONE"))
-    emit("user_input")
+    step(2, "DONE", "user_input")
     time.sleep(.05)
     with open(grants, "a") as f:
         f.write(json.dumps(dict(type="baton.grant", vendor="agy", tool="write_to_file", input=target_hash,
-                               decision=mode, rule="withheld-tool")) + "\n")
+                               decision="deny" if mode == "no-delay" else mode, rule="withheld-tool")) + "\n")
     emit("result", result=dict(status="SUCCESS", conversation_id="offline-conversation", response="NONCE-TWO"))
 '''
     try:
-        for mode in ("deny", "allow", "blocked-input", "outer-stop", "parent-exit", "delivery-exception", "newline-free"):
+        for mode in ("deny", "no-delay", "allow", "blocked-input", "outer-stop", "parent-exit", "delivery-exception", "newline-free"):
             with tempfile.TemporaryDirectory(prefix="v-2537-pipes-") as wd:
                 grants = os.path.join(wd, "grants.jsonl")
                 pid_path = os.path.join(wd, "descendant.pid")
                 argv = [sys.executable, "-u", "-c", helper,
                         "blocked-input" if mode == "outer-stop" else mode, grants, "a" * 16, pid_path]
                 controller = _AgyStreamFollowUpController(argv, wd, {"PATH": os.environ.get("PATH", "")},
-                    grants, timeout_s=20 if mode == "outer-stop" else 1.5 if mode in ("deny", "allow") else .7,
+                    grants, timeout_s=20 if mode == "outer-stop" else 1.5 if mode in ("deny", "allow", "no-delay") else .7,
                     cap_bytes=256 if mode == "newline-free" else 1024 * 1024)
                 began = time.monotonic()
                 events, receipt = _agy_stream_follow_up_contained_run(controller,
@@ -5675,7 +5728,7 @@ else:
                     raise AssertionError("independent owner must stop blocked stdin before the inner deadline")
                 result, detail = _agy_stream_follow_up_classify(events,
                     ("NONCE-ONE", "NONCE-TWO"), "a" * 16, 0, 1)
-                expected = PASS if mode == "deny" else FAIL if mode == "allow" else INCONCLUSIVE
+                expected = PASS if mode in ("deny", "no-delay") else FAIL if mode == "allow" else INCONCLUSIVE
                 if result != expected:
                     raise AssertionError(f"{mode}: {result} {detail} {events}")
                 if mode == "parent-exit":
@@ -5719,11 +5772,15 @@ def _selftest_agy_stream_follow_up():
         return [
             event(1, "first_message_flush", {}, t[0]),
             event(2, "init", {"conversation_id": "conv-1"}, t[1]),
-            event(3, "active", {"event": "step_update", "status": "ACTIVE"}, t[2]),
+            event(3, "active", {"event": "step_update", "step_update": {
+                "conversation_id": "conv-1", "step_index": 1,
+                "state": "ACTIVE", "step_type": "agent_response"}}, t[2]),
             event(4, "correction_flush", {}, t[3]),
             event(5, "first_result", {"result": {"status": "SUCCESS", "conversation_id": "conv-1",
                                                   "response": "NONCE-ONE"}}, t[4]),
-            event(6, "second_user_input", {"event": "user_input"}, t[5]),
+            event(6, "second_user_input", {"event": "step_update", "step_update": {
+                "conversation_id": "conv-1", "step_index": 2,
+                "state": "DONE", "step_type": "user_input"}}, t[5]),
             event(7, "exact_tool_attempt", {"decision": "deny", "rule": "withheld-tool",
                                              "input": FORBIDDEN_HASH}, t[6]),
             event(8, "second_result", {"result": {"status": "SUCCESS", "conversation_id": "conv-1",
@@ -5826,10 +5883,10 @@ def _selftest_agy_stream_follow_up():
             return 1
         print("   OK  an unchanged hook verdict ledger is INCONCLUSIVE")
 
-        for index in (1, 4, 7):
+        for index in (1, 2, 4, 5, 7):
             absent = full_events()
             payload = absent[index]["payload"]
-            payload.get("result", payload).pop("conversation_id")
+            payload.get("result", payload.get("step_update", payload)).pop("conversation_id")
             st, msg = classify(absent)
             if st != INCONCLUSIVE or "identity" not in msg:
                 raise AssertionError("each required identity must be present")
@@ -5837,6 +5894,21 @@ def _selftest_agy_stream_follow_up():
         conflict[7]["payload"]["conversation_id"] = "outer-conflict"
         if classify(conflict)[0] != FAIL:
             raise AssertionError("outer/inner identity conflict must fail")
+        for index in (4, 7):
+            missing_inner = full_events()
+            missing_inner[index]["payload"]["conversation_id"] = "conv-1"
+            missing_inner[index]["payload"]["result"].pop("conversation_id")
+            if classify(missing_inner)[0] != INCONCLUSIVE:
+                raise AssertionError("outer identity must not substitute for missing native inner identity")
+        for index in (2, 5):
+            conflicting_step = full_events()
+            conflicting_step[index]["payload"]["step_update"]["conversation_id"] = "step-conflict"
+            if classify(conflicting_step)[0] != FAIL:
+                raise AssertionError("native step identity conflict must fail")
+        boundary = full_events()
+        boundary[4]["ordinal"] = 3.5
+        if classify(boundary)[0] != INCONCLUSIVE:
+            raise AssertionError("unproven delivery/completion boundary must not claim vendor failure")
         for first, second in (("NONCE-ONE NONCE-TWO", ""), ("NONCE-TWO", "NONCE-ONE")):
             union_only = full_events()
             union_only[4]["payload"]["result"]["response"] = first
@@ -5949,6 +6021,44 @@ def _selftest_agy_stream_follow_up():
                 raise AssertionError("sanitized artifact lost discriminating configuration/event/hook evidence")
         print("   OK  names-only/empty-value guard, actual fresh grant acquisition, and newline-free capture cap")
         print("   OK  retained config hashes and ordinal grant/hook evidence preserve classification without private text")
+
+        # Copied envelope shapes from the retained #2180 active-response evidence (2026-09-30,
+        # agy2180-active-1ecf84701b2a496ca4e4ef8822935182/evidence.json). Only conversation IDs and
+        # response text/nonces are normalized here; native event nesting, state/type and indices
+        # remain intact. Replay through the actual stdout reader, then through sanitized retention.
+        native = [
+            '{"event":"init","conversation_id":"conv-1"}',
+            '{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":0,"state":"DONE","step_type":"user_input"}}',
+            '{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"NONCE-ONE"}}',
+            '{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"NONCE-ONE","num_turns":1}}',
+            '{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":2,"state":"DONE","step_type":"user_input"}}',
+            '{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"NONCE-TWO","num_turns":2}}',
+        ]
+        captured = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+        captured._record("stdin", "first_message_flush", {"bytes": 1})
+        captured._reader(io.BytesIO(("\n".join(native[:3]) + "\n").encode()), "stdout")
+        if not captured._seen("active") or not captured._seen("first_user_input"):
+            raise AssertionError("retained native ACTIVE/user-input envelopes were not acquired")
+        captured._record("stdin", "correction_flush", {"bytes": 1})
+        captured._reader(io.BytesIO(("\n".join(native[3:5]) + "\n").encode()), "stdout")
+        captured._record("grants", "exact_tool_attempt", {"decision": "deny", "rule": "withheld-tool",
+                                                         "input": FORBIDDEN_HASH})
+        captured._reader(io.BytesIO((native[5] + "\n").encode()), "stdout")
+        retained_events = [_agy_stream_follow_up_safe_event(e, ("NONCE-ONE", "NONCE-TWO"))
+                           for e in captured.events]
+        if classify(retained_events)[0] != PASS:
+            raise AssertionError("native reader/sanitizer replay lost ordered grant/turn evidence")
+        for e in retained_events:
+            if e["kind"] == "active":
+                e["payload"]["step_update"]["conversation_id"] = "conflicting-step"
+        if classify(retained_events)[0] != FAIL:
+            raise AssertionError("sanitized native step conflict disappeared")
+        flattened = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+        for line in ('{"event":"step_update","status":"ACTIVE"}', '{"event":"user_input"}'):
+            flattened._classify_stdout_line(line)
+        if flattened._seen("active") or classify(flattened.events)[0] != INCONCLUSIVE:
+            raise AssertionError("unsupported flattened envelope must remain INCONCLUSIVE")
+        print("   OK  retained native envelopes replay through acquisition/sanitization; unknown shapes stay INCONCLUSIVE")
     except Exception as exc:                                       # noqa: BLE001
         print(f"FAIL  agy-stream-follow-up: acquisition controls raised: {exc!r}")
         return 1
@@ -6037,7 +6147,8 @@ def _selftest_agy_stream_follow_up():
 
     print("\n" + "=" * 78)
     print("PASS  agy-stream-follow-up: classifier, delivery gate, drift detector, identify(), and "
-          "opt-in selection all hold under synthetic fixtures. No agy process was started.")
+          "opt-in selection hold under native-envelope fixtures and contained offline helpers. "
+          "No agy process was started.")
     return 0
 
 
