@@ -251,7 +251,7 @@ public static class DispatchCommand
             var ownership = await OriginatingPullRequestVerifier.VerifyAsync(
                 options.OriginatingPullRequest, workspace, cancellationToken,
                 options.OriginatingPullRequestBranch,
-                recoveryExpectedHead).ConfigureAwait(false);
+                recoveryExpectedHead, recoveryExpectedHead is null ? null : options).ConfigureAwait(false);
             bindings = bindings.ToDictionary(pair => pair.Key, pair => pair.Value with { OriginatingPullRequestOwnership = ownership }, StringComparer.Ordinal);
         }
 

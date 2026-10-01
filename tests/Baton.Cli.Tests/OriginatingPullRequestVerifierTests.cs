@@ -1,7 +1,9 @@
 using Baton.Cli.Tests.TestSupport;
 using System.Security.Cryptography;
 using System.Text;
+using System.Diagnostics;
 using Baton.CrashTestHost;
+using Baton.Cli.Daemon;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
@@ -383,6 +385,239 @@ public sealed class OriginatingPullRequestVerifierTests
             Environment.SetEnvironmentVariable("BATON_CRASH_TEST_GH_MARKER", oldMarker);
             DirectoryCleanup.DeleteRecursively(root);
         }
+    }
+
+    [Theory]
+    [InlineData("valid")]
+    [InlineData("changed-bytes")]
+    [InlineData("unrelated-file")]
+    [InlineData("tracked-edit")]
+    [InlineData("missing-journal")]
+    [InlineData("torn-journal")]
+    [InlineData("null-manifest")]
+    [InlineData("escaped-manifest")]
+    [InlineData("missing-lineage")]
+    [InlineData("wrong-claim")]
+    [InlineData("wrong-workspace")]
+    [InlineData("wrong-head")]
+    [InlineData("wrong-invoking-room")]
+    [InlineData("wrong-invoking-pr")]
+    [InlineData("wrong-invoking-branch")]
+    [InlineData("other-claimed-row")]
+    [InlineData("envelope-parent-drift")]
+    [InlineData("room-envelope-drift")]
+    [InlineData("relative-manifest")]
+    [InlineData("linked-file")]
+    public async Task Preserved_continuation_accepts_only_a_bound_prior_engine_placement(string scenario)
+    {
+        using var home = new IsolatedBatonHome();
+        var workspace = Directory.CreateDirectory(Path.Combine(home.Path, "workspace")).FullName;
+        await RunRealGitAsync(workspace, "init", "-q");
+        await RunRealGitAsync(workspace, "config", "user.name", "Baton Test");
+        await RunRealGitAsync(workspace, "config", "user.email", "test@example.invalid");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "README.md"), "base", TestContext.Current.CancellationToken);
+        await RunRealGitAsync(workspace, "add", "README.md");
+        await RunRealGitAsync(workspace, "commit", "-qm", "base");
+        var head = await ReadRealGitAsync(workspace, "rev-parse", "HEAD");
+
+        var projected = Path.Combine(workspace, ".claude", "skills", "baton-review", "SKILL.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(projected)!);
+        await File.WriteAllTextAsync(projected, "engine-owned", TestContext.Current.CancellationToken);
+        var parent = new FleetAttemptId("parent-engine-projection");
+        var current = new FleetAttemptId("current-continuation");
+        var room = Directory.CreateDirectory(Path.Combine(BatonPaths.Rooms, "queue-parent")).FullName;
+        await using (var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName)))
+        {
+            var execution = new ExecutionId("placed-execution");
+            await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
+                execution, new WorkflowId("dispatch-review"), new StepId("review"), "review",
+                Inputs: [], Outputs: [], Timeout: TimeSpan.FromMinutes(5), Environment: [],
+                UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>())), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new FlowEvent.EngineFilesPlaced(execution,
+                [new EnginePlacedFile(projected, EnginePlacedFile.TryDigest(projected))], []),
+                TestContext.Current.CancellationToken);
+        }
+        var log = new FleetEventLog(BatonPaths.FleetEventsFile, BatonPaths.FleetEventsRolloverFile, 100_000);
+        var at = DateTimeOffset.UtcNow.AddMinutes(-2);
+        await log.Append(new FleetEventDraft(FleetEventKind.AttemptStarted, "attempt-started:parent", at,
+            AttemptId: parent, WorkId: new FleetWorkId("owned-task"),
+            RoomId: new FleetRoomId(BatonPaths.RecordKey(room))), TestContext.Current.CancellationToken);
+        await log.Append(new FleetEventDraft(FleetEventKind.AttemptSettled, "attempt-settled:parent", at.AddMinutes(1),
+            AttemptId: parent, WorkId: new FleetWorkId("owned-task"),
+            RoomId: new FleetRoomId(BatonPaths.RecordKey(room)), Outcome: WorkflowOutcome.Succeeded),
+            TestContext.Current.CancellationToken);
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = [new QueueItem
+            {
+                Tag = "owned-task", Role = "implement", Workspace = workspace,
+                SpecFile = "brief.md", State = QueueItemState.Launched, Stage = WorkStage.Continue,
+                Repository = "github.com/aer-works/baton", Branch = "2178-lane", PullRequest = 2304,
+                AttemptId = current, ParentAttemptId = parent,
+                OriginatingPullRequestRecoveryClaim = current,
+                ExpectedOriginatingPullRequestHead = head,
+                AttemptEnvelope = new QueueAttemptEnvelope(current, parent, "owned-task", null, 2304,
+                    WorkStage.Continue, "implement", null, null, null, [], null, null, "admitted",
+                    Path.Combine(BatonPaths.Rooms, "queue-current"), null, head, DateTimeOffset.UtcNow),
+            }],
+        }, TestContext.Current.CancellationToken);
+
+        switch (scenario)
+        {
+            case "changed-bytes":
+                await File.WriteAllTextAsync(projected, "worker modified", TestContext.Current.CancellationToken);
+                break;
+            case "unrelated-file":
+                await File.WriteAllTextAsync(Path.Combine(workspace, "unrelated.txt"), "worker", TestContext.Current.CancellationToken);
+                break;
+            case "tracked-edit":
+                await File.WriteAllTextAsync(Path.Combine(workspace, "README.md"), "modified", TestContext.Current.CancellationToken);
+                break;
+            case "missing-journal":
+                File.Delete(Path.Combine(room, BatonPaths.FlowLogFileName));
+                break;
+            case "torn-journal":
+                await File.AppendAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{", TestContext.Current.CancellationToken);
+                break;
+            case "null-manifest":
+            case "escaped-manifest":
+            case "relative-manifest":
+                if (scenario == "escaped-manifest")
+                {
+                    var outside = Path.Combine(home.Path, "outside.txt");
+                    await File.WriteAllTextAsync(outside, "outside", TestContext.Current.CancellationToken);
+                    await using var escaped = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+                    await escaped.AppendAsync(new FlowEvent.EngineFilesPlaced(new ExecutionId("placed-execution"),
+                        [new EnginePlacedFile(outside, EnginePlacedFile.TryDigest(outside))], []),
+                        TestContext.Current.CancellationToken);
+                }
+                else if (scenario == "relative-manifest")
+                {
+                    var relativePlacement = Path.GetRelativePath(Directory.GetCurrentDirectory(), projected);
+                    Assert.False(Path.IsPathFullyQualified(relativePlacement));
+                    await using var relative = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+                    await relative.AppendAsync(new FlowEvent.EngineFilesPlaced(new ExecutionId("placed-execution"),
+                        [new EnginePlacedFile(relativePlacement, EnginePlacedFile.TryDigest(projected))], []),
+                        TestContext.Current.CancellationToken);
+                }
+                else
+                {
+                    await using var empty = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+                    await empty.AppendAsync(new FlowEvent.EngineFilesPlaced(new ExecutionId("placed-execution"),
+                        null, []), TestContext.Current.CancellationToken);
+                }
+                break;
+            case "missing-lineage":
+            case "wrong-claim":
+            case "wrong-workspace":
+            case "envelope-parent-drift":
+            case "room-envelope-drift":
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = snapshot.Items.Select(item => scenario switch
+                    {
+                        "missing-lineage" => item with { ParentAttemptId = new FleetAttemptId("unrecorded-parent") },
+                        "wrong-claim" => item with { OriginatingPullRequestRecoveryClaim = new FleetAttemptId("other-attempt") },
+                        "envelope-parent-drift" => item with { ParentAttemptId = new FleetAttemptId("different-parent") },
+                        "room-envelope-drift" => item with
+                        {
+                            RoomDirectory = Path.Combine(BatonPaths.Rooms, "queue-current"),
+                            AttemptEnvelope = item.AttemptEnvelope! with
+                            { RoomDirectory = Path.Combine(BatonPaths.Rooms, "other-room") },
+                        },
+                        _ => item with { Workspace = Path.Combine(home.Path, "other-workspace") },
+                    }).ToArray(),
+                }, TestContext.Current.CancellationToken);
+                break;
+            case "other-claimed-row":
+                var otherParent = new FleetAttemptId("other-parent");
+                var otherCurrent = new FleetAttemptId("other-current");
+                var otherRoom = Directory.CreateDirectory(Path.Combine(BatonPaths.Rooms, "queue-other-parent")).FullName;
+                await using (var otherWriter = new FlowEventLogWriter(Path.Combine(otherRoom, BatonPaths.FlowLogFileName)))
+                {
+                    var otherExecution = new ExecutionId("other-placement");
+                    await otherWriter.AppendAsync(new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
+                        otherExecution, new WorkflowId("dispatch-review"), new StepId("review"), "review",
+                        Inputs: [], Outputs: [], Timeout: TimeSpan.FromMinutes(5), Environment: [],
+                        UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>())), TestContext.Current.CancellationToken);
+                    await otherWriter.AppendAsync(new FlowEvent.EngineFilesPlaced(otherExecution,
+                        [new EnginePlacedFile(projected, EnginePlacedFile.TryDigest(projected))], []),
+                        TestContext.Current.CancellationToken);
+                }
+                await log.Append(new FleetEventDraft(FleetEventKind.AttemptStarted, "attempt-started:other-parent", at,
+                    AttemptId: otherParent, WorkId: new FleetWorkId("other-task"),
+                    RoomId: new FleetRoomId(BatonPaths.RecordKey(otherRoom))), TestContext.Current.CancellationToken);
+                await log.Append(new FleetEventDraft(FleetEventKind.AttemptSettled, "attempt-settled:other-parent", at.AddMinutes(1),
+                    AttemptId: otherParent, WorkId: new FleetWorkId("other-task"),
+                    RoomId: new FleetRoomId(BatonPaths.RecordKey(otherRoom)), Outcome: WorkflowOutcome.Succeeded),
+                    TestContext.Current.CancellationToken);
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = [snapshot.Items[0] with { OriginatingPullRequestRecoveryClaim = null },
+                        snapshot.Items[0] with
+                        {
+                            Tag = "other-task", AttemptId = otherCurrent, ParentAttemptId = otherParent,
+                            OriginatingPullRequestRecoveryClaim = otherCurrent,
+                            AttemptEnvelope = new QueueAttemptEnvelope(otherCurrent, otherParent,
+                                "other-task", null, 2304, WorkStage.Continue, "implement", null, null, null,
+                                [], null, null, "admitted", Path.Combine(BatonPaths.Rooms, "queue-other-current"),
+                                null, head, DateTimeOffset.UtcNow),
+                        }],
+                }, TestContext.Current.CancellationToken);
+                break;
+            case "linked-file":
+                var referent = Path.Combine(home.Path, "referent.txt");
+                await File.WriteAllTextAsync(referent, "engine-owned", TestContext.Current.CancellationToken);
+                File.Delete(projected);
+                try { File.CreateSymbolicLink(projected, referent); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Assert.Skip($"this host cannot create file symbolic links: {ex.Message}");
+                }
+                break;
+        }
+
+        var claimedHead = scenario == "wrong-head" ? new string('a', 40) : head;
+        var recovery = RecoveryOptions(Path.Combine(BatonPaths.Rooms, "queue-current"));
+        recovery = scenario switch
+        {
+            "wrong-invoking-room" => recovery with { RoomDirectoryPath = Path.Combine(BatonPaths.Rooms, "other-room") },
+            "wrong-invoking-pr" => recovery with { OriginatingPullRequest = "aer-works/baton#2305" },
+            "wrong-invoking-branch" => recovery with { OriginatingPullRequestBranch = "other-branch" },
+            _ => recovery,
+        };
+        if (scenario == "valid")
+        {
+            await OriginatingPullRequestVerifier.ValidatePreservedContinuationAsync(
+                workspace, claimedHead, head, TestContext.Current.CancellationToken, recovery);
+        }
+        else
+        {
+            var refused = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                OriginatingPullRequestVerifier.ValidatePreservedContinuationAsync(
+                    workspace, claimedHead, head, TestContext.Current.CancellationToken, recovery));
+            Assert.Contains("ownership was refused before launch", refused.Message, StringComparison.Ordinal);
+        }
+    }
+
+    private static async Task RunRealGitAsync(string workspace, params string[] args) =>
+        _ = await ReadRealGitAsync(workspace, args);
+
+    private static async Task<string> ReadRealGitAsync(string workspace, params string[] args)
+    {
+        var start = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = workspace,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var arg in args) start.ArgumentList.Add(arg);
+        using var process = Process.Start(start)!;
+        var stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
+        var stderr = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+        Assert.True(process.ExitCode == 0, stderr);
+        return stdout.Trim();
     }
 
     private static string CrossRepositoryValue(string kind) => kind switch
