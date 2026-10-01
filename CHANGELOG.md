@@ -9,6 +9,51 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.60.0](https://github.com/philipreese/baton/compare/v0.59.0...v0.60.0) (2026-10-01)
+
+
+### Features
+
+* **conductor:** Add one-shot owned readiness decisions ([#2485](https://github.com/philipreese/baton/issues/2485)) ([004a749](https://github.com/philipreese/baton/commit/004a749a4bbb58e0f210b528ca07c71ad7b112cd))
+* **conductor:** Hand stopped work to its conductor for bounded advice ([#2500](https://github.com/philipreese/baton/issues/2500)) ([990dfd0](https://github.com/philipreese/baton/commit/990dfd02ba1eac8a4f49235c56516d122a2a30ce))
+* **conductor:** Recover a missing review through an explicit action ([#2520](https://github.com/philipreese/baton/issues/2520)) ([40c1b83](https://github.com/philipreese/baton/commit/40c1b83738ba26bd82cb0d1f3224033cff2c68bb))
+* **dispatch:** enforce execution-wide repeated-call limit ([#2481](https://github.com/philipreese/baton/issues/2481)) ([c4db2b4](https://github.com/philipreese/baton/commit/c4db2b41d2778332b56a59ce285d9e2fafd28a89))
+* **dispatch:** Steer an exact running Codex execution ([#2483](https://github.com/philipreese/baton/issues/2483)) ([2e437fe](https://github.com/philipreese/baton/commit/2e437fe2f7240458425aaf00b6dc5e1d42c8bc2e))
+* **glass:** Show retained conductor requests ([#2494](https://github.com/philipreese/baton/issues/2494)) ([384a4d1](https://github.com/philipreese/baton/commit/384a4d1685a4000c31a4b7a2c862a3b8345b1d96))
+* **memory:** Read resolved canonical project knowledge ([#2509](https://github.com/philipreese/baton/issues/2509)) ([c44e520](https://github.com/philipreese/baton/commit/c44e5205d7327ff33928ac6008f3a8d1508f5aab))
+* **queue:** Add opt-in verified draft PR handoff ([#2487](https://github.com/philipreese/baton/issues/2487)) ([ca4b225](https://github.com/philipreese/baton/commit/ca4b2257ef0d54049c6f81398a810e6062f430f2))
+* **queue:** Recover exact-head check evidence halts ([#2504](https://github.com/philipreese/baton/issues/2504)) ([af38645](https://github.com/philipreese/baton/commit/af3864594c238a9f3750921647af0853ebe77270))
+* **steering:** Deliver one correction to a running Claude execution ([#2514](https://github.com/philipreese/baton/issues/2514)) ([9f5fc3c](https://github.com/philipreese/baton/commit/9f5fc3c19038ce0e7881c51fa196838f08fbbae7))
+* **tasks:** Own issue work through review and handoff ([#2522](https://github.com/philipreese/baton/issues/2522)) ([7c67e87](https://github.com/philipreese/baton/commit/7c67e87a5d381c8508ec99a1464015a4e21012d5))
+
+
+### Bug Fixes
+
+* **cli:** Preserve queue visibility when room evidence is unavailable ([#2512](https://github.com/philipreese/baton/issues/2512)) ([462d665](https://github.com/philipreese/baton/commit/462d665fc682cb885f174119637d1d6074a64b4e))
+* **conductor:** Replay concurrent replacement reviews safely ([#2539](https://github.com/philipreese/baton/issues/2539)) ([faad940](https://github.com/philipreese/baton/commit/faad940321addcdabcdaf645a517ec9ebd879d86))
+* **dispatch:** Recognize verified engine files during continuation ([#2536](https://github.com/philipreese/baton/issues/2536)) ([6824f06](https://github.com/philipreese/baton/commit/6824f0683695cc824698481541933cb3e08b7b8c))
+* **glass:** Make phone layout and text readable ([#2497](https://github.com/philipreese/baton/issues/2497)) ([fddb633](https://github.com/philipreese/baton/commit/fddb63338f07107231b7584edce0f58f38920cff))
+* **queue:** Preserve runway refusal before worker launch ([#2526](https://github.com/philipreese/baton/issues/2526)) ([efdda89](https://github.com/philipreese/baton/commit/efdda890b0fc0c72edd48ce1d401ad0fcf7f8966))
+* **queue:** Preserve task context in repair briefs ([#2533](https://github.com/philipreese/baton/issues/2533)) ([0f1aa57](https://github.com/philipreese/baton/commit/0f1aa57e0f377b8c1fb87cf312fef0f0dd61e7b8))
+* **store:** Preserve queue write failure diagnostics ([#2516](https://github.com/philipreese/baton/issues/2516)) ([e285c46](https://github.com/philipreese/baton/commit/e285c46cb05e7bfceac4b047f2223b1ec14b7c28))
+* **tasks:** Report failed launches as blocked ([#2532](https://github.com/philipreese/baton/issues/2532)) ([8d3bccb](https://github.com/philipreese/baton/commit/8d3bccbfaee19c906cacb40190598ca5d5201351))
+* **tasks:** Show retirement provenance in owned-task status ([#2535](https://github.com/philipreese/baton/issues/2535)) ([d678b2b](https://github.com/philipreese/baton/commit/d678b2b875f4fb9358551295342e3d3d4983841f))
+* **tool-refresh:** Add guarded orphan recovery ([#2519](https://github.com/philipreese/baton/issues/2519)) ([4433cc7](https://github.com/philipreese/baton/commit/4433cc73ca165f4d99fc1b2a6fe32580e2502f2d))
+* **tool-refresh:** Distinguish inaccessible daemon identity ([#2501](https://github.com/philipreese/baton/issues/2501)) ([652c141](https://github.com/philipreese/baton/commit/652c141ca2f730b81d533e812bf991231db72d12))
+
+
+### Documentation
+
+* **auth:** Clarify the Baton-owned Codex login root ([#2528](https://github.com/philipreese/baton/issues/2528)) ([ecc37ea](https://github.com/philipreese/baton/commit/ecc37ea544fb4b93a34395e6d16d88e6ce5c5fe1))
+* **invoking:** Lead ordinary work through owned tasks ([#2525](https://github.com/philipreese/baton/issues/2525)) ([b8dc916](https://github.com/philipreese/baton/commit/b8dc9162427b36b027484d327d07077f299b1b51))
+* **queue:** keep launches held after refused retirement ([#2479](https://github.com/philipreese/baton/issues/2479)) ([eea66d7](https://github.com/philipreese/baton/commit/eea66d73785cb2c2bcde9f18833963b1686fb300))
+
+
+### Tests
+
+* **broker:** Accept either late drain observer ([#2506](https://github.com/philipreese/baton/issues/2506)) ([b1fc6f2](https://github.com/philipreese/baton/commit/b1fc6f2e530d605fdb4d3ebf7307701c56dc3279))
+* synchronize status-follow append observation ([#2510](https://github.com/philipreese/baton/issues/2510)) ([5428c42](https://github.com/philipreese/baton/commit/5428c42d530dc57793c00d65bfc79def58cce2d7))
+
 ## [0.59.0](https://github.com/philipreese/baton/compare/v0.58.3...v0.59.0) (2026-09-28)
 
 
