@@ -18,7 +18,8 @@ internal static class ReplacementReviewConductorCommand
         string batonRoot,
         WorkItemAdvancer? advancer = null,
         ConductorObligationStore? obligations = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<CancellationToken, Task>? beforeAdviceRead = null)
     {
         var key = options.ObligationKey!;
         var holder = options.Holder!;
@@ -70,10 +71,25 @@ internal static class ReplacementReviewConductorCommand
             || source.Branch is not { Length: > 0 } || source.Repository != repository)
             throw new ConductorObligationStoreException("Stopped-work advice, source, holder, or PR head is ineligible.");
 
+        if (beforeAdviceRead is not null)
+            await beforeAdviceRead(cancellationToken).ConfigureAwait(false);
         var view = await obligations.ReadStoppedWorkAdviceViewAsync(obligation, cancellationToken)
             .ConfigureAwait(false);
         if (view is not { State: StoppedWorkJudgmentState.Available, Response: not null })
+        {
+            // Another identical caller may have admitted the slot after this caller loaded the
+            // halted source. That admission itself makes the advice projection stale.
+            var latest = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var sources = latest.Items.Where(item => item.StoppedWorkJudgment?.Key == key).ToArray();
+            if (sources.Length == 1 && sources[0].ReplacementReviewAction is { } raced)
+            {
+                RequireSameRequest(raced, obligation, holder, expectedHead);
+                RequireSameSource(raced, source);
+                output.WriteLine($"Replacement review for '{key}' is already authorized.");
+                return 0;
+            }
             throw new ConductorObligationStoreException("No complete current stopped-work advice is retained.");
+        }
 
         var identity = RepositoryIdentity.From("https://" + repository, null)
             ?? throw new ConductorObligationStoreException("Repository identity is invalid.");
@@ -162,5 +178,17 @@ internal static class ReplacementReviewConductorCommand
             || action.Tag != obligation.TargetExecution)
             throw new ConductorObligationConflictException(obligation.IdempotencyKey,
                 "replacement review request differs from the retained action slot");
+    }
+
+    private static void RequireSameSource(QueueReplacementReviewAction action, QueueItem source)
+    {
+        if (action.SourceAttemptId != source.AttemptId
+            || action.SourceRoomDirectory != source.RoomDirectory
+            || action.SourceStage != source.Stage || action.SourceRound != source.Round
+            || action.PullRequest != source.PullRequest || action.Workspace != source.Workspace
+            || action.Branch != source.Branch || action.Repository != source.Repository
+            || action.Tag != source.Tag || action.ObligationKey != source.StoppedWorkJudgment?.Key)
+            throw new ConductorObligationConflictException(action.ObligationKey,
+                "replacement review source differs from the retained action slot");
     }
 }

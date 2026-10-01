@@ -19,6 +19,82 @@ public sealed class ReplacementReviewActionTests
     private const string OtherHead = "ffffffffffffffffffffffffffffffffffffffff";
     private const string Holder = "conductor-one";
 
+    [Theory]
+    [InlineData("identical")]
+    [InlineData("changed-head")]
+    [InlineData("changed-holder")]
+    [InlineData("changed-advice")]
+    [InlineData("changed-source")]
+    [InlineData("no-slot")]
+    public async Task Stale_advice_after_another_caller_admits_replays_only_the_exact_retained_slot(
+        string scenario)
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var paused = ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct,
+                async token =>
+                {
+                    entered.TrySetResult();
+                    await release.Task.WaitAsync(token);
+                });
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                if (scenario == "no-slot")
+                {
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        Items = snapshot.Items.Select(item => item with
+                        {
+                            Halted = false,
+                            State = QueueItemState.Queued,
+                        }).ToList(),
+                    }, Ct);
+                }
+                else
+                {
+                    await ReplacementReviewConductorCommand.ExecuteAsync(
+                        Options(source), TextWriter.Null, home, advancer, store, Ct);
+                    if (scenario != "identical")
+                    {
+                        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                        {
+                            Items = snapshot.Items.Select(item => item with
+                            {
+                                ReplacementReviewAction = scenario switch
+                                {
+                                    "changed-head" => item.ReplacementReviewAction! with { HeadSha = OtherHead },
+                                    "changed-holder" => item.ReplacementReviewAction! with { Holder = "different-holder" },
+                                    "changed-advice" => item.ReplacementReviewAction! with { AdviceDigest = "different-advice" },
+                                    _ => item.ReplacementReviewAction! with
+                                    { SourceAttemptId = new FleetAttemptId("different-source") },
+                                },
+                            }).ToList(),
+                        }, Ct);
+                    }
+                }
+            }
+            finally { release.TrySetResult(); }
+
+            if (scenario == "identical")
+                await paused;
+            else if (scenario == "no-slot")
+                await Assert.ThrowsAsync<ConductorObligationStoreException>(() => paused);
+            else
+                await Assert.ThrowsAsync<ConductorObligationConflictException>(() => paused);
+            var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(scenario == "no-slot" ? 1 : 2, row.Round);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
     [Fact]
     public async Task Concurrent_callers_consume_one_round_and_replay_conflicts_with_changed_head()
     {
