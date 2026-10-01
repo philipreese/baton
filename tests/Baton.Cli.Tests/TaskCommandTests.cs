@@ -243,6 +243,74 @@ public sealed class TaskCommandTests
         }
     }
 
+    [Theory]
+    [InlineData(QueueItemState.Failed, "ownership refused", false, false, "blocked", "conductor-judgment")]
+    [InlineData(QueueItemState.Failed, null, false, false, "blocked", "conductor-judgment")]
+    [InlineData(QueueItemState.Failed, " ", false, false, "blocked", "conductor-judgment")]
+    [InlineData(QueueItemState.Failed, "ownership refused", false, true, "blocked", "conductor-judgment")]
+    [InlineData(QueueItemState.Failed, "ownership refused", true, false, "retired", "none")]
+    [InlineData(QueueItemState.Cancelled, "cancelled", false, false, "cancelled", "none")]
+    [InlineData(QueueItemState.Queued, null, false, false, "queued", "daemon-tick")]
+    [InlineData(QueueItemState.Launched, null, false, false, "running", "daemon-tick")]
+    [InlineData(QueueItemState.Queued, null, false, true, "ready-as-of", "none")]
+    public async Task Status_distinguishes_failed_launches_without_mutating_retained_evidence(
+        QueueItemState queueState, string? error, bool retired, bool oldReady,
+        string expectedState, string expectedTrigger)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var id = TaskCommand.TaskId(repository, 49);
+            var now = DateTimeOffset.UtcNow;
+            var receipt = oldReady ? new TaskReadyReceipt("ready", id, repository, 49, 50,
+                new string('a', 40), "review", new string('b', 64), "passing", "checks", now, now) : null;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id,
+                    Role = "implement",
+                    Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id),
+                    Repository = repository,
+                    Issue = 49,
+                    Stage = oldReady ? WorkStage.Ready : WorkStage.Continue,
+                    State = queueState,
+                    Halted = false,
+                    Error = error,
+                    Retirement = retired ? new QueueRetirement(QueueRetirement.Operator, now, "retained") : null,
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 49, "digest", "recorded-owner", now, receipt),
+                }],
+            }, Ct);
+            var before = await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct);
+            var output = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), output, Ct);
+            using var json = JsonDocument.Parse(output.ToString());
+            Assert.Equal(expectedState, json.RootElement.GetProperty("state").GetString());
+            Assert.Equal(expectedTrigger, json.RootElement.GetProperty("nextTrigger").GetString());
+            Assert.Equal("recorded-owner", json.RootElement.GetProperty("conductorHolder").GetString());
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("blocked").ValueKind);
+            var text = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), text, Ct);
+            Assert.Contains(expectedState, text.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"next: {expectedTrigger}", text.ToString(), StringComparison.Ordinal);
+            if (expectedState == "blocked")
+            {
+                var expectedReason = string.IsNullOrWhiteSpace(error) ? "task-failed" : error;
+                Assert.Equal(expectedReason, json.RootElement.GetProperty("reason").GetString());
+                Assert.Contains(expectedReason, text.ToString(), StringComparison.Ordinal);
+            }
+            Assert.Equal(before, await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task Abandoned_reservation_is_blocked_without_reprovision_or_worker_launch()
     {

@@ -7964,6 +7964,10 @@ daemon observation. Submission is not a synchronous worker call: a held queue or
 leaves the task accepted and queued with that reason, never described as running. There is no
 `--wait` in this slice, no new scheduler, no automatic merge, and no replacement-review authority.
 `run` and `dispatch` remain explicitly standalone, one-lane commands.
+Failed task launches display as blocked with their retained error (or `task-failed` when absent)
+and `conductor-judgment` as the next trigger, never as queued work awaiting a daemon tick (#2530).
+Retirement, cancellation and preparation retain their existing precedence. Reading status does not
+create a blocked receipt or mutate the queue; any earlier ready receipt remains historical evidence.
 
 The identity is the canonical repository plus issue, independent of checkout path or queue tag.
 Task and legacy `queue add --issue --lifecycle` admissions reserve that identity under the same
