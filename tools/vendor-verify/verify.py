@@ -6022,9 +6022,9 @@ def _selftest_agy_stream_follow_up():
         print("   OK  names-only/empty-value guard, actual fresh grant acquisition, and newline-free capture cap")
         print("   OK  retained config hashes and ordinal grant/hook evidence preserve classification without private text")
 
-        # Copied envelope shapes from the retained #2180 active-response evidence (2026-09-30,
-        # agy2180-active-1ecf84701b2a496ca4e4ef8822935182/evidence.json). Only conversation IDs and
-        # response text/nonces are normalized here; native event nesting, state/type and indices
+        # Relevant envelope fields copied from retained #2180 active-response evidence:
+        # agy2180-active-1ecf84701b2a496ca4e4ef8822935182/evidence.json. IDs and nonces are normalized;
+        # fields this instrument does not read are omitted. Native nesting, state/type and indices
         # remain intact. Replay through the actual stdout reader, then through sanitized retention.
         native = [
             '{"event":"init","conversation_id":"conv-1"}',
