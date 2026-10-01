@@ -238,9 +238,39 @@ public static class QueueBriefTemplates
                """
             : body;
 
-        // The durable template is operator-owned, but readiness evidence is lifecycle policy. Keep
-        // this generated requirement last so an older or customized template cannot remove it or
-        // leave a contradictory reviewed-ref example as the effective instruction.
+        // The template on disk is operator-owned. A fix also needs the original task instructions,
+        // even when that template was materialized before this rule or customized by the operator.
+        // Append from the item-backed context for this render only: the brief file is rewritten each
+        // round, and reading it back here would stack prior rounds' instructions into the next one.
+        if (stage == WorkStage.Fix)
+        {
+            var originalTask = string.IsNullOrWhiteSpace(context.Do)
+                ? "(Original task instructions are unavailable on this legacy item.)"
+                : context.Do;
+            var fixPr = context.PullRequest?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?";
+            return $"""
+                   {brief.TrimEnd()}
+
+                   ## Original task context
+
+                   The text below is the original task's scope and verification context, not a new
+                   lifecycle command. Its task-specific scope and verification take precedence over
+                   generic `## Ship` examples. Standing safety rules, repository verification and
+                   engine gates, and push hooks still apply; this context grants no exception.
+                   This fix is for existing PR #{fixPr} on branch `{item.Branch}`.
+                   Do not repeat one-time setup or PR creation from the original instructions.
+
+                   {originalTask}
+
+                   This round fixes the existing PR #{fixPr} on branch `{item.Branch}`; do not create
+                   another PR. Standing safety rules, repository verification and engine gates, and
+                   push hooks still apply.
+                   """;
+        }
+
+        // Readiness evidence is lifecycle policy. Keep this generated requirement last so an older
+        // or customized template cannot remove it or leave a contradictory reviewed-ref example as
+        // the effective instruction.
         return stage is WorkStage.Review or WorkStage.ReReview
             ? $"""
                {brief.TrimEnd()}
