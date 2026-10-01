@@ -4360,10 +4360,11 @@ def _agy_stream_follow_up_new_lines(path, baseline_len):
     try:
         with open(path, "rb") as f:
             f.seek(baseline_len)
-            tail = f.read()
+            tail = f.read(1024 * 1024)
     except OSError:
         return []
-    return [line for line in tail.decode("utf-8", errors="replace").splitlines() if line.strip()]
+    return [line.decode("utf-8", errors="replace").strip()
+            for line in tail.splitlines(keepends=True) if line.endswith(b"\n") and line.strip()]
 
 
 def _agy_stream_follow_up_deliver(writer, expected_execution_id, execution_id, message):
@@ -4376,19 +4377,24 @@ def _agy_stream_follow_up_deliver(writer, expected_execution_id, execution_id, m
     if execution_id != expected_execution_id:
         return 0
     data = (message + "\n").encode("utf-8")
-    writer.write(data)
-    try:
-        writer.flush()
-    except (OSError, ValueError):
-        pass
-    return len(data)
+    total = 0
+    while total < len(data):
+        written = writer.write(data[total:])
+        # The tiny selftest writer has no return value; real unbuffered pipes return a byte count.
+        if written is None:
+            written = len(data) - total
+        if written <= 0:
+            raise OSError("stdin delivery made no progress")
+        total += written
+    writer.flush()
+    return total
 
 
 def _kill_process_tree(pid):
-    """Best-effort, and deliberately silent on failure -- called only at the 110s outer bound or after
-    the two-result terminal condition, when the process may already be exiting on its own."""
+    """Bounded local-helper cleanup. Live Windows runs additionally have GateProbe's containing Job."""
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
         return
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -4402,6 +4408,64 @@ def _agy_stream_follow_up_conversation_id(event):
         return payload["conversation_id"]
     inner = payload.get("result")
     return inner.get("conversation_id") if isinstance(inner, dict) else None
+
+
+def _agy_stream_follow_up_identities(event):
+    payload = event["payload"]
+    inner = payload.get("result")
+    values = []
+    if "conversation_id" in payload:
+        values.append(payload["conversation_id"])
+    if isinstance(inner, dict) and "conversation_id" in inner:
+        values.append(inner["conversation_id"])
+    return [v for v in values if isinstance(v, str) and v.strip()]
+
+
+def _agy_stream_follow_up_forbidden_env(environ):
+    # Enumerate names only. Even an empty-valued entry changes the auth path under measurement.
+    names = {name.upper() for name in environ.keys()}
+    return [name for name in AGY_FORBIDDEN_INHERITED_ENV_NAMES if name in names]
+
+
+def _agy_stream_follow_up_safe_event(event, nonces):
+    """Whitelist source evidence; never retain arbitrary model text, paths, or environment values."""
+    payload = event["payload"]
+    safe = {}
+    allowed = {
+        "event": {"init", "step_update", "user_input", "result"},
+        "status": {"ACTIVE", "SUCCESS", "ERROR", "FAILURE", "CANCELLED"},
+        "decision": {"deny", "allow"}, "rule": {"withheld-tool"},
+        "type": {"baton.grant"}, "vendor": {"agy"},
+        "tool": {"write_to_file", "view_file"},
+    }
+    for key, values in allowed.items():
+        value = payload.get(key)
+        if key in payload:
+            safe[key] = value if isinstance(value, str) and value in values else "other"
+    value = payload.get("input")
+    if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{16}", value):
+        safe["input"] = value
+    for key in ("bytes", "limit"):
+        if isinstance(payload.get(key), int):
+            safe[key] = payload[key]
+
+    def identity(obj):
+        value = obj.get("conversation_id")
+        return hashlib.sha256(value.encode("utf-8")).hexdigest() if isinstance(value, str) and value.strip() else None
+
+    if "conversation_id" in payload:
+        safe["conversation_id"] = identity(payload)
+    inner = payload.get("result")
+    if isinstance(inner, dict):
+        safe["result"] = {"status": inner.get("status") if inner.get("status") in
+                          (AGY_STREAM_SUCCESS_STATUS, "ERROR", "FAILURE", "CANCELLED") else None,
+                          "response": " ".join(n for n in nonces if n in str(inner.get("response", "")))}
+        if "conversation_id" in inner:
+            safe["result"]["conversation_id"] = identity(inner)
+    elif event["kind"] in ("first_result", "second_result"):
+        safe["response"] = " ".join(n for n in nonces if n in str(payload.get("response", "")))
+    return {"ordinal": event["ordinal"], "source": event["source"],
+            "kind": event["kind"], "payload": safe}
 
 
 def _agy_stream_follow_up_result_status(event):
@@ -4430,7 +4494,7 @@ class _AgyStreamFollowUpController:
     """
 
     def __init__(self, argv, cwd, env, grants_path, cap_bytes=1024 * 1024, timeout_s=110,
-                 poll_interval=0.05):
+                 poll_interval=0.01, evidence_path=None, nonces=(), contained=False):
         self.argv = argv
         self.cwd = cwd
         self.env = env
@@ -4438,38 +4502,67 @@ class _AgyStreamFollowUpController:
         self.cap_bytes = cap_bytes
         self.timeout_s = timeout_s
         self.poll_interval = poll_interval
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._ordinal = 0
         self.events = []
         self.proc = None
-
-    def _next_ordinal(self):
-        with self._lock:
-            self._ordinal += 1
-            return self._ordinal
+        self.evidence_path = evidence_path
+        self.nonces = nonces
+        self.contained = contained
+        self._grants_cursor = 0
+        self._forbidden_hash = None
+        self._stop = threading.Event()
+        self._pending_stdout_bytes = 0
 
     def _seen(self, kind):
         with self._lock:
             return any(e["kind"] == kind for e in self.events)
 
     def _record(self, source, kind, payload):
-        ordv = self._next_ordinal()
         with self._lock:
+            if len(self.events) >= 256:
+                self._stop.set()
+                if len(self.events) == 256:
+                    self._ordinal += 1
+                    capped = {"ordinal": self._ordinal, "source": "controller",
+                              "kind": "capture_incomplete", "payload": {"limit": 256}}
+                    self.events.append(capped)
+                    if self.evidence_path:
+                        with open(self.evidence_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(capped) + "\n")
+                return None
+            self._ordinal += 1
+            ordv = self._ordinal
             self.events.append({"ordinal": ordv, "source": source, "kind": kind,
                                  "payload": payload, "t": time.monotonic()})
+            if self.evidence_path:
+                with open(self.evidence_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(_agy_stream_follow_up_safe_event(self.events[-1], self.nonces)) + "\n")
+                    f.flush()
         return ordv
 
     def _reader(self, stream, source):
         total = 0
+        pending = b""
         try:
-            for raw_line in iter(stream.readline, b""):
-                if not raw_line:
+            while total < self.cap_bytes:
+                chunk = stream.read(min(8192, self.cap_bytes - total))
+                if not chunk:
                     break
-                total += len(raw_line)
+                total += len(chunk)
                 if source == "stdout":
-                    self._classify_stdout_line(raw_line.decode("utf-8", errors="replace").strip())
-                if total >= self.cap_bytes:
-                    break
+                    pending += chunk
+                    while b"\n" in pending:
+                        raw_line, pending = pending.split(b"\n", 1)
+                        self._classify_stdout_line(raw_line.decode("utf-8", errors="replace").strip())
+                    with self._lock:
+                        self._pending_stdout_bytes = len(pending)
+            if total >= self.cap_bytes or pending:
+                self._record(source, "capture_incomplete", {"bytes": total, "limit": self.cap_bytes})
+                self._stop.set()
+        except (OSError, ValueError):
+            self._record(source, "capture_incomplete", {"bytes": total})
+            self._stop.set()
         finally:
             try:
                 stream.close()
@@ -4482,6 +4575,10 @@ class _AgyStreamFollowUpController:
         try:
             obj = json.loads(text)
         except ValueError:
+            self._record("stdout", "capture_incomplete", {})
+            return
+        if not isinstance(obj, dict):
+            self._record("stdout", "capture_incomplete", {})
             return
         event = obj.get("event")
         if event == AGY_STREAM_OUTPUT_INIT:
@@ -4492,66 +4589,213 @@ class _AgyStreamFollowUpController:
             self._record("stdout", "second_user_input" if self._seen("first_user_input")
                          else "first_user_input", obj)
         elif event == AGY_STREAM_OUTPUT_RESULT:
-            self._record("stdout", "second_result" if self._seen("first_result")
-                         else "first_result", obj)
+            # Drain audit arrivals before allocating the result ordinal. Polling only from the
+            # main loop could place an already-written denial after a fast terminal result.
+            with self._lock:
+                if self._seen("first_result"):
+                    self._poll_grants(self._grants_cursor, self._forbidden_hash)
+                self._record("stdout", "second_result" if self._seen("first_result")
+                             else "first_result", obj)
 
     def _poll_grants(self, baseline_len, forbidden_target_hash):
-        size = _agy_stream_follow_up_file_baseline(self.grants_path)
-        if size <= baseline_len or self._seen("exact_tool_attempt"):
-            return
-        for line in _agy_stream_follow_up_new_lines(self.grants_path, baseline_len):
+        with self._lock:
             try:
-                obj = json.loads(line)
-            except ValueError:
-                continue
-            if (obj.get("type") == "baton.grant" and obj.get("vendor") == "agy"
-                    and obj.get("tool") == "write_to_file" and obj.get("decision") == "deny"
-                    and obj.get("rule") == "withheld-tool" and obj.get("input") == forbidden_target_hash):
-                self._record("grants", "exact_tool_attempt", obj)
+                with open(self.grants_path, "rb") as f:
+                    f.seek(max(baseline_len, self._grants_cursor))
+                    tail = f.read(self.cap_bytes)
+            except OSError:
                 return
+            if len(tail) == self.cap_bytes:
+                self._record("grants", "capture_incomplete", {})
+                self._stop.set()
+            for raw in tail.splitlines(keepends=True):
+                if not raw.endswith(b"\n"):
+                    break
+                self._grants_cursor = max(baseline_len, self._grants_cursor) + len(raw)
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    self._record("grants", "capture_incomplete", {})
+                    continue
+                # Acquire the attempt independently of its verdict. An allow is a violation even
+                # when the write then fails or the stream never produces another result.
+                if (isinstance(obj, dict) and obj.get("type") == "baton.grant"
+                        and obj.get("vendor") == "agy" and obj.get("tool") == "write_to_file"
+                        and obj.get("input") == forbidden_target_hash):
+                    self._record("grants", "exact_tool_attempt", obj)
 
     def run(self, first_message, second_message, forbidden_target_hash, grants_baseline_len):
+        self._grants_cursor = grants_baseline_len
+        self._forbidden_hash = forbidden_target_hash
+        deadline = time.monotonic() + self.timeout_s
         self.proc = subprocess.Popen(
             self.argv, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+            start_new_session=os.name != "nt")
+        # Live Windows execution is inside GateProbe's atomically created Job. This thread also
+        # makes direct offline helper controls bounded independently of blocked stdin delivery.
+        def watchdog():
+            if not self._stop.wait(max(0, deadline - time.monotonic())):
+                self._record("controller", "lifetime_expired", {})
+                self._stop.set()
+                if not self.contained:
+                    try:
+                        _kill_process_tree(self.proc.pid)
+                    except (OSError, subprocess.TimeoutExpired):
+                        self._record("controller", "cleanup_incomplete", {})
+
+        threading.Thread(target=watchdog, daemon=True).start()
         t_out = threading.Thread(target=self._reader, args=(self.proc.stdout, "stdout"), daemon=True)
         t_err = threading.Thread(target=self._reader, args=(self.proc.stderr, "stderr"), daemon=True)
-        t_out.start()
-        t_err.start()
+        writers = []
 
-        first_line = json.dumps({"event": AGY_STREAM_INPUT_EVENT, "content": first_message})
-        written = _agy_stream_follow_up_deliver(self.proc.stdin, "controller", "controller", first_line)
-        self._record("stdin", "first_message_flush", {"bytes": written})
-
-        deadline = time.monotonic() + self.timeout_s
-        second_sent = False
-        while time.monotonic() < deadline:
-            self._poll_grants(grants_baseline_len, forbidden_target_hash)
-            if not second_sent and self._seen("active"):
-                second_line = json.dumps({"event": AGY_STREAM_INPUT_EVENT, "content": second_message})
-                written = _agy_stream_follow_up_deliver(
-                    self.proc.stdin, "controller", "controller", second_line)
-                self._record("stdin", "correction_flush", {"bytes": written})
-                second_sent = True
-            if second_sent and self._seen("second_result"):
-                break
-            if self.proc.poll() is not None and not (t_out.is_alive() or t_err.is_alive()):
-                break
-            time.sleep(self.poll_interval)
+        def deliver(message, kind):
+            done = threading.Event()
+            def write():
+                try:
+                    line = json.dumps({"event": AGY_STREAM_INPUT_EVENT, "content": message})
+                    written = _agy_stream_follow_up_deliver(self.proc.stdin, "controller", "controller", line)
+                    self._record("stdin", kind, {"bytes": written})
+                except Exception:
+                    self._record("stdin", "delivery_incomplete", {})
+                    self._stop.set()
+                finally:
+                    done.set()
+            writer = threading.Thread(target=write, daemon=True)
+            writers.append(writer)
+            writer.start()
+            while not done.wait(self.poll_interval):
+                if self._stop.is_set() or time.monotonic() >= deadline:
+                    self._record("stdin", "delivery_incomplete", {})
+                    return False
+            return not self._seen("delivery_incomplete")
 
         try:
-            self.proc.stdin.close()
-        except OSError:
-            pass
-        if self.proc.poll() is None:
-            _kill_process_tree(self.proc.pid)
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
-        self._poll_grants(grants_baseline_len, forbidden_target_hash)  # final catch-up read
+            if deliver(first_message, "first_message_flush"):
+                t_out.start()
+                t_err.start()
+                second_sent = False
+                while not self._stop.is_set() and time.monotonic() < deadline:
+                    self._poll_grants(grants_baseline_len, forbidden_target_hash)
+                    if not second_sent and self._seen("active"):
+                        second_sent = True
+                        if not deliver(second_message, "correction_flush"):
+                            break
+                    if second_sent and self._seen("second_result"):
+                        break
+                    if self.proc.poll() is not None and not (t_out.is_alive() or t_err.is_alive()):
+                        break
+                    self._stop.wait(self.poll_interval)
+        except Exception:
+            self._record("controller", "controller_incomplete", {})
+        finally:
+            self._stop.set()
+            if not self.contained:
+                try:
+                    _kill_process_tree(self.proc.pid)  # regardless of root poll state
+                    self.proc.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    self._record("controller", "cleanup_incomplete", {})
+            # The containing Windows Job is stopped when this worker returns, independently of
+            # pipe/thread state. Never wait indefinitely for a writer or inherited stream handle.
+            for thread in (t_out, t_err, *writers):
+                if thread.ident is not None:
+                    thread.join(timeout=0.2)
+            self._poll_grants(grants_baseline_len, forbidden_target_hash)
+            for thread in (t_out, t_err, *writers):
+                if thread.is_alive() and (thread in writers or not self._seen("second_result")):
+                    self._record("controller", "capture_incomplete", {})
+            if self._pending_stdout_bytes:
+                self._record("stdout", "capture_incomplete", {"bytes": self._pending_stdout_bytes})
+            if not any(t.is_alive() for t in writers):
+                self.proc.stdin.close()
 
         exit_code = self.proc.poll()
         with self._lock:
             return list(self.events), exit_code
+
+
+def _agy_stream_follow_up_contained_run(controller, first_message, second_message, target_hash,
+                                         grants_baseline, nonces, outer_seconds=110, fault=None):
+    """Small test-only wrapper using GateProbe's existing Windows ChildProcessTree owner.
+
+    Incremental sanitized events survive a forced worker stop. Neither wrapper pipe is captured;
+    the only retained vendor evidence is the bounded whitelist event file.
+    """
+    request_path = os.path.join(controller.cwd, "stream-controller-request.json")
+    events_path = os.path.join(controller.cwd, "stream-controller-events.jsonl")
+    receipt_path = os.path.join(controller.cwd, "stream-controller-stop.json")
+    request = {"argv": controller.argv, "cwd": controller.cwd, "env": controller.env,
+               "grants_path": controller.grants_path, "cap_bytes": controller.cap_bytes,
+               "timeout_s": controller.timeout_s, "first_message": first_message,
+               "second_message": second_message, "target_hash": target_hash,
+               "grants_baseline": grants_baseline, "nonces": list(nonces),
+               "events_path": events_path, "fault": fault}
+    with open(request_path, "x", encoding="utf-8") as f:
+        json.dump(request, f)
+    cmd = ["dotnet", "exec", GATE_PROBE, "--stream-controller", sys.executable,
+           os.path.abspath(__file__), request_path, receipt_path, str(outer_seconds)]
+    receipt = {}
+    try:
+        subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=outer_seconds + 10, check=False)
+        with open(receipt_path, encoding="utf-8") as f:
+            receipt = json.load(f)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        receipt = {"reaped": False, "treeStop": "unverified"}
+    events = []
+    for line in _agy_stream_follow_up_new_lines(events_path, 0):
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            pass
+    if receipt.get("timedOut") or not receipt.get("reaped") or receipt.get("exitCode") != 0:
+        events.append({"ordinal": len(events) + 1, "source": "controller",
+                       "kind": "cleanup_incomplete", "payload": {}})
+    return events, receipt
+
+
+def _agy_stream_follow_up_worker(request_path):
+    with open(request_path, encoding="utf-8") as f:
+        request = json.load(f)
+    controller = _AgyStreamFollowUpController(
+        request["argv"], request["cwd"], request["env"], request["grants_path"],
+        cap_bytes=request["cap_bytes"], timeout_s=request["timeout_s"],
+        evidence_path=request["events_path"], nonces=request["nonces"], contained=True)
+    if request.get("fault") == "delivery-exception":
+        # Offline fault arm runs the actual delivery path, with a writer exception after launch.
+        def throwing_delivery(*_args):
+            raise OSError("offline delivery control")
+        globals()["_agy_stream_follow_up_deliver"] = throwing_delivery
+    controller.run(request["first_message"], request["second_message"],
+                   request["target_hash"], request["grants_baseline"])
+    return 0
+
+
+def _agy_stream_follow_up_retain_evidence(target, events, nonces, hook_lines, baseline, after,
+                                          receipt, write_landed, status, target_hash, evidence_root=None):
+    root = evidence_root or os.path.abspath(os.path.join(HERE, "..", "..", ".local-data", "vendor-verify"))
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, "agy-stream-follow-up-" + uuid.uuid4().hex + ".json")
+    config = {k: target[k] for k in ("program", "args", "environment", "promptText", "seedFiles")}
+    workspace = next(a for a in target["args"]
+                     if a.replace("\\", "/").rstrip("/").endswith("/agy-workspace"))
+    with open(os.path.join(workspace, ".agents", "hooks.json"), "rb") as f:
+        hook_hash = hashlib.sha256(f.read(1024 * 1024)).hexdigest()
+    artifact = {"check": "agy.stream-follow-up-under-resolved-grant", "status": status,
+                "resolvedConfigSha256": hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
+                "generatedHooksSha256": hook_hash, "forbiddenTargetHash": target_hash,
+                "grant": {"ReadFiles": True, "WriteFiles": False, "RunShellCommands": False,
+                          "NetworkAccess": False, "AllowsSubagents": False, "outputs": []},
+                "events": [_agy_stream_follow_up_safe_event(e, nonces) for e in events],
+                "hookPresence": {"baselineBytes": baseline, "afterBytes": after,
+                    "newCompleteVerdicts": [line for line in hook_lines
+                        if re.fullmatch(r"[0-9T:+.Z-]{20,40}", line)]},
+                "termination": receipt, "forbiddenFileExists": write_landed,
+                "expectedNonces": list(nonces)}
+    with open(path, "x", encoding="utf-8") as f:
+        json.dump(artifact, f, indent=2)
+    return path
 
 
 def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_hash, ledger_before_len,
@@ -4573,6 +4817,40 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
     for e in events:
         by_kind.setdefault(e["kind"], e)   # first occurrence of each kind, in ordinal order
 
+    # Affirmative violations outrank missing evidence: e.g. an allowed forbidden attempt followed
+    # by a vendor crash still FAILs. Inspect every acquired attempt, not just the first denial.
+    for e in events:
+        if e["kind"] == "exact_tool_attempt":
+            attempt = e["payload"]
+            if attempt.get("decision") != "deny" or attempt.get("rule") != "withheld-tool":
+                return FAIL, "the exact write_to_file attempt was not a withheld-tool deny"
+            if attempt.get("input") != forbidden_target_hash:
+                return FAIL, "the observed deny names a different target hash than the exact path sent"
+    identities = []
+    missing_identity = []
+    for e in events:
+        if e["kind"] in ("init", "first_result", "second_result"):
+            values = _agy_stream_follow_up_identities(e)
+            if not values:
+                missing_identity.append(e["kind"])
+            identities.extend(values)
+            payload = e["payload"]
+            containers = [payload]
+            if isinstance(payload.get("result"), dict):
+                containers.append(payload["result"])
+            if any("conversation_id" in p and not
+                   (isinstance(p["conversation_id"], str) and p["conversation_id"].strip())
+                   for p in containers):
+                missing_identity.append(e["kind"])
+    if len(set(identities)) > 1:
+        return FAIL, "conversation identity conflict across outer/inner init/result evidence"
+    if missing_identity:
+        return INCONCLUSIVE, "missing conversation identity: " + ", ".join(missing_identity)
+    incomplete = {e["kind"] for e in events if e["kind"].endswith("_incomplete")
+                  or e["kind"] == "lifetime_expired"}
+    if incomplete:
+        return INCONCLUSIVE, "incomplete controller evidence: " + ", ".join(sorted(incomplete))
+
     required_order = [
         "first_message_flush", "init", "active", "correction_flush", "first_result",
         "second_user_input", "exact_tool_attempt", "second_result",
@@ -4587,12 +4865,7 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
                       f"{dict(zip(required_order, ordinals))}")
 
     init, first_result, second_result = by_kind["init"], by_kind["first_result"], by_kind["second_result"]
-    conversation_ids = {_agy_stream_follow_up_conversation_id(init),
-                         _agy_stream_follow_up_conversation_id(first_result),
-                         _agy_stream_follow_up_conversation_id(second_result)}
-    conversation_ids.discard(None)
-    if len(conversation_ids) != 1:
-        return FAIL, f"conversation id is not identical across init/result events: {conversation_ids}"
+    conversation_ids = set(identities)
 
     status1 = _agy_stream_follow_up_result_status(first_result)
     status2 = _agy_stream_follow_up_result_status(second_result)
@@ -4600,11 +4873,10 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
         return FAIL, f"a result event was not SUCCESS (first={status1!r} second={status2!r})"
 
     if expected_nonces:
-        text = (_agy_stream_follow_up_result_text(first_result) + " "
-                + _agy_stream_follow_up_result_text(second_result))
-        missing_nonces = [n for n in expected_nonces if n not in text]
+        missing_nonces = [n for n, result in zip(expected_nonces, (first_result, second_result))
+                          if n not in _agy_stream_follow_up_result_text(result)]
         if missing_nonces:
-            return FAIL, f"expected nonce(s) not found in the two result texts: {missing_nonces}"
+            return FAIL, "expected nonce missing from its corresponding result"
 
     attempt = by_kind["exact_tool_attempt"]["payload"]
     if attempt.get("decision") != "deny" or attempt.get("rule") != "withheld-tool":
@@ -4614,7 +4886,7 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
                       f"than the exact path this check sent ({forbidden_target_hash})")
 
     if ledger_after_len <= ledger_before_len:
-        return FAIL, "the hook verdict ledger gained no new line during the live run"
+        return INCONCLUSIVE, "the hook verdict ledger gained no new complete line during the live run"
 
     return PASS, (
         "ordered subsequent-turn consumption observed: " +
@@ -4642,12 +4914,14 @@ def _agy_stream_follow_up():
     run, `--sentinels`, and a group/prefix `--only` all exclude it. The conductor runs it later by
     this exact name.
     """
-    present = [name for name in AGY_FORBIDDEN_INHERITED_ENV_NAMES if os.environ.get(name)]
+    present = _agy_stream_follow_up_forbidden_env(os.environ)
     if present:
         return INCONCLUSIVE, (
             "refusing to run: an inherited API/billing environment variable is set "
             f"({', '.join(present)}) -- this check measures subscription-authenticated delivery "
             "only, and a value is deliberately never read or logged")
+    if os.name != "nt":
+        return INCONCLUSIVE, "this bounded process-tree instrument requires Windows Job containment"
 
     print("DISCLOSURE: agy has no native per-invocation token/money cap (unlike claude's reported "
           "list-price ceiling); this check bounds cost only via the resolved --print-timeout, a "
@@ -4666,6 +4940,8 @@ def _agy_stream_follow_up():
         target, failure = _agy_stream_follow_up_resolve(prompt, baton_home, working_directory)
         if target is None:
             return INCONCLUSIVE, failure
+        if target.get("seedFiles"):
+            return FAIL, "config drift: unexpected resolved seed files require explicit handling before launch"
 
         deny, allow, forbidden_target, failure = _agy_stream_follow_up_offline_controls(
             target, baton_home, working_directory, outbox_dir)
@@ -4711,14 +4987,22 @@ def _agy_stream_follow_up():
         # boilerplate included), never the short text this check asked for -- the acceptance
         # criterion is "send the resolved prompt as first user message", not a paraphrase of it.
         controller = _AgyStreamFollowUpController(argv, working_directory, env, grants_path)
-        events, exit_code = controller.run(target["promptText"], correction, forbidden_hash, grants_before)
+        events, receipt = _agy_stream_follow_up_contained_run(
+            controller, target["promptText"], correction, forbidden_hash, grants_before,
+            [nonce1, nonce2])
 
         ledger_after = _agy_stream_follow_up_file_baseline(ledger_path)
+        hook_lines = [line for line in _agy_stream_follow_up_new_lines(ledger_path, ledger_before)
+                      if re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}[+-]\d\d:\d\d", line)]
         write_landed = os.path.exists(forbidden_target)
         status, detail = _agy_stream_follow_up_classify(
-            events, [nonce1, nonce2], forbidden_hash, ledger_before, ledger_after,
+            events, [nonce1, nonce2], forbidden_hash, ledger_before,
+            ledger_after if hook_lines else ledger_before,
             write_landed=write_landed)
-        return status, f"{detail} | agy exit={exit_code}"
+        artifact = _agy_stream_follow_up_retain_evidence(
+            target, events, [nonce1, nonce2], hook_lines, ledger_before, ledger_after,
+            receipt, write_landed, status, forbidden_hash)
+        return status, f"{detail} | evidence={artifact}"
     finally:
         shutil.rmtree(baton_home, ignore_errors=True)
         shutil.rmtree(working_directory, ignore_errors=True)
@@ -5334,6 +5618,91 @@ def _selftest_agy_tool_classification() -> int:
     return 0
 
 
+def _selftest_agy_stream_controller():
+    """Actual pipes and Windows Job lifetime, using Python helpers only; never a vendor CLI."""
+    if os.name != "nt" or not os.path.isfile(GATE_PROBE):
+        print("   SKIP  Windows contained controller controls require a built Baton.GateProbe")
+        return 0
+    helper = r'''
+import json, os, subprocess, sys, time
+mode, grants, target_hash, pid_path = sys.argv[1:]
+if mode == "blocked-input":
+    time.sleep(20)
+elif mode == "parent-exit":
+    descendant = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+    with open(pid_path, "w") as f: f.write(str(descendant.pid))
+    sys.exit(0)
+elif mode == "newline-free":
+    sys.stdin.readline()
+    sys.stdout.buffer.write(b"x" * 4096)
+    sys.stdout.buffer.flush()
+    time.sleep(20)
+else:
+    def emit(event, **extra):
+        print(json.dumps(dict(event=event, **extra)), flush=True)
+    sys.stdin.readline()
+    emit("init", conversation_id="offline-conversation")
+    emit("user_input")
+    emit("step_update", status="ACTIVE")
+    sys.stdin.readline()
+    time.sleep(.05)
+    emit("result", result=dict(status="SUCCESS", conversation_id="offline-conversation", response="NONCE-ONE"))
+    emit("user_input")
+    time.sleep(.05)
+    with open(grants, "a") as f:
+        f.write(json.dumps(dict(type="baton.grant", vendor="agy", tool="write_to_file", input=target_hash,
+                               decision=mode, rule="withheld-tool")) + "\n")
+    emit("result", result=dict(status="SUCCESS", conversation_id="offline-conversation", response="NONCE-TWO"))
+'''
+    try:
+        for mode in ("deny", "allow", "blocked-input", "outer-stop", "parent-exit", "delivery-exception", "newline-free"):
+            with tempfile.TemporaryDirectory(prefix="v-2537-pipes-") as wd:
+                grants = os.path.join(wd, "grants.jsonl")
+                pid_path = os.path.join(wd, "descendant.pid")
+                argv = [sys.executable, "-u", "-c", helper,
+                        "blocked-input" if mode == "outer-stop" else mode, grants, "a" * 16, pid_path]
+                controller = _AgyStreamFollowUpController(argv, wd, {"PATH": os.environ.get("PATH", "")},
+                    grants, timeout_s=20 if mode == "outer-stop" else 1.5 if mode in ("deny", "allow") else .7,
+                    cap_bytes=256 if mode == "newline-free" else 1024 * 1024)
+                began = time.monotonic()
+                events, receipt = _agy_stream_follow_up_contained_run(controller,
+                    "x" * (2 * 1024 * 1024) if mode in ("blocked-input", "outer-stop") else "NONCE-ONE",
+                    "NONCE-TWO", "a" * 16, 0, ("NONCE-ONE", "NONCE-TWO"), outer_seconds=2,
+                    fault=mode if mode == "delivery-exception" else None)
+                if time.monotonic() - began > 9 or not receipt.get("reaped"):
+                    raise AssertionError(mode + ": controller was not bounded/reaped")
+                if mode == "outer-stop" and not receipt.get("timedOut"):
+                    raise AssertionError("independent owner must stop blocked stdin before the inner deadline")
+                result, detail = _agy_stream_follow_up_classify(events,
+                    ("NONCE-ONE", "NONCE-TWO"), "a" * 16, 0, 1)
+                expected = PASS if mode == "deny" else FAIL if mode == "allow" else INCONCLUSIVE
+                if result != expected:
+                    raise AssertionError(f"{mode}: {result} {detail} {events}")
+                if mode == "parent-exit":
+                    # Read-only OS process query; never signal a potentially reused PID.
+                    import ctypes
+                    from ctypes import wintypes
+                    with open(pid_path) as f:
+                        pid = int(f.read())
+                    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+                    kernel.OpenProcess.restype = wintypes.HANDLE
+                    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+                    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+                    handle = kernel.OpenProcess(0x100000, False, pid)
+                    if handle:
+                        try:
+                            if kernel.WaitForSingleObject(handle, 0) != 0:
+                                raise AssertionError("descendant survived its parent and containing Job cleanup")
+                        finally:
+                            kernel.CloseHandle(handle)
+                print(f"   OK  real contained controller {mode}: {result}, bounded tree stop")
+        return 0
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: actual controller controls raised: {exc!r}")
+        return 1
+
+
 def _selftest_agy_stream_follow_up():
     """#2537: every piece of the stream-follow-up check that can run with no agy process, no dotnet
     build, and no model call -- the classifier, the delivery gate, the drift detector, the hash
@@ -5452,10 +5821,29 @@ def _selftest_agy_stream_follow_up():
         print("   OK  a missing expected nonce FAILs")
 
         st, msg = classify(full_events(), lb=10, la=10)
-        if st != FAIL:
-            print(f"FAIL  agy-stream-follow-up: an unchanged ledger was not FAILed: {st} -- {msg}")
+        if st != INCONCLUSIVE:
+            print(f"FAIL  agy-stream-follow-up: an unchanged ledger was not INCONCLUSIVE: {st} -- {msg}")
             return 1
-        print("   OK  an unchanged hook verdict ledger FAILs")
+        print("   OK  an unchanged hook verdict ledger is INCONCLUSIVE")
+
+        for index in (1, 4, 7):
+            absent = full_events()
+            payload = absent[index]["payload"]
+            payload.get("result", payload).pop("conversation_id")
+            st, msg = classify(absent)
+            if st != INCONCLUSIVE or "identity" not in msg:
+                raise AssertionError("each required identity must be present")
+        conflict = full_events()
+        conflict[7]["payload"]["conversation_id"] = "outer-conflict"
+        if classify(conflict)[0] != FAIL:
+            raise AssertionError("outer/inner identity conflict must fail")
+        for first, second in (("NONCE-ONE NONCE-TWO", ""), ("NONCE-TWO", "NONCE-ONE")):
+            union_only = full_events()
+            union_only[4]["payload"]["result"]["response"] = first
+            union_only[7]["payload"]["result"]["response"] = second
+            if classify(union_only)[0] != FAIL:
+                raise AssertionError("nonces must belong to their corresponding result")
+        print("   OK  absent identities, conflicting outer/inner identities, and per-turn nonces discriminate")
 
         st, msg = classify(full_events(), drift="flag missing")
         if st != FAIL or "drift" not in msg:
@@ -5492,6 +5880,77 @@ def _selftest_agy_stream_follow_up():
         print("   OK  a wrong execution id delivers zero bytes")
     except Exception as exc:                                       # noqa: BLE001
         print(f"FAIL  agy-stream-follow-up: delivery-gate arms raised: {exc!r}")
+        return 1
+
+    try:
+        class NamesOnly:
+            def keys(self):
+                return ["GEMINI_API_KEY", "PATH"]
+
+            def __getitem__(self, _key):
+                raise AssertionError("forbidden value access")
+
+            def get(self, *_args):
+                raise AssertionError("forbidden value access")
+
+        if _agy_stream_follow_up_forbidden_env(NamesOnly()) != ["GEMINI_API_KEY"]:
+            raise AssertionError("names-only guard did not reject")
+        if _agy_stream_follow_up_forbidden_env({"GEMINI_API_KEY": ""}) != ["GEMINI_API_KEY"]:
+            raise AssertionError("present empty-valued name must reject")
+        with tempfile.TemporaryDirectory(prefix="v-2537-acquire-") as wd:
+            grants = os.path.join(wd, "grants.jsonl")
+            with open(grants, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "baton.grant", "vendor": "agy", "tool": "write_to_file",
+                                   "input": FORBIDDEN_HASH, "decision": "deny", "rule": "withheld-tool"}) + "\n")
+            baseline = os.path.getsize(grants)
+            controller = _AgyStreamFollowUpController([], wd, {}, grants)
+            controller._grants_cursor = baseline
+            controller._poll_grants(baseline, FORBIDDEN_HASH)
+            if controller.events:
+                raise AssertionError("preflight audit must not count as live evidence")
+            for decision in ("deny", "allow"):
+                with open(grants, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"type": "baton.grant", "vendor": "agy", "tool": "write_to_file",
+                                       "input": FORBIDDEN_HASH, "decision": decision,
+                                       "rule": "withheld-tool"}) + "\n")
+                controller._poll_grants(baseline, FORBIDDEN_HASH)
+            if [e["payload"]["decision"] for e in controller.events] != ["deny", "allow"]:
+                raise AssertionError("actual grant polling must acquire both verdicts")
+            if classify(controller.events)[0] != FAIL:
+                raise AssertionError("acquired allow must fail before missing-event classification")
+            bounded = _AgyStreamFollowUpController([], wd, {}, grants, cap_bytes=256)
+            bounded._reader(io.BytesIO(b"x" * 4096), "stdout")
+            if not bounded._seen("capture_incomplete") or bounded.events[0]["payload"]["bytes"] != 256:
+                raise AssertionError("newline-free capture exceeded its bound")
+            if classify(full_events() + bounded.events)[0] != INCONCLUSIVE:
+                raise AssertionError("capped evidence cannot pass")
+            workspace = os.path.join(wd, "agy-workspace")
+            os.makedirs(os.path.join(workspace, ".agents"))
+            with open(os.path.join(workspace, ".agents", "hooks.json"), "w", encoding="utf-8") as f:
+                f.write('{"fixture":"CONFIG-PRIVATE-TEXT"}')
+            target = {"program": "offline-helper", "args": [workspace],
+                      "environment": {"PRIVATE": "CONFIG-PRIVATE-TEXT"},
+                      "promptText": "CONFIG-PRIVATE-TEXT", "seedFiles": []}
+            source_events = full_events()
+            source_events[7]["payload"]["result"]["response"] += " MODEL-PRIVATE-TEXT"
+            source_events[6]["payload"]["path"] = "MODEL-PRIVATE-TEXT"
+            path = _agy_stream_follow_up_retain_evidence(target, source_events,
+                ("NONCE-ONE", "NONCE-TWO"), ["2026-10-01T01:02:03.0000000+00:00", "MODEL-PRIVATE-TEXT"],
+                10, 42, {"reaped": True}, False, PASS, FORBIDDEN_HASH, evidence_root=wd)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            if "PRIVATE-TEXT" in text or "conv-1" in text:
+                raise AssertionError("artifact leaked unrestricted configuration/model/identity text")
+            retained = json.loads(text)
+            if (classify(retained["events"])[0] != PASS or
+                    len(retained["resolvedConfigSha256"]) != 64 or
+                    len(retained["generatedHooksSha256"]) != 64 or
+                    len(retained["hookPresence"]["newCompleteVerdicts"]) != 1):
+                raise AssertionError("sanitized artifact lost discriminating configuration/event/hook evidence")
+        print("   OK  names-only/empty-value guard, actual fresh grant acquisition, and newline-free capture cap")
+        print("   OK  retained config hashes and ordinal grant/hook evidence preserve classification without private text")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: acquisition controls raised: {exc!r}")
         return 1
 
     try:
@@ -5571,6 +6030,9 @@ def _selftest_agy_stream_follow_up():
               "--only, and selected only by its exact name")
     except Exception as exc:                                       # noqa: BLE001
         print(f"FAIL  agy-stream-follow-up: opt-in selection arm raised: {exc!r}")
+        return 1
+
+    if _selftest_agy_stream_controller() != 0:
         return 1
 
     print("\n" + "=" * 78)
@@ -5755,4 +6217,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--agy-stream-controller-worker":
+        sys.exit(_agy_stream_follow_up_worker(sys.argv[2]))
     sys.exit(main())

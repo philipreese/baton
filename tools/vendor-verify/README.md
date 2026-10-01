@@ -53,6 +53,17 @@ have that" conclusion reached in Git Bash as unproven until re-run somewhere els
 A check that cannot separate its cases must return `INCONCLUSIVE`. That is a real result, and it is
 more useful than a confident wrong one.
 
+The paid `agy.stream-follow-up-under-resolved-grant` check is selectable only by its exact full
+name on `--only`; default, sentinel, group, and prefix selections exclude it. Its test instrument
+uses GateProbe's Windows process-tree containment and retains sanitized evidence under
+`.local-data/vendor-verify/` before removing the disposable launch directories. Evidence includes
+configuration hashes, controller ordinals, hashed conversation identities, per-result nonce matches,
+fresh grant/hook records, and the tree-stop receipt. Missing identity, capture, or fresh hook evidence
+is inconclusive; an explicit conflicting identity or forbidden grant is a failure. `--selftest`
+exercises real helper pipes and containment when GateProbe is built, without a vendor call. These
+offline controls do not establish a vendor result; that still requires separately authorized live
+measurement and independent review.
+
 ### The instruments, and what each one can't see
 
 Picking the instrument is most of the work. Three are in use here, in increasing strength:

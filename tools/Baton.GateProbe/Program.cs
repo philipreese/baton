@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Globalization;
+using Baton;
 using Baton.Vendors;
 using Baton.Domain;
 
@@ -48,6 +50,11 @@ public static class Program
 {
     public static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--stream-controller")
+        {
+            return RunStreamController(args);
+        }
+
         if (args.Length < 1)
         {
             Console.Error.WriteLine(
@@ -99,5 +106,60 @@ public static class Program
         }));
 
         return 0;
+    }
+
+    // Test instrument only. ChildProcessTree supplies the existing atomic Windows Job launch;
+    // its stdin is EOF, so the contained Python controller owns the vendor's streaming stdin.
+    // The independent timer owns the whole tree, even if delivery blocks or the vendor root exits.
+    private static int RunStreamController(string[] args)
+    {
+        if (!OperatingSystem.IsWindows() || args.Length != 6)
+        {
+            Console.Error.WriteLine("stream controller requires Windows, python, script, request, receipt, seconds");
+            return 2;
+        }
+
+        double seconds = double.Parse(args[5], CultureInfo.InvariantCulture);
+        if (!double.IsFinite(seconds) || seconds <= 0 || seconds > 110)
+        {
+            return 2;
+        }
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+        using var child = ChildProcessTree.Start(args[1], info =>
+        {
+            info.ArgumentList.Add(args[2]);
+            info.ArgumentList.Add("--agy-stream-controller-worker");
+            info.ArgumentList.Add(args[3]);
+        });
+        using var stop = deadline.Token.Register(child.Terminate);
+        bool timedOut = false;
+        bool reaped = false;
+        int? exitCode = null;
+        try
+        {
+            child.Process.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult();
+            exitCode = child.Process.ExitCode;
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            timedOut = true;
+        }
+        finally
+        {
+            timedOut |= deadline.IsCancellationRequested;
+            // Unconditional: root exit says nothing about descendants holding pipes or running.
+            child.Terminate();
+            reaped = child.Process.WaitForExit(5000);
+            File.WriteAllText(args[4], JsonSerializer.Serialize(new
+            {
+                timedOut,
+                reaped,
+                exitCode,
+                treeStop = "windows-job-terminated-and-closed",
+            }));
+        }
+
+        return timedOut || !reaped ? 1 : exitCode ?? 1;
     }
 }
