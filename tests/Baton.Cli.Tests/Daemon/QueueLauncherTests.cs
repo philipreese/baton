@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Baton.Cli.Daemon;
 using Baton.Cli.Mcp;
@@ -40,6 +41,130 @@ public sealed class QueueLauncherTests : IDisposable
         var root = Path.Combine(Path.GetTempPath(), "baton_queue_launcher_" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(root);
         return root;
+    }
+
+    [Theory]
+    [InlineData("held", true, false)]
+    [InlineData("other-room", false, false)]
+    [InlineData("ordinary-refusal", false, false)]
+    [InlineData("started-failure", false, true)]
+    [InlineData("started-success", false, true)]
+    public async Task A_child_written_terminal_room_does_not_turn_a_runway_refusal_into_a_launch(
+        string caseName, bool expectedHold, bool writeFlowLedger)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The child fixture uses Windows PowerShell, like Baton CI.");
+        var root = CreateTempRoot();
+        try
+        {
+            var room = Path.Combine(root, "queue-refusal-room");
+            var staging = Path.Combine(root, "staging");
+            var reason = caseName == "held" ? "Runway hold — not dispatching new work on codex."
+                : "Unknown role 'missing-role'.";
+            if (caseName == "started-success")
+            {
+                Directory.CreateDirectory(staging);
+                await File.WriteAllTextAsync(
+                    Path.Combine(staging, "terminal.json"),
+                    JsonSerializer.Serialize(new WorkflowStatusView(nameof(WorkflowOutcome.Succeeded), [], [], null)), Ct);
+            }
+            else
+            {
+                await TerminalSentinelWriter.WriteValidationRefusedAsync(staging, reason, Ct);
+            }
+            var admission = caseName is "held" or "other-room"
+                ? new RunwayAdmissionEntry(
+                    DateTimeOffset.UtcNow, "codex", RunwayAdmissionDecisions.Held,
+                    RunwayAdmissionDecidedBy.Counters,
+                    Room: BatonPaths.RecordKey(caseName == "held" ? room : Path.Combine(root, "other-room")),
+                    Dispatched: false)
+                : null;
+            var stagedAdmission = Path.Combine(root, "admission.jsonl");
+            await File.WriteAllTextAsync(
+                stagedAdmission, admission is null ? "" : JsonSerializer.Serialize(admission) + Environment.NewLine, Ct);
+            var script = Path.Combine(root, "refusing-child.ps1");
+            await File.WriteAllTextAsync(script, """
+                New-Item -ItemType Directory -Force -Path $env:BATON_FIXTURE_ROOM | Out-Null
+                Copy-Item -LiteralPath $env:BATON_FIXTURE_SENTINEL -Destination (Join-Path $env:BATON_FIXTURE_ROOM 'terminal.json')
+                Copy-Item -LiteralPath $env:BATON_FIXTURE_ADMISSION -Destination $env:BATON_FIXTURE_LEDGER
+                if ($env:BATON_FIXTURE_STARTED -eq 'true') { Set-Content -LiteralPath (Join-Path $env:BATON_FIXTURE_ROOM 'flow.jsonl') -Value 'started' }
+                [Console]::Error.WriteLine($env:BATON_FIXTURE_REASON)
+                Start-Sleep -Milliseconds 300
+                if ($env:BATON_FIXTURE_SUCCESS -eq 'true') { exit 0 }
+                exit 2
+                """, Ct);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.RunwayAdmissionLedgerFile)!);
+            var start = new ProcessStartInfo("powershell.exe")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            start.ArgumentList.Add("-NoProfile");
+            start.ArgumentList.Add("-File");
+            start.ArgumentList.Add(script);
+            start.Environment["BATON_FIXTURE_ROOM"] = room;
+            start.Environment["BATON_FIXTURE_SENTINEL"] = Path.Combine(staging, "terminal.json");
+            start.Environment["BATON_FIXTURE_ADMISSION"] = stagedAdmission;
+            start.Environment["BATON_FIXTURE_LEDGER"] = BatonPaths.RunwayAdmissionLedgerFile;
+            start.Environment["BATON_FIXTURE_STARTED"] = writeFlowLedger ? "true" : "false";
+            start.Environment["BATON_FIXTURE_SUCCESS"] = caseName == "started-success" ? "true" : "false";
+            start.Environment["BATON_FIXTURE_REASON"] = reason;
+            using var child = Process.Start(start)!;
+            if (writeFlowLedger)
+            {
+                // The started controls exercise the already-exited branch, so no detached
+                // supervisor can outlive this fixture's room or process handle.
+                await child.WaitForExitAsync(Ct);
+            }
+
+            var outcome = await QueueLauncher.ObserveLaunchedProcessAsync(child, "refusal", room, Ct);
+
+            Assert.Equal(expectedHold, outcome.RunwayHeld);
+            Assert.Equal(writeFlowLedger, outcome.RoomDirectory is not null);
+            if (!expectedHold && !writeFlowLedger)
+            {
+                Assert.Contains(reason, outcome.Error!, StringComparison.Ordinal);
+            }
+            Assert.Equal(
+                caseName == "started-success" ? WorkflowOutcome.Succeeded : WorkflowOutcome.Failed,
+                (await TerminalSentinelWriter.TryReadAsync(room, Ct))!.State);
+            if (expectedHold)
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+                {
+                    Items = [new QueueItem
+                    {
+                        Tag = "held-implementation",
+                        Role = "implement",
+                        Stage = WorkStage.Implement,
+                        ScopeClass = "engine",
+                        Workspace = root,
+                        SpecFile = script,
+                    }],
+                }, Ct);
+                var scheduler = new QueueSchedulerService(
+                    (_, _) => Task.FromResult(outcome), _ => Task.FromResult(0d),
+                    () => 16d, () => DateTimeOffset.UtcNow);
+                await scheduler.TickOnceAsync(Ct);
+
+                var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+                Assert.Equal(QueueItemState.Queued, retained.State);
+                Assert.Equal(WorkStage.Implement, retained.Stage);
+                Assert.False(retained.Halted);
+                Assert.Null(retained.RoomDirectory);
+                Assert.Null(retained.LaunchedAt);
+                Assert.Null(retained.PullRequest);
+                Assert.Null(retained.AttemptEnvelope);
+                var decision = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(
+                    BatonPaths.QueueDecisionLedgerFile, Ct));
+                Assert.Equal(QueueDecisionEntry.Waited, decision.Decision);
+                Assert.Equal("runway-held", decision.Reason);
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
     }
 
     [Fact]
@@ -647,7 +772,7 @@ public sealed class QueueLauncherTests : IDisposable
             [Row(RunwayAdmissionDecisions.HeldOverridden, room), Row(RunwayAdmissionDecisions.Held, otherRoom)],
             ["Error: Unknown role 'implementer'.", "try: baton templates"]);
         Assert.False(refused.RunwayHeld);
-        Assert.Contains("exited 2 before provisioning the room", refused.Error!, StringComparison.Ordinal);
+        Assert.Contains("exited 2 before starting a worker", refused.Error!, StringComparison.Ordinal);
         Assert.Contains("Unknown role 'implementer'", refused.Error, StringComparison.Ordinal);
         Assert.Contains("try: baton templates", refused.Error, StringComparison.Ordinal);
 

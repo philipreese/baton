@@ -71,11 +71,10 @@ public sealed record QueueLaneAdoption(
 /// <c>baton dispatch</c> the CLI runs, including <see cref="TerminalSettleRecorder"/> at its end.
 /// </para>
 /// <para>
-/// <b>How a refusal is told from a launch without an exit code that could.</b> Every pre-provision
-/// refusal <c>baton dispatch</c> can make — drain marker, bad spec, unknown role, runway hold —
-/// happens before it creates the room directory, so "the room now exists" is the discriminator
-/// between refused and running (the engine's own ordering, not a timing guess;
-/// <c>DispatchPreProvisionOrderingTests</c> pins it). A hold and a bad spec both exit
+/// <b>How a refusal is told from a launch without an exit code that could.</b> Dispatch can write a
+/// validation sentinel after a pre-worker refusal, creating the room directory without a flow ledger.
+/// A real flow ledger, or the child's exit while it still has none, settles the distinction;
+/// directory existence alone does not. A hold and a bad spec both exit
 /// <see cref="RunExitCode.ValidationRefused"/>, which is why the exit code alone was never enough:
 /// the hold is instead read off the <b>runway admission ledger</b>, where the child already recorded
 /// it against this room before refusing (<see cref="ClassifyPreProvisionExit"/>). That is the fact
@@ -174,13 +173,20 @@ public static class QueueLauncher
             }
         }
 
-        var relay = new LaneOutputRelay(item.Tag, process);
+        return await ObserveLaunchedProcessAsync(process, item.Tag, roomDirectory, cancellationToken).ConfigureAwait(false);
+    }
 
-        // One bounded wait for a refusal -- the class remarks state the discriminator. The timeout
-        // is the backstop for a dispatch that is neither exited nor provisioned: it reports launched,
-        // which is true, and the room's own record takes over.
+    /// <summary>Observes the process the launcher just started until a real ledger or an exit settles its admission.</summary>
+    internal static async Task<QueueLaunchOutcome> ObserveLaunchedProcessAsync(
+        Process process, string tag, string roomDirectory, CancellationToken cancellationToken)
+    {
+        var relay = new LaneOutputRelay(tag, process);
+
+        // A validation sentinel can create the room before the child exits, so only a real flow
+        // ledger proves launch while the child is still running. The deadline leaves an unresolved
+        // child launched rather than retrying it and risking a second worker.
         var deadline = DateTimeOffset.UtcNow + RefusalWindow;
-        while (!process.HasExited && !Directory.Exists(roomDirectory) && DateTimeOffset.UtcNow < deadline)
+        while (!process.HasExited && !RoomLedgerProbe.HasLedger(roomDirectory) && DateTimeOffset.UtcNow < deadline)
         {
             await Task.Delay(RefusalPollInterval, cancellationToken).ConfigureAwait(false);
         }
@@ -189,14 +195,15 @@ public static class QueueLauncher
         {
             var exitCode = await ExitCodeAsync(process).ConfigureAwait(false);
             process.Dispose();
-            if (Directory.Exists(roomDirectory))
+            if (RoomLedgerProbe.HasLedger(roomDirectory))
             {
-                // Provisioned and already over: the child wrote its own sentinel (or, faulting, did
-                // not), and done detection reads the room either way.
-                await SettleExitedLaneAsync(exitCode, item.Tag, roomDirectory).ConfigureAwait(false);
+                // The child got far enough to record execution; done detection reads its room.
+                await SettleExitedLaneAsync(exitCode, tag, roomDirectory).ConfigureAwait(false);
                 return new QueueLaunchOutcome(roomDirectory);
             }
 
+            // Program may have written terminal.json for a validation refusal. It did not run a
+            // worker, so the exact-room admission row still decides hold versus ordinary failure.
             return ClassifyPreProvisionExit(
                 exitCode, roomDirectory, await ReadAdmissionRowsAsync().ConfigureAwait(false), relay.StderrTail);
         }
@@ -204,7 +211,7 @@ public static class QueueLauncher
         // Still running: settle it when it finishes, so a queue-launched room that faults after
         // launch gets the sentinel nothing else will write. The child does its own settle on the
         // ordinary path; this only covers the one it never reached.
-        _ = SuperviseAsync(process, item.Tag, roomDirectory);
+        _ = SuperviseAsync(process, tag, roomDirectory);
 
         return new QueueLaunchOutcome(roomDirectory);
     }
@@ -485,7 +492,7 @@ public static class QueueLauncher
     }
 
     /// <summary>
-    /// The verdict for a child that exited before it ever created the room. A runway hold is read off
+    /// The verdict for a child that exited before it recorded a real flow ledger. A runway hold is read off
     /// the admission ledger — the row the child wrote against this very room before refusing — and
     /// everything else is the child's own last words on stderr. Pure, so the two answers are pinned
     /// without a spawn.
@@ -516,7 +523,7 @@ public static class QueueLauncher
 
         var code = exitCode is { } value ? value.ToString(CultureInfo.InvariantCulture) : "an unreadable code";
         var detail = stderrTail.Count > 0 ? string.Join(" | ", stderrTail) : "it wrote nothing to stderr";
-        return new QueueLaunchOutcome(null, Error: $"baton dispatch exited {code} before provisioning the room: {detail}");
+        return new QueueLaunchOutcome(null, Error: $"baton dispatch exited {code} before starting a worker: {detail}");
     }
 
     private static async Task<IReadOnlyList<RunwayAdmissionEntry>> ReadAdmissionRowsAsync()
@@ -975,9 +982,8 @@ public static class QueueLauncher
         return Path.Combine(BatonPaths.Rooms, $"queue-{item.Tag}-{Guid.NewGuid().ToString("N")[..8]}");
     }
 
-    /// <summary>How long to wait for a pre-provision refusal before reporting the lane launched.
-    /// Every refusal happens before the room directory is created, so this is a backstop, not the
-    /// mechanism.
+    /// <summary>How long to wait for a pre-worker refusal or real flow ledger before reporting an
+    /// unresolved child launched. This is a backstop for a process still running without a ledger.
     /// <para>
     /// <b>Coupled to <see cref="OnDemandRunwayHarvest.Bound"/> since #1923</b>, which is why that is
     /// named here rather than left for the next reader to find: the runway hold's inline harvest runs
