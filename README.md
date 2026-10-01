@@ -229,9 +229,10 @@ Each vendor CLI remains subject to its own provider's terms, between the operato
 
 ### Codex adapter configuration root
 
-The Codex adapter uses a persistent, otherwise-empty configuration root at `~/.baton/codex-home`
-(or `$BATON_HOME/codex-home` if `BATON_HOME` is set). This isolated home contains no operator config,
-instructions, skills, plugins, or credentials. The operator establishes Codex subscription authentication
+For structured dispatches, Baton's Codex app-server broker uses a persistent configuration root at
+`~/.baton/codex-home` (or `$BATON_HOME/codex-home` if `BATON_HOME` is set). Baton does not copy operator
+configuration or credentials into this root; Codex creates its own state there, including its credential
+after the operator logs in. The operator establishes Codex subscription authentication
 once in that root by running Codex's own login process — see
 [`docs/vendor-codex-probe-2026-09-04.md#authentication-and-executable`](docs/vendor-codex-probe-2026-09-04.md#authentication-and-executable)
 for the full procedure and technical details.
