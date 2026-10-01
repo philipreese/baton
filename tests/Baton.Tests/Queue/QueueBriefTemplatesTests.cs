@@ -262,14 +262,48 @@ public sealed class QueueBriefTemplatesTests
         Assert.Equal(QueueBriefTemplates.Names.Count, written.Count);
 
         var path = Path.Combine(templates.Path, "fix.md");
-        File.WriteAllText(path, "# My own fix brief for PR #{{PR}}");
+        const string customTemplate = "# My own fix brief for PR #{{PR}}";
+        File.WriteAllText(path, customTemplate);
 
         var writtenAgain = QueueBriefTemplates.EnsureMaterialized(templates.Path);
         var brief = QueueBriefTemplates.Compose(
-            WorkStage.Fix, Item(), new QueueBriefTemplates.BriefContext(PullRequest: 7), templates.Path);
+            WorkStage.Fix, Item(),
+            new QueueBriefTemplates.BriefContext(PullRequest: 7, Do: "Verify the changed Markdown links."),
+            templates.Path);
 
         Assert.Empty(writtenAgain);
-        Assert.Equal("# My own fix brief for PR #7", brief);
+        Assert.Equal(customTemplate, File.ReadAllText(path));
+        Assert.StartsWith("# My own fix brief for PR #7", brief, StringComparison.Ordinal);
+        Assert.Contains("Verify the changed Markdown links.", brief, StringComparison.Ordinal);
+        Assert.Contains("repository verification and", brief, StringComparison.Ordinal);
+        Assert.Contains("engine gates", brief, StringComparison.Ordinal);
+        Assert.EndsWith("push hooks still apply.", brief.TrimEnd(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_fix_with_legacy_null_context_says_it_is_unavailable_and_does_not_stack_context_on_re_render()
+    {
+        using var templates = new TempDirectory("baton_templates_");
+        var item = Item() with { Instructions = null };
+        var missing = QueueBriefTemplates.Compose(
+            WorkStage.Fix, item, new QueueBriefTemplates.BriefContext(PullRequest: 7), templates.Path);
+
+        Assert.Contains("Original task instructions are unavailable on this legacy item", missing,
+            StringComparison.Ordinal);
+        Assert.Equal(1, missing.Split("## Original task context", StringSplitOptions.None).Length - 1);
+
+        var context = new QueueBriefTemplates.BriefContext(
+            PullRequest: 7, Do: "Only verify Markdown links; the PR already exists.");
+        var first = QueueBriefTemplates.Compose(WorkStage.Fix, item, context, templates.Path);
+        var second = QueueBriefTemplates.Compose(WorkStage.Fix, item, context, templates.Path);
+        Assert.Equal(first, second);
+        Assert.Equal(1, second.Split(context.Do, StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("unavailable on this legacy item", second, StringComparison.Ordinal);
+
+        var unknownPr = QueueBriefTemplates.Compose(
+            WorkStage.Fix, item, new QueueBriefTemplates.BriefContext(Do: "Keep the task context."),
+            templates.Path);
+        Assert.Contains("existing PR #?", unknownPr, StringComparison.Ordinal);
     }
 
     [Fact]

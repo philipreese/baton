@@ -1115,7 +1115,10 @@ public sealed class WorkItemAdvancerTests
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
-            await SeedAsync(home, WorkStage.Review, room);
+            var seeded = await SeedAsync(home, WorkStage.Review, room);
+            const string originalInstructions = "Docs-only: change the landing-page copy. Verify the Markdown links. Create a PR after implementation.";
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { Instructions = originalInstructions }] }, Ct);
 
             var facts = await new WorkItemAdvancer(new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
                 .AdvanceAsync(Now, Ct);
@@ -1131,6 +1134,12 @@ public sealed class WorkItemAdvancerTests
             Assert.Contains("Fix round for PR #77", brief, StringComparison.Ordinal);
             Assert.Contains("the guard is never reached", brief, StringComparison.Ordinal);
             Assert.Contains("Decide returns first", brief, StringComparison.Ordinal);
+            Assert.Contains(originalInstructions, brief, StringComparison.Ordinal);
+            Assert.Contains("task-specific scope and verification", brief, StringComparison.Ordinal);
+            Assert.Contains("existing PR #77", brief, StringComparison.Ordinal);
+            Assert.Contains("Do not repeat one-time setup or PR creation", brief, StringComparison.Ordinal);
+            Assert.Contains("push hooks still apply", brief, StringComparison.Ordinal);
+            Assert.EndsWith("push hooks still apply.", brief.TrimEnd(), StringComparison.Ordinal);
 
             // The findings travel as text; the room they came from must not (spec/baton.md §13). The
             // room path is recorded on the ITEM instead, asserted above — which is also the control
@@ -2034,7 +2043,8 @@ public sealed class WorkItemAdvancerTests
             await advancer.AdvanceAsync(Now, Ct);
 
             var fixBrief = await File.ReadAllTextAsync((await ReadBackAsync()).SpecFile, Ct);
-            Assert.DoesNotContain("Build the lifecycle.", fixBrief, StringComparison.Ordinal);
+            Assert.Contains("Build the lifecycle.", fixBrief, StringComparison.Ordinal);
+            Assert.Equal(1, fixBrief.Split("Build the lifecycle.", StringSplitOptions.None).Length - 1);
 
             // Round 2: that fix lane stalls without pushing.
             var fixRoom = await WriteSettledRoomAsync(

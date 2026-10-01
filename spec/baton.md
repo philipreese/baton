@@ -8292,6 +8292,14 @@ mechanism, not a preference: a lane's grant cannot read another room's directory
 why the findings were being copied by hand. `lastVerdict` keeps the path on the item for the
 operator's trace and nothing renders it.
 
+A fix brief also appends the original task instructions from the item's persisted `instructions` at
+render time, even when `fix.md` was previously materialized or customized; it never rewrites that
+operator-owned template or parses an earlier round's brief. If a legacy item has no instructions,
+the brief says they are unavailable. The original task's scope and verification outrank generic
+`## Ship` examples, but do not waive standing safety rules, repository verification or engine gates,
+or push hooks. The fix-stage directions for the existing PR and branch outrank obsolete one-time
+setup or PR-creation directions in the original task.
+
 The implement template carries the standing lane rules **once** — buildlock, no `pixi run gates`, no
 sub-agents, no live vendor CLI, no issue filing, never `--no-verify`, checkpoint commits, the
 test-hygiene tripwires, record-once, the ship block, and `Closes #N` alone on the last line with no AI
