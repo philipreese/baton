@@ -215,8 +215,8 @@ HTTP-error fallback behavior has not been browser-tested yet.
 ## Vendor authentication
 
 Baton does not authenticate to any model provider. It spawns the vendor's own first-party CLI
-(`claude`, `agy`, `codex`) as a subprocess, and that CLI uses whatever login the operator already established
-on their own machine.
+(`claude`, `agy`, `codex`) as a subprocess within the configuration root selected by that adapter,
+and that CLI uses the authentication the operator has established in that root.
 
 **Baton never reads, copies, forwards, or stores a vendor credential** — no API keys, no OAuth tokens,
 no access to the OS credential store, and it never places a credential into a config directory. This
@@ -226,6 +226,16 @@ is an enforced invariant, not an intention: see
 Baton is a personal tool. It is not offered as a product or a service, and it does not provide,
 resell, or proxy access to any provider — you bring a CLI you have already signed into yourself.
 Each vendor CLI remains subject to its own provider's terms, between the operator and that provider.
+
+### Codex adapter configuration root
+
+For structured dispatches, Baton's Codex app-server broker uses a persistent configuration root at
+`~/.baton/codex-home` (or `$BATON_HOME/codex-home` if `BATON_HOME` is set). Baton does not copy operator
+configuration or credentials into this root; Codex creates its own state there, including its credential
+after the operator logs in. The operator establishes Codex subscription authentication
+once in that root by running Codex's own login process — see
+[`docs/vendor-codex-probe-2026-09-04.md#authentication-and-executable`](docs/vendor-codex-probe-2026-09-04.md#authentication-and-executable)
+for the full procedure and technical details.
 
 ## Prerequisites
 
