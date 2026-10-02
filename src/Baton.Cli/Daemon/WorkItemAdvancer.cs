@@ -386,6 +386,7 @@ public sealed partial class WorkItemAdvancer
         // A halted item remains available only for the trusted-merge retirement above. Its halt
         // still forbids every ordinary lifecycle transition and retry.
         var awaitingMissingPullRequest = IsAwaitingMissingPullRequestReconciliation(item);
+        var pullRequestAuthorityRefusal = HasPullRequestAuthorityRefusal(room, sentinel);
         if (item.Halted && !awaitingMissingPullRequest)
         {
             return null;
@@ -408,7 +409,8 @@ public sealed partial class WorkItemAdvancer
             && item.DraftPullRequestCreateMarker is null
             && pr.Succeeded && pr.Number is null
             && item.Stage == WorkStage.Implement
-            && IsDraftHandoffEnabledNow(item.Repository))
+            && IsDraftHandoffEnabledNow(item.Repository)
+            && !pullRequestAuthorityRefusal)
         {
             var created = await TryCreateDraftPullRequestAsync(item, outcome, head, now, cancellationToken)
                 .ConfigureAwait(false);
@@ -429,7 +431,7 @@ public sealed partial class WorkItemAdvancer
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
             sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null,
             item.AttemptBaseRevision, deliveryFailingMembers,
-            HasPullRequestAuthorityRefusal(room, sentinel));
+            pullRequestAuthorityRefusal);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
@@ -1973,9 +1975,8 @@ public sealed partial class WorkItemAdvancer
 
     /// <summary>
     /// Reads the current terminal execution's engine-owned grant decisions. The aggregate refused-tool
-    /// count is deliberately not used here: a denied shell command is incidental, while only a denied
-    /// <see cref="GrantRules.OwnPullRequestOnly"/> decision proves that the lane was refused its exact
-    /// originating-PR authority.
+    /// count is deliberately not used here. Exact source-produced list/view denials are incidental to
+    /// draft creation; every other own-PR-only denial remains blocking.
     /// </summary>
     private static bool HasPullRequestAuthorityRefusal(
         string? roomDirectory, WorkflowStatusView? sentinel)
@@ -2004,8 +2005,7 @@ public sealed partial class WorkItemAdvancer
             foreach (var executionDirectory in executionDirectories)
             {
                 var path = Path.Combine(executionDirectory, GrantDecisionLog.FileName);
-                if (File.Exists(path)
-                    && GrantDecisionLog.ContainsDenial(path, GrantRules.OwnPullRequestOnly))
+                if (File.Exists(path) && ContainsBlockingPullRequestAuthorityDenial(path))
                 {
                     return true;
                 }
@@ -2018,6 +2018,128 @@ public sealed partial class WorkItemAdvancer
         }
 
         return false;
+    }
+
+    private static bool ContainsBlockingPullRequestAuthorityDenial(string path)
+    {
+        foreach (var line in File.ReadLines(path))
+        {
+            if (HasMalformedOwnPullRequestDenialReason(line))
+            {
+                return true;
+            }
+
+            if (!GrantDecision.TryParseJsonLine(line, out var decision)
+                || decision is not { Allowed: false, Rule: var rule }
+                || rule != GrantRules.OwnPullRequestOnly)
+            {
+                continue;
+            }
+
+            if (decision.Reason is not { Length: > 0 } reason
+                || !IsIncidentalOwnPullRequestReadReason(reason))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasMalformedOwnPullRequestDenialReason(string line)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !HasString(root, "type", out var type) || type != GrantDecision.EventType
+                || !HasString(root, "vendor", out _)
+                || !HasString(root, "tool", out _)
+                || !HasString(root, "decision", out var decision) || decision != "deny"
+                || !HasString(root, "rule", out var ruleId)
+                || !GrantRules.TryGet(ruleId, out var rule) || rule != GrantRules.OwnPullRequestOnly
+                || !HasString(root, "input", out _)
+                || !HasString(root, "at", out var at)
+                || !DateTimeOffset.TryParse(at, CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out _))
+            {
+                return false;
+            }
+
+            return root.TryGetProperty("reason", out var reason)
+                && reason.ValueKind != JsonValueKind.String;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasString(JsonElement value, string name, out string text)
+    {
+        if (value.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && property.GetString() is { } result)
+        {
+            text = result;
+            return true;
+        }
+
+        text = string.Empty;
+        return false;
+    }
+
+    private static bool IsIncidentalOwnPullRequestReadReason(string reason)
+    {
+        const string listPrefix = "Baton refuses this command: `gh pr list` enumerates pull requests this room does not own — "
+            + "an implement lane reads its own PR only. ";
+        const string viewPrefix = "Baton refuses this command: `gh pr view ";
+        const string viewMiddle = "` is not this room's pull request — an implement lane reads its own PR only. ";
+        const string noPullRequest = "No `gh pr` read is allowed until this room's own `gh pr create` reports one.";
+        const string pullRequestTail = "`gh issue view` is unaffected.";
+
+        string? remainder = null;
+        if (reason.StartsWith(listPrefix, StringComparison.Ordinal))
+        {
+            remainder = reason[listPrefix.Length..];
+        }
+        else if (reason.StartsWith(viewPrefix, StringComparison.Ordinal))
+        {
+            var middle = reason.IndexOf(viewMiddle, viewPrefix.Length, StringComparison.Ordinal);
+            if (middle > viewPrefix.Length)
+            {
+                var selector = reason[viewPrefix.Length..middle];
+                if (selector.IndexOfAny(['\r', '\n', '`']) < 0)
+                {
+                    remainder = reason[(middle + viewMiddle.Length)..];
+                }
+            }
+        }
+
+        if (remainder is null || !remainder.EndsWith(pullRequestTail, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var ownership = remainder[..^pullRequestTail.Length].TrimEnd();
+        if (ownership == noPullRequest)
+        {
+            return true;
+        }
+
+        const string ownershipPrefix = "This room opened ";
+        const string ownershipSuffix = "; that is the only pull request it may read.";
+        if (!ownership.StartsWith(ownershipPrefix, StringComparison.Ordinal)
+            || !ownership.EndsWith(ownershipSuffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var identity = ownership.AsSpan(ownershipPrefix.Length,
+            ownership.Length - ownershipPrefix.Length - ownershipSuffix.Length);
+        var separator = identity.LastIndexOf('#');
+        return separator > 0 && int.TryParse(identity[(separator + 1)..], out _);
     }
 
     /// <summary>
