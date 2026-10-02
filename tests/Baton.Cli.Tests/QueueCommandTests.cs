@@ -3523,6 +3523,14 @@ public sealed class QueueCommandTests
     [InlineData("unknown-decision")]
     [InlineData("same-tag-default-at")]
     [InlineData("same-tag-missing-fields")]
+    [InlineData("missing-tag-launched")]
+    [InlineData("missing-tag-cancelled")]
+    [InlineData("missing-tag-retired")]
+    [InlineData("missing-tag-restored")]
+    [InlineData("missing-tag-advanced")]
+    [InlineData("valid-global-failed")]
+    [InlineData("valid-global-no-items")]
+    [InlineData("valid-global-hold")]
     [InlineData("valid-unrelated-wait")]
     public async Task Retire_strictly_reads_appended_decision_proof_rows(string defect)
     {
@@ -3549,6 +3557,15 @@ public sealed class QueueCommandTests
                 "unknown-decision" => JsonSerializer.Serialize(new QueueDecisionEntry(
                     DateTimeOffset.UtcNow, "unrelated-wait", "unrecognized", "slots", 1, 2, 3)),
                 "same-tag-missing-fields" => JsonSerializer.Serialize(new { tag = item.Tag, decision = "waited" }),
+                "missing-tag-launched" or "missing-tag-cancelled" or "missing-tag-retired"
+                    or "missing-tag-restored" or "missing-tag-advanced" => JsonSerializer.Serialize(new QueueDecisionEntry(
+                        DateTimeOffset.UtcNow, null, defect["missing-tag-".Length..], null, 0, null, 0)),
+                "valid-global-failed" => JsonSerializer.Serialize(new QueueDecisionEntry(
+                    DateTimeOffset.UtcNow, null, QueueDecisionEntry.Failed,
+                    "the evaluation itself failed and recorded no counters: fixture failure", 0, null, 0)),
+                "valid-global-no-items" or "valid-global-hold" => JsonSerializer.Serialize(new QueueDecisionEntry(
+                    DateTimeOffset.UtcNow, null, QueueDecisionEntry.Waited,
+                    defect["valid-global-".Length..], 0, null, 0)),
                 "valid-unrelated-wait" => waited,
                 _ => throw new InvalidOperationException(defect),
             };
@@ -3556,7 +3573,7 @@ public sealed class QueueCommandTests
 
             var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
             var ledgerBefore = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
-            if (defect == "valid-unrelated-wait")
+            if (defect == "valid-unrelated-wait" || defect.StartsWith("valid-global-", StringComparison.Ordinal))
             {
                 Assert.Equal(0, await QueueCommand.RetireOperatorAsync(
                     item.Tag, "valid-unrelated-wait", TextWriter.Null, Ct));
@@ -3716,6 +3733,82 @@ public sealed class QueueCommandTests
             Assert.Contains("insufficient settled failure evidence", refusal.Message, StringComparison.Ordinal);
             Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
             Assert.Equal(ledgerBefore, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Theory]
+    [InlineData("terminal-current-room")]
+    [InlineData("closed-pull-request")]
+    public async Task Retire_does_not_bypass_a_prelaunch_receipt_through_other_proof_arms(string alternative)
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+            var cancelled = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            const string repository = "github.com/example/receipt-corruption";
+            const int pullRequest = 2554;
+            var room = Path.Combine(home, "rooms", "contradictory-current-room");
+            Directory.CreateDirectory(room);
+            await TerminalSentinelWriter.WriteAsync(room,
+                new WorkflowStatusView(WorkflowOutcome.Failed, [], [], "terminal control"), Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [alternative == "terminal-current-room"
+                    ? cancelled with { State = QueueItemState.Failed, RoomDirectory = room }
+                    : cancelled with
+                    {
+                        Stage = WorkStage.Ready, State = QueueItemState.Queued,
+                        Repository = repository, PullRequest = pullRequest,
+                    }],
+                PullRequestObservations = [new QueuePullRequestObservation(
+                    repository, pullRequest, PullRequestObservationStates.Closed, "head",
+                    DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null)],
+            }, Ct);
+
+            var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var ledgerBefore = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.RetireOperatorAsync(
+                item.Tag, "receipt-exclusive-proof", TextWriter.Null, Ct));
+            Assert.Contains("insufficient settled failure evidence", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(ledgerBefore, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Retire_refuses_a_receipt_injected_after_terminal_room_observation()
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var producer = await CreatePrelaunchRefusalsAsync(home, 1);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: producer.Tag), TextWriter.Null, Ct));
+            var receipt = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).PrelaunchCancellation!;
+            var (item, _) = await WriteRetirementRoomAsync(home, terminal: true);
+            byte[]? queueImage = null;
+            byte[]? ledgerImage = null;
+            async Task Inject(CancellationToken token)
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = [item with { PrelaunchCancellation = receipt }],
+                }, token);
+                queueImage = await File.ReadAllBytesAsync(BatonPaths.QueueFile, token);
+                ledgerImage = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, token);
+            }
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.RetireOperatorAsync(
+                item.Tag, "receipt injected", TextWriter.Null, Ct, beforeCommit: Inject));
+            Assert.Contains("changed while", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(queueImage, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(ledgerImage, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
         }
         finally { DirectoryCleanup.DeleteRecursively(home); }
     }

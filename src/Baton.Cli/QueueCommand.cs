@@ -1590,8 +1590,13 @@ public static class QueueCommand
         {
             hasReprovenPrelaunchProof = observedPrelaunchProof is not null;
         }
-        if ((observed.State != QueueItemState.Failed || !terminalRoomProof.IsProven)
-            && !hasLegacyProof && !hasReprovenPrelaunchProof && !readyClosed)
+        // A retained prelaunch receipt is exclusive authority at BOTH reads: a corrupt row cannot
+        // bypass failed strict reproof by borrowing a terminal room or closed-PR disposition.
+        var observedEligible = observed.PrelaunchCancellation is not null
+            ? hasReprovenPrelaunchProof
+            : observed.State == QueueItemState.Failed && terminalRoomProof.IsProven
+                || hasLegacyProof || readyClosed;
+        if (!observedEligible)
         {
             throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement. It requires a terminal current room, exact refused-attempt/terminal-parent proof, recorded cancellation with terminal proof for every prior launched room, or a freshly reproven initial-prelaunch cancellation receipt.");
         }
@@ -1633,14 +1638,15 @@ public static class QueueCommand
                     || current.State == QueueItemState.Launched
                     || PendingDraftPullRequestHandoff(current)
                     || !SameRetirementAttempt(observed, current)
-                    || (current.State != QueueItemState.Failed
-                        || !HasTerminalRoomProofAtMutation(current, terminalRoomProof, out journalLease))
-                        && (legacyLease = TryAcquireLegacyRetirementProof(current)) is null
-                        && (prelaunchLease = snapshot.Items.Count(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)) == 1
+                    || (current.PrelaunchCancellation is not null
+                        ? (prelaunchLease = snapshot.Items.Count(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)) == 1
                             && QueueStore.ComputeRevision([current]) == observedRevision
                             ? TryAcquireReprovenPrelaunchCancellationProof(current, snapshot)
                             : null) is null
-                        && !currentReadyClosed)
+                        : (current.State != QueueItemState.Failed
+                            || !HasTerminalRoomProofAtMutation(current, terminalRoomProof, out journalLease))
+                            && (legacyLease = TryAcquireLegacyRetirementProof(current)) is null
+                            && !currentReadyClosed))
                 {
                     return snapshot;
                 }
@@ -2097,7 +2103,10 @@ public static class QueueCommand
                     || !double.IsFinite(row.FloorGb) || row.FloorGb < 0
                     || row.FreeGb is { } freeGb && (!double.IsFinite(freeGb) || freeGb < 0)
                     || !Enum.IsDefined(row.SelectionSource)
-                    || row.Tag is not null && string.IsNullOrWhiteSpace(row.Tag))
+                    || row.Tag is not null && string.IsNullOrWhiteSpace(row.Tag)
+                    || row.Tag is null && row.Decision is (QueueDecisionEntry.Launched
+                        or QueueDecisionEntry.Cancelled or QueueDecisionEntry.Retired
+                        or QueueDecisionEntry.Restored or QueueDecisionEntry.Advanced))
                 {
                     throw new JsonException("A queue-decision proof row has invalid producer values.");
                 }
