@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Baton.Accounting;
 using Baton.Cli.Daemon;
 using Baton.Cli.Tests.TestSupport;
@@ -3450,6 +3451,316 @@ public sealed class QueueCommandTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retire_reproves_prelaunch_ancestors_at_the_cancellation_boundary(bool afterCancellation)
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+            var cancelled = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            var receipt = cancelled.PrelaunchCancellation!;
+            var shiftedAt = cancelled.CancelledAt!.Value.AddSeconds(afterCancellation ? 1 : 0);
+            var shiftedReceipt = receipt with
+            {
+                Ancestors = receipt.Ancestors.Select(ancestor => ancestor with
+                {
+                    AdmissionAt = shiftedAt,
+                    RefusalAt = shiftedAt,
+                }).ToList(),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [cancelled with { PrelaunchCancellation = shiftedReceipt }],
+            }, Ct);
+
+            var log = FleetEventLog.OpenOperational();
+            var eventIds = receipt.Ancestors
+                .SelectMany(ancestor => new[] { ancestor.AdmissionEventId, ancestor.RefusalEventId })
+                .ToHashSet();
+            var shiftedEvents = (await log.ReadRetainedForInspection(Ct))
+                .Select(fact => eventIds.Contains(fact.Id) ? fact with { At = shiftedAt } : fact)
+                .ToList();
+            await File.WriteAllTextAsync(log.LivePath,
+                string.Join('\n', shiftedEvents.Select(FleetEventLog.Serialize)) + "\n", Ct);
+
+            var tampered = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.True(QueuePrelaunchCancellationReceipt.IsValidFor(tampered));
+            var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var ledgerBefore = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+
+            if (!afterCancellation)
+            {
+                Assert.Equal(0, await QueueCommand.RetireOperatorAsync(
+                    item.Tag, "boundary-equality", TextWriter.Null, Ct));
+                Assert.Equal(QueueRetirement.Operator,
+                    Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement?.Kind);
+            }
+            else
+            {
+                var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.RetireOperatorAsync(
+                    item.Tag, "after-cancellation", TextWriter.Null, Ct));
+                Assert.Contains("insufficient settled failure evidence", refusal.Message, StringComparison.Ordinal);
+                Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+                Assert.Equal(ledgerBefore, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            }
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Theory]
+    [InlineData("empty")]
+    [InlineData("missing-at")]
+    [InlineData("missing-live-weight")]
+    [InlineData("missing-floor")]
+    [InlineData("duplicate")]
+    [InlineData("unknown")]
+    [InlineData("default-at")]
+    [InlineData("unknown-decision")]
+    [InlineData("same-tag-default-at")]
+    [InlineData("same-tag-missing-fields")]
+    [InlineData("valid-unrelated-wait")]
+    public async Task Retire_strictly_reads_appended_decision_proof_rows(string defect)
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+
+            var waited = JsonSerializer.Serialize(new QueueDecisionEntry(
+                DateTimeOffset.Parse("2026-09-30T13:00:00Z"), "unrelated-wait", QueueDecisionEntry.Waited,
+                "slots", 1, 2, 3));
+            var appended = defect switch
+            {
+                "empty" => "{}",
+                "missing-at" or "missing-live-weight" or "missing-floor" => RemoveDecisionField(waited, defect),
+                "duplicate" => DuplicateDecisionField(waited, "at"),
+                "unknown" => AddUnknownDecisionField(waited),
+                "default-at" or "same-tag-default-at" => JsonSerializer.Serialize(new QueueDecisionEntry(
+                    default, defect.StartsWith("same-tag", StringComparison.Ordinal) ? item.Tag : "unrelated-wait",
+                    QueueDecisionEntry.Waited, "slots", 1, 2, 3)),
+                "unknown-decision" => JsonSerializer.Serialize(new QueueDecisionEntry(
+                    DateTimeOffset.UtcNow, "unrelated-wait", "unrecognized", "slots", 1, 2, 3)),
+                "same-tag-missing-fields" => JsonSerializer.Serialize(new { tag = item.Tag, decision = "waited" }),
+                "valid-unrelated-wait" => waited,
+                _ => throw new InvalidOperationException(defect),
+            };
+            await File.AppendAllTextAsync(BatonPaths.QueueDecisionLedgerFile, appended + "\n", Ct);
+
+            var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var ledgerBefore = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            if (defect == "valid-unrelated-wait")
+            {
+                Assert.Equal(0, await QueueCommand.RetireOperatorAsync(
+                    item.Tag, "valid-unrelated-wait", TextWriter.Null, Ct));
+                Assert.Equal(QueueRetirement.Operator,
+                    Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement?.Kind);
+            }
+            else
+            {
+                var unreadable = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() =>
+                    QueueCommand.RetireOperatorAsync(item.Tag, "malformed-decision-proof", TextWriter.Null, Ct));
+                Assert.Contains("proof read failed", unreadable.Message, StringComparison.Ordinal);
+                Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+                Assert.Equal(ledgerBefore, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            }
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("unknown")]
+    [InlineData("valid")]
+    public async Task Retire_strictly_reads_retained_rollover_event_rows(string defect)
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+            var rotatingLog = new FleetEventLog(
+                BatonPaths.FleetEventsFile, BatonPaths.FleetEventsRolloverFile, maxLiveBytes: 1);
+            await rotatingLog.Append(new FleetEventDraft(
+                FleetEventKind.DaemonStarted, "retained-rollover-control", DateTimeOffset.UtcNow), Ct);
+            Assert.True(File.Exists(BatonPaths.FleetEventsRolloverFile));
+
+            if (defect != "valid")
+            {
+                var lines = (await File.ReadAllLinesAsync(BatonPaths.FleetEventsRolloverFile, Ct)).ToList();
+                lines[0] = defect == "duplicate"
+                    ? DuplicateEventField(lines[0], "at")
+                    : AddUnknownEventField(lines[0]);
+                await File.WriteAllTextAsync(BatonPaths.FleetEventsRolloverFile,
+                    string.Join('\n', lines) + "\n", Ct);
+            }
+
+            var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var ledgerBefore = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            if (defect == "valid")
+            {
+                Assert.Equal(0, await QueueCommand.RetireOperatorAsync(
+                    item.Tag, "valid-retained-rollover", TextWriter.Null, Ct));
+                Assert.Equal(QueueRetirement.Operator,
+                    Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement?.Kind);
+            }
+            else
+            {
+                var unreadable = await Assert.ThrowsAsync<QueueCommand.LegacyRetirementProofReadException>(() =>
+                    QueueCommand.RetireOperatorAsync(item.Tag, "malformed-rollover-proof", TextWriter.Null, Ct));
+                Assert.Contains("proof read failed", unreadable.Message, StringComparison.Ordinal);
+                Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+                Assert.Equal(ledgerBefore, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            }
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Retire_keeps_live_rollover_and_decision_sources_leased_through_queue_commit()
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+            var rotatingLog = new FleetEventLog(
+                BatonPaths.FleetEventsFile, BatonPaths.FleetEventsRolloverFile, maxLiveBytes: 1);
+            await rotatingLog.Append(new FleetEventDraft(
+                FleetEventKind.DaemonStarted, "retire-lease-rotation", DateTimeOffset.UtcNow), Ct);
+            Assert.True(File.Exists(BatonPaths.FleetEventsRolloverFile));
+
+            var checkedInsideWrite = false;
+            Assert.Equal(0, await QueueCommand.RetireOperatorAsync(
+                item.Tag, "source-leases", TextWriter.Null, Ct, beforeWrite: () =>
+                {
+                    checkedInsideWrite = true;
+                    foreach (var source in new[]
+                    {
+                        BatonPaths.FleetEventsFile,
+                        BatonPaths.FleetEventsRolloverFile,
+                        BatonPaths.QueueDecisionLedgerFile,
+                    })
+                    {
+                        Assert.Throws<IOException>(() => new FileStream(
+                            source, FileMode.Open, FileAccess.Write, FileShare.Read).Dispose());
+                    }
+
+                    Assert.Throws<IOException>(() => rotatingLog.Append(new FleetEventDraft(
+                        FleetEventKind.DaemonStarted, "rotation-while-retiring", DateTimeOffset.UtcNow), Ct)
+                        .GetAwaiter().GetResult());
+                }));
+            Assert.True(checkedInsideWrite);
+            Assert.Equal(QueueRetirement.Operator,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement?.Kind);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Retire_does_not_fallback_to_legacy_proof_after_receipt_hash_corruption()
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+            var cancelled = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            var receipt = cancelled.PrelaunchCancellation!;
+            var corruptedHash = (receipt.SourceRowSha256[0] == '0' ? '1' : '0') + receipt.SourceRowSha256[1..];
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [cancelled with
+                {
+                    PrelaunchCancellation = receipt with
+                    {
+                        SourceRowSha256 = corruptedHash,
+                    },
+                }],
+            }, Ct);
+
+            var parent = cancelled.ParentAttemptId!.Value;
+            var room = Path.Combine(home, "rooms", "h3-terminal-parent");
+            Directory.CreateDirectory(room);
+            await TerminalSentinelWriter.WriteAsync(
+                room, new WorkflowStatusView(WorkflowOutcome.Failed, [], [], "terminal proof"), Ct);
+            var startedAt = cancelled.CancelledAt!.Value.AddSeconds(-2);
+            var settledAt = cancelled.CancelledAt!.Value.AddSeconds(-1);
+            var log = FleetEventLog.OpenOperational();
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptStarted, "h3-started-parent", startedAt,
+                AttemptId: parent, WorkId: new FleetWorkId(item.Tag),
+                RoomId: new FleetRoomId(BatonPaths.RecordKey(room))), Ct);
+            await log.Append(new FleetEventDraft(
+                FleetEventKind.AttemptSettled, "h3-settled-parent", settledAt,
+                AttemptId: parent, WorkId: new FleetWorkId(item.Tag),
+                RoomId: new FleetRoomId(BatonPaths.RecordKey(room)), Outcome: WorkflowOutcome.Failed), Ct);
+
+            var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var ledgerBefore = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.RetireOperatorAsync(
+                item.Tag, "receipt-hash-corruption", TextWriter.Null, Ct));
+            Assert.Contains("insufficient settled failure evidence", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(ledgerBefore, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    private static string RemoveDecisionField(string json, string defect)
+    {
+        var node = JsonNode.Parse(json)!.AsObject();
+        node.Remove(defect switch
+        {
+            "missing-at" => "at",
+            "missing-live-weight" => "liveWeight",
+            "missing-floor" => "floorGb",
+            _ => throw new InvalidOperationException(defect),
+        });
+        return node.ToJsonString();
+    }
+
+    private static string DuplicateDecisionField(string json, string field) => DuplicateJsonField(json, field);
+
+    private static string AddUnknownDecisionField(string json) => AddUnknownJsonField(json, "futureDecisionField");
+
+    private static string DuplicateEventField(string json, string field) => DuplicateJsonField(json, field);
+
+    private static string AddUnknownEventField(string json) => AddUnknownJsonField(json, "futureEventField");
+
+    private static string DuplicateJsonField(string json, string field)
+    {
+        var marker = $"\"{field}\":";
+        var start = json.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"expected serialized JSON field '{field}'");
+        start += marker.Length;
+        var end = json.IndexOf(',', start);
+        if (end < 0) end = json.LastIndexOf('}');
+        var value = json[start..end];
+        return json.Insert(end, $",{marker}{value}");
+    }
+
+    private static string AddUnknownJsonField(string json, string field)
+    {
+        var end = json.LastIndexOf('}');
+        Assert.True(end > 0, "expected a serialized JSON object");
+        return json.Insert(end, $",\"{field}\":\"unclassifiable\"");
+    }
+
+    [Theory]
     [InlineData("none")]
     [InlineData("duplicate-id")]
     [InlineData("wrong-parent")]
@@ -3464,6 +3775,8 @@ public sealed class QueueCommandTests
     [InlineData("shifted-admission-timestamp")]
     [InlineData("shifted-refusal-timestamp")]
     [InlineData("shifted-hash")]
+    [InlineData("missing-receipt")]
+    [InlineData("empty-ancestry")]
     public async Task Retire_refuses_a_reproven_prelaunch_receipt_with_corrupted_ancestry(string defect)
     {
         var home = CreatePrelaunchHome();
@@ -3474,7 +3787,19 @@ public sealed class QueueCommandTests
             Assert.Equal(0, await QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
 
-            if (defect == "shifted-hash")
+            if (defect is "missing-receipt" or "empty-ancestry")
+            {
+                var cancelled = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = [cancelled with
+                    {
+                        PrelaunchCancellation = defect == "missing-receipt"
+                            ? null : cancelled.PrelaunchCancellation! with { Ancestors = [] },
+                    }],
+                }, Ct);
+            }
+            else if (defect == "shifted-hash")
             {
                 var tampered = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
                 var tamperedItem = Assert.Single(tampered.Items);
@@ -3643,6 +3968,63 @@ public sealed class QueueCommandTests
                 new QueueOptions(QueueVerb.Retire, Tag: item.Tag, Reason: "torn rollover"), TextWriter.Null, Ct));
             Assert.Contains("proof read failed", unreadable.Message, StringComparison.Ordinal);
             Assert.Equal(before, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Theory]
+    [InlineData("fleet")]
+    [InlineData("decision")]
+    [InlineData("pending")]
+    public async Task Retire_rechecks_proof_sources_and_pending_facts_after_observation(string drift)
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+            var cancelled = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            byte[]? queueImage = null;
+            byte[]? ledgerImage = null;
+            async Task Race(CancellationToken token)
+            {
+                if (drift == "fleet")
+                {
+                    var log = FleetEventLog.OpenOperational();
+                    var facts = (await log.ReadRetainedForInspection(token)).ToList();
+                    facts[^1] = facts[^1] with { At = facts[^1].At.AddSeconds(1) };
+                    await File.WriteAllTextAsync(log.LivePath,
+                        string.Join('\n', facts.Select(FleetEventLog.Serialize)) + "\n", token);
+                }
+                else if (drift == "decision")
+                {
+                    await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(
+                        DateTimeOffset.UtcNow, item.Tag, QueueDecisionEntry.Launched, null, 0, 8, 2),
+                        null, BatonPaths.QueueDecisionLedgerFile, token);
+                }
+                else
+                {
+                    var ancestor = cancelled.PrelaunchCancellation!.Ancestors[0].AttemptId;
+                    var draft = new FleetEventDraft(FleetEventKind.AdmissionDecided, $"admission:{ancestor.Value}",
+                        DateTimeOffset.UtcNow, AttemptId: ancestor, WorkId: new FleetWorkId("foreign-pending"),
+                        DeclaredRole: "implement", EffectiveGrant: ["repository-read"], RequestedRequirements: [],
+                        AdmissionDecision: "admitted");
+                    using var json = JsonDocument.Parse(FleetEventLog.SerializeDraft(draft));
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        PendingFleetEvents = [json.RootElement.Clone()],
+                    }, token);
+                }
+                queueImage = await File.ReadAllBytesAsync(BatonPaths.QueueFile, token);
+                ledgerImage = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, token);
+            }
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.RetireOperatorAsync(
+                item.Tag, "proof drift", TextWriter.Null, Ct, beforeCommit: Race));
+            Assert.Equal(queueImage, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(ledgerImage, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Null(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Retirement);
         }
         finally { DirectoryCleanup.DeleteRecursively(home); }
     }

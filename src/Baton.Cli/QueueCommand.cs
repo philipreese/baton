@@ -1907,6 +1907,13 @@ public static class QueueCommand
 
     internal static LegacyRetirementProofLease? TryAcquireLegacyRetirementProof(QueueItem item)
     {
+        // A versioned prelaunch receipt asserts that this ancestry never started. It must use
+        // its strict proof arm; contradictory terminal-parent facts cannot relabel it as legacy.
+        // Historical cancelled rows without that receipt retain their existing room-proof path.
+        if (item.PrelaunchCancellation is not null)
+        {
+            return null;
+        }
         var refused = item is
         {
             State: QueueItemState.Failed, RoomDirectory: null,
@@ -2070,8 +2077,31 @@ public static class QueueCommand
                 {
                     throw new JsonException("A queue-decision proof row has duplicate fields.");
                 }
-                rows.Add(document.RootElement.Deserialize<QueueDecisionEntry>(StrictDecisionProofJson)
-                    ?? throw new JsonException("Empty queue-decision proof row."));
+                // Protected invariant: omitted producer fields must not deserialize to plausible
+                // default values and disappear in the later same-tag filter (for example {}).
+                var element = document.RootElement;
+                if (element.ValueKind != JsonValueKind.Object
+                    || !element.TryGetProperty("at", out _)
+                    || !element.TryGetProperty("decision", out _)
+                    || !element.TryGetProperty("liveWeight", out _)
+                    || !element.TryGetProperty("floorGb", out _))
+                {
+                    throw new JsonException("A queue-decision proof row omits required producer fields.");
+                }
+                var row = element.Deserialize<QueueDecisionEntry>(StrictDecisionProofJson)
+                    ?? throw new JsonException("Empty queue-decision proof row.");
+                if (row.At == default || row.Decision is not (QueueDecisionEntry.Launched
+                        or QueueDecisionEntry.Waited or QueueDecisionEntry.Failed or QueueDecisionEntry.Cancelled
+                        or QueueDecisionEntry.Retired or QueueDecisionEntry.Restored or QueueDecisionEntry.Advanced)
+                    || !double.IsFinite(row.LiveWeight) || row.LiveWeight < 0
+                    || !double.IsFinite(row.FloorGb) || row.FloorGb < 0
+                    || row.FreeGb is { } freeGb && (!double.IsFinite(freeGb) || freeGb < 0)
+                    || !Enum.IsDefined(row.SelectionSource)
+                    || row.Tag is not null && string.IsNullOrWhiteSpace(row.Tag))
+                {
+                    throw new JsonException("A queue-decision proof row has invalid producer values.");
+                }
+                rows.Add(row);
                 continue;
             }
             rows.Add(JsonSerializer.Deserialize<QueueDecisionEntry>(line)
@@ -2118,6 +2148,7 @@ public static class QueueCommand
                     LiveWeight: 0, FreeGb: null, FloorGb: 0,
                     Tier: null, Adapter: null, Model: null, Effort: null,
                     TierOverride: false, OverrideReason: null, Room: null,
+                    SelectionSource: QueueSelectionSource.StageDefault,
                     Admission: null, ActiveLifecycles: null, PrePullRequestLifecycles: null,
                     LiveReviews: null, PriorityBand: null, PassedNewWorkHead: null,
                     OldestOccupyingLifecycle: null, ConsumingLifecycles: null,

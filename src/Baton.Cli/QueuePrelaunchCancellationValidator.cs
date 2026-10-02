@@ -113,6 +113,12 @@ internal static class QueuePrelaunchCancellationValidator
 
         foreach (var ancestor in receipt.Ancestors)
         {
+            // A prelaunch refusal cannot be evidence for a cancellation that preceded it, even
+            // when both the retained event and receipt were shifted to the same future instant.
+            if (ancestor.AdmissionAt > item.CancelledAt || ancestor.RefusalAt > item.CancelledAt)
+            {
+                return false;
+            }
             var facts = events.Where(fact => fact.AttemptId == ancestor.AttemptId).ToList();
             var admissions = facts.Where(fact => fact.Kind == FleetEventKind.AdmissionDecided).ToList();
             var refusals = facts.Where(fact => fact.Kind == FleetEventKind.AttemptRefused).ToList();

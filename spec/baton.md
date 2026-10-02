@@ -7514,6 +7514,9 @@ may likewise be retired once its admission/refusal pairs, ids, and outcomes are 
 against that same strict event read, with no foreign, started, room, execution, or later-launch fact,
 and a strict decision-ledger read shows exactly one matching `cancelled` fact and only `waited`
 decisions otherwise for the tag; pending facts are rechecked under the same mutation lock.
+Every proved admission/refusal instant must be no later than cancellation. A receipt-bearing row
+uses this strict arm exclusively, not the older terminal-parent exception; legacy rows without a
+receipt retain their existing proof path. Malformed decision rows are rejected before tag filtering.
 `IsValidFor` alone proves the receipt's structure and row binding, never fleet history.
 The sole automatic exception is a failed row whose durable `admission.result` is explicitly
 `refused`: that refusal happened before execution, proves no room launch was admitted, and permits a
