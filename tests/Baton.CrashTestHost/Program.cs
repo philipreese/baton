@@ -203,9 +203,17 @@ if (args is ["filter-helper"]
 }
 if (Environment.GetEnvironmentVariable("BATON_EXACT_RESTORE_GIT_MODE") == "noisy")
 {
+    if (Environment.GetEnvironmentVariable("BATON_EXACT_RESTORE_GIT_STARTUP_DELAY_MS") is { } delayText)
+    {
+        await Task.Delay(int.Parse(delayText, System.Globalization.CultureInfo.InvariantCulture));
+    }
     var pidFile = Environment.GetEnvironmentVariable("BATON_EXACT_RESTORE_GIT_PID_FILE")!;
-    await File.WriteAllTextAsync(pidFile, Environment.ProcessId.ToString());
     var noise = new string('x', 16 * 1024);
+    await Console.Out.WriteAsync(noise);
+    await Console.Error.WriteAsync(noise);
+    await Console.Out.FlushAsync();
+    await Console.Error.FlushAsync();
+    WritePidAtomically(pidFile, Environment.ProcessId);
     while (true)
     {
         await Console.Out.WriteAsync(noise);

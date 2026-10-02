@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -616,6 +617,7 @@ public sealed class ExactFileRestoreTool : IMcpTool
             cancellationToken,
             timeout.Token))
         {
+            _testHooks.StartedGitProcessIds?.Enqueue(child.Process.Id);
             var stdoutTask = child.StandardOutput.BaseStream.CopyToAsync(stdoutBuffer);
             var stderrTask = child.StandardError.BaseStream.CopyToAsync(stderrBuffer);
             try
@@ -849,7 +851,8 @@ internal sealed record ExactFileRestoreTestHooks(
     TimeSpan? GitTimeout = null,
     IReadOnlyDictionary<string, string?>? GitEnvironment = null,
     Action? BeforeDurableCommit = null,
-    Action? BeforeDelete = null);
+    Action? BeforeDelete = null,
+    ConcurrentQueue<int>? StartedGitProcessIds = null);
 
 public sealed record ExactFileRestoreAudit(
     int Version,
