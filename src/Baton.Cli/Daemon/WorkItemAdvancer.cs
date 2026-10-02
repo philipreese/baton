@@ -191,6 +191,30 @@ public sealed partial class WorkItemAdvancer
             LastAdmission.Result: TaskRequirementAdmission.Refused,
         };
 
+    internal async Task<string> PrepareQueuedReviewBriefAsync(QueueItem item, CancellationToken cancellationToken)
+    {
+        if (item.Stage is not (WorkStage.Review or WorkStage.ReReview)
+            || item.PullRequest is not > 0 || item.Repository is not { Length: > 0 }
+            || item.Branch is not { Length: > 0 })
+            throw new CliArgumentException("Queued lifecycle review lacks an exact repository, branch or PR; no worker was started.");
+
+        // Protected invariant: a delayed queued review must name the PR/workspace revision observed
+        // for this launch, not the revision used when its previous stage rendered the saved brief.
+        // Required checks remain delivery gates, not permission to inspect the current source.
+        var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
+        var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
+        if (!pr.Succeeded || pr.IsOpen != true || pr.Number != item.PullRequest
+            || pr.HeadSha is not { Length: 40 } sha || !sha.All(char.IsAsciiHexDigit)
+            || !string.Equals(head, sha, StringComparison.OrdinalIgnoreCase))
+            throw new CliArgumentException("Queued lifecycle review could not verify an exact open PR and matching workspace revision; no worker was started.");
+
+        var prior = ReadLastVerdict(item);
+        return QueueBriefTemplates.Compose(item.Stage.Value, item, new QueueBriefTemplates.BriefContext(
+            Title: $"Implement #{item.Issue}", Do: item.Instructions ?? string.Empty,
+            PullRequest: item.PullRequest, HeadSha: sha, Round: item.Round,
+            Findings: prior is null ? null : QueueBriefTemplates.RenderFindings(prior)));
+    }
+
     // Only the typed, persisted recovery granted by the lifecycle may re-enter a halted row.
     // Error text is for the operator and can change without changing scheduler state.
     private static bool IsAwaitingMissingPullRequestReconciliation(QueueItem item) =>

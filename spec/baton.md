@@ -8258,6 +8258,20 @@ written:
 | any other stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
 
+**Delayed ordinary review launch (#2570).** Before claiming an unstarted queued Review/ReReview,
+the scheduler verifies the exact open PR, current workspace repository identity, recorded branch and
+`main` base, and matching canonical full workspace/PR revision. It composes that stage's brief anew
+through the existing operator template and retained prior findings; the saved rendered brief is not
+current-head evidence after a hold or admission delay. Required-check state remains a separate delivery
+gate. The generated spec write and launch claim share the existing queue mutex and require the complete
+row observed before PR I/O to remain current, unheld and unretired. A missing identity, mismatched
+revision or failed spec write cannot launch a worker. Refresh does not spend another round or automatic
+fix, reselect a retained admitted worker, overwrite an operator template, or rewrite a possibly-started
+or adopted attempt. Explicit replacement-review actions retain their separately authorized exact head
+and are never retargeted by this refresh. Queue comparison does not make external GitHub/Git revision
+changes atomic; the later exact-head readiness checks remain necessary. Settled BLOCK routing and
+replacement eligibility are unchanged.
+
 A halted no-PR row keeps its terminal room and original delivery evidence attached. Positive, absent,
 and unreadable step evidence never proves an open PR, so none may stage a continuation QueueLauncher
 will refuse before a room exists. The advancer re-observes the exact branch; only a verified bound open
