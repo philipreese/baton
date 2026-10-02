@@ -14,7 +14,7 @@ shared version through `0.14.0`.
 
 ### Features
 
-* **conductor:** Add bounded Claude stopped-work advice ([#2544](https://github.com/philipreese/baton/issues/2544)) ([e3ff0e6](https://github.com/philipreese/baton/commit/e3ff0e6acb140e9c29dbcd7034c4c4fb2653a543))
+* **conductor:** Add bounded Claude stopped-work advice adapter; native and installed acceptance remain unverified, with production enablement withheld ([#2544](https://github.com/philipreese/baton/issues/2544)) ([e3ff0e6](https://github.com/philipreese/baton/commit/e3ff0e6acb140e9c29dbcd7034c4c4fb2653a543))
 
 
 ### Bug Fixes
