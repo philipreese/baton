@@ -99,6 +99,28 @@ public sealed class ClaudeCorrectionCommandTests : IDisposable
     }
 
     [Theory]
+    [InlineData("Exact LF.\n", "Exact LF.")]
+    [InlineData("Exact CRLF.\r\n", "Exact CRLF.\n")]
+    public async Task Guard_keeps_exact_line_endings_and_admits_original_payload_only_once(
+        string original, string changed)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var request = Request() with
+        {
+            PayloadSha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(original))),
+        };
+        await SetUpLiveAsync(request);
+        await File.WriteAllTextAsync(ContractPath,
+            JsonSerializer.Serialize(new ClaudeCorrectionContract(_room, request, original)),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, await GuardAsync(request.Target, changed, "SendMessage", "deny"));
+        Assert.Equal(0, await GuardAsync(request.Target, original, "SendMessage", "allow"));
+        Assert.Equal(2, await GuardAsync(request.Target, original, "SendMessage", "deny"));
+        Assert.Equal(SteeringReceiptState.OutcomeUnknown, Store.Query(Execution)!.State);
+        AssertNoSender();
+    }
+
+    [Theory]
     [InlineData("pid")]
     [InlineData("start")]
     [InlineData("exited")]
