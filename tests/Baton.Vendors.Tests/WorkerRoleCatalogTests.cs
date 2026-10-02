@@ -480,6 +480,23 @@ public class WorkerRoleCatalogTests
         Assert.Contains("unverified", instruction);
     }
 
+    [Fact]
+    public void The_review_verdict_decision_is_contract_relative_not_merge_readiness()
+    {
+        using var env = ShippedDefault();
+
+        var instruction = WorkerRoleCatalog.For("review").Outputs
+            .Single(o => o.Name == "verdict.json").Instruction;
+
+        Assert.Contains(
+            "whether the reviewed change or claim satisfies the requested review contract",
+            instruction,
+            StringComparison.Ordinal);
+        Assert.Contains("finding severity", instruction, StringComparison.Ordinal);
+        Assert.DoesNotContain("whether the reviewed change is ready", instruction,
+            StringComparison.Ordinal);
+    }
+
     // #1745: token_budget accepts either a bare number (Fixed, today's shape) or an object mapping
     // adapter name to number (PerAdapter) -- both parsed by WorkerRoleCatalog, never left to a bare
     // long that could not represent the map shape at all.

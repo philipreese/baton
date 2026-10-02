@@ -108,6 +108,18 @@ public sealed class RoleDefaultSkillsTests : IDisposable
     }
 
     [Fact]
+    public void The_shipped_review_skill_carries_the_contract_relative_branches()
+    {
+        var package = SkillPackageReader.LoadPackage(Path.Combine(ShippedSkillsDirectory, "baton-review"));
+        var body = SkillInlining.InlinedSkillBody(package);
+
+        Assert.Contains("source judgment, not merge readiness", body, StringComparison.Ordinal);
+        Assert.Contains("target repository's agent entry point", body, StringComparison.Ordinal);
+        Assert.Contains("Standalone reviews remain relative", body, StringComparison.Ordinal);
+        Assert.Contains("operational-readiness claims", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Every_other_shipped_role_declares_no_default()
     {
         foreach (var role in WorkerRoleCatalog.All.Where(r => !ShippedDefaults.ContainsKey(r.Id)))
