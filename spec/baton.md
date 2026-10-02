@@ -7509,6 +7509,12 @@ requires a strict queue-decision read. Their source and sentinel files have
 read-deny-write leases held through the queue commit. Missing, torn, mismatched, or changing proof
 keeps the lifecycle active; a bare admitted admission result or Cancelled state is never proof.
 These are operator dispositions, not a new automatic merged-retirement shortcut.
+A round-zero initial-implementation row cancelled by its own valid `PrelaunchCancellation` receipt
+may likewise be retired once its admission/refusal pairs, ids, and outcomes are freshly reproven
+against that same strict event read, with no foreign, started, room, execution, or later-launch fact,
+and a strict decision-ledger read shows exactly one matching `cancelled` fact and only `waited`
+decisions otherwise for the tag; pending facts are rechecked under the same mutation lock.
+`IsValidFor` alone proves the receipt's structure and row binding, never fleet history.
 The sole automatic exception is a failed row whose durable `admission.result` is explicitly
 `refused`: that refusal happened before execution, proves no room launch was admitted, and permits a
 trusted positive merged-PR observation to retire the row. An admitted, unknown, or legacy admission

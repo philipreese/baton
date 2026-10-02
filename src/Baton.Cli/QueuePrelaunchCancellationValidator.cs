@@ -91,6 +91,74 @@ internal static class QueuePrelaunchCancellationValidator
         return receipt;
     }
 
+    // Protected invariant: retirement may reuse a producer-minted receipt only after its exact
+    // admission/refusal pairs, ids, timestamps and ancestor chain are reproven against the current
+    // retained event source. IsValidFor alone checks the receipt's structure and its row binding; it
+    // never reads fleet history, so it cannot by itself discriminate a receipt whose source events
+    // were later corrupted, superseded, or joined by a start/room/execution fact.
+    internal static bool ReproveAncestryForRetirement(
+        QueueItem item, IReadOnlyList<FleetEvent> events, QueuePrelaunchCancellationReceipt receipt)
+    {
+        if (events.Any(fact => fact.Id <= 0 || fact.At == default)
+            || events.Select(fact => fact.Id).Distinct().Count() != events.Count)
+        {
+            return false;
+        }
+
+        var attempts = receipt.Ancestors.Select(ancestor => ancestor.AttemptId).ToHashSet();
+        if (attempts.Count != receipt.Ancestors.Count)
+        {
+            return false;
+        }
+
+        foreach (var ancestor in receipt.Ancestors)
+        {
+            var facts = events.Where(fact => fact.AttemptId == ancestor.AttemptId).ToList();
+            var admissions = facts.Where(fact => fact.Kind == FleetEventKind.AdmissionDecided).ToList();
+            var refusals = facts.Where(fact => fact.Kind == FleetEventKind.AttemptRefused).ToList();
+            if (facts.Count != 2 || admissions.Count != 1 || refusals.Count != 1)
+            {
+                return false;
+            }
+            var admission = admissions[0];
+            var refusal = refusals[0];
+            if (!IsPairMember(admission, item) || !IsPairMember(refusal, item)
+                || admission.DedupeKey != $"admission:{ancestor.AttemptId.Value}"
+                || refusal.DedupeKey != $"attempt-refused:{ancestor.AttemptId.Value}"
+                || admission.Outcome is not null || refusal.Outcome is not ("runway-held" or "cleanup-claim")
+                || admission.ParentAttemptId != ancestor.ParentAttemptId
+                || admission.Id != ancestor.AdmissionEventId || admission.At != ancestor.AdmissionAt
+                || refusal.Id != ancestor.RefusalEventId || refusal.At != ancestor.RefusalAt
+                || FleetEventLog.Serialize(admission) != FleetEventLog.Serialize(refusal with
+                {
+                    Id = admission.Id,
+                    At = admission.At,
+                    Kind = admission.Kind,
+                    DedupeKey = admission.DedupeKey,
+                    Outcome = null,
+                }))
+            {
+                return false;
+            }
+        }
+
+        // A disconnected history or a foreign work reusing an ancestor identity also destroys proof;
+        // this also rejects any start, room, execution, or later-launch fact for this work or ancestry.
+        foreach (var fact in events.Where(fact => fact.WorkId?.Value == item.Tag
+            || fact.AttemptId is { } attempt && attempts.Contains(attempt)
+            || fact.ParentAttemptId is { } parent && attempts.Contains(parent)))
+        {
+            if (fact.WorkId?.Value != item.Tag || fact.IssueId != item.Issue
+                || fact.AttemptId is not { } attempt || !attempts.Contains(attempt)
+                || fact.Kind is not (FleetEventKind.AdmissionDecided or FleetEventKind.AttemptRefused))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     internal static void ValidatePending(
         QueueItem item, QueueSnapshot snapshot, IReadOnlySet<FleetAttemptId> ancestors)
     {
