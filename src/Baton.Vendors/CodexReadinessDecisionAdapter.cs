@@ -253,7 +253,7 @@ public sealed class CodexReadinessDecisionAdapter
         return prompt;
     }
 
-    private static string BuildStoppedWorkPrompt(
+    internal static string BuildStoppedWorkPrompt(
         StoppedWorkAdviceRequest request, StoppedWorkAdviceContext context)
     {
         ArgumentNullException.ThrowIfNull(request);

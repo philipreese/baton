@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Conductor;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
@@ -14,6 +15,7 @@ internal static class StoppedWorkJudgmentKey
     internal const string Action = "stopped-work-judgment";
     internal const string Capability = "stopped-work-advice";
     internal const string Adapter = "codex-subscription-cli";
+    internal const string ProviderRoute = "stopped-work-advice-provider";
     internal const string Owner = "repository-conductor";
 
     internal static string For(string repository, string tag, FleetAttemptId attempt, WorkStage stage) =>
@@ -40,6 +42,15 @@ internal static class StoppedWorkJudgmentKey
 
 internal static class StoppedWorkAdviceSettings
 {
+    internal static StoppedWorkAdviceProviderDescriptor SelectProvider(string repository)
+    {
+        var settings = JsonSerializer.Deserialize<DaemonSettings>(File.ReadAllText(BatonPaths.SettingsFile));
+        if (settings?.Queue.IsStoppedWorkAdviceEnabled(repository) != true
+            || !settings.Queue.TrySelectStoppedWorkAdviceProvider(repository, out var provider))
+            throw new ConductorObligationStoreException("Stopped-work advice provider selection is invalid or disabled.");
+        return provider;
+    }
+
     internal static bool IsEnabled(string repository)
     {
         if (!File.Exists(BatonPaths.SettingsFile)) return false;

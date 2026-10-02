@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Conductor;
 using System.Text.Json.Serialization;
 using Baton.Accounting;
 
@@ -102,6 +103,38 @@ public sealed record QueueSettings
     /// resetting the rest of the queue settings.
     /// </summary>
     public IReadOnlyDictionary<string, JsonElement>? StoppedWorkAdvice { get; init; }
+
+    /// <summary>Independent exact-repository provider map. Raw JSON preserves unrelated settings
+    /// even when the map is malformed. Selection never enables advice.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public JsonElement StoppedWorkAdviceProvider { get; init; }
+
+    public bool TrySelectStoppedWorkAdviceProvider(string repository,
+        out StoppedWorkAdviceProviderDescriptor provider)
+    {
+        provider = StoppedWorkAdviceProviderDescriptor.Codex;
+        if (!string.Equals(RepositoryIdentity.TryCanonicalize(repository), repository, StringComparison.Ordinal)
+            || repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase)) return false;
+        var map = StoppedWorkAdviceProvider;
+        if (map.ValueKind == JsonValueKind.Undefined) return true;
+        if (map.ValueKind != JsonValueKind.Object) return false;
+        JsonElement? selection = null;
+        foreach (var entry in map.EnumerateObject())
+        {
+            if (!string.Equals(RepositoryIdentity.TryCanonicalize(entry.Name), repository, StringComparison.Ordinal))
+                continue;
+            if (entry.Name != repository || selection is not null) return false;
+            selection = entry.Value;
+        }
+        if (selection is null) return true;
+        if (selection.Value.ValueKind != JsonValueKind.String) return false;
+        switch (selection.Value.GetString())
+        {
+            case "codex": return true;
+            case "claude": provider = StoppedWorkAdviceProviderDescriptor.Claude; return true;
+            default: return false;
+        }
+    }
 
     public bool IsDraftPullRequestHandoffEnabled(string repository) =>
         DraftPullRequestHandoff?.TryGetValue(repository, out var enabled) == true

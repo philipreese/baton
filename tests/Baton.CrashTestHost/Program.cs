@@ -9,6 +9,9 @@ using Baton.Status;
 using Baton.Steering;
 using Baton.Store;
 
+if (Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "claude-advice-helper")
+    return await ClaudeAdviceProcessMode.RunAsync(args);
+
 // #2484: the vendor test project runs this existing apphost as an inert fake Codex executable.
 // All output goes to the private test directory; no installed vendor CLI or credential is touched.
 if (args is ["exec", ..] && File.Exists(Path.Combine(Environment.CurrentDirectory, "mode.txt")))

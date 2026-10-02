@@ -120,8 +120,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
         _fleetOutbox = new QueueFleetEventOutbox(_appendFleetEvent);
         _conductorObligations = conductorObligations
             ?? new ConductorObligationStore(FleetEventLog.OpenOperational());
-        _stoppedWorkAdvice = stoppedWorkAdvice ?? ((_, request, context, directory, token) =>
-            new CodexReadinessDecisionAdapter().DecideStoppedWorkAsync(request, context, directory, token));
+        _stoppedWorkAdvice = stoppedWorkAdvice;
         _stoppedWorkAdvicePreflight = stoppedWorkAdvicePreflight;
         _advancer = advancer ?? new WorkItemAdvancer(
             null,

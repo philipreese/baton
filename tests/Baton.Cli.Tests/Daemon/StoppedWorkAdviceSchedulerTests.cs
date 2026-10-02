@@ -17,6 +17,66 @@ public sealed class StoppedWorkAdviceSchedulerTests
     private const string Repository = "github.com/aer-works/baton";
     private const string Head = "0123456789abcdef0123456789abcdef01234567";
 
+    [Theory]
+    [InlineData("codex")]
+    [InlineData("claude")]
+    [InlineData("invalid")]
+    public async Task Separate_provider_selection_is_frozen_and_invalid_selection_has_no_marker(string selection)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = Item("provider-choice", "provider-attempt", "conductor-one", home);
+            await SeedAsync(home, [item], "conductor-one");
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    StoppedWorkAdvice = new Dictionary<string, JsonElement> { [Repository] = JsonSerializer.SerializeToElement(true) },
+                    StoppedWorkAdviceProvider = JsonSerializer.SerializeToElement(new Dictionary<string, string> { [Repository] = selection }),
+                },
+            }, BatonPaths.SettingsFile, Ct);
+            var store = Store();
+            var calls = 0;
+            var scheduler = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) => Task.FromResult<string?>(Head)),
+                (obligation, request, _, _, _) =>
+                {
+                    calls++;
+                    var provider = selection == "claude" ? StoppedWorkAdviceProviderDescriptor.Claude : StoppedWorkAdviceProviderDescriptor.Codex;
+                    return Task.FromResult(Response(obligation, request) with
+                    {
+                        Adapter = provider.Adapter,
+                        Model = provider.Model,
+                        Effort = provider.Effort,
+                    });
+                });
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () => (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status is
+                ConductorObligationStatus.TransportAcknowledged or ConductorObligationStatus.Blocked);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            var row = await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct);
+            if (selection == "invalid")
+            {
+                Assert.Equal(0, calls);
+                Assert.False(File.Exists(Path.Combine(store.GetStoppedWorkAdviceEvidenceDirectory(row!.IdempotencyKey), "launch.json")));
+            }
+            else
+            {
+                Assert.Equal(1, calls);
+                Assert.Equal(StoppedWorkJudgmentKey.ProviderRoute, row!.Adapter);
+                Assert.Equal(ConductorObligationStatus.TransportAcknowledged, row.Status);
+                await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
+                var restarted = Scheduler(Store(), new WorkItemAdvancer(new PullRequestGh(), (_, _) => Task.FromResult<string?>(Head)),
+                    (_, _, _, _, _) => throw new InvalidOperationException("Settings drift cannot charge another provider"));
+                await restarted.TickOnceAsync(Ct);
+                await restarted.DrainStoppedWorkAdviceAsync();
+                Assert.Equal(1, calls);
+            }
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
     [Fact]
     public async Task Disabling_advice_still_recovers_a_saved_response_without_another_call()
     {

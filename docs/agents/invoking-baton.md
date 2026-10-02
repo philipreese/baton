@@ -6,6 +6,9 @@ For ordinary issue-backed project work, use the owned-task entry point in the
 [`spec/baton.md` §13](../../spec/baton.md).
 For advice, experiments, or a caller deliberately supervising one standalone lane, use the
 `run` and `dispatch` guidance below. Standalone calls do not acquire task lifecycle ownership.
+For automatic advice on newly stopped work, use the existing
+[stopped-work settings and ownership instructions](../../README.md#advice-when-a-lifecycle-stops);
+its provider selection grants advice only and is separate from lane or action authority.
 
 It is **not** for developing Baton — that is [`docs/agents/developing-baton.md`](developing-baton.md) — and it is not the
 reference for `baton dispatch`, which is [`docs/dispatch.md`](../dispatch.md). Where those own a fact,
