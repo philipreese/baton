@@ -92,7 +92,8 @@ public static class QueueCommand
         WorktreeApplyTestHooks? worktreeApplyTestHooks = null,
         OwnedTaskSubmission? ownedTask = null,
         byte[]? capturedSpecBytes = null,
-        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner = null)
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner = null,
+        Action? beforePreparationCommit = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -103,7 +104,7 @@ public static class QueueCommand
         {
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken,
-                ownedTask, capturedSpecBytes, preparationRunner),
+                ownedTask, capturedSpecBytes, preparationRunner, beforePreparationCommit),
             QueueVerb.List => ListAsync(options, output, cancellationToken),
             QueueVerb.Worktrees => WorktreesAsync(
                 options.Format, options.Apply, output, repositoryDirectory, cancellationToken, worktreeApplyTestHooks),
@@ -129,7 +130,8 @@ public static class QueueCommand
         CancellationToken cancellationToken,
         OwnedTaskSubmission? ownedTask,
         byte[]? capturedSpecBytes,
-        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner)
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner,
+        Action? beforePreparationCommit)
     {
         var tag = options.Tag!;
         if (options.Lifecycle && options.DeclaredTaskSize is null)
@@ -476,6 +478,9 @@ public static class QueueCommand
             }
 
             var replaced = false;
+            // Internal deterministic test seam for drift after admission/rendering. Public callers
+            // supply no callback; the mutation's own CAS and ceiling read remain authoritative.
+            beforePreparationCommit?.Invoke();
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 // A tag is an identity, not just a label: it names one spec file, so two items sharing one

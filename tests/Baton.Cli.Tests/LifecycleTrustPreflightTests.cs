@@ -367,6 +367,93 @@ public sealed class LifecycleTrustPreflightTests
     }
 
     [Theory]
+    [InlineData("deleted")]
+    [InlineData("revoked")]
+    [InlineData("narrowed")]
+    [InlineData("unchanged")]
+    public async Task Prepared_commit_rechecks_exact_target_after_earlier_admission(string change)
+    {
+        using var home = new IsolatedBatonHome();
+        var source = Directory.CreateDirectory(Path.Combine(home.Path, "source")).FullName;
+        var target = Path.Combine(home.Path, "w2560");
+        var brief = Path.Combine(home.Path, "brief.md");
+        await File.WriteAllTextAsync(brief, "unchanged original input", Ct);
+        var specDestination = BatonPaths.QueueSpecFile("2560-lane");
+        Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        await File.WriteAllTextAsync(specDestination, "previous copied bytes", Ct);
+        var copiedBefore = await File.ReadAllBytesAsync(specDestination, Ct);
+        var briefBefore = await File.ReadAllBytesAsync(brief, Ct);
+        ProjectCeilingStore.Set(source, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        var reads = 0;
+        var writes = 0;
+        Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(Repository);
+        Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(int issue, string project, string? root,
+            string repository, bool lifecycle, TextWriter writer, CancellationToken token)
+        {
+            Directory.CreateDirectory(target);
+            ProjectCeilingStore.Set(target, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+            return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(target, "2560-lane"));
+        }
+        var failure = await Record.ExceptionAsync(() => QueueCommand.ExecuteAsync(
+            new QueueOptions(QueueVerb.Add, Tag: "2560-lane", Role: "implement", SpecFilePath: brief,
+                Issue: 2560, Lifecycle: true,
+                DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one exact target recheck")),
+            TextWriter.Null, Ct, source, Resolve, Provision,
+            writeSpecFile: (path, contents) =>
+            {
+                writes++;
+                QueueCommand.WriteSpecFileAtomically(path, contents);
+            },
+            preparationRunner: IssuePreparationRunner.NoCollisions,
+            beforePreparationCommit: () =>
+            {
+                reads++;
+                var reservation = Assert.Single(QueueStore.LoadAsync(BatonPaths.QueueFile, Ct).GetAwaiter().GetResult().Items);
+                Assert.Equal(TaskPreparationState.Preparing, reservation.IssuePreparation!.State);
+                Assert.Equal(target, reservation.IssuePreparation.ExpectedWorkspace);
+                Assert.True(ProjectCeilingStore.TryGetRecord(target, ProjectCeilingStore.DefaultPath)!.IsUnrestricted);
+                Assert.True(RecordedProjectCeilingAdmission.Evaluate(new QueueItem
+                {
+                    Tag = "2560-lane",
+                    Role = "implement",
+                    Workspace = target,
+                    SpecFile = specDestination,
+                    Requirements = [],
+                }, WorkerRoleCatalog.For("implement"), false).Admission.Result != TaskRequirementAdmission.Refused);
+                switch (change)
+                {
+                    case "deleted": ProjectCeilingStore.Forget(target, ProjectCeilingStore.DefaultPath); break;
+                    case "revoked": ProjectCeilingStore.Revoke(target, ProjectCeilingStore.DefaultPath); break;
+                    case "narrowed": ProjectCeilingStore.Set(target, new ProjectCeiling(true, true, true, false), ProjectCeilingStore.DefaultPath); break;
+                }
+            }));
+        Assert.Equal(1, reads);
+        var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+        Assert.Equal(briefBefore, await File.ReadAllBytesAsync(brief, Ct));
+        Assert.True(ProjectCeilingStore.TryGetRecord(source, ProjectCeilingStore.DefaultPath)!.IsUnrestricted);
+        Assert.Null(row.AttemptId);
+        Assert.True(Directory.Exists(target));
+        if (change == "unchanged")
+        {
+            Assert.Null(failure);
+            Assert.Equal(1, writes);
+            Assert.Equal(TaskPreparationState.Prepared, row.IssuePreparation!.State);
+            Assert.NotNull(row.WorkerAssignment);
+            Assert.Equal(TaskRequirementAdmission.Admitted, row.LastAdmission!.Result);
+            Assert.Contains("unchanged original input", await File.ReadAllTextAsync(specDestination, Ct), StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.IsType<CliArgumentException>(failure);
+            Assert.Equal(0, writes);
+            Assert.Equal(TaskPreparationState.Blocked, row.IssuePreparation!.State);
+            Assert.Equal(target, row.IssuePreparation.ExpectedWorkspace);
+            Assert.Null(row.WorkerAssignment);
+            Assert.Equal(copiedBefore, await File.ReadAllBytesAsync(specDestination, Ct));
+        }
+    }
+
+    [Theory]
     [InlineData("preparing")]
     [InlineData("blocked")]
     [InlineData("queued")]
