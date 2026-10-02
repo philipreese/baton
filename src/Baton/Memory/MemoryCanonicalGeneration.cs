@@ -29,7 +29,12 @@ public static class MemoryCanonicalGeneration
         return action();
     });
 
-    internal static T Mutate<T>(string root, Func<T> action) => Locked(root, () =>
+    internal static T Mutate<T>(string root, Func<T> action) =>
+        Mutate(root, action, TimeSpan.FromSeconds(5));
+
+    // Per-call test seam: the observer sees actual replacement failures, never a fabricated move.
+    internal static T Mutate<T>(string root, Func<T> action, TimeSpan retryBudget,
+        Action<Exception>? replacementFailed = null) => Locked(root, () =>
     {
         // Validate existing authority before replacing it: corruption must not disappear on a write.
         _ = Read(root);
@@ -39,7 +44,15 @@ public static class MemoryCanonicalGeneration
         try
         {
             File.WriteAllText(temp, Guid.NewGuid().ToString("N"));
-            File.Move(temp, path, overwrite: true);
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                replacementFailed?.Invoke(error);
+                throw;
+            }
         }
         finally
         {
