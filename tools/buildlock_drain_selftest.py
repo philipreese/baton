@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from typing import Any
+from unittest.mock import patch
 
 
 PAYLOAD = b"stdout-diagnostic\x00\xff\n" + b"stderr-diagnostic\x01\xfe\n"
@@ -167,8 +168,21 @@ def _run_driver(
     try:
         stdout, stderr = process.communicate(timeout=DRIVER_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate(timeout=5)
+        # A timeout is still refusal, but its owned descendants must not retain fixture files.
+        # Kill only this Popen's tree before reaping it; never search for unrelated processes.
+        try:
+            if os.name == "nt":
+                cleanup = subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True, check=False, timeout=5,
+                )
+                if cleanup.returncode != 0:
+                    raise RuntimeError(f"driver tree cleanup failed: {cleanup.stderr!r}")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.communicate(timeout=5)
         return None, None, time.monotonic() - started
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     return completed, _load_result(result) if result.is_file() else None, time.monotonic() - started
@@ -253,6 +267,78 @@ def _check_held_run(driver: Path, module_path: Path, fixture: Path, root: Path, 
     return failures
 
 
+def _check_driver_timeout_cleanup(module_path: Path, root: Path) -> list[str]:
+    """A refused Windows driver must not leave its file-owning child behind."""
+    if os.name != "nt":
+        return []  # This control observes Windows open-file deletion semantics.
+    driver = root / "timeout-driver.py"
+    marker = root / "timeout-cleanup.result.json"
+    owned_file = root / "timeout-cleanup.receipt.lock"
+    child_code = (
+        "import json,pathlib,sys,time\n"
+        "handle=open(sys.argv[1],'wb')\n"
+        "pathlib.Path(sys.argv[2]).write_text(json.dumps({'file_owned':True}))\n"
+        "time.sleep(30)\n"
+    )
+    driver.write_text(
+        "import subprocess,sys,time\n"
+        f"child_code={child_code!r}\n"
+        "subprocess.Popen([sys.executable,'-c',child_code,"
+        "sys.argv[4].replace('.json','.lock'),sys.argv[3]],"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    completed, result, _ = _run_driver(driver, module_path, driver, root, "timeout-cleanup")
+    if completed is not None or result is not None:
+        return ["timeout-cleanup: forced driver timeout was not refused"]
+    if not marker.is_file() or not _load_result(marker).get("file_owned"):
+        return ["timeout-cleanup: child did not establish open-file ownership"]
+    try:
+        owned_file.unlink()
+    except OSError as error:
+        return [f"timeout-cleanup: refused driver left its child's file open: {error}"]
+    if time.monotonic() - started >= 30:
+        return ["timeout-cleanup: ownership lease expired before cleanup was observed"]
+    return []
+
+
+def _check_driver_cleanup_failure_reaps_root(module_path: Path, root: Path) -> list[str]:
+    """Failure of the Windows tree-kill helper stays loud and still reaps our root."""
+    if os.name != "nt":
+        return []
+    driver = root / "cleanup-failure-driver.py"
+    driver.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    original_popen = subprocess.Popen
+    failures: list[str] = []
+    for error in (OSError("fixture launch failure"), subprocess.TimeoutExpired(["taskkill"], 5)):
+        owned: list[subprocess.Popen[bytes]] = []
+
+        def launch(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+            process = original_popen(*args, **kwargs)
+            owned.append(process)
+            return process
+
+        try:
+            with patch.object(subprocess, "Popen", side_effect=launch), \
+                    patch.object(subprocess, "run", side_effect=error):
+                try:
+                    _run_driver(driver, module_path, driver, root, "cleanup-failure")
+                except type(error):
+                    pass
+                else:
+                    failures.append(f"cleanup-failure: {type(error).__name__} was hidden")
+            if len(owned) != 1 or owned[0].poll() is None:
+                failures.append(f"cleanup-failure: {type(error).__name__} left the owned root alive")
+        finally:
+            for process in owned:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5)
+    return failures
+
+
 def selftest(module_path: str | os.PathLike[str] | None = None) -> bool:
     """Run bounded controls against the supplied production buildlock module."""
     production = Path(module_path) if module_path is not None else Path(__file__).with_name("buildlock.py")
@@ -272,6 +358,8 @@ def selftest(module_path: str | os.PathLike[str] | None = None) -> bool:
         failures += _check_held_run(driver, production, fixture, root, "hold-stderr")
         failures += _check_held_run(driver, production, fixture, root, "hold-child75")
         failures += _check_main_lock_release(driver, production, fixture, root)
+        failures += _check_driver_timeout_cleanup(production, root)
+        failures += _check_driver_cleanup_failure_reaps_root(production, root)
     if failures:
         print("buildlock drain selftest: FAIL", file=sys.stderr)
         for failure in failures:
