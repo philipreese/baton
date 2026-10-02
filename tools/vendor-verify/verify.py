@@ -4299,12 +4299,12 @@ def _agy_stream_follow_up_resolve(prompt_text, baton_home, working_directory, ti
 
 def _agy_stream_follow_up_build_environment(target_environment, baton_home, working_directory,
                                             outbox_dir, source_environment=None, platform_name=None):
-    """Build the contained child environment in the same order as CoreDispatcher.
+    """Build the contained child environment for this probe's legacy dispatch stand-in.
 
     Only the existing Windows SYSTEMROOT is inherited here because native agy startup needs that OS
     plumbing.  The adapter's resolved environment is applied after it, and the per-execution Baton
-    values plus PATH are applied last, preserving the probe's existing dispatcher stand-in without
-    opening an inherit-all or credential path.
+    values plus the probe's existing source PATH are applied last.  This preserves the established
+    probe construction without opening an inherit-all or credential path.
     """
     source = os.environ if source_environment is None else source_environment
     platform = os.name if platform_name is None else platform_name
@@ -4347,6 +4347,7 @@ def _selftest_agy_stream_environment():
         "PATH": "source-path",
         "SYSTEMROOT": "source-systemroot",
         "UNRELATED_API_KEY": "source-api-key",
+        "SOURCE_ONLY_API_KEY": "must-not-be-inherited",
     }
     try:
         windows = _agy_stream_follow_up_build_environment(
@@ -4365,15 +4366,21 @@ def _selftest_agy_stream_environment():
                 raise AssertionError(f"{name} was not preserved or expanded: {windows.get(name)!r}")
         if "UNRELATED_API_KEY" not in windows or windows["UNRELATED_API_KEY"] != "must-not-be-inherited":
             raise AssertionError("resolved target environment must preserve its unrelated value")
-        if "source-api-key" in windows.values():
+        if "source-api-key" in windows.values() or "SOURCE_ONLY_API_KEY" in windows:
             raise AssertionError("unrelated source/API environment must not be inherited")
 
         unset_target = dict(target)
         del unset_target["SYSTEMROOT"]
         unset = _agy_stream_follow_up_build_environment(
-            unset_target, "baton-home", "working-directory", "outbox", {"PATH": "source-path"}, "nt")
-        if "SYSTEMROOT" in unset:
-            raise AssertionError("an unset source SYSTEMROOT must not be added")
+            unset_target, "baton-home", "working-directory", "outbox", source, "nt")
+        if unset.get("SYSTEMROOT") != "source-systemroot":
+            raise AssertionError("an existing Windows SYSTEMROOT must reach the live child environment")
+
+        empty = _agy_stream_follow_up_build_environment(
+            unset_target, "baton-home", "working-directory", "outbox",
+            {"PATH": "source-path", "SYSTEMROOT": ""}, "nt")
+        if "SYSTEMROOT" in empty:
+            raise AssertionError("an empty Windows SYSTEMROOT must not be added")
 
         non_windows_target = dict(unset_target)
         non_windows = _agy_stream_follow_up_build_environment(
