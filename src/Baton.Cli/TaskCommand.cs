@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -147,7 +148,9 @@ public static class TaskCommand
     private static void AppendField(List<byte> buffer, byte[] value)
     {
         buffer.Add(1);
-        buffer.AddRange(BitConverter.GetBytes(value.Length).Reverse());
+        Span<byte> length = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(length, value.Length);
+        buffer.AddRange(length.ToArray());
         buffer.AddRange(value);
     }
 
