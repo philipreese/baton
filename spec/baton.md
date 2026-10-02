@@ -8091,6 +8091,14 @@ not the latest or complete history, and never grants action authority or changes
 The text view labels a retained `OwnedTask.Blocked` disposition as current only for a derived
 `blocked` task; outside that state it is retained historical evidence, and a linked stopped-work
 pair has its own current-blocker label.
+The additive nullable `initialWorkerSelection` field projects only the retained implement-stage
+entry of `QueueItem.StageSelections` (adapter, model, effort); a row with no such entry reports
+null rather than an inferred ambient default. The additive nullable `retainedWorkerAssignment`
+field projects only `QueueItem.WorkerAssignment` (adapter, model, effort, decisionId, poolHash,
+closedReason, decidedAt). Both are retained-plan/as-of projections, never evidence that a worker
+is alive or that the vendor actually used that model: stage advance clears `WorkerAssignment`
+while `MarkReady` does not guarantee clearing it, and neither field borrows the review stage's
+distinct `AttemptEnvelope` tuple (#2566).
 
 The identity is the canonical repository plus issue, independent of checkout path or queue tag.
 Task and legacy `queue add --issue --lifecycle` admissions reserve that identity under the same

@@ -270,6 +270,30 @@ public static class TaskCommand
                 observedAt = stopped.ObservedAt,
             }
             : null;
+        // Retained routing facts only: the normalized implement-stage plan and the frozen pre-launch
+        // decision, neither reconstructed from settings/ready receipts nor borrowed from the review
+        // stage's distinct AttemptEnvelope tuple (#2566).
+        var initialWorkerSelection = item.StageSelections?.FirstOrDefault(s => s.Stage == WorkStage.Implement)
+            is { } implementSelection
+            ? new
+            {
+                adapter = implementSelection.Adapter,
+                model = implementSelection.Model,
+                effort = implementSelection.Effort,
+            }
+            : null;
+        var retainedWorkerAssignment = item.WorkerAssignment is { } assignment
+            ? new
+            {
+                adapter = assignment.Adapter,
+                model = assignment.Model,
+                effort = assignment.Effort,
+                decisionId = assignment.DecisionId,
+                poolHash = assignment.PoolHash,
+                closedReason = assignment.ClosedReason,
+                decidedAt = assignment.DecidedAt,
+            }
+            : null;
         var status = new
         {
             taskId = owner.Id,
@@ -305,6 +329,8 @@ public static class TaskCommand
             haltCause = currentStoppedWork?.HaltCause.ToString(),
             obligationKey = currentStoppedWork?.Key,
             stoppedWorkHistory,
+            initialWorkerSelection,
+            retainedWorkerAssignment,
             daemon = new
             {
                 availability = heartbeat.Available ? "recently-observed" : "unavailable",
@@ -333,6 +359,13 @@ public static class TaskCommand
             output.WriteLine($"  daemon: {status.daemon.availability}"
                 + (heartbeat.ObservedAt is { } lastObserved ? $" (last observed {lastObserved:O})" : " (no observation)"));
             if (readiness is not null) output.WriteLine($"  ready receipt: {readiness.Id} at {readiness.ReadyObservedAt:O}");
+            if (initialWorkerSelection is { } selected)
+                output.WriteLine("  initial implement selection (retained plan): "
+                    + $"adapter={selected.adapter ?? "none"}; model={selected.model ?? "none"}; effort={selected.effort ?? "none"}");
+            if (retainedWorkerAssignment is { } retainedAssignment)
+                output.WriteLine("  retained worker assignment (as-of; not proof of liveness or vendor use): "
+                    + $"adapter={retainedAssignment.adapter}; model={retainedAssignment.model ?? "none"}; "
+                    + $"effort={retainedAssignment.effort ?? "none"}; decidedAt={retainedAssignment.decidedAt:O}");
             if (owner.Blocked is { } blocked)
             {
                 var blockerLabel = state == "blocked" ? "current blocker" : "retained blocker (historical)";
