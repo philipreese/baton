@@ -273,7 +273,7 @@ public static class TaskCommand
         // Retained routing facts only: the normalized implement-stage plan and the frozen pre-launch
         // decision, neither reconstructed from settings/ready receipts nor borrowed from the review
         // stage's distinct AttemptEnvelope tuple (#2566).
-        var initialWorkerSelection = item.StageSelections?.FirstOrDefault(s => s.Stage == WorkStage.Implement)
+        var initialWorkerSelection = item.StageSelections?.SingleOrDefault(s => s.Stage == WorkStage.Implement)
             is { } implementSelection
             ? new
             {
