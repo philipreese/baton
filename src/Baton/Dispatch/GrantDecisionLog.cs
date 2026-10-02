@@ -77,21 +77,6 @@ public static class GrantDecisionLog
         }
     }
 
-    /// <summary>Returns whether one canonical log contains a denial by <paramref name="rule"/>.</summary>
-    public static bool ContainsDenial(string path, GrantRule rule)
-    {
-        foreach (var line in File.ReadLines(path))
-        {
-            if (GrantDecision.TryParseJsonLine(line, out var decision)
-                && decision is { Allowed: false }
-                && decision.Rule == rule)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
 }
 
 /// <summary>

@@ -8314,8 +8314,9 @@ fact, succeeded-shaped terminal room, typed `AwaitingVerifiedPullRequest` halt, 
 repository, exact clean local branch/HEAD, positive origin branch-tip proof at that full SHA, and a
 resolvable literal `main` base may enter this path. A successful bounded all-state exact-repository
 branch/base PR history read must show no previous PR, including closed or merged history; failure,
-ambiguity, or a full result limit is unknown, never absence. Existing open drafts continue through
-ordinary reconciliation. Fix, continue, review, legacy and unpushed rows have no create authority.
+ambiguity, or a full result limit is unknown, never absence. Blocking own-PR-only authority evidence
+must also be absent before draft creation. Existing open drafts continue through ordinary
+reconciliation. Fix, continue, review, legacy and unpushed rows have no create authority.
 
 For an opted-in initial issue-anchored `implement` launch with canonical recorded repository and
 branch and no PR, the queue passes `--expect-pr false` into that lane's immutable dispatch binding.
@@ -8360,10 +8361,12 @@ room, attempt identity, baseline, and last verdict stay on the item for recovery
 
 **A pull-request authority refusal is typed and operation-aware.** The advancer reads engine-owned
 `baton.grant` records in the terminal execution's unrolled `.baton-grants.ndjson` authority log.
-Only exact producer-shaped `gh pr list` and explicit `gh pr view` read reasons are incidental to
-draft creation; other denied `rule: own-pr-only` records, including missing or malformed reasons,
-remain blocking authority evidence. Codex mirrors the same record into its bounded captured stream
-for diagnostics, but that stream is not lifecycle evidence after rollover. The aggregate
+Only the exact stamped Codex `gh pr list` reason emitted before this room has opened a pull request is
+incidental to draft creation. A `gh pr view` ownership-mismatch reason requires existing ownership
+evidence and is therefore not a pre-creation exception. Hook-path reasons and all other denied
+`rule: own-pr-only` records, including missing or malformed reasons, remain blocking authority
+evidence. Codex mirrors the same record into its bounded captured stream for diagnostics, but that
+stream is not lifecycle evidence after rollover. The aggregate
 `refusedToolSteps` count is not used. For a mutating implement/fix/continue lane with no bound PR,
 blocking evidence produces `AwaitingVerifiedPullRequest`; a bound PR, review verdict, or ordinary
 outcome keeps the normal lifecycle precedence. The conductor then supplies the exact repository/branch PR, and the

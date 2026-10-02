@@ -320,33 +320,24 @@ public sealed class DraftPullRequestHandoffTests
     public async Task Exact_list_read_refusal_is_incidental_and_allows_one_draft()
     {
         using var fixture = new Fixture();
-        await fixture.SeedAsync();
+        await fixture.SeedAsync(awaitingMissingPullRequest: false);
         await fixture.WriteGrantDecisionsAsync(new GrantDecision(
             "codex", "run_command", false, GrantRules.OwnPullRequestOnly,
-            "Baton refuses this command: `gh pr list` enumerates pull requests this room does not own — an implement lane reads its own PR only. No `gh pr` read is allowed until this room's own `gh pr create` reports one. `gh issue view` is unaffected.",
+            GrantRefusal.Stamp("Baton refuses this command: `gh pr list` enumerates pull requests this room does not own — an implement lane reads its own PR only. No `gh pr` read is allowed until this room's own `gh pr create` reports one. `gh issue view` is unaffected."),
             "digest", Now));
 
-        Assert.Equal("original missing-PR delivery halt", (await fixture.ReadAsync()).Error);
-        var fact = Assert.Single(await fixture.Advancer().AdvanceAsync(Now, Ct));
+        var firstHalt = Assert.Single(await fixture.Advancer().AdvanceAsync(Now, Ct));
+        Assert.Equal(QueueDecisionEntry.Failed, firstHalt.Decision);
+        Assert.Equal(
+            "the implement lane settled succeeded but no pull request is open on '2486-lane' — a pushed branch is not PR evidence; the item is still at implement, so 'baton queue add' with the same tag replaces it once you have fixed what it needs",
+            (await fixture.ReadAsync()).Error);
+        Assert.Equal(0, fixture.Forge.CreateCount);
+
+        var fact = Assert.Single(await fixture.Advancer().AdvanceAsync(Now.AddMinutes(1), Ct));
         Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
         Assert.Equal(WorkStage.Review, (await fixture.ReadAsync()).Stage);
         Assert.Equal(1, fixture.Forge.CreateCount);
-        await fixture.Advancer().AdvanceAsync(Now.AddMinutes(1), Ct);
-        Assert.Equal(1, fixture.Forge.CreateCount);
-    }
-
-    [Fact]
-    public async Task Exact_view_read_refusal_is_incidental_and_allows_one_draft()
-    {
-        using var fixture = new Fixture();
-        await fixture.SeedAsync();
-        await fixture.WriteGrantDecisionsAsync(new GrantDecision(
-            "codex", "run_command", false, GrantRules.OwnPullRequestOnly,
-            "Baton refuses this command: `gh pr view 12` is not this room's pull request — an implement lane reads its own PR only. This room opened example/project#11; that is the only pull request it may read. `gh issue view` is unaffected.",
-            "digest", Now));
-
-        var fact = Assert.Single(await fixture.Advancer().AdvanceAsync(Now, Ct));
-        Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
+        await fixture.Advancer().AdvanceAsync(Now.AddMinutes(2), Ct);
         Assert.Equal(1, fixture.Forge.CreateCount);
     }
 
@@ -356,14 +347,17 @@ public sealed class DraftPullRequestHandoffTests
     [InlineData("Baton refuses this command: `gh pr edit 12` is not this room's pull request — an implement lane reads its own PR only. This room opened example/project#11; that is the only pull request it may read. `gh issue view` is unaffected.")]
     [InlineData("Baton refuses this command: `gh pr comment 12` is not this room's pull request — an implement lane reads its own PR only. This room opened example/project#11; that is the only pull request it may read. `gh issue view` is unaffected.")]
     [InlineData("Baton refuses this command: `gh pr checkout 12` moves this room onto another pull request's branch — an implement lane reads its own PR only.")]
+    [InlineData("Baton refuses this command: `gh pr view 12` is not this room's pull request — an implement lane reads its own PR only. This room opened example/project#11; that is the only pull request it may read. `gh issue view` is unaffected.")]
+    [InlineData("AER: Baton refuses this command: `gh pr list` enumerates pull requests this room does not own — an implement lane reads its own PR only. No `gh pr` read is allowed until this room's own `gh pr create` reports one. `gh issue view` is unaffected.")]
     [InlineData("unknown legacy refusal wording")]
     [InlineData(null)]
     public async Task Other_own_pr_only_denials_block_creation_on_every_advance(string? reason)
     {
         using var fixture = new Fixture();
-        await fixture.SeedAsync(awaitingMissingPullRequest: false, succeeded: false);
+        await fixture.SeedAsync(awaitingMissingPullRequest: false);
         await fixture.WriteGrantDecisionsAsync(new GrantDecision(
-            "codex", "run_command", false, GrantRules.OwnPullRequestOnly, reason, "digest", Now));
+            "codex", "run_command", false, GrantRules.OwnPullRequestOnly,
+            reason is null ? null : GrantRefusal.Stamp(reason), "digest", Now));
 
         var firstHalt = Assert.Single(await fixture.Advancer().AdvanceAsync(Now, Ct));
         Assert.Equal(QueueDecisionEntry.Failed, firstHalt.Decision);
@@ -372,6 +366,7 @@ public sealed class DraftPullRequestHandoffTests
         var current = await fixture.ReadAsync();
         Assert.True(current.Halted);
         Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, current.ReconciliationKind);
+        Assert.Contains("typed pull-request authority refusal", current.Error, StringComparison.Ordinal);
         Assert.Equal(0, fixture.Forge.CreateCount);
     }
 
@@ -379,7 +374,7 @@ public sealed class DraftPullRequestHandoffTests
     public async Task Malformed_reason_on_valid_own_pr_record_blocks_creation()
     {
         using var fixture = new Fixture();
-        await fixture.SeedAsync(awaitingMissingPullRequest: false, succeeded: false);
+        await fixture.SeedAsync(awaitingMissingPullRequest: false);
         var execution = Path.Combine(fixture.Item.RoomDirectory!, "artifacts", "execution_grant-test");
         Directory.CreateDirectory(execution);
         await File.WriteAllTextAsync(Path.Combine(execution, ".baton-grants.ndjson"),
@@ -395,13 +390,13 @@ public sealed class DraftPullRequestHandoffTests
     public async Task Mixed_read_and_mutation_refusals_keep_creation_blocked()
     {
         using var fixture = new Fixture();
-        await fixture.SeedAsync(awaitingMissingPullRequest: false, succeeded: false);
+        await fixture.SeedAsync(awaitingMissingPullRequest: false);
         await fixture.WriteGrantDecisionsAsync(
             new GrantDecision("codex", "run_command", false, GrantRules.OwnPullRequestOnly,
-                "Baton refuses this command: `gh pr list` enumerates pull requests this room does not own — an implement lane reads its own PR only. No `gh pr` read is allowed until this room's own `gh pr create` reports one. `gh issue view` is unaffected.",
+                GrantRefusal.Stamp("Baton refuses this command: `gh pr list` enumerates pull requests this room does not own — an implement lane reads its own PR only. No `gh pr` read is allowed until this room's own `gh pr create` reports one. `gh issue view` is unaffected."),
                 "read", Now),
             new GrantDecision("codex", "run_command", false, GrantRules.OwnPullRequestOnly,
-                "Baton refuses this command: `gh pr checkout 12` moves this room onto another pull request's branch — an implement lane reads its own PR only.",
+                GrantRefusal.Stamp("Baton refuses this command: `gh pr checkout 12` moves this room onto another pull request's branch — an implement lane reads its own PR only."),
                 "mutation", Now));
 
         Assert.Equal(QueueDecisionEntry.Failed,

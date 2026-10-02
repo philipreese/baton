@@ -166,7 +166,10 @@ public sealed class GrantDecisionStreamTests
 
             var authorityLog = Path.Combine(output, GrantDecisionLog.FileName);
             Assert.True(File.Exists(authorityLog));
-            Assert.True(GrantDecisionLog.ContainsDenial(authorityLog, GrantRules.OwnPullRequestOnly));
+            Assert.Contains(File.ReadLines(authorityLog), line =>
+                GrantDecision.TryParseJsonLine(line, out var decision)
+                && decision is { Allowed: false, Rule: var rule }
+                && rule == GrantRules.OwnPullRequestOnly);
 
             var logger = new ExecutionStreamLogger(output, maxSizeBytes: 64);
             foreach (var line in lines)
@@ -180,7 +183,10 @@ public sealed class GrantDecisionStreamTests
             }
 
             Assert.True(File.Exists(Path.Combine(output, ExecutionStreamLogger.StdoutRolloverFileName)));
-            Assert.True(GrantDecisionLog.ContainsDenial(authorityLog, GrantRules.OwnPullRequestOnly));
+            Assert.Contains(File.ReadLines(authorityLog), line =>
+                GrantDecision.TryParseJsonLine(line, out var decision)
+                && decision is { Allowed: false, Rule: var rule }
+                && rule == GrantRules.OwnPullRequestOnly);
         }
         finally
         {
