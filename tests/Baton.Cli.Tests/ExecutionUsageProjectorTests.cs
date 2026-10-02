@@ -1261,6 +1261,53 @@ public sealed class ExecutionUsageProjectorTests
         }
     }
 
+    [Theory]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"input_tokens\":\"bad\",\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"output_tokens\":null,\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"cache_read_input_tokens\":true,\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"cache_creation_input_tokens\":\"bad\",\"input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":\"bad\"},\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"num_turns\":\"bad\",\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"inputTokens\":\"bad\"}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"outputTokens\":null}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"cacheReadInputTokens\":true}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"cacheCreationInputTokens\":\"bad\"}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"thinkingTokens\":\"bad\"}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    public void Claude_status_ignores_wrong_kind_terminal_fields_without_losing_valid_terminal_authority(string terminal)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2561-terminal-kind-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("valid", 700), terminal]);
+            Assert.Equal(900, view.BilledTokens);
+            Assert.Equal(700, view.LiveBilledTokens);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":42}]}}", null)]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":42,\"input\":{}}]}}", 1)]
+    [InlineData("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":42}]}}", null)]
+    public void Claude_status_ignores_wrong_kind_tool_metadata_without_losing_intact_usage(string toolLine, int? expectedToolSteps)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2561-tool-kind-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("valid", 700), toolLine]);
+            Assert.Equal(700, view.ObservedBilledTokenFloor?.Tokens);
+            Assert.Equal(expectedToolSteps, view.ToolSteps);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public void CONTROL_observed_billed_token_floor_stays_absent_when_evidence_is_cache_read_only()
     {
