@@ -344,13 +344,16 @@ invocation without the flag reads, writes and voids nothing, and behaves exactly
 before #2010. `pixi.toml` is where the flagged call sites are; whether a given command is allowed to
 carry the flag is decided by the rule in `tools/buildlock.py`'s own docstring.
 
-A flagged run that exits 0 leaves a worktree-local receipt under its Git directory. The exact
+A fingerprintable flagged run that exits 0 with complete output capture leaves a worktree-local receipt under its Git directory. The exact
 argument list, working directory and priority class identify the command; HEAD, NUL-delimited
 porcelain status and each dirty path's content identify its inputs (including untracked files,
 renames and deletions). An unchanged pass up to six hours old prints
-`buildlock: replaying <cmd> — unchanged since the pass at HH:MM:SS`, then its recorded stdout tail
-(last 64 KiB), and exits 0 without acquiring or probing the build lock. Execution streams stdout
-and inherits stderr; stderr is not replayed. A failed or interrupted flagged attempt voids the
+`buildlock: replaying <cmd> — unchanged since the pass at HH:MM:SS`, then its recorded combined-output tail
+(last 64 KiB), and exits 0 without acquiring or probing the build lock. Fingerprintable execution streams
+stdout and stderr through one owned capture; both can be replayed. Direct-child exit is observed
+separately from pipe closure. The post-exit drain bound in `tools/buildlock.py` fails incomplete
+capture without recording a pass or treating it as lock contention. Unflagged or unfingerprintable
+invocations retain inherited streams. A failed or interrupted flagged attempt voids the
 previous pass before the next one starts, and writing a receipt sweeps that directory's expired and
 format-orphaned siblings — together those are the only two things that ever delete one.
 
