@@ -49,7 +49,7 @@ public static class GraceTurn
         string childOutputDirectory,
         IReadOnlyCollection<EnginePlacedFile> enginePlacedFiles)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(originalTaskContext);
+        ArgumentNullException.ThrowIfNull(originalTaskContext);
         ArgumentException.ThrowIfNullOrWhiteSpace(parentOutputDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(childOutputDirectory);
         ArgumentNullException.ThrowIfNull(enginePlacedFiles);

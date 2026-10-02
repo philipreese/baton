@@ -114,6 +114,40 @@ public sealed class GraceTurnEndToEndTests
         }
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public async Task Grace_prompt_preserves_empty_or_whitespace_original_context(string originalPrompt)
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: false,
+            originalPrompt: originalPrompt);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var parentOutbox = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
+                run.ArtifactsRoot, claim.ParentExecutionId);
+            var childOutbox = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
+                run.ArtifactsRoot, claim.GraceExecutionId);
+            var childTarget = run.Dispatcher.Targets[1];
+
+            var originalContext = string.Join(
+                Environment.NewLine,
+                "--- BEGIN ORIGINAL TASK CONTEXT ---",
+                originalPrompt,
+                "--- END ORIGINAL TASK CONTEXT ---");
+            Assert.Contains(originalContext, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Contains(parentOutbox, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Contains(childOutbox, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Equal(WorkflowOutcome.Indeterminate, WorkflowOutcome.Describe(run.FinalState));
+            Assert.Empty(run.Events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
     [Fact]
     public async Task Already_pushed_task_with_only_unchanged_engine_files_skips_grace()
     {
@@ -1215,7 +1249,8 @@ public sealed class GraceTurnEndToEndTests
         bool modifyEngineFileAfterPlacement = false,
         bool leaveUnrelatedDirty = false,
         bool clearUpstream = false,
-        bool unverifiedEnginePlacement = false)
+        bool unverifiedEnginePlacement = false,
+        string originalPrompt = "ORIGINAL BRIEF")
     {
         var roomDirectory = Path.Combine(Path.GetTempPath(), $"task-{Guid.NewGuid():N}");
         var workspace = Path.Combine(roomDirectory, "lane");
@@ -1244,8 +1279,8 @@ public sealed class GraceTurnEndToEndTests
             ["implement"] = new WorkerBinding.Process(
                 new WorkerContract("implement", [], [new ProducedOutput("pr.md")], optionalMetadata ?? []),
                 new CoreDispatchTarget(
-                    "vendor-cli", ["-p", "ORIGINAL BRIEF"], WorkingDirectory: workspace,
-                    OnStdoutLine: onStdoutLine, PromptText: "ORIGINAL BRIEF"),
+                    "vendor-cli", ["-p", originalPrompt], WorkingDirectory: workspace,
+                    OnStdoutLine: onStdoutLine, PromptText: originalPrompt),
                 TimeSpan.FromSeconds(30),
                 FailureClassifier: failureClassifier,
                 Adapter: "claude",
