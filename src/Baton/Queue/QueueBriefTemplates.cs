@@ -277,6 +277,12 @@ public static class QueueBriefTemplates
 
                ## Lifecycle verdict requirement
 
+               For a lifecycle review, `decision` is your independent judgment of the inspected source
+               head against the issue and review contract: source judgment, not merge readiness.
+               Pending, failing, or unknown CI, protected approval, draft state, or other delivery
+               evidence are separate delivery gates, not source defects by themselves. A concrete defect exposed by a check remains reviewable. Follow the `baton-review` skill for
+               target-policy reading and standalone contract boundaries.
+
                Write the structured verdict to `$BATON_OUTPUT_DIR/verdict.json`. Set `reviewedRef` to
                `{context.HeadSha}` exactly, with no PR label, branch, prefix, suffix, or whitespace.
                Set `completion` to `complete` only after all review work is finished; use `in_progress`
@@ -407,8 +413,9 @@ public static class QueueBriefTemplates
         ## Verdict
 
         Write `"decision": "approve"` or `"decision": "block"` in `verdict.json`: it is YOUR call on
-        whether this PR is ready, nothing derives it from the findings, and a verdict without it stops
-        this item for a person rather than carrying the round.
+        whether the reviewed change satisfies the requested review contract; the final lifecycle
+        requirement separates source judgment from delivery readiness. Nothing derives it from the
+        findings, and a verdict without it stops this item for a person rather than carrying the round.
         """;
 
     private const string ReReviewDefault = """
@@ -440,7 +447,8 @@ public static class QueueBriefTemplates
         ## Verdict
 
         Write `"decision": "approve"` or `"decision": "block"` in `verdict.json`: it is YOUR call on
-        whether this PR is ready, nothing derives it from the findings, and a verdict without it stops
-        this item for a person rather than carrying the round.
+        whether the reviewed change satisfies the requested review contract; the final lifecycle
+        requirement separates source judgment from delivery readiness. Nothing derives it from the
+        findings, and a verdict without it stops this item for a person rather than carrying the round.
         """;
 }

@@ -53,6 +53,54 @@ public class RoleDispatchTests
         }
     }
 
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("agy")]
+    [InlineData("codex")]
+    public void Standalone_review_contracts_survive_each_adapter_and_the_no_default_skills_opt_out(
+        string adapter)
+    {
+        const string request = "Review whether the deployment is operationally ready, not only source correctness.";
+
+        var binding = RoleDispatch.ToBinding(
+            Review,
+            request,
+            adapterOverride: adapter,
+            attachDefaultSkills: false);
+
+        Assert.StartsWith(request, binding.PromptTemplate, StringComparison.Ordinal);
+        Assert.Null(binding.Skills);
+        Assert.Contains("whether the reviewed change or claim satisfies the requested review contract",
+            binding.PromptTemplate, StringComparison.Ordinal);
+        Assert.Contains("verdict.json", binding.PromptTemplate, StringComparison.Ordinal);
+        Assert.DoesNotContain("source judgment, not merge readiness", binding.PromptTemplate,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("target repository's agent entry point", binding.PromptTemplate,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("agy")]
+    [InlineData("codex")]
+    public void Standalone_non_source_contracts_keep_the_shipped_default_skill_on_each_adapter(
+        string adapter)
+    {
+        const string request = "Review whether this migration preserves the documented user-facing behavior.";
+
+        var binding = RoleDispatch.ToBinding(
+            Review,
+            request,
+            adapterOverride: adapter);
+
+        Assert.Equal(["baton-review"], binding.Skills!.ToArray());
+        Assert.StartsWith(request, binding.PromptTemplate, StringComparison.Ordinal);
+        Assert.Contains("whether the reviewed change or claim satisfies the requested review contract",
+            binding.PromptTemplate, StringComparison.Ordinal);
+        Assert.DoesNotContain("source judgment, not merge readiness", binding.PromptTemplate,
+            StringComparison.Ordinal);
+    }
+
     // #1920: each vendor's line is written from that vendor's own measured refusals — codex's is the
     // issue's Ask verbatim, claude's names what the audit comment measured on claude (cd/cat/head/
     // echo/git grep and compound lines), never rg, which is not a claude refusal.
