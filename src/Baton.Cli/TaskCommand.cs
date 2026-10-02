@@ -179,6 +179,24 @@ public static class TaskCommand
             "stale" => "conductor-reassessment",
             _ => "none",
         };
+        var currentStoppedWork = state == "blocked"
+            && owner.Blocked?.ObligationKey is { } currentKey
+            && !string.IsNullOrWhiteSpace(currentKey)
+            && item.StoppedWorkJudgment?.Key is { } retainedKey
+            && !string.IsNullOrWhiteSpace(retainedKey)
+            && string.Equals(currentKey, retainedKey, StringComparison.Ordinal)
+            ? item.StoppedWorkJudgment
+            : null;
+        var stoppedWorkHistory = item.StoppedWorkJudgment is { } stopped
+            ? new
+            {
+                haltCause = stopped.HaltCause.ToString(),
+                obligationKey = stopped.Key,
+                attemptId = stopped.AttemptId?.Value,
+                stage = WorkStages.Token(stopped.Stage),
+                observedAt = stopped.ObservedAt,
+            }
+            : null;
         var status = new
         {
             taskId = owner.Id,
@@ -211,8 +229,9 @@ public static class TaskCommand
             },
             ready = readiness,
             blocked = owner.Blocked,
-            haltCause = item.StoppedWorkJudgment?.HaltCause.ToString(),
-            obligationKey = item.StoppedWorkJudgment?.Key,
+            haltCause = currentStoppedWork?.HaltCause.ToString(),
+            obligationKey = currentStoppedWork?.Key,
+            stoppedWorkHistory,
             daemon = new
             {
                 availability = heartbeat.Available ? "recently-observed" : "unavailable",
@@ -242,6 +261,12 @@ public static class TaskCommand
                 + (heartbeat.ObservedAt is { } lastObserved ? $" (last observed {lastObserved:O})" : " (no observation)"));
             if (readiness is not null) output.WriteLine($"  ready receipt: {readiness.Id} at {readiness.ReadyObservedAt:O}");
             if (owner.Blocked is { } blocked) output.WriteLine($"  blocker: {blocked.ReasonCode}; {blocked.Evidence}");
+            if (currentStoppedWork is { } linked)
+                output.WriteLine($"  current blocker: haltCause={linked.HaltCause}; obligationKey={linked.Key}");
+            if (stoppedWorkHistory is { } history)
+                output.WriteLine("  stopped-work history (one retained as-of snapshot; not latest or complete history):"
+                    + $" haltCause={history.haltCause}; obligationKey={history.obligationKey ?? "none"}"
+                    + $"; attemptId={history.attemptId ?? "none"}; stage={history.stage}; observedAt={history.observedAt:O}");
         }
     }
 

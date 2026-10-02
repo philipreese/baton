@@ -7975,6 +7975,12 @@ retirement reason is the current status reason. If a legacy retirement has no no
 uses the neutral `retirement-reason-unavailable` fallback without inventing a merge or success.
 The text view labels any retained attempt error as historical; retirement remains terminal with
 `nextTrigger: none` and does not rewrite the queue row or its earlier failure evidence.
+The existing top-level `haltCause` and `obligationKey` status fields are current-only: they are
+non-null only for a derived `blocked` task whose nonblank retained judgment key exactly matches
+the current `OwnedTask.Blocked.ObligationKey`; every other state or mismatch returns both as null.
+The additive nullable `stoppedWorkHistory` field is one retained as-of snapshot with exactly
+`haltCause`, `obligationKey`, `attemptId`, `stage`, and `observedAt`. It is historical evidence,
+not the latest or complete history, and never grants action authority or changes the queue.
 
 The identity is the canonical repository plus issue, independent of checkout path or queue tag.
 Task and legacy `queue add --issue --lifecycle` admissions reserve that identity under the same
