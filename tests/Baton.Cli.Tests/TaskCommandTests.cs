@@ -1263,6 +1263,7 @@ public sealed class TaskCommandTests
             using var json = JsonDocument.Parse(jsonOutput.ToString());
             var selection = json.RootElement.GetProperty("initialWorkerSelection");
             Assert.Equal(JsonValueKind.Object, selection.ValueKind);
+            Assert.Equal(3, selection.EnumerateObject().Count());
             Assert.Equal(adapter, selection.GetProperty("adapter").GetString());
             Assert.Equal(model, selection.GetProperty("model").GetString());
             Assert.Equal(effort, selection.GetProperty("effort").GetString());
@@ -1482,9 +1483,14 @@ public sealed class TaskCommandTests
             using var json = JsonDocument.Parse(jsonOutput.ToString());
             Assert.Equal("blocked", json.RootElement.GetProperty("state").GetString());
             var retainedAssignment = json.RootElement.GetProperty("retainedWorkerAssignment");
+            Assert.Equal(7, retainedAssignment.EnumerateObject().Count());
             Assert.Equal("codex", retainedAssignment.GetProperty("adapter").GetString());
             Assert.Equal("gpt-5.6-sol", retainedAssignment.GetProperty("model").GetString());
             Assert.Equal(JsonValueKind.Null, retainedAssignment.GetProperty("effort").ValueKind);
+            Assert.Equal("decision-2", retainedAssignment.GetProperty("decisionId").GetString());
+            Assert.Equal("pool-hash-2", retainedAssignment.GetProperty("poolHash").GetString());
+            Assert.Equal("legacy-single-candidate", retainedAssignment.GetProperty("closedReason").GetString());
+            Assert.Equal(now, retainedAssignment.GetProperty("decidedAt").GetDateTimeOffset());
 
             var textOutput = new StringWriter();
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
@@ -1651,8 +1657,10 @@ public sealed class TaskCommandTests
             Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.QueueFile)!);
 
             // Hand-written to simulate a row persisted before #2566 added StageSelections/WorkerAssignment
-            // readers: the JSON keys are entirely absent, not merely null, exactly as an old file on disk
-            // would be. Regresses to a thrown KeyNotFoundException on the pre-#2566 status projection.
+            // readers, so the JSON keys are entirely absent rather than written by the current encoder.
+            // Verified (manually, against origin/main's TaskCommand.cs): every case in this class that
+            // reads initialWorkerSelection/retainedWorkerAssignment throws KeyNotFoundException there,
+            // including this one; this file's current form is the green side of that control.
             var raw = "{\"items\":[{"
                 + "\"Tag\":" + JsonSerializer.Serialize(id) + ","
                 + "\"Role\":\"implement\","
