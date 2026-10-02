@@ -118,6 +118,6 @@ public static class WorkstreamJunctionLinker
         var roomName = Path.GetFileName(Path.TrimEndingDirectorySeparator(fullRoomPath));
         var hash = Convert.ToHexString(SHA256.HashData(
             Encoding.UTF8.GetBytes(BatonPaths.RecordKey(fullRoomPath).ToLowerInvariant())))[..8].ToLowerInvariant();
-        return Path.Combine(BatonPaths.ByWorkstream, workstream, $"{roomName}-{hash}");
+        return Path.GetFullPath(Path.Combine(BatonPaths.ByWorkstream, workstream, $"{roomName}-{hash}"));
     }
 }

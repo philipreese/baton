@@ -719,6 +719,57 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
     }
 
     /// <summary>
+    /// #2556: an absolute Windows <c>BATON_HOME</c> containing forward slashes must still produce
+    /// a real by-workstream junction. The native <c>mklink /J</c> command receives the normalized
+    /// link path, while the room remains the exact source directory and remains readable through
+    /// the junction.
+    /// </summary>
+    [Fact]
+    public async Task Dispatching_with_a_forward_slash_windows_home_creates_a_real_junction_to_the_room()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-e2e-forward-home-{Guid.NewGuid():N}");
+        var forwardSlashHome = Path.Combine(
+                Path.GetTempPath(),
+                $"baton-workstream-forward-home-{Guid.NewGuid():N}")
+            .Replace('\\', '/');
+        Directory.CreateDirectory(forwardSlashHome);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Current with { HomeOverride = forwardSlashHome });
+
+        try
+        {
+            var specPath = await WriteSpecAsync(testRoot, "Weigh the options for X.");
+            var roomDirectory = Path.Combine(testRoot, "task");
+            var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: "fake", Workstream: "w2556");
+
+            await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);
+
+            var linkPath = WorkstreamJunctionLinker.ResolveLinkPath("w2556", roomDirectory);
+            var link = new DirectoryInfo(linkPath);
+            Assert.True(link.Exists, $"expected a by-workstream junction at '{linkPath}'");
+            Assert.True(
+                (link.Attributes & FileAttributes.ReparsePoint) != 0,
+                $"expected '{linkPath}' to be a directory junction, not an ordinary directory");
+            Assert.NotNull(link.LinkTarget);
+            Assert.Equal(BatonPaths.RecordKey(roomDirectory), BatonPaths.RecordKey(link.LinkTarget!));
+            Assert.True(
+                File.Exists(Path.Combine(linkPath, "bindings.json")),
+                "the junction must read through to the real room directory's own files");
+        }
+        finally
+        {
+            CleanupWorkstreamJunction("w2556", Path.Combine(testRoot, "task"));
+            DirectoryCleanup.DeleteRecursively(testRoot);
+            DirectoryCleanup.DeleteRecursively(forwardSlashHome);
+        }
+    }
+
+    /// <summary>
     /// HIGH-1 (#1619 second-reader): the junction's own name used to be the room's leaf name alone,
     /// which collides whenever an explicit <c>--room-dir</c> under two different parents shares a leaf
     /// -- exactly the pattern every invoking harness uses (<c>docs/agents/invoking-baton.md</c>). Two
