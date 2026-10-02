@@ -9,6 +9,23 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.61.0](https://github.com/philipreese/baton/compare/v0.60.0...v0.61.0) (2026-10-02)
+
+
+### Features
+
+* **conductor:** Add bounded Claude stopped-work advice adapter; native and installed acceptance remain unverified, with production enablement withheld ([#2544](https://github.com/philipreese/baton/issues/2544)) ([e3ff0e6](https://github.com/philipreese/baton/commit/e3ff0e6acb140e9c29dbcd7034c4c4fb2653a543))
+
+
+### Bug Fixes
+
+* **task:** Separate current halt from retained stopped-work history ([#2546](https://github.com/philipreese/baton/issues/2546)) ([b59c6ac](https://github.com/philipreese/baton/commit/b59c6acc96431d682c1173cf7e37b1a13d4dbafb))
+
+
+### Tests
+
+* **vendors:** Reproduce AGY stream follow-up with resolved grants ([#2541](https://github.com/philipreese/baton/issues/2541)) ([7916437](https://github.com/philipreese/baton/commit/7916437dfff82a1480fc085fc2bcce8ef8c65076))
+
 ## [0.60.0](https://github.com/philipreese/baton/compare/v0.59.0...v0.60.0) (2026-10-01)
 
 
