@@ -4779,9 +4779,11 @@ class _AgyStreamFollowUpController:
             self._record("controller", "controller_incomplete", {})
         finally:
             self._stop.set()
-            # #2545: sampled BEFORE any kill below (and, in contained mode, before the outer Job
-            # owner can ever reach this process) -- None here means "not yet exited", never a
-            # forced-kill artifact standing in for the vendor's own exit.
+            # #2545: the supported invocation is contained=True, so this worker samples before
+            # the outer Job owner can ever stop it -- None means "not yet exited", never a
+            # forced-kill artifact standing in for the vendor's own exit. The dormant
+            # contained=False configuration is not a supported call path; its watchdog can race
+            # this finally, so this provenance guarantee must not be broadened to that mode.
             native_exit_pre_owner_stop = self.proc.poll()
             if not self.contained:
                 try:
@@ -5828,16 +5830,26 @@ else:
                 if mode == "native-nonzero":
                     if diag is None or diag["payload"].get("nativeExitCode") != 7:
                         raise AssertionError(f"native-nonzero: diagnostic lost the real native exit: {events}")
+                    if diag["payload"]["stdout"] != {"bytes": 0, "eof": True}:
+                        raise AssertionError("native-nonzero: empty stdout was not retained as complete EOF")
+                    if diag["payload"]["stderr"] != {"bytes": 0, "eof": True}:
+                        raise AssertionError("native-nonzero: empty stderr was not retained as complete EOF")
                     if receipt.get("exitCode") not in (0, None):
                         raise AssertionError("native-nonzero: the outer receipt must stay Python's exit, not agy's")
                 if mode == "wrapper-zero":
                     if diag is None or diag["payload"].get("nativeExitCode") != 0:
                         raise AssertionError(f"wrapper-zero: diagnostic lost a real zero native exit: {events}")
+                    if diag["payload"]["stdout"] != {"bytes": 0, "eof": True}:
+                        raise AssertionError("wrapper-zero: empty stdout was not retained as complete EOF")
+                    if diag["payload"]["stderr"] != {"bytes": 0, "eof": True}:
+                        raise AssertionError("wrapper-zero: empty stderr was not retained as complete EOF")
                     if result == PASS:
                         raise AssertionError("wrapper-zero: a zero native exit alone must never be permission proof")
                 if mode == "unknown-event":
                     if diag is None or diag["payload"].get("unknownStdoutEvents", 0) < 1:
                         raise AssertionError(f"unknown-event: an unrecognized well-formed stdout event was not counted: {events}")
+                    if diag["payload"]["stdout"]["bytes"] <= 0:
+                        raise AssertionError("unknown-event: the observed stdout byte total was not retained")
                     if diag["payload"]["stderr"]["bytes"] <= 0:
                         raise AssertionError("unknown-event: the observed stderr byte total was not retained")
                     blob = json.dumps(events)
@@ -5848,8 +5860,43 @@ else:
                         raise AssertionError("stall-after-init: the outer owner did not stop the stall before the inner deadline")
                     if not any(e["kind"] == "init" for e in events):
                         raise AssertionError("stall-after-init: the flushed init event did not survive the forced stop")
+                    # Regression guard: the whole worker is killed before finally can append a
+                    # terminal diagnostic. This is intentionally not a red-before-green control;
+                    # pre-#2545 source also had no diagnostic event to fabricate.
                     if diag is not None:
                         raise AssertionError("stall-after-init: a terminal diagnostic must not be fabricated after a forced owner stop")
+                if mode == "outer-stop":
+                    # The outer owner kills the whole worker before its finally block. Absence is
+                    # the only honest result here; a made-up diagnostic would claim observations
+                    # the worker never reached. This is a regression guard, not a discriminating
+                    # pre-#2545 control.
+                    if diag is not None:
+                        raise AssertionError(f"{mode}: unexpected forced-stop diagnostic shape: {diag}")
+                if mode == "blocked-input":
+                    if diag is None:
+                        raise AssertionError("blocked-input: a normally returning controller must retain a diagnostic")
+                    if diag["payload"] != {
+                            "nativeExitCode": None,
+                            "stdout": {"bytes": 0, "eof": False},
+                            "stderr": {"bytes": 0, "eof": False},
+                            "unknownStdoutEvents": 0}:
+                        raise AssertionError(f"blocked-input: unexpected unstarted-pipe diagnostic: {diag}")
+                if mode == "delivery-exception":
+                    if diag is None:
+                        raise AssertionError("delivery-exception: a normally returning worker must retain a diagnostic")
+                    if diag["payload"] != {
+                            "nativeExitCode": None,
+                            "stdout": {"bytes": 0, "eof": False},
+                            "stderr": {"bytes": 0, "eof": False},
+                            "unknownStdoutEvents": 0}:
+                        raise AssertionError(f"delivery-exception: unexpected unstarted-pipe diagnostic: {diag}")
+                if mode == "newline-free":
+                    if diag is None:
+                        raise AssertionError("newline-free: a capped reader must retain its diagnostic")
+                    if diag["payload"]["stdout"] != {"bytes": 256, "eof": False}:
+                        raise AssertionError(f"newline-free: capped stdout shape changed: {diag}")
+                    if diag["payload"]["stderr"] != {"bytes": 0, "eof": False}:
+                        raise AssertionError(f"newline-free: blocked stderr shape changed: {diag}")
                 if mode == "parent-exit":
                     # Read-only OS process query; never signal a potentially reused PID.
                     import ctypes
@@ -6264,6 +6311,11 @@ def _selftest_agy_stream_follow_up():
     try:
         completed = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
         completed._reader(io.BytesIO(b'{"event": "init", "conversation_id": "c"}\n'), "stdout")
+        for source in ("stdout", "stderr"):
+            empty = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+            empty._reader(io.BytesIO(b""), source)
+            if empty._stream_bytes[source] != 0 or not empty._stream_eof[source]:
+                raise AssertionError(f"an empty {source} stream must retain zero bytes and eof=True")
         if completed._stream_bytes["stdout"] <= 0 or not completed._stream_eof["stdout"]:
             raise AssertionError("a real complete stdout EOF under the byte cap must retain bytes and eof=True")
 
@@ -6285,6 +6337,8 @@ def _selftest_agy_stream_follow_up():
             raise AssertionError("a read failure must never report complete EOF")
         if not failing._seen("capture_incomplete"):
             raise AssertionError("a read failure must still record capture_incomplete")
+        if any(e["kind"] == "native_stream_diagnostics" for e in failing.events):
+            raise AssertionError("a reader-only read failure must not fabricate a terminal diagnostic")
 
         fresh = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
         if fresh._stream_eof["stdout"] or fresh._stream_eof["stderr"] or fresh._stream_bytes["stdout"]:
@@ -6315,6 +6369,8 @@ def _selftest_agy_stream_follow_up():
         saturating._record("controller", "native_stream_diagnostics", {
             "nativeExitCode": 0, "stdout": {"bytes": 1, "eof": True},
             "stderr": {"bytes": 1, "eof": True}, "unknownStdoutEvents": 0})
+        # Regression guard only: the saturation path predates the diagnostic event and therefore
+        # cannot be a red-before-green control for this change.
         if saturating.events != before:
             raise AssertionError("a terminal diagnostic must never displace evidence or grow a saturated cap")
         print("   OK  a saturated event cap retains all prior evidence and never admits a terminal diagnostic")
