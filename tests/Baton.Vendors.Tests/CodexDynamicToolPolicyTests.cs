@@ -1685,15 +1685,6 @@ public sealed class CodexDynamicToolPolicyTests
             CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
         await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.ReadTextTool, new { path = command.MutatedPath });
-        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var readyWatcher = new FileSystemWatcher(
-            fixture.Workspace, Path.GetFileName(command.ReadyPath))
-        {
-            NotifyFilter = NotifyFilters.FileName,
-            EnableRaisingEvents = true,
-        };
-        readyWatcher.Created += (_, _) => ready.TrySetResult();
-        readyWatcher.Renamed += (_, _) => ready.TrySetResult();
         using var cancellation = new CancellationTokenSource();
         var execution = fixture.ExecuteWithCancellationAsync(
             CodexDynamicToolPolicy.RunCommandTool,
@@ -1702,13 +1693,14 @@ public sealed class CodexDynamicToolPolicyTests
 
         try
         {
-            if (File.Exists(command.ReadyPath))
-            {
-                ready.TrySetResult();
-            }
-            // wait-ok: bounded hang backstop; the helper atomically publishes ready after both side effects.
-            await ready.Task.WaitAsync(
-                TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            // wait-ok: reuse the bounded readiness poll used by the timeout controls; the helper
+            // atomically publishes ready after both side effects. Wait for that published marker
+            // rather than a single watcher event or a two-second process-start deadline; caller
+            // cancellation remains after the marker.
+            WaitForExternalDiffReady(
+                command.ReadyPath,
+                command.CounterPath,
+                TestContext.Current.CancellationToken);
             Assert.True(File.Exists(command.ReadyPath), "helper readiness must precede caller cancellation");
             await cancellation.CancelAsync();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => execution);
