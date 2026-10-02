@@ -4176,6 +4176,11 @@ AGY_STREAM_OUTPUT_RESULT = "result"
 AGY_STREAM_ACTIVE_STATUS = "ACTIVE"
 AGY_STREAM_SUCCESS_STATUS = "SUCCESS"
 
+# #2545: a well-formed stdout line whose `event` matches none of the four shapes above is not
+# retained as evidence (no event name, no raw text) -- only counted, and bounded so a chatty unknown
+# stream cannot grow this counter without limit.
+AGY_UNKNOWN_STDOUT_EVENT_CAP = 10_000
+
 # Mirrors AgyWorkerAdapter.VerdictLedgerVariable and GrantDecisionLog.FileName exactly -- both are
 # public wire-contract names a reader relies on elsewhere, not vendor literals this file is guessing
 # at (contrast the deliberately-vendor-measured literals like AGY_DENIED_TOOLS_FOR_A_SHELL_WITHHELD_GRANT
@@ -4431,9 +4436,38 @@ def _agy_stream_follow_up_forbidden_env(environ):
     return [name for name in AGY_FORBIDDEN_INHERITED_ENV_NAMES if name in names]
 
 
+def _agy_stream_follow_up_safe_native_diagnostics(payload):
+    """#2545's exact fixed-shape whitelist for the `native_stream_diagnostics` kind -- applied by
+    both the incremental (per-`_record`) and final (`_retain_evidence`) sanitization passes, since
+    both call this same function. Idempotent: the final pass re-sanitizes events already written
+    through the incremental one, and re-applying this to its own output must reproduce it exactly.
+    """
+    def stream_fields(info):
+        if not isinstance(info, dict):
+            return {"bytes": 0, "eof": False}
+        raw_bytes = info.get("bytes")
+        bytes_value = raw_bytes if isinstance(raw_bytes, int) and not isinstance(raw_bytes, bool) else 0
+        return {"bytes": bytes_value, "eof": bool(info.get("eof"))}
+
+    exit_code = payload.get("nativeExitCode")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        exit_code = None
+    unknown = payload.get("unknownStdoutEvents")
+    unknown = unknown if isinstance(unknown, int) and not isinstance(unknown, bool) else 0
+    return {
+        "nativeExitCode": exit_code,
+        "stdout": stream_fields(payload.get("stdout")),
+        "stderr": stream_fields(payload.get("stderr")),
+        "unknownStdoutEvents": unknown,
+    }
+
+
 def _agy_stream_follow_up_safe_event(event, nonces):
     """Whitelist source evidence; never retain arbitrary model text, paths, or environment values."""
     payload = event["payload"]
+    if event["kind"] == "native_stream_diagnostics":
+        return {"ordinal": event["ordinal"], "source": event["source"], "kind": event["kind"],
+                "payload": _agy_stream_follow_up_safe_native_diagnostics(payload)}
     safe = {}
     allowed = {
         "event": {"init", "step_update", "result"},
@@ -4532,6 +4566,11 @@ class _AgyStreamFollowUpController:
         self._forbidden_hash = None
         self._stop = threading.Event()
         self._pending_stdout_bytes = 0
+        # #2545: real observed totals, never inferred from the capped/sanitized evidence stream --
+        # an unstarted or still-draining pipe correctly defaults to zero bytes and EOF=False.
+        self._stream_bytes = {"stdout": 0, "stderr": 0}
+        self._stream_eof = {"stdout": False, "stderr": False}
+        self._unknown_stdout_events = 0
 
     def _seen(self, kind):
         with self._lock:
@@ -4563,12 +4602,16 @@ class _AgyStreamFollowUpController:
     def _reader(self, stream, source):
         total = 0
         pending = b""
+        eof = False
         try:
             while total < self.cap_bytes:
                 chunk = stream.read(min(8192, self.cap_bytes - total))
                 if not chunk:
+                    eof = True
                     break
                 total += len(chunk)
+                with self._lock:
+                    self._stream_bytes[source] = total
                 if source == "stdout":
                     pending += chunk
                     while b"\n" in pending:
@@ -4579,10 +4622,14 @@ class _AgyStreamFollowUpController:
             if total >= self.cap_bytes or pending:
                 self._record(source, "capture_incomplete", {"bytes": total, "limit": self.cap_bytes})
                 self._stop.set()
+                eof = False  # cap hit or a dangling undelimited line -- never a real complete EOF
         except (OSError, ValueError):
             self._record(source, "capture_incomplete", {"bytes": total})
             self._stop.set()
+            eof = False
         finally:
+            with self._lock:
+                self._stream_eof[source] = eof
             try:
                 stream.close()
             except OSError:
@@ -4627,6 +4674,13 @@ class _AgyStreamFollowUpController:
                     self._poll_grants(self._grants_cursor, self._forbidden_hash)
                 self._record("stdout", "second_result" if self._seen("first_result")
                              else "first_result", obj)
+        else:
+            # A well-formed, parseable dict whose `event` matches none of the four known shapes --
+            # #2545's "unknown well-formed protocol events disappear". Never retained as evidence
+            # (no event name, no raw text survives); only counted, and bounded.
+            with self._lock:
+                if self._unknown_stdout_events < AGY_UNKNOWN_STDOUT_EVENT_CAP:
+                    self._unknown_stdout_events += 1
 
     def _poll_grants(self, baseline_len, forbidden_target_hash):
         with self._lock:
@@ -4725,6 +4779,10 @@ class _AgyStreamFollowUpController:
             self._record("controller", "controller_incomplete", {})
         finally:
             self._stop.set()
+            # #2545: sampled BEFORE any kill below (and, in contained mode, before the outer Job
+            # owner can ever reach this process) -- None here means "not yet exited", never a
+            # forced-kill artifact standing in for the vendor's own exit.
+            native_exit_pre_owner_stop = self.proc.poll()
             if not self.contained:
                 try:
                     _kill_process_tree(self.proc.pid)  # regardless of root poll state
@@ -4744,6 +4802,22 @@ class _AgyStreamFollowUpController:
                 self._record("stdout", "capture_incomplete", {"bytes": self._pending_stdout_bytes})
             if not any(t.is_alive() for t in writers):
                 self.proc.stdin.close()
+            # #2545: ONE fixed-shape terminal diagnostic, through the same bounded append/flush path
+            # as every other event -- so a saturated cap or a kill that reaches this process before
+            # it gets here leaves it simply absent, never fabricated. Descriptive only: never fed to
+            # the classifier as permission evidence.
+            with self._lock:
+                stdout_bytes = self._stream_bytes["stdout"]
+                stdout_eof = self._stream_eof["stdout"]
+                stderr_bytes = self._stream_bytes["stderr"]
+                stderr_eof = self._stream_eof["stderr"]
+                unknown_stdout_events = self._unknown_stdout_events
+            self._record("controller", "native_stream_diagnostics", {
+                "nativeExitCode": native_exit_pre_owner_stop,
+                "stdout": {"bytes": stdout_bytes, "eof": stdout_eof},
+                "stderr": {"bytes": stderr_bytes, "eof": stderr_eof},
+                "unknownStdoutEvents": unknown_stdout_events,
+            })
 
         exit_code = self.proc.poll()
         with self._lock:
@@ -5682,6 +5756,22 @@ elif mode == "newline-free":
     sys.stdout.buffer.write(b"x" * 4096)
     sys.stdout.buffer.flush()
     time.sleep(20)
+elif mode == "native-nonzero":
+    sys.stdin.readline()
+    sys.exit(7)
+elif mode == "wrapper-zero":
+    sys.stdin.readline()
+    sys.exit(0)
+elif mode == "unknown-event":
+    sys.stdin.readline()
+    print(json.dumps(dict(event="mystery_event", detail="canary-unknown-event-WIDGET")), flush=True)
+    sys.stderr.write("canary-stderr-WIDGET")
+    sys.stderr.flush()
+    time.sleep(.05)
+elif mode == "stall-after-init":
+    sys.stdin.readline()
+    print(json.dumps(dict(event="init", conversation_id="offline-conversation")), flush=True)
+    time.sleep(20)
 else:
     def emit(event, **extra):
         print(json.dumps(dict(event=event, **extra)), flush=True)
@@ -5708,14 +5798,17 @@ else:
     emit("result", result=dict(status="SUCCESS", conversation_id="offline-conversation", response="NONCE-TWO"))
 '''
     try:
-        for mode in ("deny", "no-delay", "allow", "blocked-input", "outer-stop", "parent-exit", "delivery-exception", "newline-free"):
+        for mode in ("deny", "no-delay", "allow", "blocked-input", "outer-stop", "parent-exit",
+                     "delivery-exception", "newline-free", "native-nonzero", "wrapper-zero",
+                     "unknown-event", "stall-after-init"):
             with tempfile.TemporaryDirectory(prefix="v-2537-pipes-") as wd:
                 grants = os.path.join(wd, "grants.jsonl")
                 pid_path = os.path.join(wd, "descendant.pid")
                 argv = [sys.executable, "-u", "-c", helper,
                         "blocked-input" if mode == "outer-stop" else mode, grants, "a" * 16, pid_path]
                 controller = _AgyStreamFollowUpController(argv, wd, {"PATH": os.environ.get("PATH", "")},
-                    grants, timeout_s=20 if mode == "outer-stop" else 1.5 if mode in ("deny", "allow", "no-delay") else .7,
+                    grants, timeout_s=20 if mode in ("outer-stop", "stall-after-init")
+                    else 1.5 if mode in ("deny", "allow", "no-delay") else .7,
                     cap_bytes=256 if mode == "newline-free" else 1024 * 1024)
                 began = time.monotonic()
                 events, receipt = _agy_stream_follow_up_contained_run(controller,
@@ -5731,6 +5824,32 @@ else:
                 expected = PASS if mode in ("deny", "no-delay") else FAIL if mode == "allow" else INCONCLUSIVE
                 if result != expected:
                     raise AssertionError(f"{mode}: {result} {detail} {events}")
+                diag = next((e for e in events if e["kind"] == "native_stream_diagnostics"), None)
+                if mode == "native-nonzero":
+                    if diag is None or diag["payload"].get("nativeExitCode") != 7:
+                        raise AssertionError(f"native-nonzero: diagnostic lost the real native exit: {events}")
+                    if receipt.get("exitCode") not in (0, None):
+                        raise AssertionError("native-nonzero: the outer receipt must stay Python's exit, not agy's")
+                if mode == "wrapper-zero":
+                    if diag is None or diag["payload"].get("nativeExitCode") != 0:
+                        raise AssertionError(f"wrapper-zero: diagnostic lost a real zero native exit: {events}")
+                    if result == PASS:
+                        raise AssertionError("wrapper-zero: a zero native exit alone must never be permission proof")
+                if mode == "unknown-event":
+                    if diag is None or diag["payload"].get("unknownStdoutEvents", 0) < 1:
+                        raise AssertionError(f"unknown-event: an unrecognized well-formed stdout event was not counted: {events}")
+                    if diag["payload"]["stderr"]["bytes"] <= 0:
+                        raise AssertionError("unknown-event: the observed stderr byte total was not retained")
+                    blob = json.dumps(events)
+                    if "canary-unknown-event-WIDGET" in blob or "canary-stderr-WIDGET" in blob or "mystery_event" in blob:
+                        raise AssertionError("unknown-event: a raw event name or text leaked into retained diagnostics")
+                if mode == "stall-after-init":
+                    if not receipt.get("timedOut"):
+                        raise AssertionError("stall-after-init: the outer owner did not stop the stall before the inner deadline")
+                    if not any(e["kind"] == "init" for e in events):
+                        raise AssertionError("stall-after-init: the flushed init event did not survive the forced stop")
+                    if diag is not None:
+                        raise AssertionError("stall-after-init: a terminal diagnostic must not be fabricated after a forced owner stop")
                 if mode == "parent-exit":
                     # Read-only OS process query; never signal a potentially reused PID.
                     import ctypes
@@ -6140,6 +6259,121 @@ def _selftest_agy_stream_follow_up():
               "--only, and selected only by its exact name")
     except Exception as exc:                                       # noqa: BLE001
         print(f"FAIL  agy-stream-follow-up: opt-in selection arm raised: {exc!r}")
+        return 1
+
+    try:
+        completed = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+        completed._reader(io.BytesIO(b'{"event": "init", "conversation_id": "c"}\n'), "stdout")
+        if completed._stream_bytes["stdout"] <= 0 or not completed._stream_eof["stdout"]:
+            raise AssertionError("a real complete stdout EOF under the byte cap must retain bytes and eof=True")
+
+        capped = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants", cap_bytes=8)
+        capped._reader(io.BytesIO(b"x" * 64), "stdout")
+        if capped._stream_eof["stdout"]:
+            raise AssertionError("a capped stream must never report complete EOF")
+
+        class _RaisingStream:
+            def read(self, _n):
+                raise OSError("offline read-failure control")
+
+            def close(self):
+                pass
+
+        failing = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+        failing._reader(_RaisingStream(), "stderr")
+        if failing._stream_eof["stderr"] or failing._stream_bytes["stderr"] != 0:
+            raise AssertionError("a read failure must never report complete EOF")
+        if not failing._seen("capture_incomplete"):
+            raise AssertionError("a read failure must still record capture_incomplete")
+
+        fresh = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+        if fresh._stream_eof["stdout"] or fresh._stream_eof["stderr"] or fresh._stream_bytes["stdout"]:
+            raise AssertionError("an unstarted pipe must default to eof=False and zero bytes")
+        print("   OK  per-stream byte/EOF tracking: real completion, cap, read-failure, and unstarted pipes")
+
+        unknown_counter = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+        unknown_counter._classify_stdout_line(json.dumps({"event": "mystery", "x": "canary-WIDGET"}))
+        unknown_counter._classify_stdout_line(json.dumps({"event": "mystery", "x": "canary-WIDGET"}))
+        if unknown_counter._unknown_stdout_events != 2 or unknown_counter.events:
+            raise AssertionError("a well-formed unknown stdout event must be counted, never retained as evidence")
+        print("   OK  a well-formed unknown-event stdout line is counted, never retained as evidence")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: native stream diagnostic acquisition raised: {exc!r}")
+        return 1
+
+    try:
+        saturating = _AgyStreamFollowUpController([], "", {}, "absent-fixture-grants")
+        for i in range(260):
+            saturating._record("stdout", f"filler-{i}", {})
+        # 256 real events fill the bound, then exactly one incomplete marker -- 257 total, never more.
+        if len(saturating.events) != 257:
+            raise AssertionError("event-count saturation must not grow past the existing bound")
+        if (saturating.events[-1]["kind"] != "capture_incomplete"
+                or saturating.events[-1]["payload"].get("limit") != 256):
+            raise AssertionError("saturation must retain the existing incomplete marker")
+        before = list(saturating.events)
+        saturating._record("controller", "native_stream_diagnostics", {
+            "nativeExitCode": 0, "stdout": {"bytes": 1, "eof": True},
+            "stderr": {"bytes": 1, "eof": True}, "unknownStdoutEvents": 0})
+        if saturating.events != before:
+            raise AssertionError("a terminal diagnostic must never displace evidence or grow a saturated cap")
+        print("   OK  a saturated event cap retains all prior evidence and never admits a terminal diagnostic")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: event-count saturation raised: {exc!r}")
+        return 1
+
+    try:
+        diag_event = {"ordinal": 9, "source": "controller", "kind": "native_stream_diagnostics",
+                      "payload": {"nativeExitCode": 7, "stdout": {"bytes": 12, "eof": True},
+                                  "stderr": {"bytes": 0, "eof": True}, "unknownStdoutEvents": 3,
+                                  "rawStdoutText": "canary-RAW-TEXT", "envPATH": "canary-ENV",
+                                  "promptText": "canary-PROMPT", "path": "C:/private/canary"}}
+        sanitized = _agy_stream_follow_up_safe_event(diag_event, ("NONCE-ONE", "NONCE-TWO"))
+        expected_keys = {"nativeExitCode", "stdout", "stderr", "unknownStdoutEvents"}
+        if set(sanitized["payload"].keys()) != expected_keys:
+            raise AssertionError(f"native diagnostic sanitization is not an exact whitelist: {sanitized['payload']}")
+        if set(sanitized["payload"]["stdout"].keys()) != {"bytes", "eof"}:
+            raise AssertionError("per-stream diagnostic fields are not an exact whitelist")
+        blob = json.dumps(sanitized)
+        if "canary-" in blob:
+            raise AssertionError("native diagnostic sanitization leaked a non-whitelisted field")
+        twice = _agy_stream_follow_up_safe_event(sanitized, ("NONCE-ONE", "NONCE-TWO"))
+        if twice != sanitized:
+            raise AssertionError("native diagnostic sanitization must be idempotent across both passes")
+        print("   OK  the native diagnostic's exact whitelist holds, rejects canary fields, and is idempotent")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: native diagnostic sanitization raised: {exc!r}")
+        return 1
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="v-2545-diagnostics-") as wd:
+            workspace = os.path.join(wd, "agy-workspace")
+            os.makedirs(os.path.join(workspace, ".agents"))
+            with open(os.path.join(workspace, ".agents", "hooks.json"), "w", encoding="utf-8") as f:
+                f.write('{"fixture":"CONFIG-PRIVATE-TEXT"}')
+            target = {"program": "offline-helper", "args": [workspace],
+                      "environment": {"PRIVATE": "CONFIG-PRIVATE-TEXT"},
+                      "promptText": "CONFIG-PRIVATE-TEXT", "seedFiles": []}
+            source_events = full_events() + [{"ordinal": 9, "source": "controller",
+                "kind": "native_stream_diagnostics",
+                "payload": {"nativeExitCode": 7, "stdout": {"bytes": 12, "eof": True},
+                            "stderr": {"bytes": 0, "eof": True}, "unknownStdoutEvents": 3,
+                            "rawStdoutText": "MODEL-PRIVATE-TEXT"}}]
+            path = _agy_stream_follow_up_retain_evidence(target, source_events,
+                ("NONCE-ONE", "NONCE-TWO"), [], 0, 0, {"reaped": True}, False, PASS, FORBIDDEN_HASH,
+                evidence_root=wd)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            if "MODEL-PRIVATE-TEXT" in text:
+                raise AssertionError("the final sanitization pass leaked a non-whitelisted diagnostic field")
+            retained = json.loads(text)
+            diag = next(e for e in retained["events"] if e["kind"] == "native_stream_diagnostics")
+            if diag["payload"] != {"nativeExitCode": 7, "stdout": {"bytes": 12, "eof": True},
+                                    "stderr": {"bytes": 0, "eof": True}, "unknownStdoutEvents": 3}:
+                raise AssertionError(f"the final artifact lost the exact diagnostic whitelist: {diag}")
+        print("   OK  the final retained artifact keeps the exact native diagnostic whitelist and no canary text")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-follow-up: final diagnostic retention raised: {exc!r}")
         return 1
 
     if _selftest_agy_stream_controller() != 0:
