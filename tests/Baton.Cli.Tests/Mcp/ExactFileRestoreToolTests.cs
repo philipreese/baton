@@ -896,7 +896,7 @@ public sealed class ExactFileRestoreToolTests
                 .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
 
             Assert.True(result.IsError);
-            Assert.Contains("filter", result.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.True(result.Text.Contains("filter", StringComparison.OrdinalIgnoreCase), result.Text);
             Assert.False(File.Exists(marker));
             Assert.False(File.Exists(descendantMarker));
             Assert.Equal("damaged\n", await File.ReadAllTextAsync(Path.Combine(root, "target.txt"), Ct));
