@@ -390,18 +390,20 @@ public sealed partial class WorkItemAdvancer
         var before = await SnapshotAsync().ConfigureAwait(false);
         if (!before.Succeeded || before.IsOpen != true || before.IsDraft != true)
             return before;
-        var checkResult = await RunBoundedGhAsync(item,
-            RepositoryArgs(item, "pr", "checks", number.ToString(CultureInfo.InvariantCulture),
-                "--required", "--json", "bucket,name,state,workflow"), cancellationToken).ConfigureAwait(false);
-        // gh pr checks exits nonzero for pending/failing checks even with valid typed JSON.
-        // Those states gate readiness later; they do not block the first review handoff.
-        var required = checkResult.Started
-            ? PullRequestChecks.TrySummarizeRequired(checkResult.Stdout) : null;
-        if (required is null) return PullRequestObservation.Failed("pinned PR required checks are unreadable", before);
+        // Policy uncertainty blocks readiness, not independently established PR identity or the
+        // initial review handoff. The same complete reader is used by normal reconciliation.
+        var required = await ReadRequiredCheckEvidenceAsync(item, before.HeadSha!, true, cancellationToken)
+            .ConfigureAwait(false);
         var after = await SnapshotAsync().ConfigureAwait(false);
         return after.Succeeded && after.Number == before.Number && after.IsOpen == true && after.IsDraft == true
             && string.Equals(after.HeadSha, before.HeadSha, StringComparison.OrdinalIgnoreCase)
-            ? after with { RequiredChecks = required }
+            ? after with
+            {
+                RequiredChecks = required.State,
+                RequiredEvidence = required.Evidence,
+                Error = required.Error,
+                NoObservedRequiredEvidence = required.NoObservedRequiredEvidence
+            }
             : PullRequestObservation.Failed("pinned PR changed during required-check observation", after);
     }
 

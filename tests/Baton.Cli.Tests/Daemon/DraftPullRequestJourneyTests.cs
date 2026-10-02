@@ -34,6 +34,9 @@ public sealed class DraftPullRequestJourneyTests
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken token)
         {
+            if (args is ["api", ..])
+                return Task.FromResult(RequiredCheckFixture.Read(args, Repository, Head,
+                    new GhCliResult(true, 0, """[{"name":"ci","bucket":"pass"}]""", "")));
             Assert.Equal("--repo", args[^2]);
             Assert.Equal(Repository, args[^1]);
             if (args is ["pr", "create", ..])

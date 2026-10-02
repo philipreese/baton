@@ -42,8 +42,10 @@ public sealed class WorkItemAdvancerTests
         RepositoryIdentity.From("https://github.com/aer-works/baton.git", null)!;
 
     private sealed class FakeGh(
-        string stdout, int exitCode = 0, string requiredBucket = "pass", int readyExitCode = 0) : IGhCliRunner
+        string stdout, int exitCode = 0, string requiredBucket = "pass", int readyExitCode = 0,
+        string? repository = null) : IGhCliRunner
     {
+        private readonly string _repository = repository ?? Repository;
         private bool _isDraft = !stdout.Contains("\"isDraft\":false", StringComparison.Ordinal);
 
         public List<string[]> Calls { get; } = [];
@@ -52,8 +54,11 @@ public sealed class WorkItemAdvancerTests
             string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
             Calls.Add(args.ToArray());
+            if (args is ["api", "--hostname", "github.com", var endpoint])
+                return Task.FromResult(FixtureApi(endpoint, stdout,
+                    $$$"""[{"name":"ci","bucket":"{{{requiredBucket}}}"}]"""));
             Assert.Equal("--repo", args[args.Count - 2]);
-            Assert.Equal(Repository, args[args.Count - 1]);
+            Assert.Equal(_repository, args[args.Count - 1]);
             if (exitCode != 0)
             {
                 return Task.FromResult(new GhCliResult(Started: true, exitCode, stdout, string.Empty));
@@ -127,11 +132,118 @@ public sealed class WorkItemAdvancerTests
     }
 
     private sealed class DelegateGh(
-        Func<string, IReadOnlyList<string>, CancellationToken, Task<GhCliResult>> run) : IGhCliRunner
+        Func<string, IReadOnlyList<string>, CancellationToken, Task<GhCliResult>> run,
+        bool useDeclaredPolicyFixture = true) : IGhCliRunner
     {
-        public Task<GhCliResult> RunAsync(
-            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
-            run(workingDirectory, args, cancellationToken);
+        private string _lastPr = "{}";
+        public List<IReadOnlyList<string>> Calls { get; } = [];
+
+        public async Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            Calls.Add(args.ToArray());
+            if (args is ["api", "--hostname", "github.com", var endpoint])
+            {
+                if (!useDeclaredPolicyFixture)
+                    return await run(workingDirectory, args, cancellationToken);
+
+                // Existing fixtures explicitly declare one ci requirement. Their injected bucket
+                // response supplies only results, never derives the declared set from that subset.
+                var result = await run(workingDirectory,
+                    ["pr", "checks", "77", "--required", "--json", "bucket,name,state,workflow", "--repo", Repository], cancellationToken);
+                return FixtureApi(endpoint, _lastPr, result.Stdout, result);
+            }
+            var observed = await run(workingDirectory, args, cancellationToken);
+            if (args is ["pr", "view" or "list", ..]) _lastPr = observed.Stdout;
+            return observed;
+        }
+    }
+
+    private static GhCliResult FixtureApi(string endpoint, string prJson, string buckets, GhCliResult? original = null)
+    {
+        if (endpoint.EndsWith("/protection", StringComparison.Ordinal))
+            return new(true, 0, """{"required_status_checks":{"contexts":["ci"],"checks":[{"context":"ci","app_id":15368}]}}""", string.Empty);
+        if (!endpoint.Contains("/check-runs?", StringComparison.Ordinal)) return new(true, 0, "[]", string.Empty);
+        try
+        {
+            using var pr = JsonDocument.Parse(prJson);
+            var candidate = pr.RootElement.ValueKind == JsonValueKind.Array ? pr.RootElement[0] : pr.RootElement;
+            var head = candidate.GetProperty("headRefOid").GetString();
+            using var checks = JsonDocument.Parse(buckets);
+            var entries = checks.RootElement.EnumerateArray().Select((entry, index) => new
+            {
+                id = index + 1,
+                name = entry.TryGetProperty("name", out var name) ? name.GetString() : "ci",
+                head_sha = head,
+                status = entry.GetProperty("bucket").GetString() == "pending" ? "queued" : "completed",
+                conclusion = entry.GetProperty("bucket").GetString() == "pending" ? null : entry.GetProperty("bucket").GetString() switch
+                {
+                    "pass" => "success",
+                    "skipping" => "skipped",
+                    _ => "failure",
+                },
+                started_at = Now.ToString("O"),
+                app = new { id = 15368 },
+            }).ToArray();
+            return new(true, 0, JsonSerializer.Serialize(new { total_count = entries.Length, check_runs = entries }), string.Empty);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException or IndexOutOfRangeException)
+        {
+            return original ?? new(true, 0, "not-json", string.Empty);
+        }
+    }
+
+    private static GhCliResult RequiredApiFixture(string endpoint, string head, bool readable)
+    {
+        if (!readable) return new(true, 1, string.Empty, "required-check fixture unavailable");
+        if (endpoint.EndsWith("/protection", StringComparison.Ordinal))
+            return new(true, 0,
+                "{\"required_status_checks\":{\"contexts\":[\"ci\"],\"checks\":[{\"context\":\"ci\",\"app_id\":15368}]}}",
+                string.Empty);
+        if (endpoint.Contains("/rules/branches/", StringComparison.Ordinal))
+            return new(true, 0, "[]", string.Empty);
+        if (endpoint.Contains("/check-runs?", StringComparison.Ordinal))
+            return new(true, 0, JsonSerializer.Serialize(new
+            {
+                total_count = 1,
+                check_runs = new[]
+                {
+                    new
+                    {
+                        id = 1, name = "ci", head_sha = head, status = "completed", conclusion = "success",
+                        started_at = Now.ToString("O"), app = new { id = 15368 },
+                    }
+                }
+            }), string.Empty);
+        if (endpoint.Contains("/statuses?", StringComparison.Ordinal))
+            return new(true, 0, "[]", string.Empty);
+        return new(true, 1, string.Empty, "unexpected required-check fixture endpoint");
+    }
+
+    private static GhCliResult RequiredApiNoObservedFixture(string endpoint, string head)
+    {
+        if (endpoint.EndsWith("/protection", StringComparison.Ordinal))
+            return new(true, 0,
+                "{\"required_status_checks\":{\"contexts\":[\"ci\"],\"checks\":[{\"context\":\"ci\",\"app_id\":15368}]}}",
+                string.Empty);
+        if (endpoint.Contains("/rules/branches/", StringComparison.Ordinal))
+            return new(true, 0, "[]", string.Empty);
+        if (endpoint.Contains("/check-runs?", StringComparison.Ordinal))
+            return new(true, 0, JsonSerializer.Serialize(new
+            {
+                total_count = 1,
+                check_runs = new[]
+                {
+                    new
+                    {
+                        id = 2, name = "optional", head_sha = head, status = "completed", conclusion = "success",
+                        started_at = Now.ToString("O"), app = new { id = 999 },
+                    }
+                }
+            }), string.Empty);
+        if (endpoint.Contains("/statuses?", StringComparison.Ordinal))
+            return new(true, 0, "[]", string.Empty);
+        return new(true, 1, string.Empty, "unexpected no-observed fixture endpoint");
     }
 
     private static string PrJson(int number, string headSha, bool isDraft = true) =>
@@ -231,7 +343,7 @@ public sealed class WorkItemAdvancerTests
         string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0,
         bool? automaticFixUsed = false, IReadOnlyList<QueueStageSelection>? stageSelections = null,
         FleetAttemptId? attemptId = null, DateTimeOffset? launchedAt = null,
-        IReadOnlyList<string>? requirements = null)
+        IReadOnlyList<string>? requirements = null, string? repository = null)
     {
         var workspace = Path.Combine(home, "w1934");
         Directory.CreateDirectory(workspace);
@@ -248,7 +360,7 @@ public sealed class WorkItemAdvancerTests
             SpecFile = BatonPaths.QueueSpecFile("1934-lane"),
             Issue = 1934,
             Branch = "1934-lane",
-            Repository = Repository,
+            Repository = repository ?? Repository,
             Stage = stage,
             Round = round,
             AutomaticFixUsed = automaticFixUsed,
@@ -274,6 +386,201 @@ public sealed class WorkItemAdvancerTests
         RepositoryIdentity? repositoryIdentity = null) =>
         new(gh, workspaceHead, (_, _) => Task.FromResult<RepositoryIdentity?>(
             repositoryIdentity ?? ExpectedRepositoryIdentity));
+
+    [Fact]
+    public async Task Declared_required_context_missing_from_successful_subset_never_grants_readiness()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+            var isDraft = true;
+            var includeCi = false;
+            var readyCalls = 0;
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                string output;
+                if (args is ["api", ..])
+                {
+                    var endpoint = args.First(argument => argument.StartsWith("repos/", StringComparison.Ordinal));
+                    output = endpoint.Contains("protection", StringComparison.Ordinal)
+                        ? """{"required_status_checks":{"contexts":["ci","lint","shape"],"checks":[{"context":"ci","app_id":15368},{"context":"lint","app_id":15368},{"context":"shape","app_id":15368}]}}"""
+                        : endpoint.Contains("rules/branches", StringComparison.Ordinal) ? "[]"
+                        : endpoint.Contains("check-runs", StringComparison.Ordinal)
+                            ? JsonSerializer.Serialize(new
+                            {
+                                total_count = includeCi ? 3 : 2,
+                                check_runs = (includeCi ? new[] { "lint", "shape", "ci" } : ["lint", "shape"])
+                                    .Select((name, index) => new
+                                    {
+                                        id = index + 1,
+                                        name,
+                                        head_sha = PushedSha,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        started_at = Now.ToString("O"),
+                                        app = new { id = 15368 },
+                                    }),
+                            })
+                            : "[]";
+                }
+                else if (args is ["pr", "checks", ..])
+                    output = includeCi ? """[{"name":"lint","bucket":"pass"},{"name":"shape","bucket":"pass"},{"name":"ci","bucket":"pass"}]"""
+                        : """[{"name":"lint","bucket":"pass"},{"name":"shape","bucket":"pass"}]""";
+                else if (args is ["pr", "ready", ..])
+                {
+                    isDraft = args.Contains("--undo", StringComparer.Ordinal);
+                    readyCalls++;
+                    output = "ok";
+                }
+                else output = args is ["pr", "view", ..]
+                    ? PrObject(77, PushedSha, isDraft) : PrJson(77, PushedSha, isDraft);
+                return Task.FromResult(new GhCliResult(true, 0, output, string.Empty));
+            }, useDeclaredPolicyFixture: false);
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha));
+            Assert.Empty(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(WorkStage.Review, (await ReadBackAsync()).Stage);
+            Assert.True(isDraft);
+            Assert.Equal(0, readyCalls);
+
+            includeCi = true;
+            Assert.Single(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
+            Assert.Equal(WorkStage.Ready, (await ReadBackAsync()).Stage);
+            Assert.False(isDraft);
+            Assert.Equal(1, readyCalls);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Passing_required_evidence_followed_by_unreadable_policy_waits_and_retains_terminal_room()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded,
+                ApprovingVerdict.Replace(PushedSha, FullPushedSha, StringComparison.Ordinal));
+            await SeedAsync(home, WorkStage.Review, room);
+            var isDraft = true;
+            var apiCalls = 0;
+            var initialEvidencePassed = false;
+            var readyCalls = 0;
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                if (args is ["api", "--hostname", "github.com", var endpoint])
+                {
+                    apiCalls++;
+                    if (apiCalls == 6) initialEvidencePassed = true;
+                    return Task.FromResult(RequiredApiFixture(endpoint, FullPushedSha, apiCalls <= 6));
+                }
+                if (args is ["pr", "ready", ..])
+                {
+                    readyCalls++;
+                    isDraft = args.Contains("--undo", StringComparer.Ordinal);
+                    return Task.FromResult(new GhCliResult(true, 0, "ok", string.Empty));
+                }
+                var output = args is ["pr", "view", ..]
+                    ? PrObject(77, FullPushedSha, isDraft)
+                    : PrJson(77, FullPushedSha);
+                return Task.FromResult(new GhCliResult(true, 0, output, string.Empty));
+            }, useDeclaredPolicyFixture: false);
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(FullPushedSha));
+
+            Assert.Empty(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(0, readyCalls);
+            Assert.True(initialEvidencePassed);
+            Assert.Equal(7, apiCalls);
+            var firstUnreadable = await ReadBackAsync();
+            Assert.Equal(1, firstUnreadable.RequiredCheckEvidenceWait!.AttemptCount);
+            Assert.Equal(FullPushedSha, firstUnreadable.RequiredCheckEvidenceWait.HeadSha);
+            Assert.Equal(room, firstUnreadable.RoomDirectory);
+
+            for (var attempt = 2; attempt <= 6; attempt++)
+            {
+                var facts = await advancer.AdvanceAsync(Now.AddSeconds(31 * (attempt - 1)), Ct);
+                var observed = await ReadBackAsync();
+                Assert.Equal(attempt, observed.RequiredCheckEvidenceWait!.AttemptCount);
+                Assert.Equal(FullPushedSha, observed.RequiredCheckEvidenceWait.HeadSha);
+                Assert.Equal(0, readyCalls);
+                if (attempt < 6) Assert.Empty(facts);
+                else Assert.Single(facts);
+            }
+
+            var exhausted = await ReadBackAsync();
+            Assert.Equal(QueueItemState.Failed, exhausted.State);
+            Assert.True(exhausted.Halted);
+            Assert.Equal(WorkStage.Review, exhausted.Stage);
+            Assert.Equal(room, exhausted.RoomDirectory);
+            Assert.Equal(Path.Combine(room, "verdict.json"), exhausted.LastVerdict);
+            Assert.Equal(QueueReconciliationKind.AwaitingRequiredCheckEvidence, exhausted.ReconciliationKind);
+            Assert.Equal(6, exhausted.RequiredCheckEvidenceWait!.AttemptCount);
+            Assert.Equal(FullPushedSha, exhausted.RequiredCheckEvidenceWait.HeadSha);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PostMarkReady_required_evidence_failure_undoes_before_waiting_on_known_head(bool sourceUnreadable)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded,
+                ApprovingVerdict.Replace(PushedSha, FullPushedSha, StringComparison.Ordinal));
+            await SeedAsync(home, WorkStage.Review, room);
+            var requiredEvidencePassing = true;
+            var isDraft = true;
+            var readyCalls = 0;
+            var undoCalls = 0;
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                if (args is ["api", "--hostname", "github.com", var endpoint])
+                    return Task.FromResult(requiredEvidencePassing
+                        ? RequiredApiFixture(endpoint, FullPushedSha, readable: true)
+                        : sourceUnreadable ? RequiredApiFixture(endpoint, FullPushedSha, readable: false)
+                        : RequiredApiNoObservedFixture(endpoint, FullPushedSha));
+                if (args is ["pr", "ready", ..])
+                {
+                    if (args.Contains("--undo", StringComparer.Ordinal))
+                    {
+                        undoCalls++;
+                        isDraft = true;
+                    }
+                    else
+                    {
+                        readyCalls++;
+                        isDraft = false;
+                        requiredEvidencePassing = false;
+                    }
+                    return Task.FromResult(new GhCliResult(true, 0, "ok", string.Empty));
+                }
+                var output = args is ["pr", "view", ..]
+                    ? PrObject(77, FullPushedSha, isDraft)
+                    : PrJson(77, FullPushedSha);
+                return Task.FromResult(new GhCliResult(true, 0, output, string.Empty));
+            }, useDeclaredPolicyFixture: false);
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(FullPushedSha));
+
+            Assert.Empty(await advancer.AdvanceAsync(Now, Ct));
+            var waiting = await ReadBackAsync();
+            Assert.Equal(WorkStage.Review, waiting.Stage);
+            Assert.Equal(room, waiting.RoomDirectory);
+            Assert.True(isDraft);
+            Assert.Equal(1, readyCalls);
+            Assert.Equal(1, undoCalls);
+            Assert.Equal(1, waiting.RequiredCheckEvidenceWait!.AttemptCount);
+            Assert.Equal(FullPushedSha, waiting.RequiredCheckEvidenceWait.HeadSha);
+            Assert.Null(waiting.ReadinessMutationClaim);
+            Assert.Contains(gh.Calls, args => args is ["pr", "ready", "77", "--undo", "--repo", Repository]);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
 
     private static string CreateTempHome()
     {
@@ -967,21 +1274,37 @@ public sealed class WorkItemAdvancerTests
     [Fact]
     public async Task Every_PR_read_check_and_mutation_is_scoped_to_the_persisted_repository()
     {
+        const string persistedRepository = "github.com/philipreese/baton";
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
-            await SeedAsync(home, WorkStage.Review, room);
-            var gh = new FakeGh(PrJson(77, PushedSha));
+            await SeedAsync(home, WorkStage.Review, room, repository: persistedRepository);
+            var gh = new FakeGh(PrJson(77, PushedSha), repository: persistedRepository);
 
-            await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+            var identity = RepositoryIdentity.From("https://github.com/philipreese/baton.git", null);
+            await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha), identity).AdvanceAsync(Now, Ct);
 
-            Assert.Contains(gh.Calls, args => args is ["pr", "list", .., "--repo", Repository]);
-            Assert.Contains(gh.Calls, args => args is ["pr", "view", "77", .., "--repo", Repository]);
-            Assert.Contains(gh.Calls, args => args is ["pr", "checks", "77", .., "--repo", Repository]);
-            Assert.Contains(gh.Calls, args => args is ["pr", "ready", "77", "--repo", Repository]);
-            Assert.All(gh.Calls, args => Assert.Equal(Repository, args[args.Length - 1]));
+            Assert.Contains(gh.Calls, args => args is ["pr", "list", .., "--repo", persistedRepository]);
+            Assert.Contains(gh.Calls, args => args is ["pr", "view", "77", .., "--repo", persistedRepository]);
+            Assert.Contains(gh.Calls, args => args is ["pr", "ready", "77", "--repo", persistedRepository]);
+
+            var apiCalls = gh.Calls.Where(args => args is ["api", "--hostname", "github.com", _]).ToArray();
+            Assert.NotEmpty(apiCalls);
+            Assert.All(apiCalls, args =>
+            {
+                Assert.Equal("api", args[0]);
+                Assert.Equal("--hostname", args[1]);
+                Assert.Equal("github.com", args[2]);
+                Assert.StartsWith("repos/philipreese/baton/", args[3], StringComparison.Ordinal);
+                Assert.True(
+                    args[3].Contains("/protection", StringComparison.Ordinal)
+                    || args[3].Contains("/rules/branches/", StringComparison.Ordinal)
+                    || args[3].Contains("/check-runs?", StringComparison.Ordinal)
+                    || args[3].Contains("/statuses?", StringComparison.Ordinal),
+                    $"unexpected API endpoint: {args[3]}");
+            });
         }
         finally
         {
@@ -1267,7 +1590,7 @@ public sealed class WorkItemAdvancerTests
 
             // A later push invalidates the approval that made the item ready. The existing PR is
             // first re-drafted and only then is a cold re-review queued for the new exact head.
-            const string newHead = "eeeeeeeeffffffff1111111122222222";
+            const string newHead = "eeeeeeeeffffffff111111112222222233333333";
             var changedGh = new FakeGh(PrJson(77, newHead, isDraft: false));
             var changedFacts = await new WorkItemAdvancer(
                 changedGh, (_, _) => Task.FromResult<string?>(newHead))
@@ -1285,6 +1608,85 @@ public sealed class WorkItemAdvancerTests
             Assert.Contains(
                 $"`{newHead}` exactly, with no PR label, branch, prefix, suffix, or whitespace.",
                 reReviewBrief, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Missing_verdict_halts_before_required_check_wait_or_readiness_mutation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await SeedAsync(home, WorkStage.Review, room);
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                if (args is ["api", "--hostname", "github.com", var endpoint])
+                    return Task.FromResult(RequiredApiFixture(endpoint, PushedSha, readable: false));
+                var output = args is ["pr", "view", ..]
+                    ? PrObject(77, PushedSha, isDraft: true)
+                    : PrJson(77, PushedSha, isDraft: true);
+                return Task.FromResult(new GhCliResult(true, 0, output, string.Empty));
+            }, useDeclaredPolicyFixture: false);
+
+            var facts = await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Failed, facts[0].Decision);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Contains("wrote no readable verdict.json", item.Error!, StringComparison.Ordinal);
+            Assert.Equal(WorkStage.Review, item.Stage);
+            Assert.Equal(room, item.RoomDirectory);
+            Assert.Null(item.RequiredCheckEvidenceWait);
+            Assert.Null(item.ReadinessMutationClaim);
+            Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
+            Assert.Contains(gh.Calls, args => args is ["api", "--hostname", "github.com", ..]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Stale_review_approval_queues_rereview_before_unknown_required_evidence_can_wait()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                if (args is ["api", "--hostname", "github.com", var endpoint])
+                    return Task.FromResult(RequiredApiNoObservedFixture(endpoint, FullPushedSha));
+                var output = args is ["pr", "view", ..]
+                    ? PrObject(77, FullPushedSha, isDraft: true)
+                    : PrJson(77, FullPushedSha, isDraft: true);
+                return Task.FromResult(new GhCliResult(true, 0, output, string.Empty));
+            }, useDeclaredPolicyFixture: false);
+
+            var facts = await Advancer(gh, (_, _) => Task.FromResult<string?>(FullPushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Advanced, facts[0].Decision);
+            Assert.Equal(WorkStage.ReReview, item.Stage);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(77, item.PullRequest);
+            Assert.Equal(FullPushedSha, item.ChecksHeadSha);
+            Assert.Null(item.RequiredCheckEvidenceWait);
+            Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
         }
         finally
         {
@@ -2929,9 +3331,12 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(FullPushedSha, waiting.RequiredCheckEvidenceWait.HeadSha);
 
             checks = null;
-            Assert.Single(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
             var failedObservation = await ReadBackAsync();
-            Assert.Equal(waiting.RequiredCheckEvidenceWait, failedObservation.RequiredCheckEvidenceWait);
+            Assert.Equal(2, failedObservation.RequiredCheckEvidenceWait!.AttemptCount);
+            Assert.Equal(waiting.RequiredCheckEvidenceWait.FirstUnreadableAt,
+                failedObservation.RequiredCheckEvidenceWait.FirstUnreadableAt);
+            Assert.Equal(WorkStage.Implement, failedObservation.Stage);
 
             checks = "[{\"name\":\"ci\",\"bucket\":\"pass\"}]";
             var facts = await advancer.AdvanceAsync(Now.AddSeconds(62), Ct);
@@ -2976,17 +3381,12 @@ public sealed class WorkItemAdvancerTests
             Assert.Single(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
             var changedHeadFailure = await ReadBackAsync();
             Assert.Null(changedHeadFailure.RequiredCheckEvidenceWait);
-            Assert.Null(changedHeadFailure.Checks);
-            Assert.Null(changedHeadFailure.ChecksObservedAt);
-            Assert.Null(changedHeadFailure.ChecksHeadSha);
+            // The PR itself remains verified; only required policy/source evidence is unknown.
+            // A new head may enter first review, but cannot inherit the old readiness wait.
+            Assert.Equal(WorkStage.Review, changedHeadFailure.Stage);
+            Assert.Equal(headSha, changedHeadFailure.ChecksHeadSha);
             Assert.False(changedHeadFailure.Halted);
-
-            checks = "[]";
-            Assert.Empty(await advancer.AdvanceAsync(Now.AddSeconds(32), Ct));
-            var restarted = await ReadBackAsync();
-            Assert.Equal(headSha, restarted.RequiredCheckEvidenceWait!.HeadSha);
-            Assert.Equal(1, restarted.RequiredCheckEvidenceWait.AttemptCount);
-            Assert.Equal(Now.AddSeconds(32), restarted.RequiredCheckEvidenceWait.FirstUnreadableAt);
+            Assert.Null(changedHeadFailure.OwnedTask?.Ready);
         }
         finally
         {

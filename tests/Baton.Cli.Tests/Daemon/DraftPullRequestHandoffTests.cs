@@ -46,6 +46,12 @@ public sealed class DraftPullRequestHandoffTests
             lock (_sync)
             {
                 Calls.Add(args.ToArray());
+                if (args is ["api", ..])
+                {
+                    using var observed = PullRequestJson is null ? null : JsonDocument.Parse(PullRequestJson);
+                    var observedHead = observed?.RootElement.GetProperty("headRefOid").GetString() ?? HeadSha;
+                    return Task.FromResult(RequiredCheckFixture.Read(args, Repository, observedHead, RequiredChecksResult));
+                }
                 Assert.Equal("--repo", args[^2]);
                 Assert.Equal(Repository, args[^1]);
                 if (args is ["pr", "create", ..])

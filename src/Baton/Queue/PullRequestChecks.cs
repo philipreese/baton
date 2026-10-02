@@ -4,7 +4,7 @@ namespace Baton.Queue;
 
 /// <summary>
 /// One vocabulary for what a pull request's checks are doing. <see cref="Summarize"/> reduces the
-/// display-only <c>statusCheckRollup</c> (#1912 slice 1), while <see cref="TrySummarizeRequired"/>
+/// display-only <c>statusCheckRollup</c> (#1912 slice 1), while <see cref="SummarizeRequired"/>
 /// independently reduces current-head required checks for readiness (#2131). The board field remains
 /// display-only; lifecycle policy receives the required-check reading as a separate value.
 /// </summary>
@@ -134,12 +134,12 @@ public static class PullRequestChecks
     }
 
     /// <summary>
-    /// Reduces the JSON emitted by <c>gh pr checks --required --json bucket,...</c>. The command's
+    /// Reduces bucket JSON for diagnostics/tests only, never readiness authority. The command's
     /// exit code describes the check result, so callers deliberately parse its output even when that
     /// receipt is non-zero. Null means no trustworthy JSON evidence; an empty array means
     /// <see cref="None"/>, not passing.
     /// </summary>
-    public static string? TrySummarizeRequired(string json)
+    public static string? TrySummarizeBuckets(string json)
     {
         try
         {
@@ -180,6 +180,46 @@ public static class PullRequestChecks
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Protected invariant: a green subset is not complete evidence. Each exact declared context
+    /// and App binding needs its own current-head witness; optional results grant no authority.
+    /// </summary>
+    public static string? SummarizeRequired(
+        IReadOnlyList<RequiredCheckRequirement> requirements,
+        IReadOnlyList<RequiredCheckWitness> witnesses)
+    {
+        if (requirements.Count == 0) return None;
+        if (requirements.Any(r => string.IsNullOrEmpty(r.Context) || r.AppId is <= 0)
+            || witnesses.Any(w => string.IsNullOrEmpty(w.Context) || w.Id <= 0
+                || w.Verdict is not (Passing or Pending or Failing)
+                || w.Source is not ("check-run" or "status")
+                || w.Source == "check-run" && w.AppId is not > 0
+                || w.Source == "status" && (w.AppId is not null || w.StartedAt is null)
+                || w.StartedAt is null && w.Verdict != Pending)) return null;
+        var verdicts = new List<string>();
+        foreach (var requirement in requirements)
+        {
+            var matching = witnesses.Where(witness => witness.Context == requirement.Context
+                && (requirement.AppId is null || witness.Source == "check-run" && witness.AppId == requirement.AppId))
+                .GroupBy(witness => (witness.Source, witness.AppId)).ToArray();
+            if (matching.Length == 0) { verdicts.Add(Pending); continue; }
+            foreach (var source in matching)
+            {
+                // A queued check may have no start timestamp. It is pending without an invented
+                // ordering key; an older green run cannot mask this unorderable pending witness.
+                if (source.Any(w => w.StartedAt is null)) { verdicts.Add(Pending); continue; }
+                // Multiple reruns are ordered only by their recorded start; ties cannot pick green
+                // arbitrarily. A classic status and a check run with the same required name must
+                // both succeed, rather than one masking the other.
+                var newestAt = source.Max(witness => witness.StartedAt);
+                var newest = source.Where(witness => witness.StartedAt == newestAt).ToArray();
+                if (newest.Length != 1) return null;
+                verdicts.Add(newest[0].Verdict);
+            }
+        }
+        return verdicts.Contains(Failing) ? Failing : verdicts.Contains(Pending) ? Pending : Passing;
     }
 
     /// <summary>
