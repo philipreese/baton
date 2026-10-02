@@ -285,5 +285,124 @@ public sealed class MemoryCanonicalGenerationTests
             AssertNoGenerationTemps(root);
         });
     }
+
+    [Fact]
+    public void A_throwing_replacement_observer_preserves_the_real_failure_and_state()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        WithRoot(root =>
+        {
+            MemoryCanonicalGeneration.Mutate(root, () => 1);
+            var oldGeneration = MemoryCanonicalGeneration.Capture(root);
+            var generationPath = GenerationPath(root);
+            var canonicalPath = Path.Combine(root, "canonical.jsonl");
+            File.WriteAllText(canonicalPath, "observer sentinel\n");
+            var canonicalBytes = File.ReadAllBytes(canonicalPath);
+            using var holder = new FileStream(
+                generationPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+            var knownObserverFailure = new InvalidOperationException("observer deliberately stopped retry");
+            Exception? actualReplacementFailure = null;
+            var actionCalls = 0;
+            var thrown = Assert.Throws<InvalidOperationException>(() =>
+                MemoryCanonicalGeneration.Mutate<int>(
+                    root,
+                    () =>
+                    {
+                        actionCalls++;
+                        return 2;
+                    },
+                    TimeSpan.FromSeconds(1),
+                    error =>
+                    {
+                        AssertReplacementFailure(error);
+                        actualReplacementFailure = error;
+                        throw knownObserverFailure;
+                    }));
+
+            Assert.Same(knownObserverFailure, thrown);
+            Assert.Same(actualReplacementFailure, thrown.Data["MemoryGenerationReplacementFailure"]);
+            Assert.NotNull(actualReplacementFailure);
+            Assert.Equal(0, actionCalls);
+            Assert.Equal(oldGeneration, MemoryCanonicalGeneration.Capture(root));
+            Assert.Equal(canonicalBytes, File.ReadAllBytes(canonicalPath));
+            AssertNoGenerationTemps(root);
+        });
+    }
+
+    [Fact]
+    public void Cleanup_failure_does_not_mask_the_first_real_replacement_failure()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        WithRoot(root =>
+        {
+            MemoryCanonicalGeneration.Mutate(root, () => 1);
+            var oldGeneration = MemoryCanonicalGeneration.Capture(root);
+            var generationPath = GenerationPath(root);
+            var canonicalPath = Path.Combine(root, "canonical.jsonl");
+            File.WriteAllText(canonicalPath, "cleanup sentinel\n");
+            var canonicalBytes = File.ReadAllBytes(canonicalPath);
+            using var holder = new FileStream(
+                generationPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+            FileStream? stagedHolder = null;
+            string? stagedPath = null;
+            var replacementFailures = 0;
+            var actionCalls = 0;
+            Exception? firstReplacementFailure = null;
+            Exception? thrown = null;
+            try
+            {
+                try
+                {
+                    MemoryCanonicalGeneration.Mutate<int>(
+                        root,
+                        () =>
+                        {
+                            actionCalls++;
+                            return 2;
+                        },
+                        TimeSpan.Zero,
+                        error =>
+                        {
+                            AssertReplacementFailure(error);
+                            replacementFailures++;
+                            firstReplacementFailure = error;
+                            stagedPath = Assert.Single(
+                                Directory.EnumerateFiles(root, "memory-generation.*.tmp"));
+                            stagedHolder = new FileStream(
+                                stagedPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                        });
+                }
+                catch (Exception error)
+                {
+                    thrown = error;
+                }
+
+                Assert.NotNull(thrown);
+                Assert.Same(firstReplacementFailure, thrown);
+                Assert.Equal(1, replacementFailures);
+                Assert.Equal(0, actionCalls);
+                AssertReplacementFailure(thrown!);
+                var cleanupFailure = Assert.IsAssignableFrom<Exception>(
+                    thrown!.Data["MemoryGenerationCleanupFailure"]);
+                AssertReplacementFailure(cleanupFailure);
+                Assert.NotNull(stagedHolder);
+                Assert.True(File.Exists(stagedPath));
+                Assert.Equal(oldGeneration, MemoryCanonicalGeneration.Capture(root));
+                Assert.Equal(canonicalBytes, File.ReadAllBytes(canonicalPath));
+            }
+            finally
+            {
+                stagedHolder?.Dispose();
+                if (stagedPath is not null && File.Exists(stagedPath))
+                    File.Delete(stagedPath);
+            }
+
+            AssertNoGenerationTemps(root);
+        });
+    }
 }
 
