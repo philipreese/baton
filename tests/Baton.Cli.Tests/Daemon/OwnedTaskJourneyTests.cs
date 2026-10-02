@@ -33,6 +33,10 @@ public sealed class OwnedTaskJourneyTests
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken token)
         {
+            if (args is ["api", ..])
+                return Task.FromResult(RequiredCheckFixture.Read(args, Repository, Head,
+                    FailChecks ? new GhCliResult(true, 1, "", "transient required-check lookup failure")
+                    : new GhCliResult(true, 0, $$"""[{"name":"ci","bucket":"{{CheckBucket}}"}]""", "")));
             Assert.Equal("--repo", args[^2]);
             Assert.Equal(Repository, args[^1]);
             if (args is ["pr", "ready", ..])
@@ -120,6 +124,7 @@ public sealed class OwnedTaskJourneyTests
             }
             WorkItemAdvancer Advancer() => new(forge, (_, _) => Task.FromResult<string?>(head),
                 (_, _) => Task.FromResult<RepositoryIdentity?>(Identity), appendFleetEvent: Append,
+                requiredCheckClock: () => now,
                 git: (program, worktree, args, token) => Task.FromResult(Git(program, worktree, args, token)));
             QueueSchedulerService Scheduler() => new(
                 (request, _) =>
@@ -171,6 +176,10 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(WorkStage.Ready, ready.Stage);
             Assert.Equal(HeadB, ready.OwnedTask!.Ready?.HeadSha);
             Assert.Equal(launches[3].Item.AttemptId?.Value, ready.OwnedTask.Ready?.ReviewAttemptId);
+            Assert.NotNull(ready.OwnedTask.Ready?.RequiredEvidence);
+            Assert.Equal(Repository, ready.OwnedTask.Ready!.RequiredEvidence!.Repository);
+            Assert.Equal(HeadB, ready.OwnedTask.Ready.RequiredEvidence.HeadSha);
+            Assert.True(ready.OwnedTask.Ready.ReadyObservedAt >= ready.OwnedTask.Ready.ChecksObservedAt);
             Assert.Equal(4, launches.Count);
             await Scheduler().TickOnceAsync(Ct);
             Assert.Equal(4, launches.Count);

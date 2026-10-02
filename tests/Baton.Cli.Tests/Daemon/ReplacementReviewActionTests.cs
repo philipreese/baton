@@ -815,6 +815,9 @@ public sealed class ReplacementReviewActionTests
         public Task<GhCliResult> RunAsync(
             string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
+            if (args is ["api", ..])
+                return Task.FromResult(RequiredCheckFixture.Read(args, Repository, HeadSha,
+                    new GhCliResult(true, 0, """[{"name":"ci","bucket":"pass"}]""", "")));
             if (args.Contains("checks", StringComparer.Ordinal))
                 return Task.FromResult(new GhCliResult(true, 0,
                     "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", string.Empty));

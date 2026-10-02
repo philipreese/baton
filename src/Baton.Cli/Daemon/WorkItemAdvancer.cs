@@ -58,6 +58,7 @@ public sealed partial class WorkItemAdvancer
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
     private readonly QueueFleetEventOutbox _fleetOutbox;
     private readonly ConductorObligationStore _conductorObligations;
+    private readonly Func<DateTimeOffset> _requiredCheckClock;
 
     public WorkItemAdvancer()
         : this(
@@ -78,13 +79,15 @@ public sealed partial class WorkItemAdvancer
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
         ConductorObligationStore? conductorObligations = null,
         WorkspaceDeliveryProbe.CommandRunner? git = null,
-        TimeSpan? draftCommandTimeout = null)
+        TimeSpan? draftCommandTimeout = null,
+        Func<DateTimeOffset>? requiredCheckClock = null)
     {
         _gh = gh ?? new GhCliRunner();
         _draftGh = gh ?? new GhCliRunner(requireOutsideWorkspace: true);
         _git = git ?? WorkspaceDeliveryProbe.SpawnAsync;
         _gitInjected = git is not null;
         _draftCommandTimeout = draftCommandTimeout ?? DefaultDraftPullRequestCommandTimeout;
+        _requiredCheckClock = requiredCheckClock ?? (() => DateTimeOffset.UtcNow);
         _workspaceHead = workspaceHead ?? ReadWorkspaceHeadAsync;
         _repositoryIdentity = repositoryIdentity;
         _boardObservationTimeout = boardObservationTimeout ?? WorkspaceDeliveryProbe.SpawnTimeout;
@@ -406,6 +409,7 @@ public sealed partial class WorkItemAdvancer
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
+        var restoredDraft = false;
 
         // A crash can leave a durable claim after GitHub reached the requested state but before the
         // queue observation committed. Re-own it with the same complete-row CAS used below before
@@ -431,40 +435,56 @@ public sealed partial class WorkItemAdvancer
         // - A verified open draft resolves the one halted no-PR delivery identity. Review
         //   may proceed without required-check evidence; trapping this recovery in the readiness wait
         //   would overwrite its original halt and eventually emit a second failure fact.
-        if (!awaitingMissingPullRequest
-            && transition.PullRequestAction != PullRequestReadinessAction.MarkDraft
-            && pr is { Succeeded: true, Number: { } number, HeadSha: { Length: > 0 } headSha, IsOpen: true }
-            && pr.RequiredChecks == PullRequestChecks.None)
+        async Task<(bool Waiting, QueueDecisionEntry? Entry)> RetainRequiredCheckWaitAsync(bool afterDraftRestoration = false)
         {
-            var prior = item.RequiredCheckEvidenceWait;
-            var changedHead = !string.Equals(prior?.HeadSha, headSha, StringComparison.Ordinal);
-            var attempts = changedHead ? 1 : prior!.AttemptCount + 1;
-            var reason = $"waiting for required-check evidence for open PR #{number} at {headSha} (attempt {attempts}/{MaxRequiredCheckEvidenceAttempts})";
-            var wait = new RequiredCheckEvidenceWait(
-                headSha, changedHead ? now : prior!.FirstUnreadableAt, now, attempts, reason);
-            if (attempts >= MaxRequiredCheckEvidenceAttempts)
+            // A missing verdict or selected repair/re-review remains actionable on an already-draft
+            // PR too. Check waiting must not replace that diagnosis with an unrelated evidence halt.
+            if (transition.Kind == WorkItemTransitionKind.NeedsOperator
+                || transition.Kind == WorkItemTransitionKind.Dispatch
+                    && (afterDraftRestoration || transition.NextStage != WorkStage.Review))
+                return (false, null);
+            if (!awaitingMissingPullRequest
+                && transition.PullRequestAction != PullRequestReadinessAction.MarkDraft
+                && pr is { Succeeded: true, Number: { } number, HeadSha: { Length: > 0 } headSha, IsOpen: true }
+                && (pr.NoObservedRequiredEvidence || pr.RequiredChecks == PullRequestChecks.None
+                    || pr.RequiredChecks is null && (transition.NextStage is not (WorkStage.Review or WorkStage.ReReview)
+                        || item.RequiredCheckEvidenceWait?.HeadSha == headSha)))
             {
-                var exhausted = new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0,
-                    $"{reason}; observation bound exhausted after first unreadable observation at "
-                    + $"{(changedHead ? now : prior!.FirstUnreadableAt):O}; the settled room remains attached and no worker was dispatched",
-                    ReconciliationKind: QueueReconciliationKind.AwaitingRequiredCheckEvidence,
-                    HaltCause: StoppedWorkHaltCause.UnavailableCheckEvidence);
-                return await FailAsync(item, stage, exhausted, verdictPath, now, room, wait,
-                    pr, sentinel, verdict is not null, outcome, cancellationToken).ConfigureAwait(false);
-            }
+                var prior = item.RequiredCheckEvidenceWait;
+                var changedHead = !string.Equals(prior?.HeadSha, headSha, StringComparison.Ordinal);
+                var attempts = changedHead ? 1 : prior!.AttemptCount + 1;
+                var reason = $"waiting for required-check evidence for open PR #{number} at {headSha} (attempt {attempts}/{MaxRequiredCheckEvidenceAttempts})"
+                    + (pr.Error is { Length: > 0 } checkError ? $"; {checkError}" : string.Empty);
+                var wait = new RequiredCheckEvidenceWait(
+                    headSha, changedHead ? now : prior!.FirstUnreadableAt, now, attempts, reason);
+                if (attempts >= MaxRequiredCheckEvidenceAttempts)
+                {
+                    var exhausted = new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0,
+                        $"{reason}; observation bound exhausted after first unreadable observation at "
+                        + $"{(changedHead ? now : prior!.FirstUnreadableAt):O}; the settled room remains attached and no worker was dispatched",
+                        ReconciliationKind: QueueReconciliationKind.AwaitingRequiredCheckEvidence,
+                        HaltCause: StoppedWorkHaltCause.UnavailableCheckEvidence);
+                    return (true, await FailAsync(item, stage, exhausted, verdictPath, now, room, wait,
+                        pr, sentinel, verdict is not null, outcome, cancellationToken).ConfigureAwait(false));
+                }
 
-            await TryMarkAsync(item, existing => existing with
-            {
-                PullRequest = number,
-                Checks = changedHead ? null : existing.Checks,
-                ChecksObservedAt = changedHead ? null : existing.ChecksObservedAt,
-                ChecksHeadSha = changedHead ? null : existing.ChecksHeadSha,
-                RequiredCheckEvidenceWait = wait,
-                Error = reason,
-                ReadinessMutationClaim = null,
-            }).ConfigureAwait(false);
-            return null;
+                await TryMarkAsync(item, existing => existing with
+                {
+                    PullRequest = number,
+                    Checks = changedHead ? null : existing.Checks,
+                    ChecksObservedAt = changedHead ? null : existing.ChecksObservedAt,
+                    ChecksHeadSha = changedHead ? null : existing.ChecksHeadSha,
+                    RequiredCheckEvidenceWait = wait,
+                    Error = reason,
+                    ReadinessMutationClaim = null,
+                }).ConfigureAwait(false);
+                return (true, null);
+            }
+            return (false, null);
         }
+
+        var initialWait = await RetainRequiredCheckWaitAsync().ConfigureAwait(false);
+        if (initialWait.Waiting) return initialWait.Entry;
 
         // A readiness mutation is never trusted from the command receipt. Re-observe the PR after
         // every attempt, then ask the pure lifecycle again. The bounded loop covers the one real
@@ -472,6 +492,17 @@ public sealed partial class WorkItemAdvancer
         // A third requested action means GitHub never converged; retain the obligation for next tick.
         for (var attempt = 0; transition.PullRequestAction != PullRequestReadinessAction.None && attempt < 3; attempt++)
         {
+            if (transition.PullRequestAction == PullRequestReadinessAction.MarkReady)
+            {
+                // Protected invariant: admission cannot borrow a prior policy read. Reconcile fresh
+                // complete policy and current-head evidence immediately before taking the claim.
+                pr = await ReadPullRequestAsync(item with { PullRequest = pr.Number }, cancellationToken)
+                    .ConfigureAwait(false);
+                transition = WorkItemLifecycle.Decide(Observation(pr));
+                var freshWait = await RetainRequiredCheckWaitAsync().ConfigureAwait(false);
+                if (freshWait.Waiting) return freshWait.Entry;
+                if (transition.PullRequestAction == PullRequestReadinessAction.None) break;
+            }
             if (pr.Number is not { } pullRequest)
             {
                 return await RetainReconciliationAsync(
@@ -524,6 +555,7 @@ public sealed partial class WorkItemAdvancer
             }
 
             pr = after;
+            restoredDraft |= desiredDraft;
             transition = WorkItemLifecycle.Decide(Observation(pr));
         }
 
@@ -533,6 +565,9 @@ public sealed partial class WorkItemAdvancer
                 item, "GitHub readiness did not converge after three confirmed observations; the obligation remains",
                 pr, now, room, recordFailure: true).ConfigureAwait(false);
         }
+
+        var finalWait = await RetainRequiredCheckWaitAsync(restoredDraft).ConfigureAwait(false);
+        if (finalWait.Waiting) return finalWait.Entry;
 
         // A current, green, already-ready PR and a closed/merged PR are stable terminal observations.
         // Do not rewrite queue.json or emit another transition fact on every daemon tick.
@@ -779,7 +814,10 @@ public sealed partial class WorkItemAdvancer
             var path = verdictPath ?? item.LastVerdict;
             if (path is null || !File.Exists(path) || pr.Number is not { } prNumber
                 || pr.HeadSha is not { Length: 40 } head || !head.All(Uri.IsHexDigit)
-                || pr.RequiredChecks != PullRequestChecks.Passing)
+                || pr.RequiredChecks != PullRequestChecks.Passing
+                || pr.RequiredEvidence is not { } requiredEvidence
+                || requiredEvidence.Repository != task.Repository || requiredEvidence.BaseBranch != "main"
+                || !string.Equals(requiredEvidence.HeadSha, head, StringComparison.OrdinalIgnoreCase))
                 throw new QueueStoreException($"Task '{task.Id}' cannot retain a ready receipt without exact PR, verdict, head and passing required checks.");
             var bytes = File.ReadAllBytes(path);
             if (!ReviewVerdictSchema.TryParse(bytes, out var approved, out _)
@@ -791,11 +829,12 @@ public sealed partial class WorkItemAdvancer
                 throw new QueueStoreException($"Task '{task.Id}' has no retained review attempt for readiness.");
             var verdictDigest = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
             var checksId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-                $"{task.Repository}\0{prNumber}\0{head}\0{pr.RequiredChecks}\0{now:O}"))).ToLowerInvariant();
+                $"{task.Repository}\0{prNumber}\0{head}\0{JsonSerializer.Serialize(requiredEvidence)}"))).ToLowerInvariant();
             var receiptId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
                 $"{task.Id}\0{head}\0{reviewAttempt}\0{verdictDigest}\0{checksId}"))).ToLowerInvariant();
             taskReceipt = new TaskReadyReceipt(receiptId, task.Id, task.Repository, task.Issue,
-                prNumber, head, reviewAttempt, verdictDigest, pr.RequiredChecks, checksId, now, now);
+                prNumber, head, reviewAttempt, verdictDigest, pr.RequiredChecks, checksId,
+                requiredEvidence.ObservedAt, now < requiredEvidence.ObservedAt ? requiredEvidence.ObservedAt : now, requiredEvidence);
         }
         var stopped = await TryMarkAsync(item, existing => existing with
         {
@@ -840,6 +879,7 @@ public sealed partial class WorkItemAdvancer
             : pr.Succeeded
               && pr.RequiredChecks is not null
               && pr.RequiredChecks != PullRequestChecks.None
+              && !pr.NoObservedRequiredEvidence
             ? null
             : existing;
 
@@ -1461,23 +1501,8 @@ public sealed partial class WorkItemAdvancer
             return before;
         }
 
-        var requiredArgs = RepositoryArgs(
-            item, "pr", "checks", before.Number.Value.ToString(CultureInfo.InvariantCulture),
-            "--required", "--json", "bucket,name,state,workflow");
-        var requiredResult = trustedDraftHandoff
-            ? await RunBoundedGhAsync(item, requiredArgs, cancellationToken).ConfigureAwait(false)
-            : await _gh.RunAsync(item.Workspace, requiredArgs, cancellationToken).ConfigureAwait(false);
-        var required = requiredResult.Started
-            ? PullRequestChecks.TrySummarizeRequired(requiredResult.Stdout)
-            : null;
-        if (required is null)
-        {
-            return PullRequestObservation.Failed(
-                !requiredResult.Started
-                    ? $"gh pr checks did not start for PR #{before.Number}"
-                    : $"gh pr checks returned unreadable required-check evidence for PR #{before.Number}",
-                before);
-        }
+        var required = await ReadRequiredCheckEvidenceAsync(item, before.HeadSha!, trustedDraftHandoff, cancellationToken)
+            .ConfigureAwait(false);
 
         // Even on the discovery tick, the stability read is exact by number. A second same-branch PR
         // appearing between the two reads therefore cannot replace the candidate about to be stored.
@@ -1496,8 +1521,20 @@ public sealed partial class WorkItemAdvancer
                 $"PR #{before.Number} changed while its required checks were being observed", after);
         }
 
-        return after with { RequiredChecks = required };
+        return after with
+        {
+            RequiredChecks = required.State,
+            RequiredEvidence = required.Evidence,
+            Error = required.Error,
+            NoObservedRequiredEvidence = required.NoObservedRequiredEvidence
+        };
     }
+
+    private Task<RequiredCheckEvidenceReader.Reading> ReadRequiredCheckEvidenceAsync(
+        QueueItem item, string head, bool trustedDraftHandoff, CancellationToken cancellationToken) =>
+        new RequiredCheckEvidenceReader((args, token) => trustedDraftHandoff
+            ? RunBoundedGhAsync(item, args, token) : _gh.RunAsync(item.Workspace, args, token), _requiredCheckClock)
+            .ReadAsync(item.Repository!, head, cancellationToken);
 
     /// <summary>
     /// Reads one operator-supplied PR through the same repository-qualified forge seam as lifecycle
@@ -1859,7 +1896,9 @@ public sealed partial class WorkItemAdvancer
         string? Checks,
         IReadOnlyList<PullRequestCheckRun> CheckRuns,
         string? RequiredChecks,
-        string? Error)
+        string? Error,
+        RequiredCheckEvidence? RequiredEvidence = null,
+        bool NoObservedRequiredEvidence = false)
     {
         internal static PullRequestObservation NoPullRequest { get; } =
             new(true, null, null, null, null, false, null, null, [], null, null);

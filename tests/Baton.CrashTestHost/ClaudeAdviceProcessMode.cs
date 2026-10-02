@@ -11,17 +11,23 @@ internal static class ClaudeAdviceProcessMode
         var preflight = File.Exists(preflightPath) ? File.ReadAllText(preflightPath).Trim() : null;
         if (args is ["--version"])
         {
+            if (preflight == "slow-overflow")
+                await Task.Delay(TimeSpan.FromSeconds(1)); // wait-ok: offline slow-start overflow fixture
             Console.WriteLine(preflight == "version" ? "2.1.282 (Claude Code)" : "2.1.283 (Claude Code)");
             return 0;
         }
         if (args is ["--help"])
         {
+            if (preflight == "slow-overflow")
+                await Task.Delay(TimeSpan.FromSeconds(1)); // wait-ok: offline slow-start overflow fixture
             Console.WriteLine((preflight == "flags" ? "" : "--tools ") + "--strict-mcp-config --mcp-config --setting-sources --disable-slash-commands "
                 + "--settings --session-id --max-turns --max-budget-usd --output-format --verbose --model --effort");
             return 0;
         }
         if (args is ["auth", "status"])
         {
+            if (preflight == "slow-overflow")
+                await Task.Delay(TimeSpan.FromSeconds(1)); // wait-ok: offline slow-start overflow fixture
             Console.WriteLine(preflight == "auth" ? """{"loggedIn":true,"authMethod":"api-key"}"""
                 : """{"loggedIn":true,"authMethod":"claude.ai"}""");
             return 0;
@@ -35,9 +41,11 @@ internal static class ClaudeAdviceProcessMode
         var session = args[sessionIndex + 1];
         Console.Error.WriteLine("parent-pid:" + Environment.ProcessId);
         Console.Error.Flush();
-        if (mode is "stdout-overflow" or "stderr-overflow")
+        if (mode is "stdout-overflow" or "stderr-overflow" or "stdout-overflow-slow" or "stderr-overflow-slow")
         {
-            var stream = mode == "stdout-overflow" ? Console.Out : Console.Error;
+            if (preflight == "slow-overflow")
+                await Task.Delay(TimeSpan.FromSeconds(2)); // wait-ok: offline slow-start overflow fixture
+            var stream = mode.StartsWith("stdout", StringComparison.Ordinal) ? Console.Out : Console.Error;
             stream.Write(new string('x', 1048577));
             stream.Flush();
             await Task.Delay(TimeSpan.FromMinutes(1)); // wait-ok: owned overflow helper must be killed

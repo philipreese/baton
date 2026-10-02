@@ -27,6 +27,9 @@ public sealed class StoppedWorkAdviceCaptureTests
             CancellationToken cancellationToken)
         {
             Calls.Add(args.ToArray());
+            if (args is ["api", ..])
+                return Task.FromResult(RequiredCheckFixture.Read(args, Repository, Head,
+                    new GhCliResult(true, 0, """[{"name":"ci","bucket":"pass"}]""", "")));
             Assert.Equal(Repository, args[^1]);
             if (args is ["pr", "checks", ..])
             {

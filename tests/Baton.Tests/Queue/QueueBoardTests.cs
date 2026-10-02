@@ -836,7 +836,7 @@ public sealed class QueueBoardTests
     [InlineData("""[{"bucket":"cancel"}]""", PullRequestChecks.Failing)]
     public void Required_check_buckets_fail_closed_without_conflating_an_empty_set(
         string json, string expected) =>
-        Assert.Equal(expected, PullRequestChecks.TrySummarizeRequired(json));
+        Assert.Equal(expected, PullRequestChecks.TrySummarizeBuckets(json));
 
     [Theory]
     [InlineData("""{}""")]
@@ -844,5 +844,5 @@ public sealed class QueueBoardTests
     [InlineData("""[42]""")]
     [InlineData("""not-json""")]
     public void Unreadable_required_check_evidence_is_unknown(string json) =>
-        Assert.Null(PullRequestChecks.TrySummarizeRequired(json));
+        Assert.Null(PullRequestChecks.TrySummarizeBuckets(json));
 }

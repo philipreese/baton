@@ -184,16 +184,22 @@ public sealed class ClaudeStoppedWorkAdviceAdapterTests
     [InlineData("terminal-error")]
     [InlineData("stdout-overflow")]
     [InlineData("stderr-overflow")]
+    [InlineData("stdout-overflow-slow")]
+    [InlineData("stderr-overflow-slow")]
     [InlineData("blocked-input")]
     [InlineData("parent-exit")]
     public async Task Real_contained_helpers_cover_transport_success_refusal_caps_and_descendants(string mode)
     {
         using var run = new HelperRun();
-        var adapter = new ClaudeStoppedWorkAdviceAdapter(run.Executable, TimeSpan.FromSeconds(4));
+        if (mode.EndsWith("-slow", StringComparison.Ordinal))
+            File.WriteAllText(Path.Combine(run.Root, "preflight.txt"), "slow-overflow");
+        // wait-ok: only blocked-input is a deliberate 4s cancellation control; all other helper cases are normal synchronization.
+        var adapter = new ClaudeStoppedWorkAdviceAdapter(run.Executable,
+            mode == "blocked-input" ? TimeSpan.FromSeconds(4) : TimeSpan.FromSeconds(60));
         var failure = await Record.ExceptionAsync(() => adapter.DecideAsync(Request(mode), Context(mode), run.Evidence, Ct));
         if (mode == "valid") Assert.Null(failure);
         else Assert.NotNull(failure);
-        if (mode is "stdout-overflow" or "stderr-overflow")
+        if (mode is "stdout-overflow" or "stderr-overflow" or "stdout-overflow-slow" or "stderr-overflow-slow")
             Assert.Contains("exceeded 1 MiB", failure!.Message, StringComparison.Ordinal);
         var diagnostics = File.ReadAllText(Path.Combine(run.Evidence, "claude.stderr.txt"));
         var parent = int.Parse(diagnostics.Split('\n').First(line => line.StartsWith("parent-pid:", StringComparison.Ordinal))[11..]);

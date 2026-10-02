@@ -44,7 +44,8 @@ public sealed record TaskReadyReceipt(
     string RequiredChecks,
     string ChecksObservationId,
     DateTimeOffset ChecksObservedAt,
-    DateTimeOffset ReadyObservedAt);
+    DateTimeOffset ReadyObservedAt,
+    RequiredCheckEvidence? RequiredEvidence = null);
 
 public sealed record TaskBlockedDisposition(
     string ReasonCode,

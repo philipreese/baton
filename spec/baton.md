@@ -8014,8 +8014,24 @@ protect the pre-provisioning window as well as the later queue lifecycle.
 
 The existing daemon drives implement → PR → review → one allowed fix → re-review → ready without
 another operator prompt. Readiness requires the existing exact-current-head approval and passing
-required-check evidence. Before ordinary stage fields are cleared, a task-owned ready receipt retains
-the review attempt, verdict digest, PR/head, checks observation, and observation time. The receipt
+required-check evidence. **Complete means declared policy, not a successful observed subset (#2551).**
+The existing bounded forge reader unions classic protection and every active applicable branch-rule
+page for the validated canonical host/owner/repository and `main` base. Every exact required context
+needs current-head source evidence, including its declared App binding. Policy fingerprints before
+and after that read must agree. Missing required contexts are pending; inaccessible, malformed,
+ambiguous or incomplete policy/source observations are unknown, never green. Optional checks remain
+display-only. An explicit empty policy is not passing. Rerun ordering cannot pick an arbitrary green
+duplicate. First review and restoration of a known PR to draft preserve independently verified PR
+identity when only policy is unknown. Immediate pre- and post-readiness mutation use the same reader.
+Each collection is bounded to five pages of 100 entries, each accepted response to 1 MiB, and an
+observation to 40 commands and 60 seconds with the existing per-command bound; exhaustion without
+completeness proof is unknown, with no new retry or polling service. A classic-policy 404 is ambiguous
+and cannot establish absence. Before ordinary stage fields are cleared, a task-owned ready receipt retains
+the review attempt, verdict digest, PR/head, checks observation, and observation time. New receipts
+also bind the normalized required-policy fingerprint and source-qualified witness digest to the
+repository/base/head and observation time. Older receipts without this binding stay historical,
+not retroactively certified complete. This is as-of evidence, not an atomic lease against later forge
+policy changes. The receipt
 is proof for that head and readiness occurrence, not a permanent completion certificate: an observed
 changed head or a new review round makes the previous receipt historical and status reports stale.
 Later checks are not inferred from the old receipt. Unrecoverable preparation or lifecycle failure retains a typed blocker. For task-owned

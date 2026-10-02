@@ -565,6 +565,9 @@ public sealed class StoppedWorkAdviceSchedulerTests
         public Task<GhCliResult> RunAsync(
             string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
+            if (args is ["api", ..])
+                return Task.FromResult(RequiredCheckFixture.Read(args, Repository, _head,
+                    new GhCliResult(true, 0, """[{"name":"ci","bucket":"pass"}]""", "")));
             if (args.Contains("ready", StringComparer.Ordinal))
             {
                 _isDraft = false;
