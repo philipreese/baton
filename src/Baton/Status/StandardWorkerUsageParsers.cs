@@ -304,6 +304,141 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
     }
 
     /// <summary>
+    /// #2559: one captured line's verdict for <c>ExecutionUsageProjector</c>'s Claude-only observed
+    /// billed-token FLOOR -- a stricter read of the SAME <c>"type":"assistant"</c>/<c>message.usage</c>
+    /// shape <see cref="TryParseIncrementalUsage"/> already reads, never a second accumulator: this
+    /// reports only whether the line is trustworthy enough for the floor to be exposed at all, and the
+    /// floor's own VALUE still comes from <see cref="Mutation.TokenBudgetMonitor"/>'s own replayed Σ
+    /// (<c>ExecutionUsageProjector</c> reads that, not anything computed here).
+    /// <para>
+    /// A nonblank line that fails to parse as JSON at all -- a torn or corrupt capture line -- is
+    /// <see langword="false"/> regardless of shape. A well-formed line that is not this shape (every
+    /// non-assistant event, and an assistant turn with no <c>usage</c> object) is ordinary traffic and
+    /// <see langword="true"/>. A blank line is always <see langword="true"/>, same as every other reader
+    /// in this file.
+    /// </para>
+    /// <para>
+    /// A recognized usage line (one carrying at least one of the two cache counters) is
+    /// <see langword="false"/> when: either cache counter present is negative, non-integer, or not a
+    /// JSON number at all; either cache counter or <c>message.id</c> is duplicated as a JSON member
+    /// within its own object; or <c>message.id</c> is missing or blank. A line carrying neither cache
+    /// counter is <see langword="true"/> and otherwise ignored -- placeholder-only or genuinely empty
+    /// usage says nothing this check is about.
+    /// </para>
+    /// <para>
+    /// <paramref name="seenCacheTokensByMessageId"/> is fingerprint metadata, not an accumulator: the
+    /// last (cache-read, cache-creation) pair this replay has observed for a given <c>message.id</c>.
+    /// <see cref="TryParseIncrementalUsage"/>'s own caller dedupes a repeated id by first sighting alone
+    /// and never checks whether the repeat agrees -- so a later line repeating an id with a DIFFERENT
+    /// value is an ambiguous replay this method catches as a conflicting repeat
+    /// (<see langword="false"/>) rather than one that silently keeps the first reading.
+    /// </para>
+    /// </summary>
+    public bool ObserveUsageFloorIntegrity(
+        string rawLine, Dictionary<string, (long? CacheRead, long? CacheCreation)> seenCacheTokensByMessageId)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return true;
+        }
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(rawLine);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
+                || !message.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+            {
+                return true;
+            }
+
+            if (CountMembers(usage, "cache_read_input_tokens") > 1
+                || CountMembers(usage, "cache_creation_input_tokens") > 1
+                || CountMembers(message, "id") > 1)
+            {
+                return false;
+            }
+
+            var cacheRead = ReadNonnegativeIntegerCounter(usage, "cache_read_input_tokens", out var cacheReadValue);
+            var cacheCreation = ReadNonnegativeIntegerCounter(usage, "cache_creation_input_tokens", out var cacheCreationValue);
+            if (cacheRead == CounterReading.Invalid || cacheCreation == CounterReading.Invalid)
+            {
+                return false;
+            }
+
+            if (cacheRead == CounterReading.Absent && cacheCreation == CounterReading.Absent)
+            {
+                return true;
+            }
+
+            if (!message.TryGetProperty("id", out var idProp)
+                || idProp.ValueKind != JsonValueKind.String
+                || idProp.GetString() is not { Length: > 0 } messageId)
+            {
+                return false;
+            }
+
+            var observedCacheRead = cacheRead == CounterReading.Valid ? cacheReadValue : (long?)null;
+            var observedCacheCreation = cacheCreation == CounterReading.Valid ? cacheCreationValue : (long?)null;
+            if (seenCacheTokensByMessageId.TryGetValue(messageId, out var prior))
+            {
+                if ((prior.CacheRead is { } priorRead && observedCacheRead is { } newRead && priorRead != newRead)
+                    || (prior.CacheCreation is { } priorCreation && observedCacheCreation is { } newCreation && priorCreation != newCreation))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                seenCacheTokensByMessageId[messageId] = (observedCacheRead, observedCacheCreation);
+            }
+
+            return true;
+        }
+    }
+
+    private enum CounterReading { Absent, Valid, Invalid }
+
+    private static CounterReading ReadNonnegativeIntegerCounter(JsonElement obj, string propertyName, out long value)
+    {
+        value = 0;
+        if (!obj.TryGetProperty(propertyName, out var prop))
+        {
+            return CounterReading.Absent;
+        }
+
+        if (prop.ValueKind != JsonValueKind.Number)
+        {
+            return CounterReading.Invalid;
+        }
+
+        var raw = prop.GetRawText();
+        if (raw.Contains('.', StringComparison.Ordinal)
+            || raw.Contains('e', StringComparison.OrdinalIgnoreCase)
+            || !prop.TryGetInt64(out value)
+            || value < 0)
+        {
+            return CounterReading.Invalid;
+        }
+
+        return CounterReading.Valid;
+    }
+
+    private static int CountMembers(JsonElement obj, string propertyName) =>
+        obj.EnumerateObject().Count(member => string.Equals(member.Name, propertyName, StringComparison.Ordinal));
+
+    /// <summary>
     /// #1623: a <c>"type":"assistant"</c> message's <c>tool_use</c> content block name, per the
     /// standard Anthropic Messages API streaming shape claude's own <c>stream-json</c> output is built
     /// on — not independently doc-audited the way the usage fields above are (docs/vendor-capabilities.md

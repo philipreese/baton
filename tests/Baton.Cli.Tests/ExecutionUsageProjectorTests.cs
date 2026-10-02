@@ -920,6 +920,233 @@ public sealed class ExecutionUsageProjectorTests
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // #2559: observedBilledTokenFloor -- the Claude-only incomplete floor, eligible only once the
+    // triple above has no terminal figure to omit in favour of. Permanent positive/negative controls.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Observed_billed_token_floor_reports_the_replayed_sum_when_no_terminal_figure_exists()
+    {
+        // The real-shaped timeout control: a completed execution whose stream never produced a
+        // terminal "type":"result" line -- the triple stays absent and unavailable reads
+        // no-terminal-billed-figure exactly as before, and this is the number that was genuinely
+        // observed. The repeated "msg_1" line is deduped, same as liveBilledTokens always dedupes it.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-basic-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 700),
+                ClaudeAssistantLine("msg_1", 700),
+                ClaudeAssistantLine("msg_2", 500),
+            ]);
+
+            Assert.Null(view.BilledTokens);
+            Assert.Null(view.LiveBilledTokens);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.NotNull(view.ObservedBilledTokenFloor);
+            Assert.Equal(1200, view.ObservedBilledTokenFloor!.Tokens);
+            Assert.Equal("incomplete", view.ObservedBilledTokenFloor.Completeness);
+            Assert.Equal("captured-stdout-monitor-replay", view.ObservedBilledTokenFloor.Source);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void CONTROL_observed_billed_token_floor_is_absent_once_a_terminal_figure_exists()
+    {
+        // The discriminating control for the arm above: identical usage line, plus the terminal line
+        // that gives the triple something to reconcile against. The floor must never ship ALONGSIDE an
+        // authoritative figure -- it exists only to fill the gap that figure leaves.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-terminal-present-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("msg_1", 700), ClaudeTerminalLine]);
+
+            Assert.NotNull(view.BilledTokens);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void CONTROL_observed_billed_token_floor_is_absent_on_a_non_claude_vendor()
+    {
+        // Claude-only per the issue's settled scope: an agy stream with the identical "no terminal
+        // figure" shape must not acquire this field just because ClaudeUsageParser's own replay figure
+        // happens to be reachable through a shared code path.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-agy-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "agy", [
+                """{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response","usage":{"input_tokens":10,"output_tokens":5}}}""",
+            ]);
+
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_spans_a_readable_single_rollover()
+    {
+        // The positive control spec/baton.md §3 names: a stream that rolled once, with no truncation
+        // marker, replays BOTH segments in order -- same rule the triple's own liveBilledTokens follows.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-rollover-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(
+                testRoot,
+                "claude",
+                currentLines: [ClaudeAssistantLine("msg_2", 500)],
+                rolledLines: [ClaudeAssistantLine("msg_1", 400)]);
+
+            Assert.NotNull(view.ObservedBilledTokenFloor);
+            Assert.Equal(900, view.ObservedBilledTokenFloor!.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_behind_a_write_failure_marker_with_no_terminal_line()
+    {
+        // Existing loss authority stays strict even on the shape this field targets: a marker omits
+        // the floor exactly as it already omits the triple, rather than this new field finding a figure
+        // the triple's own guard refuses to serve.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-marker-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(
+                testRoot, "claude", [ClaudeAssistantLine("msg_1", 700)], truncatedByWriteFailure: true);
+
+            Assert.Equal("stream-truncated-by-write-failure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_when_a_capture_line_carries_a_conflicting_repeated_id()
+    {
+        // The ambiguous-replay case the triple's own dedupe cannot see: the real monitor keeps "msg_1"'s
+        // FIRST sighting (700) and would otherwise report it as the floor -- but a second sighting
+        // disagreeing about the same id makes the whole replay untrustworthy, so the integrity gate
+        // omits the object rather than shipping the number TokenBudgetMonitor happened to settle on.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-conflict-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 700),
+                """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":701,"cache_read_input_tokens":0}}}""",
+            ]);
+
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_when_a_capture_line_is_malformed_JSON()
+    {
+        // A torn/corrupt capture line anywhere in the stream -- the worker killed mid-write -- omits
+        // the whole object rather than reporting a Σ over a stream this method cannot even fully read.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-torn-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 700),
+                """{"type":"assistant","message":{"id":"msg_2""",
+            ]);
+
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_when_the_replayed_sum_overflows()
+    {
+        // Accumulation overflow, read off the symptom: two individually valid counters whose unchecked
+        // long Σ wraps negative. Neither line is itself invalid, so this is the one control the per-line
+        // parser tests cannot exercise alone.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-overflow-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 9_223_372_036_854_775_800),
+                ClaudeAssistantLine("msg_2", 100),
+            ]);
+
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_reports_an_explicit_measured_zero()
+    {
+        // Explicit measured zero is a valid floor, never confused with the absent-evidence case below.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-zero-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("msg_1", 0)]);
+
+            Assert.NotNull(view.ObservedBilledTokenFloor);
+            Assert.Equal(0, view.ObservedBilledTokenFloor!.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void CONTROL_observed_billed_token_floor_stays_absent_when_evidence_is_cache_read_only()
+    {
+        // Absent/placeholder-only/cache-read-only is not a billed zero: TokenBudgetMonitor's own
+        // BilledTokens stays null on a stream that never reports a cache-creation figure, so the floor
+        // this field reads off that Σ stays null too, same discipline as liveBilledTokens.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-cache-read-only-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_read_input_tokens":4000}}}""",
+            ]);
+
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public void An_execution_with_no_stdout_log_at_all_reports_no_reconciliation_and_no_reason()
     {

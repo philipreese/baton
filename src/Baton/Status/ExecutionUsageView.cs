@@ -203,7 +203,23 @@ public sealed record ExecutionUsageView(
     // supplementary unknown evidence; null monitor brakes are unlimited only when monitor inputs are known.
     [property: JsonPropertyName("limits")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ExecutionLimitEvidence? Limits = null)
+    ExecutionLimitEvidence? Limits = null,
+    /// <summary>
+    /// #2559: Claude-only, additive, and never a substitute for <see cref="BilledTokens"/>. Present
+    /// only when this execution's captured stdout is otherwise readable (no loss marker, no journalled
+    /// loss, a readable single rollover permitted), carries no authoritative terminal billed figure
+    /// (<see cref="BilledReconciliationUnavailable"/> reads <see cref="NoTerminalBilledFigureReason"/>),
+    /// and <c>ExecutionUsageProjector</c>'s integrity scan over every captured line found no conflicting
+    /// repeated id, missing identity, malformed capture line, duplicate relevant JSON member, invalid
+    /// numeric counter, or accumulation overflow -- any one of those omits this object rather than
+    /// reporting a number a reader cannot trust. Its <see cref="ObservedBilledTokenFloorView.Tokens"/>
+    /// is the same cache-creation Σ <see cref="LiveBilledTokens"/> would have reported had the terminal
+    /// line existed to reconcile against -- never a second computation of it. It is an observed FLOOR,
+    /// not a final bill, a subscription-quota charge, a price, or a complete room-spend estimate.
+    /// </summary>
+    [property: JsonPropertyName("observedBilledTokenFloor")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ExecutionUsageView.ObservedBilledTokenFloorView? ObservedBilledTokenFloor = null)
 {
     /// <summary>The capture is provably not the whole stream — <see cref="Dispatch.ExecutionStreamLogger.StdoutTruncationMarkerFileName"/>.</summary>
     public const string StreamTruncatedByRolloverReason = "stream-truncated-by-rollover";
@@ -245,6 +261,24 @@ public sealed record ExecutionUsageView(
         NoLiveBilledFigureReason,
         NoTerminalBilledFigureReason,
     };
+
+    /// <summary>
+    /// #2559: the wire shape of <see cref="ObservedBilledTokenFloor"/> -- <c>Completeness</c> and
+    /// <c>Source</c> are fixed literals rather than free text, so a consumer can match on them instead
+    /// of parsing prose; <see cref="Tokens"/> is the only figure that varies per execution.
+    /// </summary>
+    public sealed record ObservedBilledTokenFloorView(
+        [property: JsonPropertyName("tokens")] long Tokens,
+        [property: JsonPropertyName("completeness")] string Completeness = "incomplete",
+        [property: JsonPropertyName("source")] string Source = "captured-stdout-monitor-replay")
+    {
+        /// <summary>The only value <see cref="Completeness"/> carries -- this is a floor, never a final count.</summary>
+        public const string IncompleteCompleteness = "incomplete";
+
+        /// <summary>The only value <see cref="Source"/> carries -- <c>Mutation.TokenBudgetMonitor</c>'s own
+        /// replay over the captured stdout, read back by <c>ExecutionUsageProjector</c>.</summary>
+        public const string CapturedStdoutMonitorReplaySource = "captured-stdout-monitor-replay";
+    }
 }
 
 /// <summary>
@@ -475,6 +509,7 @@ public static class ExecutionUsageProjector
                 ? null
                 : (usage.TokensIn ?? 0) + (usage.TokensOut ?? 0) + (usage.CacheCreationTokens ?? 0);
             var liveBilled = reading?.LiveBilled;
+            var observedBilledTokenFloorTokens = reading?.ObservedBilledTokenFloorTokens;
 
             // #1876: the in-memory fallback, and the exact line at which it stops. The per-dimension
             // fields fall back to what the live monitor observed and journalled on the arrest when the
@@ -504,6 +539,7 @@ public static class ExecutionUsageProjector
             {
                 WarnOnChannelDisagreement(executionId, journalledReason, reading?.LiveUnavailableReason);
                 liveBilled = null;
+                observedBilledTokenFloorTokens = null;
             }
 
             // #1706 review M2: ALL THREE or none. The previous shape emitted `billedTokens` alone
@@ -528,6 +564,17 @@ public static class ExecutionUsageProjector
                               : ExecutionUsageView.NoLiveBilledFigureReason)
                         : null);
             }
+
+            // #2559: eligible only once there is NO authoritative terminal figure to omit in favour of --
+            // `billed is null` already implies `unavailable` reads NoTerminalBilledFigureReason here,
+            // since TryReadWorkerUsage only ever computes a non-null floor on the one success path
+            // whose LiveUnavailableReason is null, and the journalled-loss branch above already nulled
+            // this out for every stdout loss. Every other omission (markers, unreadable rollover, a
+            // vendor other than claude, a failed integrity scan) already reads null off `reading` and
+            // reaches no further here.
+            var observedBilledTokenFloor = billed is null && observedBilledTokenFloorTokens is { } floorTokens
+                ? new ExecutionUsageView.ObservedBilledTokenFloorView(floorTokens)
+                : null;
 
             long? peakBilledInWindow = peakBilledInWindowByExecutionId.TryGetValue(executionId, out var recordedPeak)
                 ? recordedPeak
@@ -586,7 +633,8 @@ public static class ExecutionUsageProjector
                     : graceTerminalByExecutionId.TryGetValue(executionId, out graceTerminal)
                         ? graceTerminal.ArrestReason
                         : null,
-                resolvedBinding.Limits);
+                resolvedBinding.Limits,
+                observedBilledTokenFloor);
         }
 
         foreach (var executionId in unresolvedGraceExecutionIds)
@@ -772,12 +820,20 @@ public static class ExecutionUsageProjector
     /// the merge with #1927 is what put the two opposite rules side by side. The one earlier return the
     /// scan itself sits below (no captured stream at all, so nothing to scan) carries neither.
     /// </param>
+    /// <param name="ObservedBilledTokenFloorTokens">
+    /// #2559: the same value as <paramref name="LiveBilled"/> once the claude-only integrity scan over
+    /// every captured line holds, null otherwise -- including on every early return above, none of
+    /// which computes it. The CALLER (<c>BuildByExecutionId</c>) still gates whether this ever reaches
+    /// <see cref="ExecutionUsageView.ObservedBilledTokenFloor"/> on there being no authoritative
+    /// terminal billed figure and no journalled stdout loss, neither of which this method can see.
+    /// </param>
     private sealed record UsageReading(
         WorkerUsage? Terminal,
         long? LiveBilled,
         string? LiveUnavailableReason = null,
         string? ModelEchoed = null,
-        ToolStepCounts? ToolStepCounts = null);
+        ToolStepCounts? ToolStepCounts = null,
+        long? ObservedBilledTokenFloorTokens = null);
 
     /// <summary>
     /// The memo behind <see cref="UsageReading"/>'s L3 note. Concurrent because both readers above are
@@ -1061,12 +1117,37 @@ public static class ExecutionUsageProjector
             toolStepTally.OnStdoutLine(line);
         }
 
+        var liveBilled = replayMonitor.SnapshotUsage().BilledTokens;
+
+        // #2559: claude-only, computed from the SAME two segments just replayed above, in the same
+        // order -- an eighth parse of a line already discussed at length in this doc comment, not a
+        // ninth accumulator: ClaudeUsageParser.ObserveUsageFloorIntegrity reports trustworthiness only,
+        // and the figure this carries forward is `liveBilled` itself, read off the real monitor's own Σ
+        // two lines above. `seenCacheTokensByMessageId` is fingerprint metadata, not a running total --
+        // see that method's own doc for why a conflicting repeat is the one thing TokenBudgetMonitor's
+        // first-sighting dedupe cannot by itself catch. A negative `liveBilled` is this scan's one
+        // non-per-line check: unchecked long addition wraps on overflow, and a genuine cache-creation Σ
+        // is never negative, so a negative replay result is itself the overflow signal rather than one
+        // this method re-derives by summing a second time.
+        long? observedBilledTokenFloorTokens = null;
+        if (replayParser is ClaudeUsageParser claudeReplayParser)
+        {
+            var seenCacheTokensByMessageId = new Dictionary<string, (long? CacheRead, long? CacheCreation)>(StringComparer.Ordinal);
+            var integrityHolds = rolledLines.Concat(lines).All(
+                line => claudeReplayParser.ObserveUsageFloorIntegrity(line, seenCacheTokensByMessageId));
+            if (integrityHolds && liveBilled is { } floor && floor >= 0)
+            {
+                observedBilledTokenFloorTokens = floor;
+            }
+        }
+
         return Memoize(cacheKey, new UsageReading(
             terminal,
-            replayMonitor.SnapshotUsage().BilledTokens,
+            liveBilled,
             null,
             modelEchoed,
-            toolStepTally.Snapshot()));
+            toolStepTally.Snapshot(),
+            observedBilledTokenFloorTokens));
     }
 
     /// <summary>

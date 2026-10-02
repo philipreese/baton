@@ -406,4 +406,139 @@ public sealed class StandardWorkerUsageParsersTests
         Assert.Equal(0, usage.ThinkingTokens);
         Assert.Equal(200, usage.TokensOut);
     }
+
+    // #2559: ClaudeUsageParser.ObserveUsageFloorIntegrity -- the per-line integrity gate behind
+    // ExecutionUsageProjector's Claude-only observedBilledTokenFloor. Each arm below is a permanent
+    // positive or negative control for one named failure mode spec/baton.md §3 enumerates.
+
+    private static Dictionary<string, (long? CacheRead, long? CacheCreation)> NewFingerprint() =>
+        new(StringComparer.Ordinal);
+
+    [Fact]
+    public void Integrity_POSITIVE_a_well_formed_assistant_usage_line_holds()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":2,"cache_creation_input_tokens":700,"cache_read_input_tokens":0,"output_tokens":3}}}""";
+
+        Assert.True(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_POSITIVE_ordinary_non_usage_JSON_traffic_holds()
+    {
+        var parser = new ClaudeUsageParser();
+        var seen = NewFingerprint();
+
+        Assert.True(parser.ObserveUsageFloorIntegrity("""{"type":"system","subtype":"init","session_id":"s"}""", seen));
+        Assert.True(parser.ObserveUsageFloorIntegrity("""{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}""", seen));
+        Assert.True(parser.ObserveUsageFloorIntegrity(string.Empty, seen));
+    }
+
+    [Fact]
+    public void Integrity_POSITIVE_an_identical_repeated_id_holds()
+    {
+        var parser = new ClaudeUsageParser();
+        var seen = NewFingerprint();
+        const string line = """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":700,"cache_read_input_tokens":0}}}""";
+
+        Assert.True(parser.ObserveUsageFloorIntegrity(line, seen));
+        Assert.True(parser.ObserveUsageFloorIntegrity(line, seen));
+    }
+
+    [Fact]
+    public void Integrity_POSITIVE_an_explicit_measured_zero_counter_holds()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}""";
+
+        Assert.True(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_torn_nonblank_line_that_is_not_valid_JSON_fails()
+    {
+        var parser = new ClaudeUsageParser();
+
+        Assert.False(parser.ObserveUsageFloorIntegrity("""{"type":"assistant","message":{"id":"msg_1""", NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_negative_cache_counter_fails()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":-5}}}""";
+
+        Assert.False(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_non_integer_cache_counter_fails()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":1.5}}}""";
+
+        Assert.False(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_missing_message_id_on_a_recognized_usage_line_fails()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"usage":{"cache_creation_input_tokens":700}}}""";
+
+        Assert.False(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_blank_message_id_on_a_recognized_usage_line_fails()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"id":"","usage":{"cache_creation_input_tokens":700}}}""";
+
+        Assert.False(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_duplicated_cache_creation_member_fails()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":1,"cache_creation_input_tokens":2}}}""";
+
+        Assert.False(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_duplicated_message_id_member_fails()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """{"type":"assistant","message":{"id":"msg_1","id":"msg_2","usage":{"cache_creation_input_tokens":700}}}""";
+
+        Assert.False(parser.ObserveUsageFloorIntegrity(line, NewFingerprint()));
+    }
+
+    [Fact]
+    public void Integrity_NEGATIVE_a_conflicting_repeated_id_fails_on_the_second_sighting()
+    {
+        var parser = new ClaudeUsageParser();
+        var seen = NewFingerprint();
+        const string first = """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":700}}}""";
+        const string conflicting = """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":701}}}""";
+
+        Assert.True(parser.ObserveUsageFloorIntegrity(first, seen));
+        Assert.False(parser.ObserveUsageFloorIntegrity(conflicting, seen));
+    }
+
+    [Fact]
+    public void Integrity_POSITIVE_placeholder_only_or_cache_read_only_evidence_holds_but_is_ignored()
+    {
+        // Absent/placeholder-only/cache-read-only is not corruption -- it simply carries no cache
+        // counter TokenBudgetMonitor's own BilledTokens would act on, so the integrity gate passes it
+        // and leaves the eligibility decision to that Σ staying null (spec/baton.md §3).
+        var parser = new ClaudeUsageParser();
+
+        Assert.True(parser.ObserveUsageFloorIntegrity(
+            """{"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":2,"output_tokens":3}}}""", NewFingerprint()));
+        Assert.True(parser.ObserveUsageFloorIntegrity(
+            """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_read_input_tokens":40}}}""", NewFingerprint()));
+    }
 }
