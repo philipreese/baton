@@ -25,31 +25,38 @@ public sealed class FleetEventLogTests : IDisposable
         Assert.False(File.Exists(Rollover));
         var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var acquiring = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var writer = Task.Run(() => MutexGuardedFileLock.RunUnderLock(Live, "baton-fleet-events", TimeSpan.FromSeconds(5), () =>
+        var acquiring = new TaskCompletionSource<Thread>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = Task.Run(() => MutexGuardedFileLock.RunUnderLock(Live, "baton-fleet-events", TimeSpan.FromSeconds(60), () =>
         {
             held.SetResult();
             release.Task.GetAwaiter().GetResult();
             return true;
         }), token);
-        await held.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+        await held.Task.WaitAsync(TimeSpan.FromSeconds(60), token);
         var proof = Task.Run(() =>
         {
-            acquiring.SetResult();
+            acquiring.SetResult(Thread.CurrentThread);
             return log.AcquireRetainedProof();
         }, token);
         try
         {
-            await acquiring.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            var acquisitionThread = await acquiring.Task.WaitAsync(TimeSpan.FromSeconds(60), token);
+            // A pre-call signal alone could leave the reader unscheduled throughout the negative
+            // observation. First observe this synchronous acquisition blocked, or its completion.
+            Assert.True(await Task.Run(() => SpinWait.SpinUntil(
+                () => proof.IsCompleted || (acquisitionThread.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                TimeSpan.FromSeconds(60)), token));
+            Assert.False(proof.IsCompleted);
             // The mutation control removes the fleet mutex from AcquireRetainedProof: the same
             // read then completes while rotation still owns its authority lock.
+            // wait-ok: negative observation after acquisition is blocked while the append mutex is held; release follows this check.
             Assert.NotSame(proof, await Task.WhenAny(proof, Task.Delay(150, token)));
         }
         finally
         {
             release.TrySetResult();
             await writer;
-            using var lease = await proof.WaitAsync(TimeSpan.FromSeconds(5), token);
+            using var lease = await proof.WaitAsync(TimeSpan.FromSeconds(60), token);
             Assert.Single(lease.Events);
         }
     }

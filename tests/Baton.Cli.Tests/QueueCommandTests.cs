@@ -2766,7 +2766,7 @@ public sealed class QueueCommandTests
                 beforeLaunchClaim: cancellationWins ? null : async token =>
                 {
                     reached.TrySetResult();
-                    await release.Task.WaitAsync(TimeSpan.FromSeconds(10), token);
+                    await release.Task.WaitAsync(TimeSpan.FromSeconds(60), token);
                 },
                 appendFleetEvent: FleetEventLog.OpenOperational().Append,
                 workspaceHead: async (_, token) =>
@@ -2774,14 +2774,14 @@ public sealed class QueueCommandTests
                     if (cancellationWins)
                     {
                         reached.TrySetResult();
-                        await release.Task.WaitAsync(TimeSpan.FromSeconds(10), token);
+                        await release.Task.WaitAsync(TimeSpan.FromSeconds(60), token);
                     }
                     return null;
                 }, workspaceLocks: _ => []);
             var tick = service.TickOnceAsync(Ct);
             try
             {
-                await reached.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+                await reached.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
                 if (cancellationWins)
                 {
                     Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
