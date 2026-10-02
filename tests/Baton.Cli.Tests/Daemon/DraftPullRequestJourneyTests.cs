@@ -224,10 +224,7 @@ public sealed class DraftPullRequestJourneyTests
             var retained = QueueFailureEvidence.Retain(ex,
                 nameof(Settled_implementation_creates_draft_review_block_launches_one_fix_and_restarts_without_duplicates),
                 home, [BatonPaths.QueueFile]);
-            if (retained is not null)
-            {
-                TestContext.Current.TestOutputHelper?.WriteLine($"Retained post-unwind queue evidence at '{retained}'.");
-            }
+            QueueFailureEvidence.ReportRetained(retained);
 
             throw;
         }

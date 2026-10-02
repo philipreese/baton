@@ -104,10 +104,7 @@ public sealed class QueueSchedulerServiceTests
             var retained = QueueFailureEvidence.Retain(ex,
                 nameof(An_unknown_unscoped_role_fails_one_item_and_the_next_unscoped_item_launches), home,
                 [BatonPaths.QueueFile]);
-            if (retained is not null)
-            {
-                TestContext.Current.TestOutputHelper?.WriteLine($"Retained post-unwind queue evidence at '{retained}'.");
-            }
+            QueueFailureEvidence.ReportRetained(retained);
 
             throw;
         }

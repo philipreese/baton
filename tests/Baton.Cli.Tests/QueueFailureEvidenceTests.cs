@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Tests.Shared;
@@ -328,13 +330,319 @@ public sealed class QueueFailureEvidenceTests
 
             Assert.Null(retained);
             Assert.Empty(Directory.GetFileSystemEntries(retentionRoot));
-            File.Delete(outside);
+            FileCleanup.Delete(outside);
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(fixtureRoot);
             DirectoryCleanup.DeleteRecursively(retentionRoot);
         }
+    }
+
+    [Fact]
+    public void A_queue_path_that_is_itself_a_reparse_point_targeting_outside_the_fixture_is_refused()
+    {
+        var fixtureRoot = NewFixtureRoot("baton_qfe_reparse_queue_fixture");
+        var retentionRoot = NewFixtureRoot("baton_qfe_reparse_queue_retention");
+        var outsideRoot = NewFixtureRoot("baton_qfe_reparse_queue_outside");
+        Directory.CreateDirectory(fixtureRoot);
+        Directory.CreateDirectory(retentionRoot);
+        Directory.CreateDirectory(outsideRoot);
+        var outsideFile = Path.Combine(outsideRoot, "secret.json");
+        File.WriteAllText(outsideFile, "{\"secret\":true}");
+        var linkedQueuePath = Path.Combine(fixtureRoot, "queue.json");
+        try
+        {
+            try
+            {
+                File.CreateSymbolicLink(linkedQueuePath, outsideFile);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Assert.Skip($"this host refuses unprivileged symlink creation: {ex.Message}");
+            }
+
+            var ex2 = new QueueStoreException("Could not perform queue replacement for the queue at 'x': boom",
+                new IOException("boom"));
+
+            var retained = QueueFailureEvidence.Retain(ex2,
+                nameof(A_queue_path_that_is_itself_a_reparse_point_targeting_outside_the_fixture_is_refused),
+                fixtureRoot, [linkedQueuePath], retentionRoot);
+
+            // The lexical escape check alone would have passed this path — it never leaves the fixture
+            // root as a string. Only the reparse-point check rejects it.
+            Assert.Null(retained);
+            Assert.Empty(Directory.GetFileSystemEntries(retentionRoot));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(fixtureRoot);
+            DirectoryCleanup.DeleteRecursively(retentionRoot);
+            DirectoryCleanup.DeleteRecursively(outsideRoot);
+        }
+    }
+
+    [Fact]
+    public async Task A_sibling_reparse_point_targeting_outside_the_fixture_is_skipped_and_never_copied()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows share-mode exclusion is required");
+
+        var fixtureRoot = NewFixtureRoot("baton_qfe_reparse_sibling_fixture");
+        var retentionRoot = NewFixtureRoot("baton_qfe_reparse_sibling_retention");
+        var outsideRoot = NewFixtureRoot("baton_qfe_reparse_sibling_outside");
+        Directory.CreateDirectory(fixtureRoot);
+        Directory.CreateDirectory(retentionRoot);
+        Directory.CreateDirectory(outsideRoot);
+        var queuePath = Path.Combine(fixtureRoot, "queue.json");
+        var outsideFile = Path.Combine(outsideRoot, "never-read.md");
+        const string marker = "do-not-read-this-marker-reparse-sibling";
+        var linkedSibling = Path.Combine(fixtureRoot, "sibling.tmp");
+        try
+        {
+            await File.WriteAllTextAsync(outsideFile, marker, Ct);
+            try
+            {
+                File.CreateSymbolicLink(linkedSibling, outsideFile);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Assert.Skip($"this host refuses unprivileged symlink creation: {ex.Message}");
+            }
+
+            await QueueStore.MutateAsync(queuePath, s => s with { Items = [Item("original")] }, Ct);
+
+            string? retained;
+            using (new FileStream(queuePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                var ex = await Assert.ThrowsAsync<QueueStoreException>(() =>
+                    QueueStore.MutateAsync(queuePath, s => s with { Items = [Item("replacement")] }, Ct));
+                retained = QueueFailureEvidence.Retain(ex,
+                    nameof(A_sibling_reparse_point_targeting_outside_the_fixture_is_skipped_and_never_copied),
+                    fixtureRoot, [queuePath], retentionRoot);
+            }
+
+            // The real queue path is still retained; only the reparse-point sibling is refused — the
+            // Directory.Exists filter that already screens out directory-typed reparse points does not
+            // catch this file-typed one, so it depends entirely on the explicit reparse-point check.
+            Assert.NotNull(retained);
+            Assert.DoesNotContain("sibling.tmp", Directory.GetFiles(retained!).Select(Path.GetFileName));
+            var manifestText = await File.ReadAllTextAsync(Path.Combine(retained!, "manifest.txt"), Ct);
+            Assert.DoesNotContain(marker, manifestText, StringComparison.Ordinal);
+            Assert.Contains("sibling-reparse-point", manifestText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(fixtureRoot);
+            DirectoryCleanup.DeleteRecursively(retentionRoot);
+            DirectoryCleanup.DeleteRecursively(outsideRoot);
+        }
+    }
+
+    [Fact]
+    public async Task A_junction_ancestor_inside_the_fixture_tree_is_refused_and_its_outside_target_is_never_read()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only");
+
+        var fixtureRoot = NewFixtureRoot("baton_qfe_junction_fixture");
+        var retentionRoot = NewFixtureRoot("baton_qfe_junction_retention");
+        var outsideRoot = NewFixtureRoot("baton_qfe_junction_outside");
+        Directory.CreateDirectory(fixtureRoot);
+        Directory.CreateDirectory(retentionRoot);
+        Directory.CreateDirectory(outsideRoot);
+        var junction = Path.Combine(fixtureRoot, "queue");
+        const string marker = "do-not-read-this-marker-junction";
+        var outsideQueueFile = Path.Combine(outsideRoot, "queue.json");
+        try
+        {
+            await File.WriteAllTextAsync(outsideQueueFile, marker, Ct);
+
+            var startInfo = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{outsideRoot}\"")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                Assert.Skip("this host could not start cmd.exe to create a junction");
+            }
+
+            await BoundedProcessWait.WaitForExitAsync(process, TimeSpan.FromSeconds(60), Ct);
+            if (process.ExitCode != 0)
+            {
+                Assert.Skip("this host refused to create a junction");
+            }
+
+            // The leaf itself ("queue.json") is a real file -- only "queue", an ancestor of the
+            // caller-supplied queue path, is the reparse point. The leaf-only check this PR's review
+            // round found missing would have passed this straight through.
+            var linkedQueuePath = Path.Combine(junction, "queue.json");
+            var ex = new QueueStoreException("Could not perform queue replacement for the queue at 'x': boom",
+                new IOException("boom"));
+
+            var retained = QueueFailureEvidence.Retain(ex,
+                nameof(A_junction_ancestor_inside_the_fixture_tree_is_refused_and_its_outside_target_is_never_read),
+                fixtureRoot, [linkedQueuePath], retentionRoot);
+
+            Assert.Null(retained);
+            Assert.Empty(Directory.GetFileSystemEntries(retentionRoot));
+        }
+        finally
+        {
+            // Unlink the junction (non-recursive) before the fixture root's own recursive delete --
+            // deleting through a live junction would otherwise reach into outsideRoot and delete the
+            // sentinel this test depends on existing to prove it was never read.
+            if (Directory.Exists(junction))
+            {
+                Directory.Delete(junction, recursive: false);
+            }
+
+            DirectoryCleanup.DeleteRecursively(fixtureRoot);
+            DirectoryCleanup.DeleteRecursively(retentionRoot);
+            DirectoryCleanup.DeleteRecursively(outsideRoot);
+        }
+    }
+
+    [Fact]
+    public void A_fixture_root_outside_the_machine_temp_directory_is_refused()
+    {
+        var retentionRoot = NewFixtureRoot("baton_qfe_nontemp_retention");
+        Directory.CreateDirectory(retentionRoot);
+
+        // A synthetic root under the test binary's own output directory -- never a real user/vendor
+        // home -- stands in for "anywhere that is not an owned temp fixture", per the issue's
+        // explicit "reject ... user/vendor/production homes" bound.
+        var nonTempRoot = Path.Combine(AppContext.BaseDirectory, $"baton_qfe_nontemp_fixture_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(nonTempRoot);
+        var queuePath = Path.Combine(nonTempRoot, "queue.json");
+        File.WriteAllText(queuePath, "{}");
+        try
+        {
+            var ex = new QueueStoreException("Could not perform queue replacement for the queue at 'x': boom",
+                new IOException("boom"));
+
+            var retained = QueueFailureEvidence.Retain(ex,
+                nameof(A_fixture_root_outside_the_machine_temp_directory_is_refused),
+                nonTempRoot, [queuePath], retentionRoot);
+
+            Assert.Null(retained);
+            Assert.Empty(Directory.GetFileSystemEntries(retentionRoot));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(nonTempRoot);
+            DirectoryCleanup.DeleteRecursively(retentionRoot);
+        }
+    }
+
+    [Fact]
+    public void TruncateUtf8_backs_off_to_a_character_boundary_instead_of_splitting_one_or_throwing()
+    {
+        // Each character here is a 3-byte UTF-8 codepoint, so byte count is 3x character count --
+        // well past a byte limit a naive character-indexed slice would treat as safely under length,
+        // and not a multiple of 3, so a naive byte cut lands mid-character.
+        var text = new string('\u2603', 1000);
+        var bytes = Encoding.UTF8.GetBytes(text);
+        Assert.True(bytes.Length > text.Length);
+
+        var truncated = QueueFailureEvidence.TruncateUtf8(bytes, 100);
+
+        Assert.True(truncated.Length <= 100);
+        // A result that split a character would fail to round-trip through decode/re-encode.
+        Assert.Equal(truncated, Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(truncated)));
+    }
+
+    [Fact]
+    public void ReportRetained_swallows_a_throwing_writer_instead_of_letting_it_propagate()
+    {
+        var thrown = Record.Exception(() =>
+            QueueFailureEvidence.ReportRetained("C:\\fake\\retained\\path", _ => throw new InvalidOperationException("boom")));
+
+        Assert.Null(thrown);
+    }
+
+    [Fact]
+    public void Caller_queue_paths_stop_at_a_bounded_prefix_and_label_exhaustion()
+    {
+        var fixtureRoot = NewFixtureRoot("baton_qfe_caller_bound");
+        var retentionRoot = NewFixtureRoot("baton_qfe_caller_retention");
+        Directory.CreateDirectory(fixtureRoot);
+        Directory.CreateDirectory(retentionRoot);
+        var queuePath = Path.Combine(fixtureRoot, "queue.json");
+        File.WriteAllText(queuePath, "{}");
+        var paths = new QueuePathsWithOverreadTrap(queuePath);
+        try
+        {
+            var original = new QueueStoreException("queue replacement failed", new IOException("boom"));
+            var retained = QueueFailureEvidence.Retain(original, nameof(Caller_queue_paths_stop_at_a_bounded_prefix_and_label_exhaustion),
+                fixtureRoot, paths, retentionRoot);
+
+            Assert.NotNull(retained);
+            Assert.Equal(64, paths.Reads);
+            Assert.Contains("caller-path-limit-exhausted", File.ReadAllText(Path.Combine(retained!, "manifest.txt")), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(fixtureRoot);
+            DirectoryCleanup.DeleteRecursively(retentionRoot);
+        }
+    }
+
+    [Fact]
+    public void A_nonascii_overflow_manifest_is_labeled_valid_utf8_and_included_in_the_total_byte_bound()
+    {
+        var fixtureRoot = NewFixtureRoot("baton_qfe_manifest_bound");
+        var retentionRoot = NewFixtureRoot("baton_qfe_manifest_retention");
+        Directory.CreateDirectory(fixtureRoot);
+        Directory.CreateDirectory(retentionRoot);
+        var queuePath = Path.Combine(fixtureRoot, "queue.json");
+        File.WriteAllBytes(queuePath, new byte[checked((int)QueueFailureEvidence.MaxTotalBytes)]);
+        // These lexical escape candidates are never opened. Their non-ASCII metadata exceeds
+        // the manifest reserve without creating or reading any real path outside this fixture.
+        var escapedPath = Path.Combine(retentionRoot, new string('\u2603', 2048));
+        var paths = new[] { queuePath }.Concat(Enumerable.Repeat(escapedPath, 32)).ToArray();
+        try
+        {
+            var original = new QueueStoreException("queue replacement failed", new IOException("boom"));
+            var retained = QueueFailureEvidence.Retain(original,
+                nameof(A_nonascii_overflow_manifest_is_labeled_valid_utf8_and_included_in_the_total_byte_bound),
+                fixtureRoot, paths, retentionRoot);
+
+            Assert.NotNull(retained);
+            var manifestBytes = File.ReadAllBytes(Path.Combine(retained!, "manifest.txt"));
+            Assert.True(manifestBytes.LongLength <= QueueFailureEvidence.ManifestReserveBytes);
+            var text = new UTF8Encoding(false, true).GetString(manifestBytes);
+            Assert.Contains("manifest-truncated", text, StringComparison.Ordinal);
+            Assert.True(Directory.GetFiles(retained!).Sum(path => new FileInfo(path).Length) <= QueueFailureEvidence.MaxTotalBytes);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(fixtureRoot);
+            DirectoryCleanup.DeleteRecursively(retentionRoot);
+        }
+    }
+
+    private sealed class QueuePathsWithOverreadTrap(string path) : IReadOnlyList<string>
+    {
+        public int Count => 65;
+        public int Reads { get; private set; }
+        public string this[int index]
+        {
+            get
+            {
+                if (index >= 64) throw new InvalidOperationException("The caller-path prefix was exceeded.");
+                Reads++;
+                return path;
+            }
+        }
+
+        public IEnumerator<string> GetEnumerator()
+        {
+            for (var index = 0; index < Count; index++) yield return this[index];
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     [Fact]
@@ -360,7 +668,7 @@ public sealed class QueueFailureEvidenceTests
         finally
         {
             DirectoryCleanup.DeleteRecursively(fixtureRoot);
-            File.Delete(retentionRootThatIsActuallyAFile);
+            FileCleanup.Delete(retentionRootThatIsActuallyAFile);
         }
     }
 

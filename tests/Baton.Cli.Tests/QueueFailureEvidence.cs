@@ -64,6 +64,31 @@ internal static class QueueFailureEvidence
         }
     }
 
+    /// <summary>
+    /// Logs <paramref name="retained"/> (if non-null) to the active test's output, best-effort. The
+    /// caller invokes this from inside the same catch block that is about to rethrow the original
+    /// <see cref="QueueStoreException"/>: a diagnostic-output failure here must not replace it either.
+    /// </summary>
+    internal static void ReportRetained(string? retained, Action<string>? write = null)
+    {
+        if (retained is null)
+        {
+            return;
+        }
+
+        try
+        {
+            (write ?? DefaultReport)(retained);
+        }
+        catch (Exception)
+        {
+            // Best-effort diagnostic output only; the caller's original exception still rethrows.
+        }
+    }
+
+    private static void DefaultReport(string retained) =>
+        TestContext.Current.TestOutputHelper?.WriteLine($"Retained post-unwind queue evidence at '{retained}'.");
+
     private static string? RetainCore(
         QueueStoreException original,
         string testName,
@@ -78,10 +103,20 @@ internal static class QueueFailureEvidence
             return null;
         }
 
-        // A fixture root that is the bare machine temp directory (or otherwise escapes retention)
-        // cannot be bounded to "the relevant queue-related fixture subset" — refuse rather than treat
-        // an unbounded tree as in-scope.
-        if (PathsEqual(fixtureFull, tempFull))
+        // The issue's explicit bound is "reject ... user/vendor/production homes", not just "the
+        // bare temp directory". Both real callers hand this an owned fixture they created themselves
+        // under the machine temp root, so requiring a STRICT descendant of temp (never temp itself,
+        // never anything outside it) rejects a real home outright without narrowing what either
+        // caller actually does.
+        if (!IsWithin(fixtureFull, tempFull) || PathsEqual(fixtureFull, tempFull))
+        {
+            return null;
+        }
+
+        // A reparse-point ancestor between temp and the fixture root would let a lexically-contained
+        // fixture resolve somewhere else entirely; components above temp itself are never checked,
+        // since profile redirection there is ordinary and out of this capture's concern.
+        if (HasReparsePointAncestor(fixtureFull, tempFull))
         {
             return null;
         }
@@ -101,12 +136,27 @@ internal static class QueueFailureEvidence
         var skipped = new List<string>();
         var enumerationBudget = MaxEnumeratedEntries;
 
-        foreach (var queuePath in queuePaths)
+        // Caller paths need their own prefix bound: limiting only sibling enumeration still lets
+        // an arbitrarily long caller list grow candidates and diagnostic metadata without limit.
+        foreach (var queuePath in queuePaths.Take(MaxEnumeratedEntries))
         {
             var full = Path.GetFullPath(queuePath);
             if (!IsWithin(full, fixtureFull))
             {
                 AddSkip(skipped, $"escaped-root: {Bound(queuePath)}");
+                continue;
+            }
+
+            // The lexical IsWithin check above only looks at the string, not what the entry actually
+            // resolves to: a reparse point (symlink/junction) lexically under the fixture root can
+            // still target bytes outside it. File.GetAttributes reads the reparse point's own
+            // metadata rather than following it, so this rejects the link itself without ever opening
+            // whatever it points to. An ancestor directory between the fixture root and this path can
+            // be the reparse point instead of the leaf itself, so the whole chain is checked, not just
+            // the leaf.
+            if ((File.Exists(full) && IsReparsePoint(full)) || HasReparsePointAncestor(full, fixtureFull))
+            {
+                AddSkip(skipped, $"reparse-point: {Bound(queuePath)}");
                 continue;
             }
 
@@ -145,6 +195,16 @@ internal static class QueueFailureEvidence
                     continue;
                 }
 
+                // A directory-typed reparse point is already filtered out above by Directory.Exists
+                // (its own entry carries the directory bit even unresolved). A file-typed reparse
+                // point is not, so it must be rejected here before CaptureOne ever opens it — opening
+                // it follows the link and copies whatever it actually points to.
+                if (IsReparsePoint(entryFull))
+                {
+                    AddSkip(skipped, $"sibling-reparse-point: {Bound(entryFull)}");
+                    continue;
+                }
+
                 candidates.Add(("sibling", entryFull));
             }
         }
@@ -173,6 +233,10 @@ internal static class QueueFailureEvidence
             ? "Inner: none"
             : $"Inner: {inner.GetType().FullName} HResult=0x{inner.HResult:X8}");
         manifest.AppendLine("Unknown: deleted staged bytes, failure-time attributes, blocking actor.");
+        if (queuePaths.Count > MaxEnumeratedEntries)
+        {
+            manifest.AppendLine($"caller-path-limit-exhausted: inspected={MaxEnumeratedEntries}; supplied={queuePaths.Count}");
+        }
 
         var retainedCount = 0;
         foreach (var (label, path) in candidates)
@@ -205,13 +269,19 @@ internal static class QueueFailureEvidence
             }
         }
 
-        var manifestText = manifest.ToString();
-        if (Encoding.UTF8.GetByteCount(manifestText) > ManifestReserveBytes)
+        // ManifestReserveBytes bounds encoded BYTES, not characters: slicing the string by character
+        // count can both exceed that byte bound (non-ASCII content encodes wider than its character
+        // count) and throw (a byte-sized character slice can run past the string's own length when
+        // characters are multi-byte). Truncate the encoded bytes themselves instead.
+        var manifestBytes = Encoding.UTF8.GetBytes(manifest.ToString());
+        if (manifestBytes.Length > ManifestReserveBytes)
         {
-            manifestText = manifestText[..(int)ManifestReserveBytes];
+            var marker = Encoding.UTF8.GetBytes("\nmanifest-truncated: UTF-8 byte limit; later metadata omitted.\n");
+            var prefix = TruncateUtf8(manifestBytes, checked((int)ManifestReserveBytes - marker.Length));
+            manifestBytes = [.. prefix, .. marker];
         }
 
-        File.WriteAllText(Path.Combine(destination, "manifest.txt"), manifestText);
+        File.WriteAllBytes(Path.Combine(destination, "manifest.txt"), manifestBytes);
         return destination;
     }
 
@@ -313,6 +383,28 @@ internal static class QueueFailureEvidence
         return name;
     }
 
+    /// <summary>
+    /// Truncates already-UTF8-encoded <paramref name="bytes"/> to at most <paramref name="maxBytes"/>
+    /// bytes, backing the cut off whatever multi-byte character it would otherwise split. A
+    /// continuation byte (<c>10xxxxxx</c>) sitting right at the cut point means the boundary falls
+    /// inside a character that started earlier in the kept prefix.
+    /// </summary>
+    internal static byte[] TruncateUtf8(byte[] bytes, int maxBytes)
+    {
+        if (bytes.Length <= maxBytes)
+        {
+            return bytes;
+        }
+
+        var cut = maxBytes;
+        while (cut > 0 && (bytes[cut] & 0xC0) == 0x80)
+        {
+            cut--;
+        }
+
+        return bytes[..cut];
+    }
+
     private static bool IsReparsePoint(string path)
     {
         try
@@ -323,6 +415,36 @@ internal static class QueueFailureEvidence
         {
             return true;
         }
+    }
+
+    /// <summary>
+    /// Walks every directory strictly between <paramref name="path"/> and <paramref name="stopAt"/>
+    /// (exclusive of both), rejecting as a whole if any component is itself a reparse point. A
+    /// reparse point lexically under <paramref name="stopAt"/> can resolve anywhere; checking only
+    /// <paramref name="path"/>'s own leaf would miss one sitting at an intermediate directory.
+    /// </summary>
+    private static bool HasReparsePointAncestor(string path, string stopAt)
+    {
+        var current = Path.GetDirectoryName(path);
+        while (current is not null && !PathsEqual(current, stopAt))
+        {
+            // A missing ancestor is not itself a reparse point; IsReparsePoint fails closed (treats
+            // an unreadable path as one), which would otherwise mislabel a merely-absent directory.
+            if (Directory.Exists(current) && IsReparsePoint(current))
+            {
+                return true;
+            }
+
+            var parent = Path.GetDirectoryName(current);
+            if (parent is null || PathsEqual(parent, current))
+            {
+                break;
+            }
+
+            current = parent;
+        }
+
+        return false;
     }
 
     private static bool PathsEqual(string a, string b) =>
