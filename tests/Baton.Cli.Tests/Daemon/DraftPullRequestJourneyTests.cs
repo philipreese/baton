@@ -218,6 +218,19 @@ public sealed class DraftPullRequestJourneyTests
             Assert.Equal(1, forge.CreateCount);
             Assert.Equal(2, launches.Count);
         }
+        catch (QueueStoreException ex) when (QueueFailureEvidence.IsCapturable(ex))
+        {
+            // #2515: QueueFailureEvidence's own remarks on this type say what this retains and why.
+            var retained = QueueFailureEvidence.Retain(ex,
+                nameof(Settled_implementation_creates_draft_review_block_launches_one_fix_and_restarts_without_duplicates),
+                home, [BatonPaths.QueueFile]);
+            if (retained is not null)
+            {
+                TestContext.Current.TestOutputHelper?.WriteLine($"Retained post-unwind queue evidence at '{retained}'.");
+            }
+
+            throw;
+        }
         finally
         {
             scope.Dispose();
