@@ -2504,7 +2504,7 @@ public sealed class QueueCommandTests
                 var json = await File.ReadAllTextAsync(log.LivePath, Ct);
                 await File.WriteAllTextAsync(log.LivePath, json.Replace("\"kind\":\"admissionDecided\"", "\"kind\":\"attemptStarted\",\"kind\":\"admissionDecided\"", StringComparison.Ordinal), Ct);
             }
-            if (defect == "missing-live") { File.Delete(log.LivePath); }
+            if (defect == "missing-live") { FileCleanup.EnsureDeleted(log.LivePath); }
             var before = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
             await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
@@ -2668,7 +2668,7 @@ public sealed class QueueCommandTests
         try
         {
             var item = await CreatePrelaunchRefusalsAsync(home, 2);
-            File.Delete(BatonPaths.QueueDecisionLedgerFile);
+            FileCleanup.EnsureDeleted(BatonPaths.QueueDecisionLedgerFile);
             Directory.CreateDirectory(BatonPaths.QueueDecisionLedgerFile);
             var failed = await Record.ExceptionAsync(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
@@ -2677,7 +2677,7 @@ public sealed class QueueCommandTests
             Assert.Equal(QueueItemState.Cancelled, cancelled.State);
             Assert.NotNull(cancelled.PrelaunchCancellation);
             Assert.False(QueueScheduler.IsActiveLifecycle(cancelled));
-            File.Delete(BatonPaths.FleetEventsFile);
+            FileCleanup.EnsureDeleted(BatonPaths.FleetEventsFile);
             Directory.Delete(BatonPaths.QueueDecisionLedgerFile);
             for (var retry = 0; retry < 2; retry++)
             {
