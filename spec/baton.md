@@ -2527,7 +2527,8 @@ spawn failure is itself journaled and never prevents the original arrest from be
 **The grace turn (#2134, operator ruling 2026-09-08 23:10 ET, "build it").** Three `agy` budget
 arrests the same night each landed after real work was done and before it was ever committed, leaving
 a dirty tree a follow-up lane had to rescue at several hundred thousand tokens — a grace turn costs one
-bounded reply on an already-cached context instead. When `TokenBudgetMonitor` arrests an execution
+bounded checkpoint reply instead; it does not assume vendor-session resume or prompt-cache reuse.
+When `TokenBudgetMonitor` arrests an execution
 whose role is workspace-verifying (`WorkerBinding.Process.VerifiesWorkspace` — the same `implement`/
 `janitor` set §"Arms 2 and 3 grade the roles that CHANGE the workspace" already draws, on the same
 reasoning: a read-shaped role writes nothing, so there is nothing for a grace turn to rescue) and whose
@@ -2536,7 +2537,7 @@ mutation check already uses — no second, freshly-written `git status --porcela
 ONE further, bounded dispatch into the SAME workspace and under the SAME grant as the arrested
 execution (`WorkerBinding.Process.Target` verbatim — program, args, working directory, permission
 flags; only the prompt and the caps change, never a fresh, more permissive dispatch) before the arrest
-itself is appended. That dispatch carries a fixed, self-contained prompt (`Mutation.GraceTurn.PromptText`)
+itself is appended. That dispatch carries the bounded checkpoint prompt (`Mutation.GraceTurn.BuildPrompt`)
 under its own fixed, far smaller caps
 (`Mutation.GraceTurn.TokenBudget`/`MaxToolSteps`/`WallClockTimeout`) — one bounded reply, never a second
 attempt at the original task, and never per-role configurable: there is no role-specific reason for a
