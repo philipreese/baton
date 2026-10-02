@@ -2814,7 +2814,9 @@ where `ExecutionUsageView` is
   "keyableToolSteps"?: number,
   "limits"?: { "maxRepeatedToolSteps"?: number, "maxRepeatedToolStepsSource"?: string },
   "emptyToolResults"?: number, "predecessorExecutionId"?: string,
-  "outcome"?: "Unresolved" }
+  "outcome"?: "Unresolved",
+  "observedBilledTokenFloor"?: { "tokens": number, "completeness": "incomplete",
+                                  "source": "captured-stdout-monitor-replay" } }
 ```
 (`src/Baton/Status/ExecutionUsageView.cs` declares the C# record; `WorkflowStatusView.cs` projects it). The four
 #1921 added are the step-budget axis, present or absent as a set of four (`Status.ToolStepTally.Snapshot`
@@ -2880,6 +2882,51 @@ from, which one may not be read, and what its absence means; that ruling is not 
 view and its durable cost-ledger row carry one named anomaly with the execution id plus requested,
 resolved and observed models. It is an observation, not a retroactive launch control: the spend already
 happened, so the signal stays loud on both live status reads and later ledger analysis.
+
+**`observedBilledTokenFloor` (#2559) is Claude-only, additive, and never a substitute for the
+reconciliation triple above.** [#2559](https://github.com/philipreese/baton/issues/2559) records the
+motivating timeout measurement. This field exposes positively observed incomplete usage without
+widening the triple's contract.
+
+Eligibility combines the existing capture/loss rules with the stricter integrity gate below:
+present only when `billedTokens` is absent for the `no-terminal-billed-figure` reason specifically (an
+authoritative terminal figure, when one exists, always wins and this field is omitted alongside the
+triple) — which already implies a captured stream existed, carried no loss marker
+(`stream-truncated-by-rollover`/`stream-truncated-by-write-failure`), was not reported lost on the
+journalled channel (`FlowEvent.StreamLogLossDeclared` for the `stdout` stream — a `stderr`-only loss
+does not reach it, same scoping as the triple), and had no unreadable rollover segment. A readable
+single rollover is replayed in full, in order, exactly as `liveBilledTokens` already is. Its `tokens`
+value is **the identical `LiveBilledTokens` figure the triple would have reported had the terminal line
+existed** — read off the same unarmed `Mutation.TokenBudgetMonitor` replay, never a second computation
+of it — so a room that later gains a terminal line and starts reconciling would see this field's last
+value and `liveBilledTokens` agree.
+
+**The integrity gate is additive validation over the SAME captured bytes, not a second parser or
+accumulator.** `ExecutionUsageProjector` asks `ClaudeUsageParser.ObserveUsageFloorIntegrity` about every
+line of both segments, in the same rollover-then-current order the replay already uses, and omits the
+whole object the instant any one line's verdict comes back false — never a partial figure and never a
+fabricated zero. That method's own doc comment is the one statement of exactly which shapes fail it
+(a torn line, a bad counter, a duplicated member, an unidentified or disagreeing repeat), not restated
+here; what belongs in this register is the two facts that doc comment cannot itself state. First: the
+check is deliberately STRICTER than `TokenBudgetMonitor`'s own dedupe, which trusts a repeated
+`message.id` by first sighting alone and so cannot, by itself, notice a replay where a later line claims
+a different count for an id it has already seen — this gate exists to catch exactly that disagreement
+before the figure it would corrupt ever reaches a reader. Second: accumulation overflow is read off
+the monitor's own per-line snapshots and latched. With valid nonnegative cache-creation deltas, the
+first unchecked cumulative wrap is negative; a later wrap back to positive does not erase that finding.
+This gate never sums the stream a second time. An identical repeat (same id, same counters and their
+presence) still contributes once, the same dedupe
+`liveBilledTokens` already performs, and an explicit measured zero is a valid floor distinct from the
+absent/placeholder/cache-read-only case that leaves `liveBilledTokens` — and so this field — null, per
+the absent-is-not-zero rule the triple above already enforces.
+
+**Scope, stated once rather than left to be inferred from what is absent.** No value from this field
+propagates into the reconciliation triple, the cost ledger's totals or completeness, any budget or
+quota figure, `outcome`/`exitReason`/`arrestReason`, retry or arrest behaviour, a running execution's
+live status, an unresolved grace row, or any non-claude vendor's reading — each of those keeps reading
+exactly as it did before this field existed. It is not a full room total, a price, or a quota claim;
+`completeness: "incomplete"` and `source: "captured-stdout-monitor-replay"` are fixed literals precisely
+so a consumer never mistakes it for one.
 
 **The two added by #1882 are not token figures at all, and are attributed to ONE execution.**
 `verifyStepMs` and `verifyResultsBytes` are the wall clock of the room's pre-turn verify step (the
@@ -7617,6 +7664,25 @@ from the exact invocation checkout refuses rather than being copied. If the exac
 record, that exact ceiling is copied even when a sibling is narrower. If the repository is proven
 never trusted, the historical unrestricted bootstrap is recorded with the exact invocation checkout
 as provenance; concurrent provisions may copy only that deterministic bootstrap lineage.
+
+**Read-only fresh lifecycle trust admission (#2560).** After canonical repository resolution,
+task submission and fresh lifecycle issue-add observe the provisioner's bounded candidate selection
+and the same deterministic trust policy before reserving an issue identity, copying a brief,
+creating a branch/worktree, or writing trust. A fresh target is audited using the exact invocation
+checkout's identity, never an invented future-path identity. Its live source record does not skip
+the repository-wide unknown-candidate audit. A registered exact canonical target with its own live
+ceiling remains reusable even without source trust; a directory or branch name alone proves nothing.
+The prospective ceiling must pass initial role admission without widening authority. Identical
+retained task input still returns the existing row before this preflight; changed input conflicts.
+
+Eligibility is an observation, not a permission token. Provisioning re-observes selection, cleanup
+and deterministic trust before mutation, including a changed candidate or suffix after a collision.
+The actual trust writer and final exact-target admission remain authoritative before `Prepared`,
+and the queue identity reservation and preparation CAS still prevent duplicate provisioning or
+resurrection after cancellation. Trust, Git, GitHub and queue storage are not one transaction:
+genuinely late failure may retain a blocked reservation and external effects. Those facts remain
+uncertain evidence requiring reconciliation; this admission check neither deletes the row nor
+supplies missing provenance for blocked-preparation recovery.
 
 **Retained-worktree inventory and controlled cleanup (#2318, #2386).** `queue worktrees` projects every distinct
 resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for

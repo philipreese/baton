@@ -656,7 +656,7 @@ public static class WorktreeProvisioner
             && PathsEqual(currentOut.Trim(), endpointOut.Trim());
     }
 
-    private static readonly TimeSpan GraceRemoteProbeTimeout = TimeSpan.FromSeconds(10);
+    internal static readonly TimeSpan GraceRemoteProbeTimeout = TimeSpan.FromSeconds(10);
     private static readonly AsyncLocal<GraceRemoteProbeOverride?> GraceRemoteProbeOverrideScope = new();
 
     /// <summary>

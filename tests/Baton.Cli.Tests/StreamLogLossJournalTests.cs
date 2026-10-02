@@ -597,6 +597,61 @@ public sealed class StreamLogLossJournalTests
         }
     }
 
+    [Fact]
+    public void A_journalled_stdout_loss_suppresses_the_observed_billed_token_floor_with_no_terminal_line()
+    {
+        // #2559: existing loss authority stays strict for the new field too -- a declared stdout loss
+        // withholds the floor exactly as it withholds the triple, even on the shape (no terminal line
+        // at all) the floor otherwise targets.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-stdout-loss-{Guid.NewGuid():N}");
+        try
+        {
+            var executionId = new ExecutionId("exec-2559-stdout-loss");
+            var view = Project(
+                testRoot,
+                executionId,
+                stdoutLines: [ClaudeAssistantLine],
+                journalledLoss: new FlowEvent.StreamLogLossDeclared(
+                    executionId, ExecutionStreamLogger.StdoutStreamName, WriteFailureReason));
+
+            Assert.Equal(WriteFailureReason, view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void A_journalled_stderr_loss_does_not_suppress_the_observed_billed_token_floor()
+    {
+        // The positive control: scope stays stdout-only, same as the triple's own stderr-loss control.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-stderr-loss-{Guid.NewGuid():N}");
+        try
+        {
+            var executionId = new ExecutionId("exec-2559-stderr-loss");
+            var view = Project(
+                testRoot,
+                executionId,
+                stdoutLines: [ClaudeAssistantLine],
+                journalledLoss: new FlowEvent.StreamLogLossDeclared(
+                    executionId, ExecutionStreamLogger.StderrStreamName, WriteFailureReason));
+
+            // No terminal line in this fixture either way, so unavailable still reads
+            // no-terminal-billed-figure -- the scope claim here is narrower: a stderr-only loss must
+            // not ALSO suppress the floor on top of that, the same scope the triple's own stderr
+            // control states.
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.NotNull(view.ObservedBilledTokenFloor);
+            Assert.Equal(700, view.ObservedBilledTokenFloor!.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static ExecutionRequest AcceptedRequest(ExecutionId executionId, string worker) => new(
         executionId,
         new WorkflowId("wf-1885"),

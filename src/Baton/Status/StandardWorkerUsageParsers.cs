@@ -68,6 +68,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("type", out var typeProp)
+                || typeProp.ValueKind != JsonValueKind.String
                 || typeProp.GetString() != "result")
             {
                 return false;
@@ -94,22 +95,22 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
 
             if (root.TryGetProperty("usage", out var usageProp) && usageProp.ValueKind == JsonValueKind.Object)
             {
-                if (tokensIn is null && usageProp.TryGetProperty("input_tokens", out var inProp) && inProp.TryGetInt64(out var inTokens))
+                if (tokensIn is null && usageProp.TryGetProperty("input_tokens", out var inProp) && inProp.ValueKind == JsonValueKind.Number && inProp.TryGetInt64(out var inTokens))
                 {
                     tokensIn = inTokens;
                 }
 
-                if (tokensOut is null && usageProp.TryGetProperty("output_tokens", out var outProp) && outProp.TryGetInt64(out var outTokens))
+                if (tokensOut is null && usageProp.TryGetProperty("output_tokens", out var outProp) && outProp.ValueKind == JsonValueKind.Number && outProp.TryGetInt64(out var outTokens))
                 {
                     tokensOut = outTokens;
                 }
 
-                if (cacheReadTokens is null && usageProp.TryGetProperty("cache_read_input_tokens", out var cacheReadProp) && cacheReadProp.TryGetInt64(out var cacheReadValue))
+                if (cacheReadTokens is null && usageProp.TryGetProperty("cache_read_input_tokens", out var cacheReadProp) && cacheReadProp.ValueKind == JsonValueKind.Number && cacheReadProp.TryGetInt64(out var cacheReadValue))
                 {
                     cacheReadTokens = cacheReadValue;
                 }
 
-                if (cacheCreationTokens is null && usageProp.TryGetProperty("cache_creation_input_tokens", out var cacheCreationProp) && cacheCreationProp.TryGetInt64(out var cacheCreationValue))
+                if (cacheCreationTokens is null && usageProp.TryGetProperty("cache_creation_input_tokens", out var cacheCreationProp) && cacheCreationProp.ValueKind == JsonValueKind.Number && cacheCreationProp.TryGetInt64(out var cacheCreationValue))
                 {
                     cacheCreationTokens = cacheCreationValue;
                 }
@@ -118,6 +119,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
                     && usageProp.TryGetProperty("output_tokens_details", out var outputDetailsProp)
                     && outputDetailsProp.ValueKind == JsonValueKind.Object
                     && outputDetailsProp.TryGetProperty("thinking_tokens", out var thinkingProp)
+                    && thinkingProp.ValueKind == JsonValueKind.Number
                     && thinkingProp.TryGetInt64(out var thinkingValue))
                 {
                     thinkingTokens = thinkingValue;
@@ -125,7 +127,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             }
 
             int? turns = null;
-            if (root.TryGetProperty("num_turns", out var turnsProp) && turnsProp.TryGetInt32(out var turnCount))
+            if (root.TryGetProperty("num_turns", out var turnsProp) && turnsProp.ValueKind == JsonValueKind.Number && turnsProp.TryGetInt32(out var turnCount))
             {
                 turns = turnCount;
             }
@@ -217,7 +219,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
 
         static void Accumulate(JsonElement model, string propertyName, ref long? running)
         {
-            if (model.TryGetProperty(propertyName, out var prop) && prop.TryGetInt64(out var value))
+            if (model.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out var value))
             {
                 running = (running ?? 0) + value;
             }
@@ -267,6 +269,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("type", out var typeProp)
+                || typeProp.ValueKind != JsonValueKind.String
                 || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message)
                 || message.ValueKind != JsonValueKind.Object
@@ -276,8 +279,9 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
                 return false;
             }
 
-            long? cacheReadTokens = usageProp.TryGetProperty("cache_read_input_tokens", out var cacheReadProp) && cacheReadProp.TryGetInt64(out var cacheReadValue) ? cacheReadValue : null;
-            long? cacheCreationTokens = usageProp.TryGetProperty("cache_creation_input_tokens", out var cacheCreationProp) && cacheCreationProp.TryGetInt64(out var cacheCreationValue) ? cacheCreationValue : null;
+            // Invalid JSON value kinds are not measurements; TryGetInt64 itself throws on them.
+            long? cacheReadTokens = usageProp.TryGetProperty("cache_read_input_tokens", out var cacheReadProp) && cacheReadProp.ValueKind == JsonValueKind.Number && cacheReadProp.TryGetInt64(out var cacheReadValue) ? cacheReadValue : null;
+            long? cacheCreationTokens = usageProp.TryGetProperty("cache_creation_input_tokens", out var cacheCreationProp) && cacheCreationProp.ValueKind == JsonValueKind.Number && cacheCreationProp.TryGetInt64(out var cacheCreationValue) ? cacheCreationValue : null;
             string? messageId = message.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.String ? idProp.GetString() : null;
             // #1666: a sub-agent's own turn carries a parent_tool_use_id field, set and non-null, at
             // the line's ROOT (not inside "message") -- spec/baton.md §3 has the measured shape.
@@ -304,6 +308,161 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
     }
 
     /// <summary>
+    /// #2559: one captured line's verdict for <c>ExecutionUsageProjector</c>'s Claude-only observed
+    /// billed-token FLOOR -- a stricter read of the SAME <c>"type":"assistant"</c>/<c>message.usage</c>
+    /// shape <see cref="TryParseIncrementalUsage"/> already reads, never a second accumulator: this
+    /// reports only whether the line is trustworthy enough for the floor to be exposed at all, and the
+    /// floor's own VALUE still comes from <see cref="Mutation.TokenBudgetMonitor"/>'s own replayed Σ
+    /// (<c>ExecutionUsageProjector</c> reads that, not anything computed here).
+    /// <para>
+    /// A nonblank line that fails to parse as JSON at all -- a torn or corrupt capture line -- is
+    /// <see langword="false"/> regardless of shape. A well-formed line that is not this shape (every
+    /// non-assistant event, and an assistant turn with no <c>usage</c> member) is ordinary traffic and
+    /// <see langword="true"/>. A blank line is always <see langword="true"/>, same as every other reader
+    /// in this file.
+    /// </para>
+    /// <para>
+    /// A recognized usage line (one carrying at least one of the two cache counters) is
+    /// <see langword="false"/> when: either cache counter present is negative, non-integer, or not a
+    /// JSON number at all; a relevant selection member (<c>type</c>, <c>message</c>, <c>usage</c>),
+    /// cache counter or <c>message.id</c> is duplicated within its object; or <c>message.id</c> is
+    /// missing or whitespace-only. A line carrying neither cache
+    /// counter is <see langword="true"/> and otherwise ignored -- placeholder-only or genuinely empty
+    /// usage says nothing this check is about.
+    /// </para>
+    /// <para>
+    /// <paramref name="seenCacheTokensByMessageId"/> is fingerprint metadata, not an accumulator: the
+    /// first (cache-read, cache-creation) pair this replay has observed for a given <c>message.id</c>,
+    /// including whether each counter was present. A present non-object usage payload is invalid.
+    /// <see cref="TryParseIncrementalUsage"/>'s own caller dedupes a repeated id by first sighting alone
+    /// and never checks whether the repeat agrees -- so a later line repeating an id with a DIFFERENT
+    /// value is an ambiguous replay this method catches as a conflicting repeat
+    /// (<see langword="false"/>) rather than one that silently keeps the first reading.
+    /// </para>
+    /// </summary>
+    public bool ObserveUsageFloorIntegrity(
+        string rawLine, Dictionary<string, (long? CacheRead, long? CacheCreation)> seenCacheTokensByMessageId)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return true;
+        }
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(rawLine);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return true;
+            }
+            if (CountMembers(root, "type") > 1 || CountMembers(root, "message") > 1)
+            {
+                return false;
+            }
+            if (!root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String
+                || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
+            {
+                return true;
+            }
+            if (CountMembers(message, "usage") > 1)
+            {
+                return false;
+            }
+            if (!message.TryGetProperty("usage", out var usage))
+            {
+                return true;
+            }
+            if (usage.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (CountMembers(usage, "cache_read_input_tokens") > 1
+                || CountMembers(usage, "cache_creation_input_tokens") > 1
+                || CountMembers(message, "id") > 1)
+            {
+                return false;
+            }
+
+            var cacheRead = ReadNonnegativeIntegerCounter(usage, "cache_read_input_tokens", out var cacheReadValue);
+            var cacheCreation = ReadNonnegativeIntegerCounter(usage, "cache_creation_input_tokens", out var cacheCreationValue);
+            if (cacheRead == CounterReading.Invalid || cacheCreation == CounterReading.Invalid)
+            {
+                return false;
+            }
+
+            if (cacheRead == CounterReading.Absent && cacheCreation == CounterReading.Absent)
+            {
+                return true;
+            }
+
+            if (!message.TryGetProperty("id", out var idProp)
+                || idProp.ValueKind != JsonValueKind.String
+                || idProp.GetString() is not { } messageId || string.IsNullOrWhiteSpace(messageId))
+            {
+                return false;
+            }
+
+            var observedCacheRead = cacheRead == CounterReading.Valid ? cacheReadValue : (long?)null;
+            var observedCacheCreation = cacheCreation == CounterReading.Valid ? cacheCreationValue : (long?)null;
+            if (seenCacheTokensByMessageId.TryGetValue(messageId, out var prior))
+            {
+                if (prior != (observedCacheRead, observedCacheCreation))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                seenCacheTokensByMessageId[messageId] = (observedCacheRead, observedCacheCreation);
+            }
+
+            return true;
+        }
+    }
+
+    private enum CounterReading { Absent, Valid, Invalid }
+
+    private static CounterReading ReadNonnegativeIntegerCounter(JsonElement obj, string propertyName, out long value)
+    {
+        value = 0;
+        if (!obj.TryGetProperty(propertyName, out var prop))
+        {
+            return CounterReading.Absent;
+        }
+
+        if (prop.ValueKind != JsonValueKind.Number)
+        {
+            return CounterReading.Invalid;
+        }
+
+        var raw = prop.GetRawText();
+        if (raw.Contains('.', StringComparison.Ordinal)
+            || raw.Contains('e', StringComparison.OrdinalIgnoreCase)
+            || !prop.TryGetInt64(out value)
+            || value < 0)
+        {
+            return CounterReading.Invalid;
+        }
+
+        return CounterReading.Valid;
+    }
+
+    private static int CountMembers(JsonElement obj, string propertyName) =>
+        obj.EnumerateObject().Count(member => string.Equals(member.Name, propertyName, StringComparison.Ordinal));
+
+    /// <summary>
     /// #1623: a <c>"type":"assistant"</c> message's <c>tool_use</c> content block name, per the
     /// standard Anthropic Messages API streaming shape claude's own <c>stream-json</c> output is built
     /// on — not independently doc-audited the way the usage fields above are (docs/vendor-capabilities.md
@@ -323,7 +482,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -333,8 +492,8 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             foreach (var block in content.EnumerateArray())
             {
                 if (block.ValueKind == JsonValueKind.Object
-                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
-                    && block.TryGetProperty("name", out var nameProp) && nameProp.GetString() is { Length: > 0 } name)
+                    && block.TryGetProperty("type", out var blockType) && blockType.ValueKind == JsonValueKind.String && blockType.GetString() == "tool_use"
+                    && block.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String && nameProp.GetString() is { Length: > 0 } name)
                 {
                     return name;
                 }
@@ -369,7 +528,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -380,7 +539,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             foreach (var block in content.EnumerateArray())
             {
                 if (block.ValueKind == JsonValueKind.Object
-                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use")
+                    && block.TryGetProperty("type", out var blockType) && blockType.ValueKind == JsonValueKind.String && blockType.GetString() == "tool_use")
                 {
                     count++;
                 }
@@ -409,7 +568,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -418,8 +577,9 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
 
             return content.EnumerateArray().Count(block =>
                 block.ValueKind == JsonValueKind.Object
-                && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
+                && block.TryGetProperty("type", out var blockType) && blockType.ValueKind == JsonValueKind.String && blockType.GetString() == "tool_use"
                 && block.TryGetProperty("name", out var name)
+                && name.ValueKind == JsonValueKind.String
                 && name.GetString() is "Edit" or "Write" or "NotebookEdit");
         }
         catch (JsonException)
@@ -470,7 +630,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp))
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String)
             {
                 return null;
             }
@@ -539,7 +699,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -550,8 +710,8 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             foreach (var block in content.EnumerateArray())
             {
                 if (block.ValueKind == JsonValueKind.Object
-                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
-                    && block.TryGetProperty("name", out var nameProp) && nameProp.GetString() is { Length: > 0 } name
+                    && block.TryGetProperty("type", out var blockType) && blockType.ValueKind == JsonValueKind.String && blockType.GetString() == "tool_use"
+                    && block.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String && nameProp.GetString() is { Length: > 0 } name
                     && block.TryGetProperty("input", out var inputProp)
                     && inputProp.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
                 {
@@ -584,7 +744,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -595,8 +755,8 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             foreach (var block in content.EnumerateArray())
             {
                 if (block.ValueKind == JsonValueKind.Object
-                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
-                    && block.TryGetProperty("name", out var nameProp) && nameProp.GetString() == "Bash"
+                    && block.TryGetProperty("type", out var blockType) && blockType.ValueKind == JsonValueKind.String && blockType.GetString() == "tool_use"
+                    && block.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String && nameProp.GetString() == "Bash"
                     && block.TryGetProperty("input", out var input) && input.ValueKind == JsonValueKind.Object
                     && input.TryGetProperty("command", out var command) && command.ValueKind == JsonValueKind.String
                     && command.GetString() is { Length: > 0 } commandLine)
@@ -630,7 +790,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "user"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "user"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -641,7 +801,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             foreach (var block in content.EnumerateArray())
             {
                 if (block.ValueKind == JsonValueKind.Object
-                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_result"
+                    && block.TryGetProperty("type", out var blockType) && blockType.ValueKind == JsonValueKind.String && blockType.GetString() == "tool_result"
                     && matches(ReadToolResultText(block)))
                 {
                     count++;

@@ -699,7 +699,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
     private static Func<string, CancellationToken, Task<RepositoryIdentity?>> Probe(
         string commonDir, params string[] paths) =>
         (path, _) => Task.FromResult(
-            paths.Contains(path, StringComparer.OrdinalIgnoreCase) ? RepositoryIdentity.From(null, commonDir) : null);
+            paths.Contains(path, StringComparer.OrdinalIgnoreCase) ? RepositoryIdentity.From("https://" + CapturedRepository, commonDir) : null);
 
     private string MakeDirectory(string name)
     {

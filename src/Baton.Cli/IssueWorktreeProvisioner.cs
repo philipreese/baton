@@ -187,50 +187,33 @@ public static class IssueWorktreeProvisioner
 
         runner ??= RunRetainedProbeAsync;
 
-        var root = ResolveWorktreeRoot(worktreeRoot, repositoryDirectory);
-
-        var firstWorkspace = Path.Combine(root, $"w{issue}");
-        var firstBranch = BranchNameFor(issue);
-
-        var canonicalFirst = Path.GetFullPath(firstWorkspace);
-        if (Directory.Exists(firstWorkspace)
-            && !await QueueStore.HasActiveWorktreeCleanupClaimAsync(
-                BatonPaths.QueueFile, canonicalFirst, cancellationToken).ConfigureAwait(false))
+        var minimumSuffix = 1;
+        for (var attempt = 1; attempt <= 100; attempt++)
         {
-            // A directory named w<n> is not evidence that it is the live lane. Only an exact Git
-            // registration on the first-lane branch permits reuse. A positively different attached
-            // branch plus a proven canonical branch collision leaves the old directory untouched and
-            // selects a free suffix; an unreadable or unregistered path still refuses fail-closed.
-            if (await CanReuseCanonicalWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
-                    .ConfigureAwait(false))
+            // Preflight is never a permission token. Re-observe selection, cleanup and trust before
+            // each mutation, including a suffix selected after a concurrent creator won (#2560).
+            var candidate = await ObserveCandidateAsync(issue, repositoryDirectory, worktreeRoot, runner, cancellationToken,
+                minimumSuffix, allowReuse: minimumSuffix == 1)
+                .ConfigureAwait(false);
+            var workspace = candidate.Workspace;
+            var branch = candidate.Branch;
+            var reuse = candidate.Reuse;
+            if (deterministicSourceCeiling)
             {
-                await TrustAsync(firstWorkspace, repositoryDirectory, deterministicSourceCeiling, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
-                return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
+                await InspectDeterministicTrustAsync(workspace, repositoryDirectory, !reuse,
+                    probe ?? RepositoryIdentityResolver.TryResolveAsync, ProjectCeilingStore.DefaultPath,
+                    repository, cancellationToken).ConfigureAwait(false);
+                var current = await ObserveCandidateAsync(issue, repositoryDirectory, worktreeRoot, runner, cancellationToken,
+                    minimumSuffix, allowReuse: minimumSuffix == 1).ConfigureAwait(false);
+                if (current != candidate) continue;
             }
-        }
-
-        for (var suffix = 1; suffix <= 100; suffix++)
-        {
-            var branch = suffix == 1 ? firstBranch : $"{firstBranch}-{suffix}";
-            var workspace = suffix == 1 ? firstWorkspace : Path.Combine(root, $"w{issue}-{suffix}");
-            var canonicalWorkspace = Path.GetFullPath(workspace);
-            if (await QueueStore.HasActiveWorktreeCleanupClaimAsync(
-                    BatonPaths.QueueFile, canonicalWorkspace, cancellationToken).ConfigureAwait(false))
+            if (reuse)
             {
-                continue;
+                await TrustAsync(workspace, repositoryDirectory, deterministicSourceCeiling, probe,
+                    output: output, cancellationToken: cancellationToken, expectedRepository: repository).ConfigureAwait(false);
+                return new ProvisionedIssueWorktree(workspace, branch);
             }
-
-            if (Directory.Exists(workspace))
-            {
-                continue;
-            }
-
-            // Check every candidate before asking GitHub to create it. In particular, the canonical
-            // name may have survived a merged PR even when its w<n> worktree did not.
-            if (await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
-            {
-                continue;
-            }
+            minimumSuffix = candidate.Suffix + 1;
 
             var (developExit, developOutput) = await runner(
                 "gh", ["issue", "develop", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -252,7 +235,8 @@ public static class IssueWorktreeProvisioner
                 "git", ["worktree", "add", workspace, branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
             if (worktreeExit == 0)
             {
-                await TrustAsync(workspace, repositoryDirectory, deterministicSourceCeiling, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await TrustAsync(workspace, repositoryDirectory, deterministicSourceCeiling, probe, output: output,
+                    cancellationToken: cancellationToken, expectedRepository: repository).ConfigureAwait(false);
                 return new ProvisionedIssueWorktree(workspace, branch);
             }
 
@@ -269,6 +253,54 @@ public static class IssueWorktreeProvisioner
         throw new CliArgumentException(
             $"Could not select a free branch and workspace for issue {issue} after 100 deterministic attempts.",
             "remove stale issue worktrees or retry after concurrent queue adds finish.");
+    }
+
+    internal sealed record Candidate(string Workspace, string Branch, bool Reuse, int Suffix = 1);
+
+    /// <summary>Shared bounded, read-only selection; names alone never prove canonical reuse.</summary>
+    internal static async Task<Candidate> ObserveCandidateAsync(
+        int issue, string repositoryDirectory, string? worktreeRoot,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> runner,
+        CancellationToken cancellationToken, int minimumSuffix = 1, bool allowReuse = true)
+    {
+        var root = ResolveWorktreeRoot(worktreeRoot, repositoryDirectory);
+        var firstWorkspace = Path.Combine(root, $"w{issue}");
+        var firstBranch = BranchNameFor(issue);
+        if (allowReuse && Directory.Exists(firstWorkspace)
+            && !await QueueStore.HasActiveWorktreeCleanupClaimAsync(BatonPaths.QueueFile,
+                Path.GetFullPath(firstWorkspace), cancellationToken).ConfigureAwait(false)
+            && await CanReuseCanonicalWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
+                .ConfigureAwait(false))
+            return new Candidate(firstWorkspace, firstBranch, true);
+
+        for (var suffix = minimumSuffix; suffix <= 100; suffix++)
+        {
+            var branch = suffix == 1 ? firstBranch : $"{firstBranch}-{suffix}";
+            var workspace = suffix == 1 ? firstWorkspace : Path.Combine(root, $"w{issue}-{suffix}");
+            if (await QueueStore.HasActiveWorktreeCleanupClaimAsync(BatonPaths.QueueFile,
+                    Path.GetFullPath(workspace), cancellationToken).ConfigureAwait(false)
+                || Directory.Exists(workspace)
+                || await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
+                continue;
+            return new Candidate(workspace, branch, false, suffix);
+        }
+        throw new CliArgumentException(
+            $"Could not select a free branch and workspace for issue {issue} after 100 deterministic attempts.",
+            "remove stale issue worktrees or retry after concurrent queue adds finish.");
+    }
+
+    /// <summary>Eligibility only: observes current trust without probing a future path or writing it.</summary>
+    internal static async Task<(Candidate Candidate, ProjectCeiling Ceiling)> PreflightAsync(
+        int issue, string sourceRepository, string? worktreeRoot, string repository,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
+        CancellationToken cancellationToken = default)
+    {
+        var candidate = await ObserveCandidateAsync(issue, sourceRepository, worktreeRoot,
+            runner ?? RunRetainedProbeAsync, cancellationToken).ConfigureAwait(false);
+        var trust = await InspectDeterministicTrustAsync(candidate.Workspace, sourceRepository, !candidate.Reuse,
+            probe, ProjectCeilingStore.DefaultPath, repository, cancellationToken).ConfigureAwait(false);
+        return (candidate, trust.Ceiling);
     }
 
     private static async Task<bool> BranchExistsAsync(
@@ -387,7 +419,8 @@ public static class IssueWorktreeProvisioner
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
         string? storePath = null,
         TextWriter? output = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? expectedRepository = null)
     {
         storePath ??= ProjectCeilingStore.DefaultPath;
         probe ??= RepositoryIdentityResolver.TryResolveAsync;
@@ -424,79 +457,110 @@ public static class IssueWorktreeProvisioner
                 }
             }
 
-            var own = ProjectCeilingStore.TryGetRecord(workspace, storePath);
-            if (own is { IsRevoked: false }) return;
-            // Audit the whole repository identity without writing. The exact invocation checkout is
-            // the only source we will copy, but unknown/revoked sibling evidence still blocks the
-            // never-trusted `all` fallback.
-            var observation = await InheritedProjectCeiling.InspectAsync(
-                workspace, storePath, probe, cancellationToken, unknownOutranksSource: true).ConfigureAwait(false);
-            switch (observation.Outcome)
-            {
-                case InheritanceOutcome.NoIdentity:
-                    throw new ProjectNotTrustedException(workspace,
-                        "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
-                case InheritanceOutcome.CandidateUnknown:
-                    throw new ProjectNotTrustedException(
-                        workspace, observation.CandidatePath!, observation.ProbeFailure ?? "repository identity is unreadable");
-                case InheritanceOutcome.Revoked:
-                    throw new ProjectNotTrustedException(workspace, observation.RevokedPath!, observation.RevokedAt!.Value);
-                case InheritanceOutcome.AlreadyTrusted:
-                    return;
-            }
-
-            RepositoryIdentity? sourceIdentity;
-            try
-            {
-                sourceIdentity = await probe(sourceRepository, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                throw new ProjectNotTrustedException(workspace,
-                    $"the exact source checkout repository probe threw: {ex.Message}.");
-            }
-            if (sourceIdentity is null || observation.RepositoryIdentity is null
-                || !string.Equals(sourceIdentity.Value, observation.RepositoryIdentity, StringComparison.Ordinal))
-                throw new ProjectNotTrustedException(workspace,
-                    "the exact source checkout could not be proven to be the same repository as the new worktree.");
-
-            // #2333: the invocation checkout is the sole deterministic bootstrap authority. A
-            // temporary review sibling can block an unsafe fallback, but can never donate its grant.
-            var source = ProjectCeilingStore.TryGetRecord(sourceRepository, storePath);
-            if (source is { IsRevoked: true })
-                throw new ProjectNotTrustedException(workspace, ProjectCeilingStore.CanonicalKey(sourceRepository), source.RevokedAt!.Value);
-            if (source is not null)
-            {
-                var inherited = source with { InheritedFrom = ProjectCeilingStore.CanonicalKey(sourceRepository) };
-                ProjectCeilingStore.Set(workspace, inherited, storePath);
-                (output ?? Console.Out).WriteLine(
-                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from source repository {ProjectCeilingStore.CanonicalKey(sourceRepository)}");
-                return;
-            }
-
-            var sourceKey = ProjectCeilingStore.CanonicalKey(sourceRepository);
-            if (observation.Outcome == InheritanceOutcome.Inherited
-                && observation.SourceCeiling is { } derived
-                && string.Equals(derived.InheritedFrom, sourceKey, StringComparison.OrdinalIgnoreCase))
-            {
-                ProjectCeilingStore.Set(workspace, derived with { InheritedFrom = sourceKey }, storePath);
-                (output ?? Console.Out).WriteLine(
-                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from deterministic source bootstrap {sourceKey}");
-                return;
-            }
-            if (observation.Outcome == InheritanceOutcome.Inherited)
-                throw new ProjectNotTrustedException(workspace,
-                    $"the exact source checkout '{sourceKey}' has no recorded ceiling, while another checkout of this repository does; sibling trust is not a deterministic bootstrap authority.");
-
-            ProjectCeilingStore.Set(
-                workspace, ProjectCeiling.Unrestricted with { InheritedFrom = sourceKey }, storePath);
-            (output ?? Console.Out).WriteLine(
-                $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: source repository has no recorded ceiling; recorded ceiling all");
+            var trust = await InspectDeterministicTrustAsync(workspace, sourceRepository, false,
+                probe, storePath, expectedRepository, cancellationToken).ConfigureAwait(false);
+            if (trust.AlreadyRecorded) return;
+            ProjectCeilingStore.Set(workspace, trust.Ceiling, storePath);
+            (output ?? Console.Out).WriteLine(trust.Fact);
         }
         finally
         {
             TrustGate.Release();
         }
+    }
+
+    private sealed record DeterministicTrust(ProjectCeiling Ceiling, bool AlreadyRecorded, string? Fact = null);
+
+    private static async Task<DeterministicTrust> InspectDeterministicTrustAsync(
+        string workspace, string sourceRepository, bool freshTarget,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
+        string storePath, string? expectedRepository, CancellationToken cancellationToken)
+    {
+        async Task<RepositoryIdentity?> AuditProbe(string path, CancellationToken token)
+        {
+            try
+            {
+                return await probe(path, token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new ProjectNotTrustedException(workspace,
+                    $"the repository-identity probe for '{path}' threw: {ex.Message}.");
+            }
+        }
+        var own = ProjectCeilingStore.TryGetRecord(workspace, storePath);
+        if (!freshTarget && own is { IsRevoked: false })
+        {
+            if (expectedRepository is not null)
+            {
+                var identity = await AuditProbe(workspace, cancellationToken).ConfigureAwait(false);
+                if (identity?.Value != expectedRepository)
+                    throw new ProjectNotTrustedException(workspace, "the reusable worktree does not resolve to the canonical issue repository.");
+            }
+            return new DeterministicTrust(own, true);
+        }
+        // Audit the whole repository identity without writing. The exact invocation checkout is
+        // the only source we will copy, but unknown/revoked sibling evidence still blocks the
+        // never-trusted `all` fallback.
+        var observation = await InheritedProjectCeiling.InspectAsync(
+            freshTarget ? sourceRepository : workspace, storePath, AuditProbe, cancellationToken,
+            unknownOutranksSource: true, auditOwnRecord: freshTarget).ConfigureAwait(false);
+        switch (observation.Outcome)
+        {
+            case InheritanceOutcome.NoIdentity:
+                throw new ProjectNotTrustedException(workspace,
+                    "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+            case InheritanceOutcome.CandidateUnknown:
+                throw new ProjectNotTrustedException(
+                    workspace, observation.CandidatePath!, observation.ProbeFailure ?? "repository identity is unreadable");
+            case InheritanceOutcome.Revoked:
+                throw new ProjectNotTrustedException(workspace, observation.RevokedPath!, observation.RevokedAt!.Value);
+            case InheritanceOutcome.AlreadyTrusted:
+                throw new InvalidOperationException("Deterministic trust audit unexpectedly skipped the repository scan.");
+        }
+
+        RepositoryIdentity? sourceIdentity;
+        try
+        {
+            sourceIdentity = await probe(sourceRepository, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new ProjectNotTrustedException(workspace,
+                $"the exact source checkout repository probe threw: {ex.Message}.");
+        }
+        if (sourceIdentity is null || observation.RepositoryIdentity is null
+            || (expectedRepository is not null && sourceIdentity.Value != expectedRepository)
+            || !string.Equals(sourceIdentity.Value, observation.RepositoryIdentity, StringComparison.Ordinal))
+            throw new ProjectNotTrustedException(workspace,
+                "the exact source checkout could not be proven to be the same repository as the new worktree.");
+
+        // #2333: the invocation checkout is the sole deterministic bootstrap authority. A
+        // temporary review sibling can block an unsafe fallback, but can never donate its grant.
+        var source = ProjectCeilingStore.TryGetRecord(sourceRepository, storePath);
+        if (source is { IsRevoked: true })
+            throw new ProjectNotTrustedException(workspace, ProjectCeilingStore.CanonicalKey(sourceRepository), source.RevokedAt!.Value);
+        if (source is not null)
+        {
+            var inherited = source with { InheritedFrom = ProjectCeilingStore.CanonicalKey(sourceRepository) };
+            return new DeterministicTrust(inherited, false,
+                $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from source repository {ProjectCeilingStore.CanonicalKey(sourceRepository)}");
+        }
+
+        var sourceKey = ProjectCeilingStore.CanonicalKey(sourceRepository);
+        if (observation.Outcome == InheritanceOutcome.Inherited
+            && observation.SourceCeiling is { } derived
+            && string.Equals(derived.InheritedFrom, sourceKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return new DeterministicTrust(derived with { InheritedFrom = sourceKey }, false,
+                $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: inherited ceiling from deterministic source bootstrap {sourceKey}");
+        }
+        if (observation.Outcome == InheritanceOutcome.Inherited)
+            throw new ProjectNotTrustedException(workspace,
+                $"the exact source checkout '{sourceKey}' has no recorded ceiling, while another checkout of this repository does; sibling trust is not a deterministic bootstrap authority.");
+
+        return new DeterministicTrust(ProjectCeiling.Unrestricted with { InheritedFrom = sourceKey }, false,
+            $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: source repository has no recorded ceiling; recorded ceiling all");
     }
 
     /// <summary>

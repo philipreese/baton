@@ -91,7 +91,9 @@ public static class QueueCommand
         IGhCliRunner? ghRunner = null,
         WorktreeApplyTestHooks? worktreeApplyTestHooks = null,
         OwnedTaskSubmission? ownedTask = null,
-        byte[]? capturedSpecBytes = null)
+        byte[]? capturedSpecBytes = null,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner = null,
+        Action? beforePreparationCommit = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -102,7 +104,7 @@ public static class QueueCommand
         {
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken,
-                ownedTask, capturedSpecBytes),
+                ownedTask, capturedSpecBytes, preparationRunner, beforePreparationCommit),
             QueueVerb.List => ListAsync(options, output, cancellationToken),
             QueueVerb.Worktrees => WorktreesAsync(
                 options.Format, options.Apply, output, repositoryDirectory, cancellationToken, worktreeApplyTestHooks),
@@ -127,7 +129,9 @@ public static class QueueCommand
         Action<string, string>? writeSpecFile,
         CancellationToken cancellationToken,
         OwnedTaskSubmission? ownedTask,
-        byte[]? capturedSpecBytes)
+        byte[]? capturedSpecBytes,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner,
+        Action? beforePreparationCommit)
     {
         var tag = options.Tag!;
         if (options.Lifecycle && options.DeclaredTaskSize is null)
@@ -247,6 +251,18 @@ public static class QueueCommand
                 role, settings.Queue.RequireDeclaredRequirements, admissionRequirements, queueSnapshot.Items, cancellationToken)
                 .ConfigureAwait(false)
             : null;
+
+        if (options.Lifecycle && !retained)
+        {
+            var preflight = await IssueWorktreeProvisioner.PreflightAsync(options.Issue!.Value,
+                sourceRepository, effectiveWorktreeRoot, issueRepository!, repositoryResolver,
+                preparationRunner, cancellationToken).ConfigureAwait(false);
+            var eligibility = RecordedProjectCeilingAdmission.Evaluate(admissionItem, role,
+                settings.Queue.RequireDeclaredRequirements, preflight.Ceiling);
+            if (eligibility.Admission.Result == TaskRequirementAdmission.Refused)
+                throw new CliArgumentException(eligibility.RefusalMessage(preflight.Candidate.Workspace, options.Role!),
+                    "choose a role whose grant fits the exact source ceiling before queueing this issue.");
+        }
 
         // Reserve the canonical repository/issue while the queue mutex is held, before the
         // provisioner can create a branch, worktree, or trust entry. Both task and legacy lifecycle
@@ -462,6 +478,9 @@ public static class QueueCommand
             }
 
             var replaced = false;
+            // Internal deterministic test seam for drift after admission/rendering. Public callers
+            // supply no callback; the mutation's own CAS and ceiling read remain authoritative.
+            beforePreparationCommit?.Invoke();
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 // A tag is an identity, not just a label: it names one spec file, so two items sharing one
@@ -489,6 +508,17 @@ public static class QueueCommand
                 {
                     RetainedIssueWorktreeValidator.RefuseIfLiveQueueOwnership(
                         snapshot.Items, retainedProof.Workspace, retainedProof.Branch);
+                }
+
+                // Trust can change while the brief is rendered. Re-read the exact target ceiling at
+                // the Prepared CAS; preflight and the earlier trust writer cannot authorize stale admission.
+                if (options.Lifecycle)
+                {
+                    var finalAdmission = RecordedProjectCeilingAdmission.Evaluate(
+                        admissionItem with { Workspace = workspace }, role, settings.Queue.RequireDeclaredRequirements);
+                    if (!finalAdmission.CeilingFound || finalAdmission.Admission.Result == TaskRequirementAdmission.Refused)
+                        throw new CliArgumentException(finalAdmission.RefusalMessage(workspace, options.Role!));
+                    item = item with { LastAdmission = finalAdmission.Admission };
                 }
 
                 // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it

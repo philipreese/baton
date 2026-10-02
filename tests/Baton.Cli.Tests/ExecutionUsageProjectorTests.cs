@@ -920,6 +920,464 @@ public sealed class ExecutionUsageProjectorTests
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // #2559: observedBilledTokenFloor -- the Claude-only incomplete floor, eligible only once the
+    // triple above has no terminal figure to omit in favour of. Permanent positive/negative controls.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Observed_billed_token_floor_reports_the_replayed_sum_when_no_terminal_figure_exists()
+    {
+        // The real-shaped timeout control: a completed execution whose stream never produced a
+        // terminal "type":"result" line -- the triple stays absent and unavailable reads
+        // no-terminal-billed-figure exactly as before, and this is the number that was genuinely
+        // observed. The repeated "msg_1" line is deduped, same as liveBilledTokens always dedupes it.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-basic-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 700),
+                ClaudeAssistantLine("msg_1", 700),
+                ClaudeAssistantLine("msg_2", 500),
+            ]);
+
+            Assert.Null(view.BilledTokens);
+            Assert.Null(view.LiveBilledTokens);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.NotNull(view.ObservedBilledTokenFloor);
+            Assert.Equal(1200, view.ObservedBilledTokenFloor!.Tokens);
+            Assert.Equal("incomplete", view.ObservedBilledTokenFloor.Completeness);
+            Assert.Equal("captured-stdout-monitor-replay", view.ObservedBilledTokenFloor.Source);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void CONTROL_observed_billed_token_floor_is_absent_once_a_terminal_figure_exists()
+    {
+        // The discriminating control for the arm above: identical usage line, plus the terminal line
+        // that gives the triple something to reconcile against. The floor must never ship ALONGSIDE an
+        // authoritative figure -- it exists only to fill the gap that figure leaves.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-terminal-present-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("msg_1", 700), ClaudeTerminalLine]);
+
+            Assert.NotNull(view.BilledTokens);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, 900)]
+    [InlineData(true, 900)]
+    [InlineData(false, 0)]
+    [InlineData(true, 0)]
+    public void Captured_terminal_billed_authority_before_a_footer_omits_only_the_new_floor(bool terminalInRollover, long terminalTokens)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-terminal-footer-{Guid.NewGuid():N}");
+        var assistant = ClaudeAssistantLine("valid", 700);
+        var terminal = "{\"type\":\"result\",\"usage\":{\"cache_creation_input_tokens\":" + terminalTokens + "}}";
+        const string footer = """{"type":"system","subtype":"footer"}""";
+        try
+        {
+            var view = terminalInRollover
+                ? ProjectStream(testRoot, "claude", [footer], [assistant, terminal])
+                : ProjectStream(testRoot, "claude", [assistant, terminal, footer]);
+
+            Assert.Null(view.BilledTokens);
+            Assert.Null(view.LiveBilledTokens);
+            Assert.Null(view.BilledUnderReadTokens);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"result\",\"num_turns\":2}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"cache_read_input_tokens\":900}}")]
+    public void CONTROL_terminal_without_billed_components_before_a_footer_preserves_the_observed_floor(string terminal)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-nonbilled-terminal-footer-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("valid", 700), terminal, """{"type":"system","subtype":"footer"}"""]);
+            Assert.Null(view.BilledTokens);
+            Assert.Null(view.LiveBilledTokens);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Equal(700, view.ObservedBilledTokenFloor?.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void CONTROL_observed_billed_token_floor_is_absent_on_a_non_claude_vendor()
+    {
+        // Claude-only per the issue's settled scope: an agy stream with the identical "no terminal
+        // figure" shape must not acquire this field just because ClaudeUsageParser's own replay figure
+        // happens to be reachable through a shared code path.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-agy-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "agy", [
+                """{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response","usage":{"input_tokens":10,"output_tokens":5}}}""",
+            ]);
+
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_spans_a_readable_single_rollover()
+    {
+        // The positive control spec/baton.md §3 names: a stream that rolled once, with no truncation
+        // marker, replays BOTH segments in order -- same rule the triple's own liveBilledTokens follows.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-rollover-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(
+                testRoot,
+                "claude",
+                currentLines: [ClaudeAssistantLine("msg_2", 500)],
+                rolledLines: [ClaudeAssistantLine("msg_1", 400)]);
+
+            Assert.NotNull(view.ObservedBilledTokenFloor);
+            Assert.Equal(900, view.ObservedBilledTokenFloor!.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_behind_a_write_failure_marker_with_no_terminal_line()
+    {
+        // Existing loss authority stays strict even on the shape this field targets: a marker omits
+        // the floor exactly as it already omits the triple, rather than this new field finding a figure
+        // the triple's own guard refuses to serve.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-marker-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(
+                testRoot, "claude", [ClaudeAssistantLine("msg_1", 700)], truncatedByWriteFailure: true);
+
+            Assert.Equal("stream-truncated-by-write-failure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_when_a_capture_line_carries_a_conflicting_repeated_id()
+    {
+        // The ambiguous-replay case the triple's own dedupe cannot see: the real monitor keeps "msg_1"'s
+        // FIRST sighting (700) and would otherwise report it as the floor -- but a second sighting
+        // disagreeing about the same id makes the whole replay untrustworthy, so the integrity gate
+        // omits the object rather than shipping the number TokenBudgetMonitor happened to settle on.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-conflict-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 700),
+                """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_creation_input_tokens":701,"cache_read_input_tokens":0}}}""",
+            ]);
+
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_when_a_capture_line_is_malformed_JSON()
+    {
+        // A torn/corrupt capture line anywhere in the stream -- the worker killed mid-write -- omits
+        // the whole object rather than reporting a Σ over a stream this method cannot even fully read.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-torn-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 700),
+                """{"type":"assistant","message":{"id":"msg_2""",
+            ]);
+
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_is_absent_when_the_replayed_sum_overflows()
+    {
+        // Accumulation overflow, read off the symptom: two individually valid counters whose unchecked
+        // long Σ wraps negative. Neither line is itself invalid, so this is the one control the per-line
+        // parser tests cannot exercise alone.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-overflow-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", 9_223_372_036_854_775_800),
+                ClaudeAssistantLine("msg_2", 100),
+            ]);
+
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_remembers_overflow_after_the_sum_wraps_positive_again()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-repeated-wrap-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", long.MaxValue),
+                ClaudeAssistantLine("msg_2", long.MaxValue),
+                ClaudeAssistantLine("msg_3", 3),
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_accepts_a_large_non_overflowing_sum()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-large-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", long.MaxValue - 3),
+                ClaudeAssistantLine("msg_2", 3),
+            ]);
+            Assert.Equal(long.MaxValue, view.ObservedBilledTokenFloor?.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"id\":\"   \",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"id\":\"\\t\",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"system\",\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"assistant\",\"message\":{},\"message\":{\"id\":\"m\",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"usage\":{},\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    public void Observed_billed_token_floor_refuses_blank_identity_or_ambiguous_selection_members(string line)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-selection-{Guid.NewGuid():N}");
+        try
+        {
+            Assert.Null(ProjectStream(testRoot, "claude", [line]).ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_refuses_a_changed_counter_presence_for_a_repeated_identity()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-counter-presence-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                """{"type":"assistant","message":{"id":"m","usage":{"cache_creation_input_tokens":700}}}""",
+                """{"type":"assistant","message":{"id":"m","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":700}}}""",
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("\"700\"")]
+    [InlineData("null")]
+    [InlineData("true")]
+    [InlineData("1e3")]
+    [InlineData("9223372036854775808")]
+    public void Observed_billed_token_floor_omits_invalid_counter_types_without_crashing_status(string counter)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-counter-type-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("m1", 700),
+                "{\"type\":\"assistant\",\"message\":{\"id\":\"m2\",\"usage\":{\"cache_creation_input_tokens\":" + counter + "}}}",
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_accepts_valid_unrelated_JSON_with_a_non_string_type()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-unrelated-type-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("m1", 700), """{"type":42}"""]);
+            Assert.Equal(700, view.ObservedBilledTokenFloor?.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_reports_an_explicit_measured_zero()
+    {
+        // Explicit measured zero is a valid floor, never confused with the absent-evidence case below.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-zero-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("msg_1", 0)]);
+
+            Assert.NotNull(view.ObservedBilledTokenFloor);
+            Assert.Equal(0, view.ObservedBilledTokenFloor!.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("true")]
+    [InlineData("[]")]
+    [InlineData("\"invalid\"")]
+    public void Observed_billed_token_floor_refuses_a_malformed_assistant_usage_object(string usage)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-usage-kind-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("m1", 700),
+                "{\"type\":\"assistant\",\"message\":{\"id\":\"m2\",\"usage\":" + usage + "}}",
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"input_tokens\":\"bad\",\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"output_tokens\":null,\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"cache_read_input_tokens\":true,\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"cache_creation_input_tokens\":\"bad\",\"input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":\"bad\"},\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"num_turns\":\"bad\",\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"inputTokens\":\"bad\"}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"outputTokens\":null}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"cacheReadInputTokens\":true}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"cacheCreationInputTokens\":\"bad\"}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    [InlineData("{\"type\":\"result\",\"modelUsage\":{\"model\":{\"thinkingTokens\":\"bad\"}},\"usage\":{\"cache_creation_input_tokens\":900}}")]
+    public void Claude_status_ignores_wrong_kind_terminal_fields_without_losing_valid_terminal_authority(string terminal)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2561-terminal-kind-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("valid", 700), terminal]);
+            Assert.Equal(900, view.BilledTokens);
+            Assert.Equal(700, view.LiveBilledTokens);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":42}]}}", null)]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":42,\"input\":{}}]}}", 1)]
+    [InlineData("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":42}]}}", null)]
+    public void Claude_status_ignores_wrong_kind_tool_metadata_without_losing_intact_usage(string toolLine, int? expectedToolSteps)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2561-tool-kind-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("valid", 700), toolLine]);
+            Assert.Equal(700, view.ObservedBilledTokenFloor?.Tokens);
+            Assert.Equal(expectedToolSteps, view.ToolSteps);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void CONTROL_observed_billed_token_floor_stays_absent_when_evidence_is_cache_read_only()
+    {
+        // Absent/placeholder-only/cache-read-only is not a billed zero: TokenBudgetMonitor's own
+        // BilledTokens stays null on a stream that never reports a cache-creation figure, so the floor
+        // this field reads off that Σ stays null too, same discipline as liveBilledTokens.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-cache-read-only-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                """{"type":"assistant","message":{"id":"msg_1","usage":{"cache_read_input_tokens":4000}}}""",
+            ]);
+
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public void An_execution_with_no_stdout_log_at_all_reports_no_reconciliation_and_no_reason()
     {

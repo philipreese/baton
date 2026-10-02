@@ -62,11 +62,11 @@ public sealed class TaskCommandTests
             var options = new TaskOptions(TaskVerb.Submit, 42, project,
                 new TaskSizeDeclaration(DeclaredTaskSize.Small, "one acceptance cluster"), spec);
             var firstOutput = new StringWriter();
-            var first = TaskCommand.ExecuteAsync(options, firstOutput, Resolve, Provision, Ct);
+            var first = TaskCommand.ExecuteAsync(options, firstOutput, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
             await entered.Task.WaitAsync(Ct);
 
             var secondOutput = new StringWriter();
-            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, secondOutput, Resolve, Provision, Ct));
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, secondOutput, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
             Assert.Equal(1, provisions);
             var preparing = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Preparing, preparing.IssuePreparation!.State);
@@ -84,7 +84,7 @@ public sealed class TaskCommandTests
             Assert.DoesNotContain("changed during preparation", renderedBrief, StringComparison.Ordinal);
             await File.WriteAllTextAsync(spec, "changed explicit brief", Ct);
             var conflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
-                TaskCommand.ExecuteAsync(options, TextWriter.Null, Resolve, Provision, Ct));
+                TaskCommand.ExecuteAsync(options, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
             Assert.Contains(prepared.OwnedTask!.Id, conflict.Message, StringComparison.Ordinal);
             Assert.Equal(1, provisions);
             Assert.Equal("first immutable brief", Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Instructions);
@@ -126,7 +126,7 @@ public sealed class TaskCommandTests
             }
             var submit = TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 47, project,
                 new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue"), spec),
-                TextWriter.Null, Resolve, Provision, Ct);
+                TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
             await entered.Task.WaitAsync(Ct);
             var id = TaskCommand.TaskId(repository.Value, 47);
             await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: id), TextWriter.Null, Ct);
@@ -171,10 +171,10 @@ public sealed class TaskCommandTests
             }
             var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
             Assert.Equal(0, await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 48,
-                project, size, spec), TextWriter.Null, Resolve, Provision, Ct));
+                project, size, spec), TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
             var conflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
                 TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 48,
-                    project, size), TextWriter.Null, Resolve, Provision, Ct));
+                    project, size), TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
             Assert.Contains(TaskCommand.TaskId(repository.Value, 48), conflict.Message, StringComparison.Ordinal);
         }
         finally
@@ -215,7 +215,7 @@ public sealed class TaskCommandTests
             await ConductorClaimStore.ClaimAsync(repository, "conductor-one", home, cancellationToken: Ct);
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = true }, Ct);
             var output = new StringWriter();
-            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, output, Resolve, Provision, Ct));
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, output, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
             Assert.Contains("queued (queue-held)", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("conductor-one", output.ToString(), StringComparison.Ordinal);
             var status = new StringWriter();
@@ -705,11 +705,11 @@ public sealed class TaskCommandTests
                 }],
             }, Ct);
             await Assert.ThrowsAsync<CliArgumentException>(() =>
-                TaskCommand.ExecuteAsync(task, TextWriter.Null, Resolve, Provision, Ct));
+                TaskCommand.ExecuteAsync(task, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
             Assert.Equal(0, provisions);
 
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Items = [] }, Ct);
-            Assert.Equal(0, await TaskCommand.ExecuteAsync(task, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(task, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
             Assert.Equal(1, provisions);
             await Assert.ThrowsAsync<CliArgumentException>(() =>
                 QueueCommand.ExecuteAsync(legacy, TextWriter.Null, Ct, project, Resolve, Provision));

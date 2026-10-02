@@ -357,7 +357,7 @@ public sealed class QueueCommandTests
                             RunShellCommands: true, NetworkAccess: false),
                         ProjectCeilingStore.DefaultPath);
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2353-lane"));
-                }));
+                }, preparationRunner: IssuePreparationRunner.NoCollisions));
 
             Assert.Contains(workspace, refusal.Message, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("file-write", refusal.Message, StringComparison.Ordinal);
@@ -410,7 +410,7 @@ public sealed class QueueCommandTests
                 DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue"), Requirements: []),
                 TextWriter.Null, Ct, project,
                 (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/example/repo", null)),
-                Provision);
+                Provision, preparationRunner: IssuePreparationRunner.NoCollisions);
             await entered.Task.WaitAsync(Ct);
             await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Import, ImportFilePath: importFile), TextWriter.Null, Ct));
@@ -1085,8 +1085,9 @@ public sealed class QueueCommandTests
                 {
                     Assert.True(deterministicSourceCeiling);
                     Directory.CreateDirectory(workspace);
+                    ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2225-lane"));
-                });
+                }, preparationRunner: IssuePreparationRunner.NoCollisions);
 
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal("github.com/owner/repo", item.Repository);
@@ -1131,8 +1132,9 @@ public sealed class QueueCommandTests
                 (_, _, _, _, _, _, _) =>
                 {
                     Directory.CreateDirectory(workspace);
+                    ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
                     return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2418-lane"));
-                });
+                }, preparationRunner: IssuePreparationRunner.NoCollisions);
 
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal("one rationale for selected lifecycle routing", item.LifecycleReason);

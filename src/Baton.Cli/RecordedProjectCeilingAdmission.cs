@@ -10,9 +10,12 @@ namespace Baton.Cli;
 internal static class RecordedProjectCeilingAdmission
 {
     internal static Result Evaluate(QueueItem item, WorkerRole role, bool requireDeclaredRequirements)
+        => Evaluate(item, role, requireDeclaredRequirements,
+            ProjectCeilingStore.TryGetRecord(item.Workspace, ProjectCeilingStore.DefaultPath));
+
+    internal static Result Evaluate(QueueItem item, WorkerRole role, bool requireDeclaredRequirements, ProjectCeiling? ceiling)
     {
         var roleAdmission = TaskRequirementPreflight.Evaluate(item, role, requireDeclaredRequirements);
-        var ceiling = ProjectCeilingStore.TryGetRecord(item.Workspace, ProjectCeilingStore.DefaultPath);
         if (ceiling is null)
         {
             // An unrecorded workspace is still refused by the binding gate. Do not invent trust at

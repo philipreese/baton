@@ -26,7 +26,8 @@ public static class TaskCommand
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         Func<int, string, string?, string, bool, TextWriter, CancellationToken,
             Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -77,7 +78,8 @@ public static class TaskCommand
         {
             await QueueCommand.ExecuteAsync(queueOptions, new StringWriter(), cancellationToken, project,
                 repositoryResolver, issueProvisioner, ownedTask: owned,
-                capturedSpecBytes: options.Spec is null ? null : specBytes).ConfigureAwait(false);
+                capturedSpecBytes: options.Spec is null ? null : specBytes,
+                preparationRunner: preparationRunner).ConfigureAwait(false);
         }
         catch (Exception) when (HasRetainedBlockedPreparation(id))
         {

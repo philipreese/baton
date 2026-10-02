@@ -254,15 +254,19 @@ public sealed class GraceCheckpointRealGitTests
         Assert.True(fixture.IsAncestor(originalHead, fixture.TrackingRef));
     }
 
-    [Fact]
-    public async Task A_hung_remote_probe_is_timed_out_and_its_process_tree_is_reaped_without_mutating_the_repository()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2000)]
+    public async Task A_hung_remote_probe_is_timed_out_and_its_process_tree_is_reaped_without_mutating_the_repository(int startupDelayMilliseconds)
     {
         using var fixture = new GraceRepository();
         var originalHead = fixture.Head;
         var signalPath = Path.Combine(Path.GetTempPath(), $"grace-remote-probe-{Guid.NewGuid():N}.txt");
         var temporarySignalPath = signalPath + ".tmp";
-        var timeout = TimeSpan.FromSeconds(1);
-        var command = $"$child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru; [IO.File]::WriteAllText('{temporarySignalPath.Replace("'", "''")}', \"$PID,$($child.Id)\"); [IO.File]::Move('{temporarySignalPath.Replace("'", "''")}', '{signalPath.Replace("'", "''")}'); Start-Sleep -Seconds 30";
+        // Exercise the production-sized bound: a shorter timer can kill the shell before it has
+        // published the process identities, testing startup scheduling rather than tree cleanup.
+        var timeout = WorktreeProvisioner.GraceRemoteProbeTimeout;
+        var command = $"Start-Sleep -Milliseconds {startupDelayMilliseconds}; $child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru; [IO.File]::WriteAllText('{temporarySignalPath.Replace("'", "''")}', \"$PID,$($child.Id)\"); [IO.File]::Move('{temporarySignalPath.Replace("'", "''")}', '{signalPath.Replace("'", "''")}'); Start-Sleep -Seconds 30";
         Task<GraceCheckpoint?>? capture = null;
         ProbeProcess? helper = null;
         ProbeProcess? child = null;
@@ -273,13 +277,13 @@ public sealed class GraceCheckpointRealGitTests
                 timeout, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command);
             var stopwatch = Stopwatch.StartNew();
             capture = WorktreeProvisioner.CaptureGraceCheckpointAsync(fixture.Repository, CancellationToken.None);
-            var observed = await ReadProbeProcessIdsAsync(signalPath, TimeSpan.FromSeconds(5));
+            var observed = await ReadProbeProcessIdsAsync(signalPath, timeout + TimeSpan.FromSeconds(5));
             (helper, child) = observed;
 
             Assert.Null(await capture);
             stopwatch.Stop();
 
-            Assert.InRange(stopwatch.Elapsed, timeout, TimeSpan.FromSeconds(10));
+            Assert.InRange(stopwatch.Elapsed, timeout, timeout + TimeSpan.FromSeconds(10));
             Assert.True(observed.Helper.HasExited);
             Assert.True(observed.Child.HasExited);
             Assert.Equal(originalHead, fixture.Head);
