@@ -215,6 +215,7 @@ public static class QueueScheduler
     public static bool IsActiveLifecycle(QueueItem item) =>
         item.Stage is not null
         && item.Retirement is null
+        && !QueuePrelaunchCancellationReceipt.IsValidFor(item)
         && (item.AttemptId is not null
             || item.ParentAttemptId is not null
             // Compatibility evidence for rows written before attempt identities existed.

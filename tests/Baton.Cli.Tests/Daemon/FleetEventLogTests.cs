@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Baton.Cli.Daemon;
 using Baton.Domain;
+using Baton.Status;
 using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -14,6 +15,44 @@ public sealed class FleetEventLogTests : IDisposable
     public FleetEventLogTests() => Directory.CreateDirectory(_root);
 
     public void Dispose() => DirectoryCleanup.DeleteRecursively(_root);
+
+    [Fact]
+    public async Task Proof_acquisition_waits_for_append_rotation_mutex_even_when_rollover_is_initially_absent()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var log = new FleetEventLog(Live, Rollover, 100_000);
+        await log.Append(new FleetEventDraft(FleetEventKind.DaemonStarted, "proof-root", DateTimeOffset.UtcNow), token);
+        Assert.False(File.Exists(Rollover));
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acquiring = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = Task.Run(() => MutexGuardedFileLock.RunUnderLock(Live, "baton-fleet-events", TimeSpan.FromSeconds(5), () =>
+        {
+            held.SetResult();
+            release.Task.GetAwaiter().GetResult();
+            return true;
+        }), token);
+        await held.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+        var proof = Task.Run(() =>
+        {
+            acquiring.SetResult();
+            return log.AcquireRetainedProof();
+        }, token);
+        try
+        {
+            await acquiring.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            // The mutation control removes the fleet mutex from AcquireRetainedProof: the same
+            // read then completes while rotation still owns its authority lock.
+            Assert.NotSame(proof, await Task.WhenAny(proof, Task.Delay(150, token)));
+        }
+        finally
+        {
+            release.TrySetResult();
+            await writer;
+            using var lease = await proof.WaitAsync(TimeSpan.FromSeconds(5), token);
+            Assert.Single(lease.Events);
+        }
+    }
 
     [Fact]
     public async Task Ids_remain_monotonic_across_restart_and_rotation_while_replay_reads_only_live_file()

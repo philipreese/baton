@@ -383,6 +383,9 @@ public sealed record QueueItem
     /// queue history; cancellation is a fact, not deletion.</summary>
     public DateTimeOffset? CancelledAt { get; init; }
 
+    /// <summary>Producer-owned proof of an exact wholly prelaunch cancellation, retained with lineage.</summary>
+    public QueuePrelaunchCancellationReceipt? PrelaunchCancellation { get; init; }
+
     /// <summary>Why this item is <see cref="QueueItemState.Failed"/>; null otherwise.</summary>
     public string? Error { get; init; }
 
@@ -498,6 +501,82 @@ public sealed record QueueRetirement(
 {
     public const string Merged = "merged";
     public const string Operator = "operator";
+}
+
+/// <summary>Positive admission/refusal evidence for one ancestor, ordered from root to last parent.</summary>
+public sealed record QueuePrelaunchCancellationAncestor(
+    FleetAttemptId AttemptId,
+    FleetAttemptId? ParentAttemptId,
+    long AdmissionEventId,
+    DateTimeOffset AdmissionAt,
+    long RefusalEventId,
+    DateTimeOffset RefusalAt);
+
+/// <summary>Queue authority minted only after the cancellation producer has leased and proved all ancestry.</summary>
+public sealed record QueuePrelaunchCancellationReceipt(
+    int Version,
+    string Tag,
+    FleetAttemptId ParentAttemptId,
+    DateTimeOffset CancelledAt,
+    string SourceRowSha256,
+    IReadOnlyList<QueuePrelaunchCancellationAncestor> Ancestors)
+{
+    /// <summary>The narrow initial-implementation source shape. Error and frozen admission are explanatory, not launch proof.</summary>
+    public static bool IsEligibleSource(QueueItem item) =>
+        item.State == QueueItemState.Queued && item.Stage == WorkStage.Implement && item.Role == "implement"
+        && item.Round == 0 && item.Issue is > 0 && QueueTag.IsValid(item.Tag)
+        && item.ParentAttemptId is { Value.Length: > 0 }
+        && item.CancelledAt is null && item.PrelaunchCancellation is null
+        && item.AttemptId is null && item.AttemptEnvelope is null && item.AttemptBaseRevision is null
+        && item.RoomDirectory is null && item.LaunchedAt is null && item.LaunchMayHaveBegunAt is null
+        && !item.AttemptAdmissionFactDurable && !item.AttemptStartedFactDurable
+        && !item.AttemptRefusedFactDurable && !item.AttemptSettledFactDurable
+        && item.PullRequest is null && item.ExpectedOriginatingPullRequestHead is null
+        && item.OriginatingPullRequestRecoveryClaim is null && item.OriginatingPullRequestRecoveryProofDigest is null
+        && item.ReadinessMutationClaim is null && item.DraftPullRequestCreateMarker is null
+        && item.StoppedWorkJudgment is null && item.ReplacementReviewAction is null
+        && item.Retirement is null && item.DispositionOperation is null && item.DispositionOperations is null
+        && item.LastVerdict is null && item.Checks is null && item.ChecksObservedAt is null && item.ChecksHeadSha is null
+        && item.RequiredCheckEvidenceWait is null && item.ReconciliationKind is null && item.LaunchRecoveryKind is null
+        && !item.Halted && !item.External && item.AutomaticFixUsed is not true;
+
+    /// <summary>Checks structure and the complete exact row after reload; it does not independently prove fleet history.</summary>
+    public static bool IsValidFor(QueueItem item)
+    {
+        if (item.State != QueueItemState.Cancelled || item.PrelaunchCancellation is not { } receipt
+            || receipt.Version != 1 || receipt.Tag != item.Tag || receipt.ParentAttemptId != item.ParentAttemptId
+            || receipt.CancelledAt == default || receipt.CancelledAt != item.CancelledAt
+            || receipt.SourceRowSha256 is not { Length: 64 } digest
+            || digest.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f'))
+            || receipt.Ancestors is not { Count: > 0 })
+        {
+            return false;
+        }
+
+        var source = item with { State = QueueItemState.Queued, CancelledAt = null, PrelaunchCancellation = null };
+        if (!IsEligibleSource(source) || QueueStore.ComputeRevision([source]) != digest)
+        {
+            return false;
+        }
+        var attempts = new HashSet<FleetAttemptId>();
+        var eventIds = new HashSet<long>();
+        FleetAttemptId? parent = null;
+        long previousRefusal = 0;
+        foreach (var ancestor in receipt.Ancestors)
+        {
+            if (ancestor is null || ancestor.AttemptId is not { Value.Length: > 0 }
+                || !attempts.Add(ancestor.AttemptId) || ancestor.ParentAttemptId != parent
+                || ancestor.AdmissionAt == default || ancestor.RefusalAt == default
+                || ancestor.AdmissionEventId <= previousRefusal || ancestor.RefusalEventId <= ancestor.AdmissionEventId
+                || !eventIds.Add(ancestor.AdmissionEventId) || !eventIds.Add(ancestor.RefusalEventId))
+            {
+                return false;
+            }
+            parent = ancestor.AttemptId;
+            previousRefusal = ancestor.RefusalEventId;
+        }
+        return parent == receipt.ParentAttemptId;
+    }
 }
 
 /// <summary>One queue-committed retirement or restoration awaiting (or retaining) its ledger fact.</summary>

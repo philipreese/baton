@@ -7782,6 +7782,20 @@ item, its copied brief, its worktree, nor its branch. The cancellation mutation 
 launched item refuses with `baton cancel <room-dir>`, the existing room-level remedy; missing and already
 cancelled tags report that fact rather than pretending a new cancellation occurred.
 
+**Wholly prelaunch refusal ancestry (#2547).** An initial queued implement lifecycle may retain a
+parent because the scheduler durably refused and reset a launch attempt. Cancellation accepts that
+exception only after leasing complete retained fleet ancestry to an evidenced root: each ancestor
+has exactly one matching queue admission/refusal pair, with only `runway-held` or `cleanup-claim`
+outcomes and no execution evidence. Missing, malformed, duplicate, foreign, contradictory,
+disconnected, rolled-away or pending/unknown evidence refuses. Both fleet segments are opened under
+the append/rotation mutex; read-deny-write leases survive the actual queue write, without holding
+that mutex while taking the queue lock. The same queue-lock mutation requires the unchanged complete
+source row and rechecks pending facts. It commits cancellation with one typed, versioned receipt
+binding tag, last parent, cancellation instant, full source-row SHA256 and ordered ancestor event
+references; all lineage and source facts remain. The receipt is producer-owned queue authority,
+not a signature against manual store edits. Ordinary untouched no-parent cancellation and
+already-cancelled ledger backfill do not require fleet files.
+
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
 `git worktree add <root>/w<n> <n>-lane`, then records trust. A lifecycle add applies the deterministic
 fresh-provisioning ceiling rule stated above under **Explicit retained issue worktree reuse (#2333)**;
@@ -7852,7 +7866,10 @@ the gap.
 null, zero, or negative. An active lifecycle has a stage, no retirement, and a claimed attempt
 identity (`attemptId` or `parentAttemptId`); legacy rows without an identity count only when their
 room, PR, nonzero round, or non-queued execution state is durable evidence of an earlier launch.
-Only cancellation before the first launch avoids active or pre-PR WIP. `baton queue cancel`
+Only cancellation before the first launch avoids active or pre-PR WIP, including the proved refusal
+ancestry exception above. After reload, the shared scheduler predicate releases a cancelled row
+only when its receipt structure, ordered ancestry references and reconstructed complete source-row
+hash remain valid. A queued row gains no dispatch authority from a receipt. `baton queue cancel`
 refuses a queued review, fix, or ready lifecycle that already has launch proof; an older malformed
 `Cancelled` row with that proof still occupies WIP until trusted retirement. Pre-PR is the active
 subset without a bound PR; live reviews are launched review or re-review
