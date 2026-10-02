@@ -4297,6 +4297,110 @@ def _agy_stream_follow_up_resolve(prompt_text, baton_home, working_directory, ti
     return target, None
 
 
+def _agy_stream_follow_up_build_environment(target_environment, baton_home, working_directory,
+                                            outbox_dir, source_environment=None, platform_name=None):
+    """Build the contained child environment for this probe's legacy dispatch stand-in.
+
+    Only the existing Windows SYSTEMROOT is inherited here because native agy startup needs that OS
+    plumbing.  The adapter's resolved environment is applied after it, and the per-execution Baton
+    values plus the probe's existing source PATH are applied last.  This preserves the established
+    probe construction without opening an inherit-all or credential path.
+    """
+    source = os.environ if source_environment is None else source_environment
+    platform = os.name if platform_name is None else platform_name
+
+    def expand(s):
+        return (s.replace("%BATON_OUTPUT_DIR%", outbox_dir).replace("$BATON_OUTPUT_DIR", outbox_dir)
+                 .replace("%BATON_ARTIFACTS_ROOT%", working_directory)
+                 .replace("$BATON_ARTIFACTS_ROOT", working_directory))
+
+    env = {}
+    if platform == "nt":
+        systemroot = source.get("SYSTEMROOT")
+        if systemroot:
+            env["SYSTEMROOT"] = systemroot
+    env.update({k: expand(v) for k, v in target_environment.items()})
+    env["BATON_OUTPUT_DIR"] = outbox_dir
+    env["BATON_ARTIFACTS_ROOT"] = working_directory
+    env["BATON_HOME"] = baton_home
+    env["PATH"] = source.get("PATH", "")
+    return env
+
+
+def _selftest_agy_stream_environment():
+    """The red-before-green controls for the AGY stream child environment seam (#2553).
+
+    These controls deliberately call the same helper the live stream check will use.  They keep the
+    inherited source environment tiny and synthetic, so they never inspect or launch a vendor CLI.
+    """
+    target = {
+        "BATON_HOOK_VERDICT_LEDGER": "%BATON_OUTPUT_DIR%/.baton-grants.ndjson",
+        "HOME": "%BATON_OUTPUT_DIR%/.gemini_home",
+        "USERPROFILE": "%BATON_OUTPUT_DIR%/.gemini_home",
+        "BATON_HOOK_DENIED_TOOLS": "write_to_file",
+        "BATON_HOOK_DENIED_SHELL_PATTERNS": "secret-pattern",
+        "ADAPTER_SYSTEMROOT": "adapter-systemroot",
+        "SYSTEMROOT": "adapter-systemroot",
+        "UNRELATED_API_KEY": "must-not-be-inherited",
+    }
+    source = {
+        "PATH": "source-path",
+        "SYSTEMROOT": "source-systemroot",
+        "UNRELATED_API_KEY": "source-api-key",
+        "SOURCE_ONLY_API_KEY": "must-not-be-inherited",
+    }
+    try:
+        windows = _agy_stream_follow_up_build_environment(
+            target, "baton-home", "working-directory", "outbox", source, "nt")
+        if windows.get("SYSTEMROOT") != "adapter-systemroot":
+            raise AssertionError("adapter SYSTEMROOT override must win over the inherited value")
+        if windows.get("PATH") != "source-path":
+            raise AssertionError("the existing PATH must remain the source PATH")
+        for name, expected in {
+                "BATON_OUTPUT_DIR": "outbox", "BATON_ARTIFACTS_ROOT": "working-directory",
+                "BATON_HOME": "baton-home", "HOME": "outbox/.gemini_home",
+                "USERPROFILE": "outbox/.gemini_home", "BATON_HOOK_DENIED_TOOLS": "write_to_file",
+                "BATON_HOOK_DENIED_SHELL_PATTERNS": "secret-pattern",
+                "BATON_HOOK_VERDICT_LEDGER": "outbox/.baton-grants.ndjson"}.items():
+            if windows.get(name) != expected:
+                raise AssertionError(f"{name} was not preserved or expanded: {windows.get(name)!r}")
+        if "UNRELATED_API_KEY" not in windows or windows["UNRELATED_API_KEY"] != "must-not-be-inherited":
+            raise AssertionError("resolved target environment must preserve its unrelated value")
+        if "source-api-key" in windows.values() or "SOURCE_ONLY_API_KEY" in windows:
+            raise AssertionError("unrelated source/API environment must not be inherited")
+
+        unset_target = dict(target)
+        del unset_target["SYSTEMROOT"]
+        unset = _agy_stream_follow_up_build_environment(
+            unset_target, "baton-home", "working-directory", "outbox", source, "nt")
+        if unset.get("SYSTEMROOT") != "source-systemroot":
+            raise AssertionError("an existing Windows SYSTEMROOT must reach the live child environment")
+
+        source_unset = _agy_stream_follow_up_build_environment(
+            unset_target, "baton-home", "working-directory", "outbox",
+            {"PATH": "source-path"}, "nt")
+        if "SYSTEMROOT" in source_unset:
+            raise AssertionError("an unset Windows SYSTEMROOT must not be added")
+
+        empty = _agy_stream_follow_up_build_environment(
+            unset_target, "baton-home", "working-directory", "outbox",
+            {"PATH": "source-path", "SYSTEMROOT": ""}, "nt")
+        if "SYSTEMROOT" in empty:
+            raise AssertionError("an empty Windows SYSTEMROOT must not be added")
+
+        non_windows_target = dict(unset_target)
+        non_windows = _agy_stream_follow_up_build_environment(
+            non_windows_target, "baton-home", "working-directory", "outbox", source, "posix")
+        if "SYSTEMROOT" in non_windows:
+            raise AssertionError("non-Windows must skip the inherited SYSTEMROOT addition")
+        print("   OK  AGY environment controls cover Windows set/unset, non-Windows skip, adapter "
+              "precedence, PATH/home/hook/grant preservation, and source API exclusion")
+        return 0
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-stream-environment: {exc!r}")
+        return 1
+
+
 def _agy_stream_follow_up_offline_controls(target, baton_home, working_directory, outbox_dir):
     """Runs the REAL generated hook command -- read out of the hooks.json `AgyWorkerAdapter` actually
     wrote, never a hand-typed approximation of it (matching every `agy.hook-*` check in this file) --
@@ -5093,11 +5197,9 @@ def _agy_stream_follow_up():
                      .replace("$BATON_ARTIFACTS_ROOT", working_directory))
 
         argv = [target["program"]] + [expand(a) for a in target["args"]]
-        env = {k: expand(v) for k, v in target["environment"].items()}
-        env["BATON_OUTPUT_DIR"] = outbox_dir
-        env["BATON_ARTIFACTS_ROOT"] = working_directory
-        env["BATON_HOME"] = baton_home
-        env["PATH"] = os.environ.get("PATH", "")
+        env = _agy_stream_follow_up_build_environment(
+            target["environment"], baton_home, working_directory, outbox_dir,
+            source_environment=os.environ, platform_name=os.name)
 
         correction = (
             "Now do two things in this message: first use the write_to_file tool to write the word "
@@ -6449,6 +6551,7 @@ def _selftest_agy_stream_follow_up():
 SELFTEST_SUITES = (
     ("local-checks", _selftest_local_checks),
     ("agy-tool-classification", _selftest_agy_tool_classification),
+    ("agy-stream-environment", _selftest_agy_stream_environment),
     ("agy-stream-follow-up", _selftest_agy_stream_follow_up),
 )
 

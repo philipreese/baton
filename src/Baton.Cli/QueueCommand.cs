@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Baton.Accounting;
 using Baton.Cli.Daemon;
 using Baton.Domain;
@@ -1535,8 +1536,10 @@ public static class QueueCommand
                 tag, reason, pullRequest, output, cancellationToken, repositoryResolver, ghRunner)
             : RetireOperatorAsync(tag, reason, output, cancellationToken);
 
-    private static async Task<int> RetireOperatorAsync(
-        string tag, string reason, TextWriter output, CancellationToken cancellationToken)
+    internal static async Task<int> RetireOperatorAsync(
+        string tag, string reason, TextWriter output, CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? beforeCommit = null,
+        Action? beforeWrite = null)
     {
         var before = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var observed = before.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
@@ -1582,10 +1585,20 @@ public static class QueueCommand
         {
             hasLegacyProof = observedLegacyProof is not null;
         }
-        if ((observed.State != QueueItemState.Failed || !terminalRoomProof.IsProven)
-            && !hasLegacyProof && !readyClosed)
+        bool hasReprovenPrelaunchProof;
+        using (var observedPrelaunchProof = TryAcquireReprovenPrelaunchCancellationProof(observed, before))
         {
-            throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement. It requires a terminal current room, exact refused-attempt/terminal-parent proof, or recorded cancellation with terminal proof for every prior launched room.");
+            hasReprovenPrelaunchProof = observedPrelaunchProof is not null;
+        }
+        // A retained prelaunch receipt is exclusive authority at BOTH reads: a corrupt row cannot
+        // bypass failed strict reproof by borrowing a terminal room or closed-PR disposition.
+        var observedEligible = observed.PrelaunchCancellation is not null
+            ? hasReprovenPrelaunchProof
+            : observed.State == QueueItemState.Failed && terminalRoomProof.IsProven
+                || hasLegacyProof || readyClosed;
+        if (!observedEligible)
+        {
+            throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement. It requires a terminal current room, exact refused-attempt/terminal-parent proof, recorded cancellation with terminal proof for every prior launched room, or a freshly reproven initial-prelaunch cancellation receipt.");
         }
         // A restoration can have committed its CAS while its ledger append failed. Replaying every
         // retained predecessor here is a fence: do not commit this successor unless the full ordered
@@ -1595,8 +1608,14 @@ public static class QueueCommand
         var at = DateTimeOffset.UtcNow;
         var operation = new QueueDispositionOperation(
             Guid.NewGuid().ToString("N"), at, QueueDecisionEntry.Retired, $"operator: {reason}");
+        var observedRevision = QueueStore.ComputeRevision([observed]);
+        if (beforeCommit is not null)
+        {
+            await beforeCommit(cancellationToken).ConfigureAwait(false);
+        }
         RoomJournalLease? journalLease = null;
         LegacyRetirementProofLease? legacyLease = null;
+        LegacyRetirementProofLease? prelaunchLease = null;
         try
         {
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
@@ -1619,13 +1638,19 @@ public static class QueueCommand
                     || current.State == QueueItemState.Launched
                     || PendingDraftPullRequestHandoff(current)
                     || !SameRetirementAttempt(observed, current)
-                    || (current.State != QueueItemState.Failed
-                        || !HasTerminalRoomProofAtMutation(current, terminalRoomProof, out journalLease))
-                        && (legacyLease = TryAcquireLegacyRetirementProof(current)) is null
-                        && !currentReadyClosed)
+                    || (observed.PrelaunchCancellation is not null || current.PrelaunchCancellation is not null
+                        ? (prelaunchLease = snapshot.Items.Count(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)) == 1
+                            && QueueStore.ComputeRevision([current]) == observedRevision
+                            ? TryAcquireReprovenPrelaunchCancellationProof(current, snapshot)
+                            : null) is null
+                        : (current.State != QueueItemState.Failed
+                            || !HasTerminalRoomProofAtMutation(current, terminalRoomProof, out journalLease))
+                            && (legacyLease = TryAcquireLegacyRetirementProof(current)) is null
+                            && !currentReadyClosed))
                 {
                     return snapshot;
                 }
+                beforeWrite?.Invoke();
                 eligible = true;
                 return snapshot with
                 {
@@ -1650,6 +1675,7 @@ public static class QueueCommand
             // through that write, not just through the callback's stamp comparison.
             journalLease?.Dispose();
             legacyLease?.Dispose();
+            prelaunchLease?.Dispose();
         }
 
         if (!eligible)
@@ -1887,6 +1913,13 @@ public static class QueueCommand
 
     internal static LegacyRetirementProofLease? TryAcquireLegacyRetirementProof(QueueItem item)
     {
+        // A versioned prelaunch receipt asserts that this ancestry never started. It must use
+        // its strict proof arm; contradictory terminal-parent facts cannot relabel it as legacy.
+        // Historical cancelled rows without that receipt retain their existing room-proof path.
+        if (item.PrelaunchCancellation is not null)
+        {
+            return null;
+        }
         var refused = item is
         {
             State: QueueItemState.Failed, RoomDirectory: null,
@@ -2026,7 +2059,12 @@ public static class QueueCommand
         }
     }
 
-    private static IReadOnlyList<QueueDecisionEntry> ReadStrictDecisionProof(FileStream stream)
+    private static readonly JsonSerializerOptions StrictDecisionProofJson = new()
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+    };
+
+    private static IReadOnlyList<QueueDecisionEntry> ReadStrictDecisionProof(FileStream stream, bool strictSchema = false)
     {
         using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
         var text = reader.ReadToEnd();
@@ -2038,10 +2076,123 @@ public static class QueueCommand
         foreach (var line in text.Split('\n'))
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
+            if (strictSchema)
+            {
+                using var document = JsonDocument.Parse(line);
+                if (FleetEventLog.HasDuplicateMembers(document.RootElement))
+                {
+                    throw new JsonException("A queue-decision proof row has duplicate fields.");
+                }
+                // Protected invariant: omitted producer fields must not deserialize to plausible
+                // default values and disappear in the later same-tag filter (for example {}).
+                var element = document.RootElement;
+                if (element.ValueKind != JsonValueKind.Object
+                    || !element.TryGetProperty("at", out _)
+                    || !element.TryGetProperty("decision", out _)
+                    || !element.TryGetProperty("liveWeight", out _)
+                    || !element.TryGetProperty("floorGb", out _))
+                {
+                    throw new JsonException("A queue-decision proof row omits required producer fields.");
+                }
+                var row = element.Deserialize<QueueDecisionEntry>(StrictDecisionProofJson)
+                    ?? throw new JsonException("Empty queue-decision proof row.");
+                if (row.At == default || row.Decision is not (QueueDecisionEntry.Launched
+                        or QueueDecisionEntry.Waited or QueueDecisionEntry.Failed or QueueDecisionEntry.Cancelled
+                        or QueueDecisionEntry.Retired or QueueDecisionEntry.Restored or QueueDecisionEntry.Advanced)
+                    || !double.IsFinite(row.LiveWeight) || row.LiveWeight < 0
+                    || !double.IsFinite(row.FloorGb) || row.FloorGb < 0
+                    || row.FreeGb is { } freeGb && (!double.IsFinite(freeGb) || freeGb < 0)
+                    || !Enum.IsDefined(row.SelectionSource)
+                    || row.Tag is not null && string.IsNullOrWhiteSpace(row.Tag)
+                    || row.Tag is null && row.Decision is (QueueDecisionEntry.Launched
+                        or QueueDecisionEntry.Cancelled or QueueDecisionEntry.Retired
+                        or QueueDecisionEntry.Restored or QueueDecisionEntry.Advanced))
+                {
+                    throw new JsonException("A queue-decision proof row has invalid producer values.");
+                }
+                rows.Add(row);
+                continue;
+            }
             rows.Add(JsonSerializer.Deserialize<QueueDecisionEntry>(line)
                 ?? throw new JsonException("Empty queue-decision proof row."));
         }
         return rows;
+    }
+
+    /// <summary>
+    /// Freshly reproves a round-zero initial-implementation <see cref="QueuePrelaunchCancellationReceipt"/>
+    /// against retained fleet and decision sources. <see cref="QueuePrelaunchCancellationReceipt.IsValidFor"/>
+    /// alone checks the receipt's structure and its binding to the exact row; it never reads fleet history,
+    /// so a legitimately produced receipt could otherwise outlive the source evidence it once proved.
+    /// </summary>
+    internal static LegacyRetirementProofLease? TryAcquireReprovenPrelaunchCancellationProof(
+        QueueItem item, QueueSnapshot snapshot)
+    {
+        if (item.PrelaunchCancellation is not { } receipt || !QueuePrelaunchCancellationReceipt.IsValidFor(item))
+        {
+            return null;
+        }
+
+        FleetEventLog.FleetEventProofLease? events = null;
+        FileStream? decisionStream = null;
+        try
+        {
+            events = FleetEventLog.OpenOperational().AcquireRetainedProof(strictSchema: true);
+            if (!QueuePrelaunchCancellationValidator.ReproveAncestryForRetirement(item, events.Events, receipt))
+            {
+                return null;
+            }
+
+            decisionStream = new FileStream(
+                BatonPaths.QueueDecisionLedgerFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var decisions = ReadStrictDecisionProof(decisionStream, strictSchema: true);
+            var tagDecisions = decisions.Where(d => d.Tag == item.Tag).ToList();
+            var cancellations = tagDecisions.Where(d => d.Decision == QueueDecisionEntry.Cancelled).ToList();
+            if (cancellations.Count != 1 || tagDecisions.Any(d => d.Decision != QueueDecisionEntry.Cancelled
+                    && d.Decision != QueueDecisionEntry.Waited)
+                || cancellations[0] is not
+                {
+                    At: var cancelledAt,
+                    Reason: "operator cancelled before launch",
+                    LiveWeight: 0, FreeGb: null, FloorGb: 0,
+                    Tier: null, Adapter: null, Model: null, Effort: null,
+                    TierOverride: false, OverrideReason: null, Room: null,
+                    SelectionSource: QueueSelectionSource.StageDefault,
+                    Admission: null, ActiveLifecycles: null, PrePullRequestLifecycles: null,
+                    LiveReviews: null, PriorityBand: null, PassedNewWorkHead: null,
+                    OldestOccupyingLifecycle: null, ConsumingLifecycles: null,
+                    NewWorkHeadCap: null, OperationKey: null,
+                }
+                || cancelledAt != item.CancelledAt)
+            {
+                return null;
+            }
+
+            try
+            {
+                QueuePrelaunchCancellationValidator.ValidatePending(
+                    item, snapshot, receipt.Ancestors.Select(ancestor => ancestor.AttemptId).ToHashSet());
+            }
+            catch (CliArgumentException)
+            {
+                return null;
+            }
+
+            var proof = new LegacyRetirementProofLease(events, decisionStream, []);
+            events = null;
+            decisionStream = null;
+            return proof;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
+            or InvalidOperationException or ArgumentException or BatonFlowException)
+        {
+            throw new LegacyRetirementProofReadException(item.Tag, ex);
+        }
+        finally
+        {
+            decisionStream?.Dispose();
+            events?.Dispose();
+        }
     }
 
     private static bool IsTerminalOutcome(string? outcome) => outcome is

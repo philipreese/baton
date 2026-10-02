@@ -80,6 +80,210 @@ public sealed class GraceTurnEndToEndTests
     }
 
     [Fact]
+    public async Task Grace_prompt_carries_original_context_and_execution_scoped_outboxes()
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit: true, placeEngineFile: true);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var parentOutbox = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
+                run.ArtifactsRoot, claim.ParentExecutionId);
+            var childOutbox = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
+                run.ArtifactsRoot, claim.GraceExecutionId);
+            var childTarget = run.Dispatcher.Targets[1];
+            var childRequest = run.Dispatcher.Requests[1];
+            var enginePath = Path.Combine(run.Workspace, "engine-placed.txt");
+            var engineDigest = EnginePlacedFile.TryDigest(enginePath);
+
+            Assert.Contains("ORIGINAL BRIEF", childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Contains(parentOutbox, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Contains(childOutbox, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Contains(enginePath, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.NotNull(engineDigest);
+            Assert.Contains(engineDigest!, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.DoesNotContain("everything staged and unstaged", childTarget.PromptText, StringComparison.Ordinal);
+            Assert.DoesNotContain("repository-root", childTarget.PromptText, StringComparison.Ordinal);
+            var outputVariable = Assert.Single(
+                childRequest.Environment.OfType<EnvironmentVariable.BatonComputed>(),
+                variable => variable.Name == "BATON_OUTPUT_DIR");
+            Assert.Equal(childOutbox, outputVariable.Value);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public async Task Grace_prompt_preserves_empty_or_whitespace_original_context(string originalPrompt)
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: false,
+            originalPrompt: originalPrompt);
+        try
+        {
+            var claim = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            var parentOutbox = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
+                run.ArtifactsRoot, claim.ParentExecutionId);
+            var childOutbox = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
+                run.ArtifactsRoot, claim.GraceExecutionId);
+            var childTarget = run.Dispatcher.Targets[1];
+
+            var originalContext = string.Join(
+                Environment.NewLine,
+                "--- BEGIN ORIGINAL TASK CONTEXT ---",
+                originalPrompt,
+                "--- END ORIGINAL TASK CONTEXT ---");
+            Assert.Contains(originalContext, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Contains(parentOutbox, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Contains(childOutbox, childTarget.PromptText, StringComparison.Ordinal);
+            Assert.Equal(WorkflowOutcome.Indeterminate, WorkflowOutcome.Describe(run.FinalState));
+            Assert.Empty(run.Events.OfType<FlowEvent.ExecutionSucceeded>());
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Already_pushed_task_with_only_unchanged_engine_files_skips_grace()
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: true,
+            primaryMutatesWorkspace: false,
+            placeEngineFile: true,
+            primaryCommitsSource: true,
+            pushPrimaryCommit: true,
+            satisfyParentOutbox: true);
+        try
+        {
+            Assert.Empty(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            Assert.Single(run.Events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Equal(1, run.Dispatcher.CallCount);
+            Assert.False(RepositoryIsClean(run.Workspace));
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Timeout_with_already_pushed_task_and_only_unchanged_engine_files_skips_grace()
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: true,
+            primaryTimesOut: true,
+            primaryMutatesWorkspace: false,
+            placeEngineFile: true,
+            primaryCommitsSource: true,
+            pushPrimaryCommit: true,
+            satisfyParentOutbox: true);
+        try
+        {
+            Assert.Empty(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            Assert.Equal(1, run.Dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Timeout_with_modified_engine_file_keeps_the_grace_path()
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: false,
+            primaryTimesOut: true,
+            primaryMutatesWorkspace: false,
+            placeEngineFile: true,
+            primaryCommitsSource: true,
+            pushPrimaryCommit: true,
+            satisfyParentOutbox: true,
+            modifyEngineFileAfterPlacement: true);
+        try
+        {
+            Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            Assert.Equal(2, run.Dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task Unverified_engine_placement_keeps_the_grace_path()
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: false,
+            primaryMutatesWorkspace: false,
+            placeEngineFile: true,
+            unverifiedEnginePlacement: true,
+            primaryCommitsSource: true,
+            pushPrimaryCommit: true,
+            satisfyParentOutbox: true);
+        try
+        {
+            Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+            Assert.Equal(2, run.Dispatcher.CallCount);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Theory]
+    [InlineData(false, true, false, false, false)] // missing parent outbox
+    [InlineData(true, false, false, false, false)] // source commit is not pushed
+    [InlineData(true, true, true, false, false)] // recorded engine file was modified
+    [InlineData(true, true, false, true, false)] // unrelated dirty work remains
+    [InlineData(true, true, false, false, true)] // no upstream is not a pushed proof
+    public async Task Generated_only_skip_controls_keep_the_existing_grace_path(
+        bool satisfyParentOutbox,
+        bool pushPrimaryCommit,
+        bool modifyEngineFileAfterPlacement,
+        bool leaveUnrelatedDirty,
+        bool clearUpstream = false)
+    {
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: false,
+            primaryMutatesWorkspace: false,
+            placeEngineFile: true,
+            primaryCommitsSource: true,
+            pushPrimaryCommit: pushPrimaryCommit,
+            satisfyParentOutbox: satisfyParentOutbox,
+            modifyEngineFileAfterPlacement: modifyEngineFileAfterPlacement,
+            leaveUnrelatedDirty: leaveUnrelatedDirty,
+            clearUpstream: clearUpstream);
+        try
+        {
+            if (clearUpstream)
+            {
+                Assert.True(string.IsNullOrWhiteSpace(
+                    RunGitCapturingOutput(run.Workspace, "rev-parse", "--abbrev-ref", "@{upstream}")));
+                Assert.Empty(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+                Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
+                Assert.Equal(1, run.Dispatcher.CallCount);
+            }
+            else
+            {
+                Assert.Single(run.Events.OfType<FlowEvent.GraceTurnClaimed>());
+                Assert.Equal(2, run.Dispatcher.CallCount);
+            }
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
     public async Task A_grace_turn_that_exceeds_its_own_cap_is_arrested_with_the_dirty_tree_recorded()
     {
         var run = await RunArrestedLaneAsync(graceShouldCommit: false);
@@ -1037,7 +1241,16 @@ public sealed class GraceTurnEndToEndTests
         Baton.Outcomes.IFailureClassifier? failureClassifier = null,
         IReadOnlyList<string>? optionalMetadata = null,
         string? metadataJson = null,
-        bool settleOnVendorExhaustion = false)
+        bool settleOnVendorExhaustion = false,
+        bool placeEngineFile = false,
+        bool primaryCommitsSource = false,
+        bool pushPrimaryCommit = false,
+        bool satisfyParentOutbox = false,
+        bool modifyEngineFileAfterPlacement = false,
+        bool leaveUnrelatedDirty = false,
+        bool clearUpstream = false,
+        bool unverifiedEnginePlacement = false,
+        string originalPrompt = "ORIGINAL BRIEF")
     {
         var roomDirectory = Path.Combine(Path.GetTempPath(), $"task-{Guid.NewGuid():N}");
         var workspace = Path.Combine(roomDirectory, "lane");
@@ -1050,6 +1263,10 @@ public sealed class GraceTurnEndToEndTests
         TempGitRepository.AddRemote(workspace, "origin", remote);
         TempGitRepository.Push(workspace, "origin", "HEAD:refs/heads/main");
         RunGit(workspace, "branch", "--set-upstream-to", "origin/main");
+        if (clearUpstream)
+        {
+            RunGit(workspace, "branch", "--unset-upstream");
+        }
 
         var snapshot = new WorkflowDefinitionSnapshot(
             new WorkflowDefinitionSnapshotId("snapshot-2134"),
@@ -1062,8 +1279,8 @@ public sealed class GraceTurnEndToEndTests
             ["implement"] = new WorkerBinding.Process(
                 new WorkerContract("implement", [], [new ProducedOutput("pr.md")], optionalMetadata ?? []),
                 new CoreDispatchTarget(
-                    "vendor-cli", ["-p", "ORIGINAL BRIEF"], WorkingDirectory: workspace,
-                    OnStdoutLine: onStdoutLine, PromptText: "ORIGINAL BRIEF"),
+                    "vendor-cli", ["-p", originalPrompt], WorkingDirectory: workspace,
+                    OnStdoutLine: onStdoutLine, PromptText: originalPrompt),
                 TimeSpan.FromSeconds(30),
                 FailureClassifier: failureClassifier,
                 Adapter: "claude",
@@ -1075,7 +1292,9 @@ public sealed class GraceTurnEndToEndTests
         await using var writer = new FlowEventLogWriter(logPath);
         var dispatcher = new GraceTurnCoreDispatcher(
             workspace, PrimaryArrestingUsageLine, graceShouldCommit, GraceExceedingUsageLine, graceSpawnFails,
-            artifactsRoot, primaryTimesOut, primaryMutatesWorkspace, optionalMetadata, metadataJson, writer);
+            artifactsRoot, primaryTimesOut, primaryMutatesWorkspace, optionalMetadata, metadataJson, writer,
+            placeEngineFile, primaryCommitsSource, pushPrimaryCommit, satisfyParentOutbox,
+            modifyEngineFileAfterPlacement, leaveUnrelatedDirty, unverifiedEnginePlacement);
 
         var reader = new FlowEventLogReader(logPath);
 
@@ -1267,16 +1486,25 @@ public sealed class GraceTurnEndToEndTests
         bool primaryMutatesWorkspace = true,
         IReadOnlyList<string>? optionalMetadata = null,
         string? metadataJson = null,
-        ICoreEventLogWriter? coreEventLogWriter = null) : ICoreDispatcher
+        ICoreEventLogWriter? coreEventLogWriter = null,
+        bool placeEngineFile = false,
+        bool primaryCommitsSource = false,
+        bool pushPrimaryCommit = false,
+        bool satisfyParentOutbox = false,
+        bool modifyEngineFileAfterPlacement = false,
+        bool leaveUnrelatedDirty = false,
+        bool unverifiedEnginePlacement = false) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
         public List<ExecutionRequest> Requests { get; } = [];
+        public List<CoreDispatchTarget> Targets { get; } = [];
 
         public async Task<CoreDispatchResult> DispatchAsync(
             ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
         {
             CallCount++;
             Requests.Add(request);
+            Targets.Add(target);
             if (coreEventLogWriter is not null && (CallCount == 1 || !graceSpawnFails))
             {
                 await coreEventLogWriter.AppendAsync(
@@ -1289,6 +1517,47 @@ public sealed class GraceTurnEndToEndTests
                 if (primaryMutatesWorkspace)
                 {
                     File.WriteAllText(Path.Combine(workspace, "left-behind.txt"), "written, never committed before the arrest");
+                }
+                if (placeEngineFile)
+                {
+                    var enginePath = Path.Combine(workspace, "engine-placed.txt");
+                    File.WriteAllText(enginePath, "engine scaffolding");
+                    if (target.OnEngineFilesPlaced is not null)
+                    {
+                        await target.OnEngineFilesPlaced(
+                            [new EnginePlacedFile(
+                                enginePath,
+                                unverifiedEnginePlacement ? null : EnginePlacedFile.TryDigest(enginePath))],
+                            ["test-engine-placement"]);
+                    }
+
+                    if (modifyEngineFileAfterPlacement)
+                    {
+                        File.WriteAllText(enginePath, "worker changed the generated file");
+                    }
+                }
+                if (primaryCommitsSource)
+                {
+                    var sourcePath = Path.Combine(workspace, "implemented-source.txt");
+                    File.WriteAllText(sourcePath, "implemented and committed by the parent");
+                    RunGit(workspace, "add", "implemented-source.txt");
+                    RunGit(workspace, "commit", "-m", "fix: implement task before timeout");
+                    if (pushPrimaryCommit)
+                    {
+                        RunGit(workspace, "push", "origin", "HEAD:refs/heads/main");
+                    }
+                }
+                if (satisfyParentOutbox)
+                {
+                    var outputDirectory = Baton.Artifacts.ArtifactManager.ResolveOutputDirectory(
+                        artifactsRoot ?? throw new InvalidOperationException("The outbox fixture needs an artifact root."),
+                        request.ExecutionId);
+                    Directory.CreateDirectory(outputDirectory);
+                    File.WriteAllText(Path.Combine(outputDirectory, "pr.md"), "parent handoff");
+                }
+                if (leaveUnrelatedDirty)
+                {
+                    File.WriteAllText(Path.Combine(workspace, "unrelated.txt"), "unrelated work");
                 }
                 if (primaryTimesOut)
                 {

@@ -702,7 +702,7 @@ public sealed class FleetEventLog
         return entry;
     }
 
-    private static bool HasDuplicateMembers(JsonElement element) =>
+    internal static bool HasDuplicateMembers(JsonElement element) =>
         element.ValueKind == JsonValueKind.Object
         && element.EnumerateObject().Select(property => property.Name).Distinct(StringComparer.Ordinal).Count()
             != element.EnumerateObject().Count();

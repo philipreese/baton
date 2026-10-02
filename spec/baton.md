@@ -2527,7 +2527,8 @@ spawn failure is itself journaled and never prevents the original arrest from be
 **The grace turn (#2134, operator ruling 2026-09-08 23:10 ET, "build it").** Three `agy` budget
 arrests the same night each landed after real work was done and before it was ever committed, leaving
 a dirty tree a follow-up lane had to rescue at several hundred thousand tokens — a grace turn costs one
-bounded reply on an already-cached context instead. When `TokenBudgetMonitor` arrests an execution
+bounded checkpoint reply instead; it does not assume vendor-session resume or prompt-cache reuse.
+When `TokenBudgetMonitor` arrests an execution
 whose role is workspace-verifying (`WorkerBinding.Process.VerifiesWorkspace` — the same `implement`/
 `janitor` set §"Arms 2 and 3 grade the roles that CHANGE the workspace" already draws, on the same
 reasoning: a read-shaped role writes nothing, so there is nothing for a grace turn to rescue) and whose
@@ -2536,7 +2537,7 @@ mutation check already uses — no second, freshly-written `git status --porcela
 ONE further, bounded dispatch into the SAME workspace and under the SAME grant as the arrested
 execution (`WorkerBinding.Process.Target` verbatim — program, args, working directory, permission
 flags; only the prompt and the caps change, never a fresh, more permissive dispatch) before the arrest
-itself is appended. That dispatch carries a fixed, self-contained prompt (`Mutation.GraceTurn.PromptText`)
+itself is appended. That dispatch carries the bounded checkpoint prompt (`Mutation.GraceTurn.BuildPrompt`)
 under its own fixed, far smaller caps
 (`Mutation.GraceTurn.TokenBudget`/`MaxToolSteps`/`WallClockTimeout`) — one bounded reply, never a second
 attempt at the original task, and never per-role configurable: there is no role-specific reason for a
@@ -2553,9 +2554,10 @@ unprovable remote query is unsafe. On every unsafe or unprovable result the engi
 ref, index, or worktree path: it preserves all observed evidence and records `WorkspaceCleanAfter:
 false`; it never uses reset or another destructive repair to make the workspace appear clean.
 
-The prompt is self-contained on purpose — it names no prior turn — so no vendor session resume is
-needed to make it actionable: the workspace on disk already carries whatever the arrested execution
-left behind. Before spawning, `MutationInterface.RunGraceTurnAsync` writes one durable
+The prompt is self-contained on purpose — it requires no vendor session resume — so the fresh worker
+can act on the workspace and the original task context the engine supplies. The workspace on disk
+already carries whatever the arrested execution left behind. Before spawning,
+`MutationInterface.RunGraceTurnAsync` writes one durable
 `GraceTurnClaimed` with a distinct child execution ID, its own request/limit snapshot, the parent's
 already-observed result (or pending monitor arrest), and a secret-free workspace baseline whose
 endpoint/configuration identities are digests. The exact captured endpoint and applicable URL rewrite
@@ -2576,6 +2578,18 @@ claim/completion/uncertainty joins before publishing a row. No Core exit, durati
 zero is synthesized. Recovery checks claims from
 the full journal before generic parent crash classification. Historical
 `GraceTurnAttempted` records remain readable, but do not gain fabricated child limits or identity.
+
+**Generated-only residue is not rescueable dirty work (#2557).** The raw `Audit` remains the first
+eligibility read, but a dirty result receives no grace child only when the existing
+`ReadWorkspaceMutation` reading is measured, reports zero changed/untracked paths after subtracting
+the journaled hash-proved engine placements, positively shows `HEAD` on its upstream, and the
+arrested execution's declared outbox already satisfies `ContractValidator`. An unknown reading,
+missing upstream proof, unpushed head, modified generated file, unrelated edit, or incomplete outbox
+keeps the existing one-child opportunity. This is a skip of unnecessary recovery spend, never a
+success classification. When a child is dispatched, its bounded prompt carries the original task
+context, exact parent and child outboxes, and the unchanged engine-placement inventory; it tells the
+fresh worker to inspect the committed source and parent handoff before deciding whether genuine
+uncommitted task work remains. The prompt is contextual advice, not a structural content gate.
 
 **A grace turn never turns an arrest into a `Succeeded` room.** It runs entirely inside the same
 `budgetMonitor is { Arrested: true }` block that already returns without ever reaching
@@ -7509,6 +7523,15 @@ requires a strict queue-decision read. Their source and sentinel files have
 read-deny-write leases held through the queue commit. Missing, torn, mismatched, or changing proof
 keeps the lifecycle active; a bare admitted admission result or Cancelled state is never proof.
 These are operator dispositions, not a new automatic merged-retirement shortcut.
+A round-zero initial-implementation row cancelled by its own valid `PrelaunchCancellation` receipt
+may likewise be retired once its admission/refusal pairs, ids, and outcomes are freshly reproven
+against that same strict event read, with no foreign, started, room, execution, or later-launch fact,
+and a strict decision-ledger read shows exactly one matching `cancelled` fact and only `waited`
+decisions otherwise for the tag; pending facts are rechecked under the same mutation lock.
+Every proved admission/refusal instant must be no later than cancellation. A receipt-bearing row
+uses this strict arm exclusively, not the older terminal-parent exception; legacy rows without a
+receipt retain their existing proof path. Malformed decision rows are rejected before tag filtering.
+`IsValidFor` alone proves the receipt's structure and row binding, never fleet history.
 The sole automatic exception is a failed row whose durable `admission.result` is explicitly
 `refused`: that refusal happened before execution, proves no room launch was admitted, and permits a
 trusted positive merged-PR observation to retire the row. An admitted, unknown, or legacy admission

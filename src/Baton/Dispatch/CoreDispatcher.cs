@@ -187,9 +187,10 @@ public sealed record CoreDispatchTarget(
     /// <summary>
     /// #2134: returns this target with its prompt REPLACED wholesale by <paramref name="newPrompt"/> —
     /// unlike <see cref="WithPromptPreamble"/>, which prepends to the existing prompt, this drops it
-    /// entirely. Built for <c>Mutation.GraceTurn</c>: a bounded, self-contained follow-up dispatch that
-    /// deliberately does not carry the original task's prompt forward, only the same grant (program,
-    /// args, working directory). Same invariant and failure mode as <see cref="WithPromptPreamble"/>:
+    /// entirely. Built for <c>Mutation.GraceTurn</c>: a bounded follow-up dispatch whose prompt builder
+    /// supplies the original task context and execution-scoped handoff paths while retaining the same
+    /// grant (program, args, working directory). Same invariant and failure mode as
+    /// <see cref="WithPromptPreamble"/>:
     /// <see cref="PromptText"/> and the <see cref="Args"/> element carrying it must stay identical.
     /// </summary>
     /// <exception cref="PromptPreambleException">
