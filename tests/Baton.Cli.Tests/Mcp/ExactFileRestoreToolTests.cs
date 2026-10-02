@@ -929,13 +929,29 @@ public sealed class ExactFileRestoreToolTests
             var baseSha = await GitAsync(root, "rev-parse", "HEAD");
             var tool = new ExactFileRestoreTool(
                 root, baseSha, "execution-1", Path.Combine(root, "room"), hooks);
-            using var cancellation = callerCancellation
-                ? new CancellationTokenSource(TimeSpan.FromMilliseconds(250)) // wait-ok: deliberately short caller-cancellation trigger under test.
-                : new CancellationTokenSource();
+            using var cancellation = new CancellationTokenSource();
             var started = Stopwatch.StartNew();
-
-            var result = await tool.CallAsync(
+            var call = tool.CallAsync(
                 Args("target.txt", acknowledgeDirtyFile: true), cancellation.Token);
+            McpToolCallResult result;
+            try
+            {
+                if (callerCancellation)
+                {
+                    // This arm tests cancellation of a running noisy child, not cancellation during
+                    // workspace preflight or native startup. Observe the actual checkpoint first.
+                    await WaitForNativePidCheckpointAsync(pidFile, call);
+                    started.Restart();
+                    cancellation.Cancel();
+                }
+                result = await call.WaitAsync(TimeSpan.FromSeconds(8), Ct); // wait-ok: bounded test observation of native teardown.
+            }
+            finally
+            {
+                cancellation.Cancel();
+                // A failed startup assertion must still let the owned tool reap its native child.
+                await call.WaitAsync(TimeSpan.FromSeconds(8)); // wait-ok: bounded fixture cleanup independent of an expired test token.
+            }
 
             Assert.True(result.IsError);
             Assert.Contains(
@@ -1088,6 +1104,25 @@ public sealed class ExactFileRestoreToolTests
         }
 
         Assert.Fail($"contained git child {pid} survived teardown");
+    }
+
+    private static async Task WaitForNativePidCheckpointAsync(
+        string pidFile, Task<McpToolCallResult> call)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(5)) // wait-ok: finite native-fixture startup allowance, separate from cancellation teardown.
+        {
+            try
+            {
+                if (int.TryParse(await File.ReadAllTextAsync(pidFile, Ct), out var pid) && pid > 0)
+                    return;
+            }
+            catch (IOException) { } // The writer may not have created or finished its own checkpoint yet.
+            if (call.IsCompleted)
+                break;
+            await Task.Delay(20, Ct); // wait-ok: bounded observation of the actual child checkpoint, not a guessed cancellation delay.
+        }
+        Assert.Fail("the noisy native child did not reach its PID checkpoint before cancellation was requested");
     }
 
     private static JsonElement Args(string path, bool acknowledgeDirtyFile)
