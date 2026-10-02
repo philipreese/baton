@@ -99,6 +99,15 @@ public sealed class QueueSchedulerServiceTests
                 fact => Assert.Equal(QueueDecisionEntry.Failed, fact.Decision),
                 fact => Assert.Equal(QueueDecisionEntry.Launched, fact.Decision));
         }
+        catch (QueueStoreException ex) when (QueueFailureEvidence.IsCapturable(ex))
+        {
+            var retained = QueueFailureEvidence.Retain(ex,
+                nameof(An_unknown_unscoped_role_fails_one_item_and_the_next_unscoped_item_launches), home,
+                [BatonPaths.QueueFile]);
+            QueueFailureEvidence.ReportRetained(retained);
+
+            throw;
+        }
         finally
         {
             Cleanup(home);

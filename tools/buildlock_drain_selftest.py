@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 from unittest.mock import patch
@@ -150,6 +151,7 @@ def _run_driver(
     fixture: Path,
     root: Path,
     mode: str,
+    timeout_s: float = DRIVER_TIMEOUT_S,
 ) -> tuple[subprocess.CompletedProcess[bytes] | None, dict[str, Any] | None, float]:
     result = root / f"{mode}.result.json"
     receipt = root / f"{mode}.receipt.json"
@@ -166,17 +168,23 @@ def _run_driver(
     started = time.monotonic()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        stdout, stderr = process.communicate(timeout=DRIVER_TIMEOUT_S)
+        stdout, stderr = process.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         # A timeout is still refusal, but its owned descendants must not retain fixture files.
         # Kill only this Popen's tree before reaping it; never search for unrelated processes.
         try:
-            if os.name == "nt":
+            # The root can exit naturally while an inherited writer still holds our capture pipe.
+            # Its PID is no longer a safe kill target (it may be reused); bounded EOF is the only
+            # safe proof that inherited writers have closed in this state.
+            root_exited = process.poll() is not None
+            if os.name == "nt" and not root_exited:
                 cleanup = subprocess.run(
                     ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                     capture_output=True, check=False, timeout=5,
                 )
-                if cleanup.returncode != 0:
+                # If it exited between poll and taskkill, do not treat the stale PID as a cleanup
+                # refusal. The communicate barrier below still has to establish EOF.
+                if cleanup.returncode != 0 and process.poll() is None:
                     raise RuntimeError(f"driver tree cleanup failed: {cleanup.stderr!r}")
         finally:
             if process.poll() is None:
@@ -285,7 +293,9 @@ def _check_driver_timeout_cleanup(module_path: Path, root: Path) -> list[str]:
         f"child_code={child_code!r}\n"
         "subprocess.Popen([sys.executable,'-c',child_code,"
         "sys.argv[4].replace('.json','.lock'),sys.argv[3]],"
-        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        # Deliberately inherit the wrapper's captured pipes: communicate() is the bounded EOF
+        # barrier that proves this file-owning descendant has closed before unlink is attempted.
+        "close_fds=True)\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
@@ -301,6 +311,105 @@ def _check_driver_timeout_cleanup(module_path: Path, root: Path) -> list[str]:
         return [f"timeout-cleanup: refused driver left its child's file open: {error}"]
     if time.monotonic() - started >= 30:
         return ["timeout-cleanup: ownership lease expired before cleanup was observed"]
+    return []
+
+
+def _check_tree_cleanup_waits_for_descendant_eof(module_path: Path, root: Path) -> list[str]:
+    """A successful tree-kill result is not proof that an owned descendant closed its file."""
+    if os.name != "nt":
+        return []
+    driver = root / "tree-cleanup-driver.py"
+    marker = root / "tree-cleanup.result.json"
+    owned_file = root / "tree-cleanup.receipt.lock"
+    cleanup_returned = root / "tree-cleanup.returned"
+    child_observed = root / "tree-cleanup.observed"
+    release_child = root / "tree-cleanup.release"
+    child_closed = root / "tree-cleanup.closed"
+    child_code = (
+        "import json,pathlib,sys,time\n"
+        "handle=open(sys.argv[1],'wb')\n"
+        "pathlib.Path(sys.argv[2]).write_text(json.dumps({'file_owned':True}))\n"
+        "deadline=time.monotonic()+15\n"
+        "while not pathlib.Path(sys.argv[3]).exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+        "if not pathlib.Path(sys.argv[3]).exists(): raise SystemExit('cleanup marker unavailable')\n"
+        "pathlib.Path(sys.argv[4]).write_text('observed')\n"
+        "while not pathlib.Path(sys.argv[5]).exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+        "if not pathlib.Path(sys.argv[5]).exists(): raise SystemExit('release marker unavailable')\n"
+        "handle.close()\n"
+        "pathlib.Path(sys.argv[6]).write_text('closed')\n"
+    )
+    driver.write_text(
+        "import pathlib,subprocess,sys,time\n"
+        f"child_code={child_code!r}\n"
+        "result=pathlib.Path(sys.argv[3])\n"
+        "base=result.parent\n"
+        "subprocess.Popen([sys.executable,'-c',child_code,"
+        "str(pathlib.Path(sys.argv[4]).with_suffix('.lock')),str(result),"
+        "str(base/'tree-cleanup.returned'),str(base/'tree-cleanup.observed'),"
+        "str(base/'tree-cleanup.release'),str(base/'tree-cleanup.closed')],"
+        # Inherit only stdout/stderr: communicate() then proves child EOF after root reaping.
+        "close_fds=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    real_run = subprocess.run
+    failures: list[str] = []
+
+    def return_before_descendant_exit(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        if isinstance(args, (list, tuple)) and args and args[0] == "taskkill":
+            cleanup_returned.write_text("returned", encoding="utf-8")
+            deadline = time.monotonic() + 2
+            while not child_observed.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not child_observed.exists():
+                raise RuntimeError("tree-cleanup: child did not observe cleanup return")
+            threading.Timer(
+                1.5, lambda: release_child.write_text("release", encoding="utf-8")
+            ).start()
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        return real_run(args, **kwargs)
+
+    try:
+        with patch.object(subprocess, "run", side_effect=return_before_descendant_exit):
+            completed, result, _ = _run_driver(driver, module_path, driver, root, "tree-cleanup")
+        if completed is not None or result is not None:
+            failures.append("tree-cleanup: refused driver was not reported as a timeout")
+        if not child_closed.is_file():
+            failures.append("tree-cleanup: wrapper returned before its file-owning descendant closed")
+        try:
+            owned_file.unlink()
+        except OSError as error:
+            failures.append(f"tree-cleanup: descendant file remained open after wrapper returned: {error}")
+    finally:
+        release_child.touch(exist_ok=True)
+        deadline = time.monotonic() + 5
+        while not child_closed.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+    return failures
+
+
+def _check_root_exit_before_pipe_eof(module_path: Path, root: Path) -> list[str]:
+    """A naturally exited root must not be taskkilled by a now-stale PID."""
+    if os.name != "nt":
+        return []
+    driver = root / "natural-root-exit-driver.py"
+    marker = root / "natural-root-exit.result.json"
+    child_closed = root / "natural-root-exit.closed"
+    driver.write_text(
+        "import subprocess,sys\n"
+        "subprocess.Popen([sys.executable,'-c',"
+        "'import pathlib,sys,time; time.sleep(2); pathlib.Path(sys.argv[1]).write_text(\"closed\")',"
+        "sys.argv[3].replace('.result.json','.closed')],close_fds=True)\n"
+        "open(sys.argv[3],'w').write('root-exited')\n",
+        encoding="utf-8",
+    )
+    completed, result, _ = _run_driver(
+        driver, module_path, driver, root, "natural-root-exit", timeout_s=1.0
+    )
+    if completed is not None or result is not None:
+        return ["natural-root-exit: wrapper did not report its bounded timeout"]
+    if not marker.is_file() or not child_closed.is_file():
+        return ["natural-root-exit: root/descendant EOF barrier was not observed"]
     return []
 
 
@@ -359,6 +468,8 @@ def selftest(module_path: str | os.PathLike[str] | None = None) -> bool:
         failures += _check_held_run(driver, production, fixture, root, "hold-child75")
         failures += _check_main_lock_release(driver, production, fixture, root)
         failures += _check_driver_timeout_cleanup(production, root)
+        failures += _check_tree_cleanup_waits_for_descendant_eof(production, root)
+        failures += _check_root_exit_before_pipe_eof(production, root)
         failures += _check_driver_cleanup_failure_reaps_root(production, root)
     if failures:
         print("buildlock drain selftest: FAIL", file=sys.stderr)
