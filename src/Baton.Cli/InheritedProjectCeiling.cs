@@ -158,7 +158,8 @@ internal static class InheritedProjectCeiling
         string storePath,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
         CancellationToken cancellationToken = default,
-        bool unknownOutranksSource = false)
+        bool unknownOutranksSource = false,
+        bool auditOwnRecord = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(storePath);
         ArgumentNullException.ThrowIfNull(probe);
@@ -177,7 +178,7 @@ internal static class InheritedProjectCeiling
         // A tombstone at the key (#2121) is not "already trusted": it falls through to the scan, where
         // it is one of the candidates, so a revoked workspace whose repository has since been
         // re-trusted elsewhere inherits again, and one whose repository has not is reported Revoked.
-        if (ceilings.TryGetValue(key, out var own) && !own.IsRevoked)
+        if (!auditOwnRecord && ceilings.TryGetValue(key, out var own) && !own.IsRevoked)
         {
             return new InheritanceResult(InheritanceOutcome.AlreadyTrusted);
         }

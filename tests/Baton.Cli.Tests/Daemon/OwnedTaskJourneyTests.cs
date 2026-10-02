@@ -2,6 +2,7 @@ using System.Text.Json;
 using Baton.Accounting;
 using Baton.Cli;
 using Baton.Cli.Daemon;
+using Baton.Cli.Tests.TestSupport;
 using Baton.Conductor;
 using Baton.Domain;
 using Baton.Queue;
@@ -93,7 +94,7 @@ public sealed class OwnedTaskJourneyTests
 
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 44, project,
                 new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple lifecycle seams"), brief),
-                TextWriter.Null, Resolve, Provision, Ct);
+                TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
             var accepted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Prepared, accepted.IssuePreparation!.State);
             Assert.Equal("recorded-conductor", accepted.OwnedTask!.ConductorHolder);

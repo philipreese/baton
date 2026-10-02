@@ -7665,6 +7665,25 @@ record, that exact ceiling is copied even when a sibling is narrower. If the rep
 never trusted, the historical unrestricted bootstrap is recorded with the exact invocation checkout
 as provenance; concurrent provisions may copy only that deterministic bootstrap lineage.
 
+**Read-only fresh lifecycle trust admission (#2560).** After canonical repository resolution,
+task submission and fresh lifecycle issue-add observe the provisioner's bounded candidate selection
+and the same deterministic trust policy before reserving an issue identity, copying a brief,
+creating a branch/worktree, or writing trust. A fresh target is audited using the exact invocation
+checkout's identity, never an invented future-path identity. Its live source record does not skip
+the repository-wide unknown-candidate audit. A registered exact canonical target with its own live
+ceiling remains reusable even without source trust; a directory or branch name alone proves nothing.
+The prospective ceiling must pass initial role admission without widening authority. Identical
+retained task input still returns the existing row before this preflight; changed input conflicts.
+
+Eligibility is an observation, not a permission token. Provisioning re-observes selection, cleanup
+and deterministic trust before mutation, including a changed candidate or suffix after a collision.
+The actual trust writer and final exact-target admission remain authoritative before `Prepared`,
+and the queue identity reservation and preparation CAS still prevent duplicate provisioning or
+resurrection after cancellation. Trust, Git, GitHub and queue storage are not one transaction:
+genuinely late failure may retain a blocked reservation and external effects. Those facts remain
+uncertain evidence requiring reconciliation; this admission check neither deletes the row nor
+supplies missing provenance for blocked-preparation recovery.
+
 **Retained-worktree inventory and controlled cleanup (#2318, #2386).** `queue worktrees` projects every distinct
 resolved workspace retained by queue history. Its queue-item `workspaceOrigin` is nullable for
 compatibility: only the exact creation fact `issue-provisioned` confers Baton ownership;
