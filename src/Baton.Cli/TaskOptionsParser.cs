@@ -11,13 +11,17 @@ public sealed record TaskOptions(
     TaskSizeDeclaration? Size = null,
     string? Spec = null,
     string? Id = null,
-    bool Json = false);
+    bool Json = false,
+    string? Adapter = null,
+    string? Model = null,
+    string? Effort = null);
 
 public static class TaskOptionsParser
 {
     public const string Usage =
         "baton task submit --issue <number> --project <repository-directory> "
-        + "--declared-size <small|medium|large|unknown> --size-rationale <clause> [--spec <file>]\n"
+        + "--declared-size <small|medium|large|unknown> --size-rationale <clause> [--spec <file>] "
+        + "[--adapter <name>] [--model <name>] [--effort <name>]\n"
         + "       baton task status <task-id> [--json]";
 
     public static TaskOptions Parse(IReadOnlyList<string> args)
@@ -34,12 +38,13 @@ public static class TaskOptionsParser
 
         if (args[0] != "submit") throw new CliArgumentException(Usage);
         int? issue = null;
-        string? project = null, size = null, rationale = null, spec = null;
+        string? project = null, size = null, rationale = null, spec = null, adapter = null, model = null, effort = null;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 1; i < args.Count; i++)
         {
             var flag = args[i];
-            if (flag is not ("--issue" or "--project" or "--declared-size" or "--size-rationale" or "--spec")
+            if (flag is not ("--issue" or "--project" or "--declared-size" or "--size-rationale" or "--spec"
+                    or "--adapter" or "--model" or "--effort")
                 || !seen.Add(flag) || ++i == args.Count || string.IsNullOrWhiteSpace(args[i]))
                 throw new CliArgumentException(Usage);
             switch (flag)
@@ -53,6 +58,9 @@ public static class TaskOptionsParser
                 case "--declared-size": size = args[i]; break;
                 case "--size-rationale": rationale = args[i]; break;
                 case "--spec": spec = args[i]; break;
+                case "--adapter": adapter = args[i]; break;
+                case "--model": model = args[i]; break;
+                case "--effort": effort = args[i]; break;
             }
         }
 
@@ -70,6 +78,7 @@ public static class TaskOptionsParser
             try { declaration = TaskSizeDeclaration.Parse(size, rationale); }
             catch (ArgumentException ex) { throw new CliArgumentException(ex.Message); }
         }
-        return new TaskOptions(TaskVerb.Submit, issue, project, declaration, spec);
+        return new TaskOptions(TaskVerb.Submit, issue, project, declaration, spec,
+            Adapter: adapter, Model: model, Effort: effort);
     }
 }

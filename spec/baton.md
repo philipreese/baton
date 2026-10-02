@@ -8062,9 +8062,10 @@ departed from. Nothing in the queue substitutes a model.
 ### Conductor-owned issue tasks (#2521)
 
 `baton task submit --issue <n> --project <dir> --declared-size small|medium|large|unknown
---size-rationale <why> [--spec <file>]` is the ordinary project-work entry point. It accepts exactly
-one canonical remote repository and issue under an existing conductor claim and returns a stable
-`task-` ID. `unknown` is an explicit size declaration requiring a rationale, not an omitted field.
+--size-rationale <why> [--spec <file>] [--adapter <name>] [--model <name>] [--effort <name>]` is the
+ordinary project-work entry point. It accepts exactly one canonical remote repository and issue under
+an existing conductor claim and returns a stable `task-` ID. `unknown` is an explicit size declaration
+requiring a rationale, not an omitted field.
 The supplied size and rationale constrain and explain the existing worker admission policy; they do
 not override model, permission, runway, or queue limits. `baton task status <id> [--json]` reads the
 retained queue task, including the recorded claim holder, stage, PR, readiness proof, blocker, and
@@ -8097,9 +8098,33 @@ queue lock **before** branch/worktree creation, trust entries, or brief copies. 
 the preparing process and is never launchable. A preparation failure or dead owner is retained as
 blocked uncertainty rather than assumed to mean no external side effect; retries cannot provision
 a second branch. The prepared row retains the explicit-input digest and the frozen rendered brief.
-An identical submission returns that same row at any stage; a differing declaration or spec bytes
-is a conflict. Import cannot erase task-owned rows or a matching issue lifecycle. These checks
-protect the pre-provisioning window as well as the later queue lifecycle.
+An identical submission returns that same row at any stage; a differing declaration, spec bytes, or
+worker selection is a conflict. Import cannot erase task-owned rows or a matching issue lifecycle.
+These checks protect the pre-provisioning window as well as the later queue lifecycle.
+
+**Task-local initial worker selection (#2563).** `--adapter`/`--model`/`--effort` each independently
+select the task's **implement stage only**, as one `QueueStageSelection` forwarded through the
+existing `QueueCommand` lifecycle-add path — never a whole-item axis, a `LifecyclePin`, or a routing
+reason (this entry point names no scope class, so there is no tier to depart from and nothing to
+justify). Admission reuses every existing seam exactly as `queue add --lifecycle` does: offline
+adapter/model validation, model-to-adapter inference, and conductor-only/known-mismatch refusals all
+run before reservation; the resolved tuple is frozen at accept time and survives a later settings
+edit; `WorkItemAdvancer` clears the assignment on advance so review/fix/re-review resolve their own
+tier, never inheriting this selection. No flags preserves the exact historical behavior and digest.
+Vendor model/effort validation that is deliberately deferred (not every unknown model is refused
+offline) stays deferred — this slice adds no universal allowlist.
+
+A selected submission's `InputDigest` uses a distinct version/domain, encoded as typed,
+length-delimited fields (a presence tag, then a big-endian length, then the bytes) rather than
+appended to the legacy newline-joined header: the legacy preimage stays byte-for-byte exact for a
+submission naming no axis, and the new encoding's explicit length prefixes keep a delimiter,
+newline, or spec-marker byte inside a rationale or spec from aliasing two different submissions onto
+one digest. The selected digest covers the complete explicit input — canonical repository, issue,
+size, rationale, spec presence and its exact captured bytes, and each of the three axes' presence and
+exact value — and never an ambient resolved default (an adapter's own fallback model, a role's tier),
+so two submissions that happen to resolve to the same launch tuple by different explicit paths still
+conflict. Changing or dropping any previously-explicit axis conflicts exactly as a changed size or
+spec would, including while the task is still preparing.
 
 The existing daemon drives implement → PR → review → one allowed fix → re-review → ready without
 another operator prompt. Readiness requires the existing exact-current-head approval and passing

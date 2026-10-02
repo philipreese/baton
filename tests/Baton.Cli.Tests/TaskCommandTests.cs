@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Baton.Accounting;
 using Baton.Cli.Tests.TestSupport;
@@ -24,9 +26,34 @@ public sealed class TaskCommandTests
         Assert.Equal(TaskVerb.Submit, submit.Verb);
         Assert.Equal(DeclaredTaskSize.Unknown, submit.Size!.Value.Size);
         Assert.Equal("scope has not been measured", submit.Size.Value.Rationale);
+        Assert.Null(submit.Adapter);
+        Assert.Null(submit.Model);
+        Assert.Null(submit.Effort);
         Assert.True(TaskOptionsParser.Parse(["status", "task-id", "--json"]).Json);
         Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse(["submit", "--issue", "42",
             "--project", "C:/repo", "--declared-size", "small"]));
+    }
+
+    [Fact]
+    public void Parser_accepts_optional_worker_selection_axes_and_refuses_malformed_ones()
+    {
+        string[] baseArgs =
+            ["submit", "--issue", "42", "--project", "C:/repo", "--declared-size", "small", "--size-rationale", "one cluster"];
+
+        var withAll = TaskOptionsParser.Parse([.. baseArgs, "--adapter", "claude", "--model", "opus", "--effort", "high"]);
+        Assert.Equal("claude", withAll.Adapter);
+        Assert.Equal("opus", withAll.Model);
+        Assert.Equal("high", withAll.Effort);
+
+        var modelOnly = TaskOptionsParser.Parse([.. baseArgs, "--model", "opus"]);
+        Assert.Null(modelOnly.Adapter);
+        Assert.Equal("opus", modelOnly.Model);
+        Assert.Null(modelOnly.Effort);
+
+        Assert.Throws<CliArgumentException>(() =>
+            TaskOptionsParser.Parse([.. baseArgs, "--adapter", "claude", "--adapter", "codex"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--model"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--effort", " "]));
     }
 
     [Fact]
@@ -714,6 +741,488 @@ public sealed class TaskCommandTests
             await Assert.ThrowsAsync<CliArgumentException>(() =>
                 QueueCommand.ExecuteAsync(legacy, TextWriter.Null, Ct, project, Resolve, Provision));
             Assert.Equal(1, provisions);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public void No_selection_digest_preserves_exact_legacy_preimage_bytes()
+    {
+        var size = new TaskSizeDeclaration(DeclaredTaskSize.Medium, "scoped already");
+        var specBytes = Encoding.UTF8.GetBytes("spec body");
+
+        // Pinned fixture: these exact hex strings are the historical no-selection preimage
+        // (repository\nissue\nsize\nrationale\n + "no-spec\n"/"spec\n" + raw spec bytes, SHA-256).
+        // A change here silently breaks every retained task's idempotency/conflict check.
+        Assert.Equal("a853306ca7de02ff062aa1b4651c280003259a9ccbf323e26f87ae357bd2fcb0",
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 77, size, null, null));
+        Assert.Equal("9f5df45b8a1531d07086da86abc2bd5eda3677dd5596183ccbba63280a0b297b",
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 77, size, specBytes, null));
+    }
+
+    [Fact]
+    public void Selected_digest_uses_a_distinct_domain_never_suffixed_onto_the_legacy_header()
+    {
+        var size = new TaskSizeDeclaration(DeclaredTaskSize.Medium, "scoped already");
+        var noSelection = TaskCommand.ComputeInputDigest("github.com/example/repo", 77, size, null, null);
+        var emptySelection = TaskCommand.ComputeInputDigest("github.com/example/repo", 77, size, null,
+            new QueueStageSelection { Stage = WorkStage.Implement });
+        var oneAxisSelection = TaskCommand.ComputeInputDigest("github.com/example/repo", 77, size, null,
+            new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" });
+        Assert.NotEqual(noSelection, emptySelection);
+        Assert.NotEqual(noSelection, oneAxisSelection);
+        Assert.NotEqual(emptySelection, oneAxisSelection);
+    }
+
+    [Fact]
+    public void Selected_digest_is_deterministic_and_distinguishes_every_explicit_axis()
+    {
+        var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one cluster");
+        string Digest(string? adapter, string? model, string? effort) => TaskCommand.ComputeInputDigest(
+            "github.com/example/repo", 1, size, null,
+            new QueueStageSelection { Stage = WorkStage.Implement, Adapter = adapter, Model = model, Effort = effort });
+
+        Assert.Equal(Digest("claude", "opus", "high"), Digest("claude", "opus", "high"));
+        Assert.NotEqual(Digest("claude", "opus", "high"), Digest("claude", "opus", null));
+        Assert.NotEqual(Digest("claude", "opus", null), Digest("claude", null, null));
+        Assert.NotEqual(Digest("claude", null, null), Digest(null, "claude", null));
+        Assert.NotEqual(Digest(null, null, "high"), Digest(null, null, "medium"));
+    }
+
+    [Fact]
+    public void Selected_digest_is_collision_safe_across_adversarial_field_boundaries()
+    {
+        // Naive, un-delimited concatenation of ("ab", "cd") and ("a", "bcd") produces the identical
+        // byte sequence "abcd"; length-prefixing each field is what keeps these two distinct
+        // submissions from aliasing onto the same digest.
+        var left = TaskCommand.ComputeInputDigest("github.com/example/repo", 1,
+            new TaskSizeDeclaration(DeclaredTaskSize.Small, "ab"), null,
+            new QueueStageSelection { Stage = WorkStage.Implement, Model = "cd" });
+        var right = TaskCommand.ComputeInputDigest("github.com/example/repo", 1,
+            new TaskSizeDeclaration(DeclaredTaskSize.Small, "a"), null,
+            new QueueStageSelection { Stage = WorkStage.Implement, Model = "bcd" });
+        Assert.NotEqual(left, right);
+
+        // An absent spec and a zero-byte captured spec carry different presence tags, not merely
+        // different lengths of the same "present" marker.
+        var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one cluster");
+        var noSpec = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null,
+            new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" });
+        var emptySpec = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, [],
+            new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" });
+        Assert.NotEqual(noSpec, emptySpec);
+
+        // This pair really aliases in the historical newline header. A selected request must not
+        // reuse that ambiguous header and merely append selection fields to it.
+        var embeddedMarkers = new TaskSizeDeclaration(DeclaredTaskSize.Small, "x\nspec\npayload");
+        var capturedMarkers = new TaskSizeDeclaration(DeclaredTaskSize.Small, "x");
+        byte[] capturedSpec = Encoding.UTF8.GetBytes("payload\nno-spec\n");
+        var selection = new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" };
+        Assert.Equal(
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, embeddedMarkers, null, null),
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, capturedMarkers, capturedSpec, null));
+        Assert.NotEqual(
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, embeddedMarkers, null, selection),
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, capturedMarkers, capturedSpec, selection));
+    }
+
+    [Fact]
+    public async Task Adding_an_explicit_selection_to_a_previously_unselected_submission_conflicts()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w61");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "61-lane"));
+            }
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
+
+            // Unselected -> selected is a conflict; the identical unselected input stays idempotent.
+            var unselected = new TaskOptions(TaskVerb.Submit, 61, project, size, spec);
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(unselected, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            var id = TaskCommand.TaskId(repository.Value, 61);
+            var addingSelection = unselected with { Model = "opus" };
+            var addedConflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(addingSelection, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Contains(id, addedConflict.Message, StringComparison.Ordinal);
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(unselected, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Equivalent_model_selection_forms_keep_assignment_but_not_admission_identity(
+        bool adapterFormFirst)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w61-equivalent");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            var provisions = 0;
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                provisions++;
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "61-equivalent-lane"));
+            }
+
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
+            var modelOnly = new TaskOptions(TaskVerb.Submit, 61, project, size, spec, Model: "opus");
+            var adapterAndModel = modelOnly with { Adapter = "claude" };
+            var initial = adapterFormFirst ? adapterAndModel : modelOnly;
+            var changed = adapterFormFirst ? modelOnly : adapterAndModel;
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(initial, TextWriter.Null, Resolve, Provision, Ct,
+                IssuePreparationRunner.NoCollisions));
+
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            var assignment = Assert.IsType<FrozenWorkerAssignment>(retained.WorkerAssignment);
+            Assert.Equal(("claude", "opus", null),
+                (assignment.Adapter, assignment.Model, assignment.Effort));
+            var queueBeforeReplay = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var briefBeforeReplay = await File.ReadAllBytesAsync(retained.SpecFile, Ct);
+            var trustBeforeReplay = await File.ReadAllBytesAsync(ProjectCeilingStore.DefaultPath, Ct);
+
+            // The alternate spelling resolves to the same worker tuple but remains a different
+            // explicit submission, so admission must reject it before the preparation callback.
+            var conflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(changed, TextWriter.Null, Resolve, Provision, Ct,
+                    IssuePreparationRunner.NoCollisions));
+            Assert.Contains(retained.OwnedTask!.Id, conflict.Message, StringComparison.Ordinal);
+            Assert.Equal(1, provisions);
+            Assert.Equal(queueBeforeReplay, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(briefBeforeReplay, await File.ReadAllBytesAsync(retained.SpecFile, Ct));
+            Assert.Equal(trustBeforeReplay, await File.ReadAllBytesAsync(ProjectCeilingStore.DefaultPath, Ct));
+
+            // Exact replay is idempotent and still cannot reach a vendor or provision another lane.
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(initial, TextWriter.Null, Resolve, Provision, Ct,
+                IssuePreparationRunner.NoCollisions));
+            Assert.Equal(1, provisions);
+            Assert.Equal(queueBeforeReplay, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(briefBeforeReplay, await File.ReadAllBytesAsync(retained.SpecFile, Ct));
+            Assert.Equal(trustBeforeReplay, await File.ReadAllBytesAsync(ProjectCeilingStore.DefaultPath, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Changing_or_dropping_a_retained_explicit_selection_conflicts_in_both_directions()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w62");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "62-lane"));
+            }
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
+
+            // Selected -> changed and selected -> absent are both conflicts; the identical selected
+            // input stays idempotent.
+            var selected = new TaskOptions(TaskVerb.Submit, 62, project, size, spec, Adapter: "claude", Model: "opus");
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(selected, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            var id = TaskCommand.TaskId(repository.Value, 62);
+            var changedModel = selected with { Model = "sonnet" };
+            var changedConflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(changedModel, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Contains(id, changedConflict.Message, StringComparison.Ordinal);
+            var droppedSelection = selected with { Adapter = null, Model = null };
+            var droppedConflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(droppedSelection, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Contains(id, droppedConflict.Message, StringComparison.Ordinal);
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(selected, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Selected_submission_is_idempotent_during_and_after_preparation()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w66");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var provisions = 0;
+            async Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issueNumber, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Interlocked.Increment(ref provisions);
+                entered.SetResult();
+                await release.Task.WaitAsync(token);
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return new(workspace, "66-lane");
+            }
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            var options = new TaskOptions(TaskVerb.Submit, 66, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one cluster"), spec,
+                Adapter: "claude", Model: "opus", Effort: "high");
+            var first = TaskCommand.ExecuteAsync(options, new StringWriter(), Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
+            await entered.Task.WaitAsync(Ct);
+
+            // Identical explicit selection, resubmitted while preparation is still in flight.
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, new StringWriter(), Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Equal(1, provisions);
+
+            release.SetResult();
+            Assert.Equal(0, await first);
+
+            // Identical explicit selection, resubmitted after preparation completed.
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, new StringWriter(), Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Equal(1, provisions);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(TaskPreparationState.Prepared, item.IssuePreparation!.State);
+            Assert.Equal("claude", Assert.Single(item.StageSelections!).Adapter);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Selected_submission_sets_exactly_one_implement_stage_selection_leaving_other_stages_and_the_shared_tier_table_untouched()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w63");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            var sharedSettings = new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    Tiers = new Dictionary<string, QueueTierSettings>
+                    {
+                        ["engine"] = new() { Adapter = "claude", Model = "opus", Effort = "high" },
+                        ["review-engine"] = new() { Adapter = "codex", Model = "gpt-5.6-sol", Effort = "high" },
+                    },
+                    AdapterDefaultModels = new Dictionary<string, string> { ["agy"] = "gemini-3.8-flash-high" },
+                },
+            };
+            await DaemonSettingsStore.SaveAsync(sharedSettings, BatonPaths.SettingsFile, Ct);
+            var settingsBefore = await File.ReadAllBytesAsync(BatonPaths.SettingsFile, Ct);
+            var loadedBefore = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, Ct);
+            var unrelated = new QueueItem
+            {
+                Tag = "unrelated-task",
+                Role = "implement",
+                Workspace = project,
+                SpecFile = BatonPaths.QueueSpecFile("unrelated-task"),
+                ScopeClass = "engine",
+                Stage = WorkStage.Implement,
+            };
+            var unrelatedBefore = QueueTierTable.ResolveForStage(unrelated, WorkStage.Implement,
+                loadedBefore.Queue, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "63-lane"));
+            }
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
+            var options = new TaskOptions(TaskVerb.Submit, 63, project, size, spec, Adapter: "claude", Model: "opus", Effort: "high");
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+
+            Assert.False(item.LifecyclePin);
+            Assert.Null(item.ScopeClass);
+            var selection = Assert.Single(item.StageSelections!);
+            Assert.Equal(WorkStage.Implement, selection.Stage);
+            Assert.Equal("claude", selection.Adapter);
+            Assert.Equal("opus", selection.Model);
+            Assert.Equal("high", selection.Effort);
+
+            // Later stages inherit nothing from this submission -- each resolves its own tier.
+            var (reviewSelection, reviewSource) = QueueTierTable.SelectionForStage(item, WorkStage.Review);
+            Assert.Null(reviewSelection);
+            Assert.Equal(QueueSelectionSource.StageDefault, reviewSource);
+
+            // Admission reads the shared catalog but never owns or rewrites it. The unrelated
+            // default resolution is a discriminating control for accidental catalog mutation.
+            Assert.Equal(settingsBefore, await File.ReadAllBytesAsync(BatonPaths.SettingsFile, Ct));
+            var loadedAfter = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, Ct);
+            var unrelatedAfter = QueueTierTable.ResolveForStage(unrelated, WorkStage.Implement,
+                loadedAfter.Queue, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            Assert.Equal(unrelatedBefore, unrelatedAfter);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Selected_submission_freezes_initial_assignment_against_settings_drift_after_acceptance()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w64");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "64-lane"));
+            }
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
+            // Explicit adapter, no model: the shipped per-adapter default fills the launch model at
+            // add time -- exactly the ambient value a later settings edit can move.
+            var options = new TaskOptions(TaskVerb.Submit, 64, project, size, spec, Adapter: "agy");
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.NotNull(item.WorkerAssignment);
+            Assert.Equal("agy", item.WorkerAssignment!.Adapter);
+            Assert.Equal("gemini-3.8-flash-high", item.WorkerAssignment.Model);
+
+            // Discriminating control: an operator edit to the adapter default after acceptance really
+            // does move what a fresh resolution would pick, so the freeze below is actually exercised.
+            var driftedSettings = new QueueSettings
+            {
+                AdapterDefaultModels = new Dictionary<string, string> { ["agy"] = "gemini-4-ultra" },
+            };
+            var driftedCurrent = QueueTierTable.ResolveForStage(item, WorkStage.Implement, driftedSettings,
+                WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            Assert.Equal("gemini-4-ultra", driftedCurrent.Model);
+
+            var applied = QueueLauncher.ApplyFrozenAssignment(item, driftedCurrent);
+            Assert.Equal("agy", applied.Adapter);
+            Assert.Equal("gemini-3.8-flash-high", applied.Model);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Unknown_adapter_in_explicit_selection_refuses_before_any_queue_side_effect()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            Directory.CreateDirectory(project);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            var provisions = 0;
+            var trustPath = ProjectCeilingStore.DefaultPath;
+            var queuePath = BatonPaths.QueueFile;
+            var taskId = TaskCommand.TaskId(repository.Value, 65);
+            var briefPath = BatonPaths.QueueSpecFile(taskId);
+            Assert.False(File.Exists(trustPath));
+            Assert.False(File.Exists(queuePath));
+            Assert.False(File.Exists(briefPath));
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                provisions++;
+                throw new InvalidOperationException("Provisioning must not run after a refused selection.");
+            }
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue");
+            var options = new TaskOptions(TaskVerb.Submit, 65, project, size, Adapter: "not-a-real-adapter", Model: "whatever");
+            var ex = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(options, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Contains("not-a-real-adapter", ex.Message, StringComparison.Ordinal);
+            Assert.Equal(0, provisions);
+            // No repository checkout was fabricated for this pre-provision validation refusal, so
+            // Git-side witnesses are intentionally limited to the injected provisioner not running.
+            Assert.False(File.Exists(trustPath));
+            Assert.False(File.Exists(queuePath));
+            Assert.False(File.Exists(briefPath));
+            Assert.False(Directory.Exists(Path.Combine(home, "w65")));
         }
         finally
         {
