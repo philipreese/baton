@@ -1658,9 +1658,11 @@ public sealed class TaskCommandTests
 
             // Hand-written to simulate a row persisted before #2566 added StageSelections/WorkerAssignment
             // readers, so the JSON keys are entirely absent rather than written by the current encoder.
-            // Verified (manually, against origin/main's TaskCommand.cs): every case in this class that
-            // reads initialWorkerSelection/retainedWorkerAssignment throws KeyNotFoundException there,
-            // including this one; this file's current form is the green side of that control.
+            // The two asserts below (`DoesNotContain`) are the actual proof of that absence; against
+            // origin/main's TaskCommand.cs, which writes neither field at all, the later
+            // `GetProperty("initialWorkerSelection"|"retainedWorkerAssignment")` calls would throw
+            // KeyNotFoundException per JsonElement's documented contract -- a language guarantee, not
+            // a claim this test re-verifies against the old binary.
             var raw = "{\"items\":[{"
                 + "\"Tag\":" + JsonSerializer.Serialize(id) + ","
                 + "\"Role\":\"implement\","
