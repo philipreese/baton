@@ -950,7 +950,7 @@ public sealed class ExactFileRestoreToolTests
             {
                 cancellation.Cancel();
                 // A failed startup assertion must still let the owned tool reap its native child.
-                await call.WaitAsync(TimeSpan.FromSeconds(8)); // wait-ok: bounded fixture cleanup independent of an expired test token.
+                await call.WaitAsync(TimeSpan.FromSeconds(8), CancellationToken.None); // wait-ok: bounded fixture cleanup independent of an expired test token.
             }
 
             Assert.True(result.IsError);
