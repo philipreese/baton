@@ -127,12 +127,20 @@ public sealed record GrantDecision(
     /// Parses the canonical grant-decision line used by every enforcement-point sink. Unknown or
     /// malformed lines are not grant evidence and are rejected rather than partially interpreted.
     /// </summary>
-    public static bool TryParseJsonLine(string? json, out GrantDecision? decision)
+    public static bool TryParseJsonLine(string? json, out GrantDecision? decision) =>
+        ParseJsonLine(json, out decision) == GrantDecisionParseResult.Parsed;
+
+    /// <summary>
+    /// Parses a canonical line while distinguishing a malformed <c>reason</c> from a line that is not
+    /// otherwise a grant decision. The partial decision returned for <see cref="GrantDecisionParseResult.MalformedReason"/>
+    /// lets conservative readers retain a denial without maintaining a second grant-schema parser.
+    /// </summary>
+    public static GrantDecisionParseResult ParseJsonLine(string? json, out GrantDecision? decision)
     {
         decision = null;
         if (string.IsNullOrWhiteSpace(json))
         {
-            return false;
+            return GrantDecisionParseResult.Invalid;
         }
 
         try
@@ -153,7 +161,7 @@ public sealed record GrantDecision(
                 || !DateTimeOffset.TryParse(
                     atText, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at))
             {
-                return false;
+                return GrantDecisionParseResult.Invalid;
             }
 
             string? reason = null;
@@ -161,7 +169,9 @@ public sealed record GrantDecision(
             {
                 if (reasonProperty.ValueKind != JsonValueKind.String)
                 {
-                    return false;
+                    decision = new GrantDecision(
+                        vendor, tool, decisionText == "allow", rule, null, input, at);
+                    return GrantDecisionParseResult.MalformedReason;
                 }
 
                 reason = reasonProperty.GetString();
@@ -169,11 +179,11 @@ public sealed record GrantDecision(
 
             decision = new GrantDecision(
                 vendor, tool, decisionText == "allow", rule, reason, input, at);
-            return true;
+            return GrantDecisionParseResult.Parsed;
         }
         catch (JsonException)
         {
-            return false;
+            return GrantDecisionParseResult.Invalid;
         }
     }
 
@@ -195,6 +205,13 @@ public sealed record GrantDecision(
     {
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
+}
+
+public enum GrantDecisionParseResult
+{
+    Invalid,
+    Parsed,
+    MalformedReason,
 }
 
 /// <summary>

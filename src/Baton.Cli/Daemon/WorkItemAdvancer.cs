@@ -386,6 +386,7 @@ public sealed partial class WorkItemAdvancer
         // A halted item remains available only for the trusted-merge retirement above. Its halt
         // still forbids every ordinary lifecycle transition and retry.
         var awaitingMissingPullRequest = IsAwaitingMissingPullRequestReconciliation(item);
+        var pullRequestAuthorityRefusal = HasPullRequestAuthorityRefusal(room, sentinel);
         if (item.Halted && !awaitingMissingPullRequest)
         {
             return null;
@@ -408,7 +409,8 @@ public sealed partial class WorkItemAdvancer
             && item.DraftPullRequestCreateMarker is null
             && pr.Succeeded && pr.Number is null
             && item.Stage == WorkStage.Implement
-            && IsDraftHandoffEnabledNow(item.Repository))
+            && IsDraftHandoffEnabledNow(item.Repository)
+            && !pullRequestAuthorityRefusal)
         {
             var created = await TryCreateDraftPullRequestAsync(item, outcome, head, now, cancellationToken)
                 .ConfigureAwait(false);
@@ -429,7 +431,7 @@ public sealed partial class WorkItemAdvancer
             arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested,
             sentinel?.Steps is { } terminalSteps ? terminalSteps.Count > 0 : null,
             item.AttemptBaseRevision, deliveryFailingMembers,
-            HasPullRequestAuthorityRefusal(room, sentinel));
+            pullRequestAuthorityRefusal);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
@@ -1973,9 +1975,8 @@ public sealed partial class WorkItemAdvancer
 
     /// <summary>
     /// Reads the current terminal execution's engine-owned grant decisions. The aggregate refused-tool
-    /// count is deliberately not used here: a denied shell command is incidental, while only a denied
-    /// <see cref="GrantRules.OwnPullRequestOnly"/> decision proves that the lane was refused its exact
-    /// originating-PR authority.
+    /// count is deliberately not used here. The exact Codex pre-creation list denial is incidental to
+    /// draft creation; every other own-PR-only denial remains blocking.
     /// </summary>
     private static bool HasPullRequestAuthorityRefusal(
         string? roomDirectory, WorkflowStatusView? sentinel)
@@ -2004,8 +2005,7 @@ public sealed partial class WorkItemAdvancer
             foreach (var executionDirectory in executionDirectories)
             {
                 var path = Path.Combine(executionDirectory, GrantDecisionLog.FileName);
-                if (File.Exists(path)
-                    && GrantDecisionLog.ContainsDenial(path, GrantRules.OwnPullRequestOnly))
+                if (File.Exists(path) && ContainsBlockingPullRequestAuthorityDenial(path))
                 {
                     return true;
                 }
@@ -2018,6 +2018,37 @@ public sealed partial class WorkItemAdvancer
         }
 
         return false;
+    }
+
+    private static bool ContainsBlockingPullRequestAuthorityDenial(string path)
+    {
+        foreach (var line in File.ReadLines(path))
+        {
+            var parseResult = GrantDecision.ParseJsonLine(line, out var decision);
+            if (decision is not { Allowed: false, Rule: var rule }
+                || rule != GrantRules.OwnPullRequestOnly)
+            {
+                continue;
+            }
+
+            if (parseResult == GrantDecisionParseResult.MalformedReason
+                || decision.Reason is not { Length: > 0 } reason
+                || !IsIncidentalOwnPullRequestReadReason(reason))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsIncidentalOwnPullRequestReadReason(string reason)
+    {
+        const string incidentalListReason =
+            "[baton:grant-refused] Baton refuses this command: `gh pr list` enumerates pull requests this room does not own — "
+            + "an implement lane reads its own PR only. No `gh pr` read is allowed until this room's own "
+            + "`gh pr create` reports one. `gh issue view` is unaffected.";
+        return reason == incidentalListReason;
     }
 
     /// <summary>
