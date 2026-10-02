@@ -7981,6 +7981,9 @@ the current `OwnedTask.Blocked.ObligationKey`; every other state or mismatch ret
 The additive nullable `stoppedWorkHistory` field is one retained as-of snapshot with exactly
 `haltCause`, `obligationKey`, `attemptId`, `stage`, and `observedAt`. It is historical evidence,
 not the latest or complete history, and never grants action authority or changes the queue.
+The text view labels a retained `OwnedTask.Blocked` disposition as current only for a derived
+`blocked` task; outside that state it is retained historical evidence, and a linked stopped-work
+pair has its own current-blocker label.
 
 The identity is the canonical repository plus issue, independent of checkout path or queue tag.
 Task and legacy `queue add --issue --lifecycle` admissions reserve that identity under the same
