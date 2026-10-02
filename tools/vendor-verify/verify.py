@@ -4376,6 +4376,12 @@ def _selftest_agy_stream_environment():
         if unset.get("SYSTEMROOT") != "source-systemroot":
             raise AssertionError("an existing Windows SYSTEMROOT must reach the live child environment")
 
+        source_unset = _agy_stream_follow_up_build_environment(
+            unset_target, "baton-home", "working-directory", "outbox",
+            {"PATH": "source-path"}, "nt")
+        if "SYSTEMROOT" in source_unset:
+            raise AssertionError("an unset Windows SYSTEMROOT must not be added")
+
         empty = _agy_stream_follow_up_build_environment(
             unset_target, "baton-home", "working-directory", "outbox",
             {"PATH": "source-path", "SYSTEMROOT": ""}, "nt")
