@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -48,10 +49,17 @@ public static class TaskCommand
         var id = TaskId(identity.Value, issue);
         var specBytes = options.Spec is null ? [] : await File.ReadAllBytesAsync(options.Spec, cancellationToken)
             .ConfigureAwait(false);
-        var explicitHeader = $"{identity.Value}\n{issue}\n{options.Size!.Value.Size}\n{options.Size.Value.Rationale}\n"
-            + (options.Spec is null ? "no-spec\n" : "spec\n");
-        var digest = Convert.ToHexString(SHA256.HashData([
-            .. Encoding.UTF8.GetBytes(explicitHeader), .. specBytes])).ToLowerInvariant();
+        var selection = options.Adapter is null && options.Model is null && options.Effort is null
+            ? null
+            : new QueueStageSelection
+            {
+                Stage = WorkStage.Implement,
+                Adapter = options.Adapter,
+                Model = options.Model,
+                Effort = options.Effort,
+            };
+        var digest = ComputeInputDigest(
+            identity.Value, issue, options.Size!.Value, options.Spec is null ? null : specBytes, selection);
         var existing = (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
             .Items.FirstOrDefault(item => item.OwnedTask?.Id == id);
         if (existing is not null)
@@ -70,7 +78,8 @@ public static class TaskCommand
         var owned = new OwnedTaskSubmission(id, identity.Value, issue, digest, holder, DateTimeOffset.UtcNow);
         var queueOptions = new QueueOptions(QueueVerb.Add, Tag: id, Role: "implement",
             SpecFilePath: options.Spec, Issue: issue, Lifecycle: true,
-            DeclaredTaskSize: options.Size, Requirements: []);
+            DeclaredTaskSize: options.Size, Requirements: [],
+            StageSelections: selection is null ? null : [selection]);
 
         // QueueCommand owns the shared locked reservation and the exact existing provisioning path.
         // Its queue-oriented prose stays internal; this front door returns the task receipt.
@@ -95,6 +104,65 @@ public static class TaskCommand
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{repository}\0{issue}"));
         return "task-" + Convert.ToHexString(bytes).ToLowerInvariant()[..58];
+    }
+
+    /// <summary>
+    /// No-selection submissions preserve the exact historical newline-header preimage (legacy
+    /// digest/idempotency fixtures depend on these exact bytes). A selected submission instead uses a
+    /// distinct, domain-separated, typed/length-delimited encoding of the complete explicit input —
+    /// never suffixed onto the ambiguous legacy header, so a delimiter/newline/spec-marker byte inside
+    /// a rationale or spec cannot alias two different submissions onto the same digest.
+    /// </summary>
+    internal static string ComputeInputDigest(
+        string repository, int issue, TaskSizeDeclaration size, byte[]? specBytes, QueueStageSelection? selection)
+    {
+        if (selection is null)
+        {
+            var explicitHeader = $"{repository}\n{issue}\n{size.Size}\n{size.Rationale}\n"
+                + (specBytes is null ? "no-spec\n" : "spec\n");
+            return Convert.ToHexString(SHA256.HashData([
+                .. Encoding.UTF8.GetBytes(explicitHeader), .. (specBytes ?? [])])).ToLowerInvariant();
+        }
+
+        var buffer = new List<byte>();
+        AppendField(buffer, Encoding.UTF8.GetBytes(SelectedInputDomain));
+        AppendField(buffer, Encoding.UTF8.GetBytes(repository));
+        AppendField(buffer, Encoding.UTF8.GetBytes(issue.ToString(CultureInfo.InvariantCulture)));
+        AppendField(buffer, Encoding.UTF8.GetBytes(size.Size.ToString()));
+        AppendOptionalField(buffer, size.Rationale is null ? null : Encoding.UTF8.GetBytes(size.Rationale));
+        AppendOptionalField(buffer, specBytes);
+        AppendOptionalField(buffer, selection.Adapter is null ? null : Encoding.UTF8.GetBytes(selection.Adapter));
+        AppendOptionalField(buffer, selection.Model is null ? null : Encoding.UTF8.GetBytes(selection.Model));
+        AppendOptionalField(buffer, selection.Effort is null ? null : Encoding.UTF8.GetBytes(selection.Effort));
+        return Convert.ToHexString(SHA256.HashData(buffer.ToArray())).ToLowerInvariant();
+    }
+
+    // "v1" of the selected-submission domain. Bumping this value is the only way the encoding below
+    // may ever change shape; a version bump is itself a new domain, never a mutation of this one.
+    private const string SelectedInputDomain = "baton-task-selected-input-v1";
+
+    /// <summary>A present, always-required field: a 1-byte present tag, a 4-byte big-endian length,
+    /// then the bytes. The length prefix is what makes two fields' boundary unambiguous regardless of
+    /// what bytes either one contains.</summary>
+    private static void AppendField(List<byte> buffer, byte[] value)
+    {
+        buffer.Add(1);
+        buffer.AddRange(BitConverter.GetBytes(value.Length).Reverse());
+        buffer.AddRange(value);
+    }
+
+    /// <summary>A nullable field: a 1-byte tag (0 = absent, nothing follows; 1 = present, as
+    /// <see cref="AppendField"/>). Absence and an explicit zero-length value are never the same byte
+    /// sequence.</summary>
+    private static void AppendOptionalField(List<byte> buffer, byte[]? value)
+    {
+        if (value is null)
+        {
+            buffer.Add(0);
+            return;
+        }
+
+        AppendField(buffer, value);
     }
 
     private static bool HasRetainedBlockedPreparation(string id)
