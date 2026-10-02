@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using Baton.Status;
 
 namespace Baton.Memory;
@@ -29,24 +31,81 @@ public static class MemoryCanonicalGeneration
         return action();
     });
 
-    internal static T Mutate<T>(string root, Func<T> action) => Locked(root, () =>
+    internal static T Mutate<T>(string root, Func<T> action) =>
+        Mutate(root, action, TimeSpan.FromSeconds(5));
+
+    // Per-call test seam: the observer sees actual replacement failures, never a fabricated move.
+    internal static T Mutate<T>(string root, Func<T> action, TimeSpan retryBudget,
+        Action<Exception>? replacementFailed = null) => Locked(root, () =>
     {
         // Validate existing authority before replacing it: corruption must not disappear on a write.
         _ = Read(root);
         Directory.CreateDirectory(root);
         var path = Path.Combine(root, FileName);
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        Exception? publicationFailure = null;
         try
         {
             File.WriteAllText(temp, Guid.NewGuid().ToString("N"));
-            File.Move(temp, path, overwrite: true);
+            ReplaceGeneration(temp, path, retryBudget, replacementFailed);
+        }
+        catch (Exception error)
+        {
+            publicationFailure = error;
+            throw;
         }
         finally
         {
-            File.Delete(temp);
+            try { File.Delete(temp); }
+            catch (Exception cleanupFailure) when (publicationFailure is not null)
+            {
+                // Keep the failed publication's original stack; retain a cleanup refusal as evidence.
+                publicationFailure.Data["MemoryGenerationCleanupFailure"] = cleanupFailure;
+            }
         }
+        // Protected invariant: replacement is the only retried operation. Canonical mutation runs
+        // once, after successful invalidation; exhaustion never touches canonical bytes.
         return action();
     });
+
+    private static void ReplaceGeneration(string temp, string path, TimeSpan retryBudget,
+        Action<Exception>? replacementFailed)
+    {
+        var elapsed = Stopwatch.StartNew();
+        var backoffMs = 15.0;
+        ExceptionDispatchInfo? firstFailure = null;
+        while (true)
+        {
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+                return;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                firstFailure ??= ExceptionDispatchInfo.Capture(error);
+                try { replacementFailed?.Invoke(error); }
+                catch (Exception observerFailure)
+                {
+                    observerFailure.Data["MemoryGenerationReplacementFailure"] = error;
+                    throw;
+                }
+                // The first real attempt happens even with a zero budget. Observer time and waits
+                // consume the same monotonic budget, rather than starting a fresh deadline.
+                var remaining = retryBudget - elapsed.Elapsed;
+                if (remaining <= TimeSpan.Zero)
+                    firstFailure.Throw();
+
+                // wait-ok: a bounded wait for a noncooperating file holder; no async suspension while
+                // owning the thread-affine generation mutex. Never retry after the budget expires.
+                Thread.Sleep(remaining < TimeSpan.FromMilliseconds(backoffMs)
+                    ? remaining : TimeSpan.FromMilliseconds(backoffMs));
+                if (elapsed.Elapsed >= retryBudget)
+                    firstFailure.Throw();
+                backoffMs = Math.Min(backoffMs * 2, 250);
+            }
+        }
+    }
 
     internal static T MutateLedger<T>(string path, Func<T> action) => Mutate(LedgerRoot(path), action);
 

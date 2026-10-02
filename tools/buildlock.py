@@ -150,7 +150,8 @@ REPLAY_TAIL_BYTES = 64 * 1024
 # Receipt format version. It is inside the KEY (so a bump orphans every existing file under a key
 # nothing asks for again) and, since the 2026-09-07 review, also inside the BODY -- which is what
 # lets prune_receipts recognise an orphan rather than leave it on disk forever.
-REPLAY_VERSION = 1
+REPLAY_VERSION = 2
+POST_EXIT_DRAIN_S = 2.0
 
 # The `--replay` allowlist, mechanically pinned (#2010, 2026-09-07 re-review). The docstring's
 # "Replay" section is the RULE; this is the SET the rule currently admits, as (pixi task, verbatim
@@ -293,37 +294,86 @@ def prune_receipts(directory: Path, keep: Path) -> None:
                 pass
 
 
+def _pipe_available(stream: BinaryIO) -> int | None:
+    """Windows anonymous-pipe bytes available; None means closed, zero means live/empty."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    peek = kernel.PeekNamedPipe
+    peek.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                     wintypes.LPVOID, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID)
+    peek.restype = wintypes.BOOL
+    available = wintypes.DWORD()
+    if not peek(msvcrt.get_osfhandle(stream.fileno()), None, 0, None,
+                ctypes.byref(available), None):
+        error = ctypes.get_last_error()
+        if error == 109:  # ERROR_BROKEN_PIPE: all writers closed.
+            return None
+        raise ctypes.WinError(error)
+    return available.value
+
+
 def run_recorded(command: list[str], env: dict[str, str], priority_class: str,
                  inputs: tuple[Path, str] | None) -> int:
-    """Stream stdout unchanged, retaining a bounded byte tail; stderr stays inherited."""
+    """Replay-eligible runs capture both streams; incomplete post-exit capture fails closed."""
     if inputs is None:
         # Not replay-eligible (no `--replay`, or unreadable inputs): nothing to record, so stdout
         # stays the INHERITED handle it was before #2010 rather than a pipe this process pumps.
-        # That is most of the pipe's blast radius removed -- see the remark on the read loop below
-        # for the part that necessarily remains.
+        # Unflagged/unfingerprintable invocations retain their existing inherited streams.
         return subprocess.run(command, env=env).returncode
     before = replay_inputs(command, priority_class)
     # A previous holder may have published while this process queued.
     if not invalidate_pass(inputs):
         before = None
     tail = bytearray()
-    # UNVERIFIED RESIDUAL, and it is on the MSBuild-owning commands specifically (2026-09-07 review):
-    # a pipe ends at EOF, which arrives only when every process holding the write handle has closed
-    # it, so a grandchild that outlives the wrapped command would stall this loop after the build
-    # finished -- in the file whose Timeout section exists to stop exactly that hang class, and this
-    # loop has no bound of its own. MSBuild's handle-inheritance behaviour was not measured. The
-    # opted-in set is what bounds the exposure: it is `dotnet format --verify-no-changes` and the
-    # `--no-build` test legs, which do own MSBuild, so this is narrowed rather than gone.
-    # `pixi.toml`'s activation env (MSBUILDDISABLENODEREUSE, UseSharedCompilation=false) is what
-    # stops node reuse leaving such a process behind, and it does not apply outside a pixi shell.
-    with subprocess.Popen(command, env=env, stdout=subprocess.PIPE) as child:
+    # Protected invariant: child exit is NOT pipe EOF. An inherited writer may retain either
+    # stream indefinitely; bound post-exit drain and never receipt incomplete capture. Merge
+    # stderr into the owned pipe, rather than letting it keep the outer gates capture alive.
+    # One reader, read1 of at most PeekNamedPipe's available bytes: an empty live pipe is not EOF.
+    child = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    deadline = None
+    capture_complete = False
+    try:
         assert child.stdout is not None
-        while chunk := child.stdout.read1(8192):
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
-            tail.extend(chunk)
-            del tail[:-REPLAY_TAIL_BYTES]
+        while True:
+            code = child.poll()
+            if code is not None and deadline is None:
+                deadline = time.monotonic() + POST_EXIT_DRAIN_S
+            # Check even when a descendant keeps writing; output cannot renew this deadline.
+            if deadline is not None and time.monotonic() >= deadline:
+                print("buildlock: output drain failed after direct command exit; "
+                      "an inherited stream remains open, no passing receipt recorded", file=sys.stderr)
+                break
+            available = _pipe_available(child.stdout)
+            if available is None:
+                capture_complete = True
+                break
+            if available:
+                chunk = child.stdout.read1(min(available, 8192))
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                tail.extend(chunk)
+                del tail[:-REPLAY_TAIL_BYTES]
+            else:
+                time.sleep(0.02)
         code = child.wait()
+    except OSError as error:
+        # Reap ONLY our direct child before closing its pipe. No Popen.__exit__ implicit wait.
+        child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=5)
+        print(f"buildlock: output capture failed: {error}; no passing receipt recorded", file=sys.stderr)
+        return 1
+    finally:
+        if child.stdout is not None:
+            child.stdout.close()
+    if not capture_complete:
+        return 1  # Capture failure is never lock contention, even if the child exited 75.
     after = replay_inputs(command, priority_class) if code == 0 and before else None
     if after is not None and after == before:
         path, fingerprint = after
@@ -890,8 +940,11 @@ def _selftest_replay_allowlist() -> bool:
 
 
 def selftest() -> int:
+    from buildlock_drain_selftest import selftest as drain_selftest
+
     ok = _selftest_replay()
     ok = _selftest_replay_allowlist() and ok
+    ok = drain_selftest(__file__) and ok
     with tempfile.TemporaryDirectory() as td:
         lock_file = os.path.join(td, "selftest.lock")
         stamps = os.path.join(td, "stamps.txt")

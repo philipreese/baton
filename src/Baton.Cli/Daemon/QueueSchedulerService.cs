@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Baton.Conductor;
 using Baton.Domain;
 using Baton.Core.Internal;
@@ -125,6 +126,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
         _advancer = advancer ?? new WorkItemAdvancer(
             null,
             null,
+            RepositoryIdentityResolver.TryResolveAsync,
             appendFleetEvent: _appendFleetEvent,
             conductorObligations: _conductorObligations);
         _loopDriver = loopDriver ?? new DaemonLoopDriver();
@@ -298,6 +300,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
             string? attemptBaseRevision;
             QueueAttemptEnvelope envelope;
             string roomDirectory;
+            QueueItem admittedQueueRow;
 
             // A queue commit may have completed before the daemon stopped. Resume that exact
             // envelope after its admission draft is pumped; never resolve a newer tier or grant.
@@ -342,6 +345,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 attemptId = envelope.AttemptId;
                 attemptBaseRevision = envelope.AttemptBaseRevision;
                 roomDirectory = envelope.RoomDirectory;
+                admittedQueueRow = item;
                 item = item with
                 {
                     LastAdmission = admission,
@@ -522,6 +526,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 {
                     continue;
                 }
+                admittedQueueRow = admitted;
 
                 // Keep the pre-launch queue row retireable, while giving the launcher the exact
                 // retained binding it must observe once this tick wins the launch claim.
@@ -573,9 +578,48 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 continue;
             }
 
+            QueueItem? reviewPreparationRow = null;
+            string? refreshedReviewBrief = null;
+            if (item.Stage is WorkStage.Review or WorkStage.ReReview && item.ReplacementReviewAction is null)
+            {
+                var preparationSnapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken)
+                    .ConfigureAwait(false);
+                reviewPreparationRow = preparationSnapshot.Items.FirstOrDefault(row => row.Tag == item.Tag);
+                if (preparationSnapshot.Held || reviewPreparationRow is null
+                    || reviewPreparationRow.State != QueueItemState.Queued
+                    || reviewPreparationRow.Retirement is not null
+                    || reviewPreparationRow.LaunchMayHaveBegunAt is not null
+                    || reviewPreparationRow.AttemptEnvelope?.AttemptId != attemptId
+                    || !reviewPreparationRow.AttemptAdmissionFactDurable
+                    // Pumping admission changes this one durability flag, not limits, skills,
+                    // provenance or the frozen envelope. Reject every other pre-capture change.
+                    || JsonSerializer.Serialize(reviewPreparationRow with
+                    {
+                        AttemptAdmissionFactDurable = admittedQueueRow.AttemptAdmissionFactDurable,
+                    }) != JsonSerializer.Serialize(admittedQueueRow)
+                    || !HasSameAdmissionDeclaration(reviewPreparationRow, item, admittedDeclaration))
+                    continue;
+            }
+
             if (_beforeLaunchClaim is not null)
             {
                 await _beforeLaunchClaim(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (reviewPreparationRow is not null)
+            {
+                try
+                {
+                    refreshedReviewBrief = await _advancer.PrepareQueuedReviewBriefAsync(
+                        reviewPreparationRow, cancellationToken).ConfigureAwait(false);
+                }
+                catch (CliArgumentException ex)
+                {
+                    if (await TryFailPreLaunchAsync(item, ex.Message, now, decision, tier,
+                        cancellationToken, admission, attemptId, reviewPreparationRow).ConfigureAwait(false))
+                        return interval;
+                    continue;
+                }
             }
 
             if (item.ReplacementReviewAction is { } replacement)
@@ -607,6 +651,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
                     var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                     if (current?.State != QueueItemState.Queued
                         || current.Retirement is not null || snapshot.Held
+                        || reviewPreparationRow is not null
+                            && JsonSerializer.Serialize(current) != JsonSerializer.Serialize(reviewPreparationRow)
                         || current.ReplacementReviewAction is { } currentAction
                             && (item.ReplacementReviewAction is null
                                 || currentAction.ObligationKey != item.ReplacementReviewAction.ObligationKey
@@ -648,6 +694,11 @@ public sealed partial class QueueSchedulerService : BackgroundService
                         });
                         return snapshot with { Items = claimedItems };
                     }
+
+                    // The exact row observed before PR I/O still owns this spec. A failed write must
+                    // not claim a worker launch; held, replaced and cancelled rows never write it.
+                    if (refreshedReviewBrief is not null)
+                        File.WriteAllText(current.SpecFile, refreshedReviewBrief);
 
                     launchClaimed = true;
                     claimedItems = Replace(snapshot.Items, item.Tag, existing => existing with
@@ -1064,7 +1115,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
         QueueTierResolution tier,
         CancellationToken cancellationToken,
         TaskRequirementAdmission admission,
-        FleetAttemptId attemptId)
+        FleetAttemptId attemptId,
+        QueueItem? expectedReviewRow = null)
     {
         var failed = false;
         using (DaemonLoopDriver.EnterPhase("queue-store"))
@@ -1074,6 +1126,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                 if (current?.State != QueueItemState.Queued
                     || current.Retirement is not null
+                    || expectedReviewRow is not null
+                        && (snapshot.Held || JsonSerializer.Serialize(current) != JsonSerializer.Serialize(expectedReviewRow))
                     || !HasSameAdmissionDeclaration(current, item))
                 {
                     return snapshot;
@@ -1509,6 +1563,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
         left is null || right is null
             ? left is null && right is null
             : left.SequenceEqual(right, StringComparer.Ordinal);
+
 
     private static Task<FleetEvent?> AppendOperationalFleetEventAsync(
         FleetEventDraft draft, CancellationToken cancellationToken) =>

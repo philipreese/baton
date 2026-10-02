@@ -49,6 +49,18 @@ public sealed class QueueSchedulerServiceTests
         }
     }
 
+    private sealed class ReviewObservationGh : IGhCliRunner
+    {
+        public Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
+            Task.FromResult(new GhCliResult(true, 0, args.Contains("checks") ? "[]" : """
+                {"number":2567,"state":"OPEN","isDraft":true,
+                 "headRefOid":"2222222222222222222222222222222222222222",
+                 "headRefName":"2566-lane","baseRefName":"main","isCrossRepository":false,
+                 "statusCheckRollup":[]}
+                """, string.Empty));
+    }
+
     [Fact]
     public async Task An_unknown_unscoped_role_fails_one_item_and_the_next_unscoped_item_launches()
     {
@@ -113,14 +125,22 @@ public sealed class QueueSchedulerServiceTests
                 {
                     Stage = WorkStage.Review,
                     Requirements = sourceRequirements,
+                    Repository = "github.com/philipreese/baton",
+                    Branch = "2566-lane",
+                    PullRequest = 2567,
+                    Workspace = home,
+                    SpecFile = Path.Combine(home, "persisted-review.md"),
                 }],
             }, Ct);
             QueueLaunchRequest? launch = null;
-            var service = Service((request, _) =>
+            var service = new QueueSchedulerService((request, _) =>
             {
                 launch = request;
                 return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
-            });
+            }, _ => Task.FromResult(0d), () => 16d, () => DateTimeOffset.UtcNow,
+                advancer: new WorkItemAdvancer(new ReviewObservationGh(),
+                    (_, _) => Task.FromResult<string?>("2222222222222222222222222222222222222222")),
+                workspaceLocks: _ => []);
 
             await service.TickOnceAsync(Ct);
 

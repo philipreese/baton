@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -896,7 +897,7 @@ public sealed class ExactFileRestoreToolTests
                 .CallAsync(Args("target.txt", acknowledgeDirtyFile: true), Ct);
 
             Assert.True(result.IsError);
-            Assert.Contains("filter", result.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.True(result.Text.Contains("filter", StringComparison.OrdinalIgnoreCase), result.Text);
             Assert.False(File.Exists(marker));
             Assert.False(File.Exists(descendantMarker));
             Assert.Equal("damaged\n", await File.ReadAllTextAsync(Path.Combine(root, "target.txt"), Ct));
@@ -910,7 +911,7 @@ public sealed class ExactFileRestoreToolTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Noisy_git_timeout_and_cancellation_are_bounded_and_kill_the_child(
+    public async Task Startup_timeout_and_noisy_cancellation_are_bounded_and_kill_the_child(
         bool callerCancellation)
     {
         var root = await CreateRepositoryAsync();
@@ -918,6 +919,7 @@ public sealed class ExactFileRestoreToolTests
         {
             var pidFile = Path.Combine(root, "git.pid");
             var executable = CrashHostExecutable();
+            var startedProcessIds = new ConcurrentQueue<int>();
             var hooks = new ExactFileRestoreTestHooks(
                 GitFileName: executable,
                 GitTimeout: callerCancellation ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(250), // wait-ok: deliberately short production timeout under test.
@@ -925,17 +927,35 @@ public sealed class ExactFileRestoreToolTests
                 {
                     ["BATON_EXACT_RESTORE_GIT_MODE"] = "noisy",
                     ["BATON_EXACT_RESTORE_GIT_PID_FILE"] = pidFile,
-                });
+                    ["BATON_EXACT_RESTORE_GIT_STARTUP_DELAY_MS"] = callerCancellation ? null : "1000",
+                },
+                StartedGitProcessIds: startedProcessIds);
             var baseSha = await GitAsync(root, "rev-parse", "HEAD");
             var tool = new ExactFileRestoreTool(
                 root, baseSha, "execution-1", Path.Combine(root, "room"), hooks);
-            using var cancellation = callerCancellation
-                ? new CancellationTokenSource(TimeSpan.FromMilliseconds(250)) // wait-ok: deliberately short caller-cancellation trigger under test.
-                : new CancellationTokenSource();
+            using var cancellation = new CancellationTokenSource();
             var started = Stopwatch.StartNew();
-
-            var result = await tool.CallAsync(
+            var call = tool.CallAsync(
                 Args("target.txt", acknowledgeDirtyFile: true), cancellation.Token);
+            McpToolCallResult result;
+            try
+            {
+                if (callerCancellation)
+                {
+                    // This arm tests cancellation of a running noisy child, not cancellation during
+                    // workspace preflight or native startup. Observe the actual checkpoint first.
+                    await WaitForNativePidCheckpointAsync(pidFile, call);
+                    started.Restart();
+                    cancellation.Cancel();
+                }
+                result = await call.WaitAsync(TimeSpan.FromSeconds(8), Ct); // wait-ok: bounded test observation of native teardown.
+            }
+            finally
+            {
+                cancellation.Cancel();
+                // A failed startup assertion must still let the owned tool reap its native child.
+                await call.WaitAsync(TimeSpan.FromSeconds(8), CancellationToken.None); // wait-ok: bounded fixture cleanup independent of an expired test token.
+            }
 
             Assert.True(result.IsError);
             Assert.Contains(
@@ -943,8 +963,12 @@ public sealed class ExactFileRestoreToolTests
                 result.Text,
                 StringComparison.OrdinalIgnoreCase);
             Assert.True(started.Elapsed < TimeSpan.FromSeconds(8), $"teardown took {started.Elapsed}");
-            Assert.True(File.Exists(pidFile), "the noisy native child did not reach its PID checkpoint");
-            var pid = int.Parse(await File.ReadAllTextAsync(pidFile, Ct));
+            var pid = Assert.Single(startedProcessIds);
+            // Scheduling may let startup publish its checkpoint before the timeout is observed.
+            if (callerCancellation || File.Exists(pidFile))
+            {
+                Assert.Equal(pid, int.Parse(await File.ReadAllTextAsync(pidFile, Ct)));
+            }
             await AssertProcessExitedAsync(pid);
         }
         finally
@@ -1088,6 +1112,25 @@ public sealed class ExactFileRestoreToolTests
         }
 
         Assert.Fail($"contained git child {pid} survived teardown");
+    }
+
+    private static async Task WaitForNativePidCheckpointAsync(
+        string pidFile, Task<McpToolCallResult> call)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(5)) // wait-ok: finite native-fixture startup allowance, separate from cancellation teardown.
+        {
+            try
+            {
+                if (int.TryParse(await File.ReadAllTextAsync(pidFile, Ct), out var pid) && pid > 0)
+                    return;
+            }
+            catch (IOException) { } // The writer may not have created or finished its own checkpoint yet.
+            if (call.IsCompleted)
+                break;
+            await Task.Delay(20, Ct); // wait-ok: bounded observation of the actual child checkpoint, not a guessed cancellation delay.
+        }
+        Assert.Fail("the noisy native child did not reach its PID checkpoint before cancellation was requested");
     }
 
     private static JsonElement Args(string path, bool acknowledgeDirtyFile)

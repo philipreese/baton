@@ -1229,4 +1229,477 @@ public sealed class TaskCommandTests
             DirectoryCleanup.DeleteRecursively(home);
         }
     }
+
+    [Theory]
+    [InlineData(null, "opus", null)]
+    [InlineData("claude", null, "high")]
+    public async Task Status_initial_worker_selection_normalizes_the_retained_implement_stage_entry(
+        string? adapter, string? model, string? effort)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var id = TaskCommand.TaskId(repository, 70);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id, Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = 70,
+                    Stage = WorkStage.Implement,
+                    StageSelections = [new QueueStageSelection
+                    {
+                        Stage = WorkStage.Implement, Adapter = adapter, Model = model, Effort = effort,
+                    }],
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 70, "digest", "recorded-owner", DateTimeOffset.UtcNow),
+                }],
+            }, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            var selection = json.RootElement.GetProperty("initialWorkerSelection");
+            Assert.Equal(JsonValueKind.Object, selection.ValueKind);
+            Assert.Equal(3, selection.EnumerateObject().Count());
+            Assert.Equal(adapter, selection.GetProperty("adapter").GetString());
+            Assert.Equal(model, selection.GetProperty("model").GetString());
+            Assert.Equal(effort, selection.GetProperty("effort").GetString());
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("retainedWorkerAssignment").ValueKind);
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            Assert.Contains(
+                $"initial implement selection (retained plan): adapter={adapter ?? "none"}; model={model ?? "none"}; effort={effort ?? "none"}",
+                textOutput.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Status_initial_worker_selection_is_null_without_a_retained_implement_stage_entry()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var noSelectionId = TaskCommand.TaskId(repository, 71);
+            var reviewOnlyId = TaskCommand.TaskId(repository, 72);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = noSelectionId, Role = "implement", Workspace = home,
+                        SpecFile = BatonPaths.QueueSpecFile(noSelectionId), Repository = repository, Issue = 71,
+                        Stage = WorkStage.Implement,
+                        OwnedTask = new OwnedTaskSubmission(
+                            noSelectionId, repository, 71, "digest", "recorded-owner", DateTimeOffset.UtcNow),
+                    },
+                    new QueueItem
+                    {
+                        Tag = reviewOnlyId, Role = "implement", Workspace = home,
+                        SpecFile = BatonPaths.QueueSpecFile(reviewOnlyId), Repository = repository, Issue = 72,
+                        Stage = WorkStage.Review,
+                        StageSelections = [new QueueStageSelection { Stage = WorkStage.Review, Model = "sonnet" }],
+                        OwnedTask = new OwnedTaskSubmission(
+                            reviewOnlyId, repository, 72, "digest", "recorded-owner", DateTimeOffset.UtcNow),
+                    },
+                ],
+            }, Ct);
+
+            foreach (var id in new[] { noSelectionId, reviewOnlyId })
+            {
+                var jsonOutput = new StringWriter();
+                await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+                using var json = JsonDocument.Parse(jsonOutput.ToString());
+                Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("initialWorkerSelection").ValueKind);
+
+                var textOutput = new StringWriter();
+                await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+                Assert.DoesNotContain("initial implement selection", textOutput.ToString(), StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Status_clears_retained_assignment_on_review_advance_without_borrowing_the_distinct_attempt_envelope_tuple()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var id = TaskCommand.TaskId(repository, 73);
+            var now = DateTimeOffset.UtcNow;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id, Role = "review", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = 73,
+                    Stage = WorkStage.Review, State = QueueItemState.Launched,
+                    // Stage advance to review cleared the implement-stage worker assignment; the
+                    // implement selection itself remains visible.
+                    StageSelections = [new QueueStageSelection
+                    {
+                        Stage = WorkStage.Implement, Adapter = "claude", Model = "opus", Effort = "high",
+                    }],
+                    WorkerAssignment = null,
+                    AttemptId = new FleetAttemptId("review-attempt"),
+                    AttemptEnvelope = new QueueAttemptEnvelope(
+                        new FleetAttemptId("review-attempt"), null, id, 73, null, WorkStage.Review,
+                        "review", "codex", "gpt-5.6-sol", "high", [], null, null, "admitted", null, null, null, now),
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 73, "digest", "recorded-owner", now),
+                }],
+            }, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("retainedWorkerAssignment").ValueKind);
+            var selection = json.RootElement.GetProperty("initialWorkerSelection");
+            Assert.Equal("claude", selection.GetProperty("adapter").GetString());
+            Assert.Equal("opus", selection.GetProperty("model").GetString());
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            var text = textOutput.ToString();
+            Assert.DoesNotContain("retained worker assignment", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("gpt-5.6-sol", text, StringComparison.Ordinal);
+            Assert.Contains("initial implement selection (retained plan): adapter=claude; model=opus; effort=high",
+                text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Status_ready_row_truthfully_retains_historical_assignment_without_claiming_liveness(bool hasAssignment)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var issue = hasAssignment ? 74 : 75;
+            var id = TaskCommand.TaskId(repository, issue);
+            var now = DateTimeOffset.UtcNow;
+            var ready = new TaskReadyReceipt("ready", id, repository, issue, 100,
+                new string('a', 40), "review", new string('b', 64), "passing", "checks", now, now);
+            var assignment = hasAssignment
+                ? new FrozenWorkerAssignment("decision-1", "claude", "opus", "high", "pool-hash-1",
+                    "legacy-single-candidate", "Legacy one-triple tier frozen before launch.", now)
+                : null;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id, Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = issue,
+                    Stage = WorkStage.Ready, State = QueueItemState.Queued,
+                    WorkerAssignment = assignment,
+                    OwnedTask = new OwnedTaskSubmission(id, repository, issue, "digest", "recorded-owner", now, ready),
+                }],
+            }, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            Assert.Equal("ready-as-of", json.RootElement.GetProperty("state").GetString());
+            var retainedAssignment = json.RootElement.GetProperty("retainedWorkerAssignment");
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            var text = textOutput.ToString();
+            if (hasAssignment)
+            {
+                Assert.Equal(JsonValueKind.Object, retainedAssignment.ValueKind);
+                Assert.Equal("claude", retainedAssignment.GetProperty("adapter").GetString());
+                Assert.Equal("opus", retainedAssignment.GetProperty("model").GetString());
+                Assert.Equal("decision-1", retainedAssignment.GetProperty("decisionId").GetString());
+                Assert.Contains(
+                    "retained worker assignment (as-of; not proof of liveness or vendor use): "
+                    + "adapter=claude; model=opus; effort=high", text, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Equal(JsonValueKind.Null, retainedAssignment.ValueKind);
+                Assert.DoesNotContain("retained worker assignment", text, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Status_retains_truthful_assignment_for_a_blocked_halted_row()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var id = TaskCommand.TaskId(repository, 76);
+            var now = DateTimeOffset.UtcNow;
+            var assignment = new FrozenWorkerAssignment("decision-2", "codex", "gpt-5.6-sol", null,
+                "pool-hash-2", "legacy-single-candidate", "Legacy one-triple tier frozen before launch.", now);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id, Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = 76,
+                    Stage = WorkStage.Continue, State = QueueItemState.Failed, Halted = true,
+                    Error = "needs-operator",
+                    WorkerAssignment = assignment,
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 76, "digest", "recorded-owner", now),
+                }],
+            }, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            Assert.Equal("blocked", json.RootElement.GetProperty("state").GetString());
+            var retainedAssignment = json.RootElement.GetProperty("retainedWorkerAssignment");
+            Assert.Equal(7, retainedAssignment.EnumerateObject().Count());
+            Assert.Equal("codex", retainedAssignment.GetProperty("adapter").GetString());
+            Assert.Equal("gpt-5.6-sol", retainedAssignment.GetProperty("model").GetString());
+            Assert.Equal(JsonValueKind.Null, retainedAssignment.GetProperty("effort").ValueKind);
+            Assert.Equal("decision-2", retainedAssignment.GetProperty("decisionId").GetString());
+            Assert.Equal("pool-hash-2", retainedAssignment.GetProperty("poolHash").GetString());
+            Assert.Equal("legacy-single-candidate", retainedAssignment.GetProperty("closedReason").GetString());
+            Assert.Equal(now, retainedAssignment.GetProperty("decidedAt").GetDateTimeOffset());
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            Assert.Contains(
+                "retained worker assignment (as-of; not proof of liveness or vendor use): "
+                + "adapter=codex; model=gpt-5.6-sol; effort=none", textOutput.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Status_retains_truthful_assignment_for_a_retired_row()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var id = TaskCommand.TaskId(repository, 77);
+            var now = DateTimeOffset.UtcNow;
+            var assignment = new FrozenWorkerAssignment("decision-3", "claude", "sonnet", "medium",
+                "pool-hash-3", "legacy-single-candidate", "Legacy one-triple tier frozen before launch.", now);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id, Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = 77,
+                    Stage = WorkStage.Continue, State = QueueItemState.Failed, Halted = true,
+                    Retirement = new QueueRetirement(QueueRetirement.Operator, now, "handled"),
+                    WorkerAssignment = assignment,
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 77, "digest", "recorded-owner", now),
+                }],
+            }, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            Assert.Equal("retired", json.RootElement.GetProperty("state").GetString());
+            var retainedAssignment = json.RootElement.GetProperty("retainedWorkerAssignment");
+            Assert.Equal("claude", retainedAssignment.GetProperty("adapter").GetString());
+            Assert.Equal("sonnet", retainedAssignment.GetProperty("model").GetString());
+            Assert.Equal("medium", retainedAssignment.GetProperty("effort").GetString());
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            Assert.Contains(
+                "retained worker assignment (as-of; not proof of liveness or vendor use): "
+                + "adapter=claude; model=sonnet; effort=medium", textOutput.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Status_worker_projections_are_isolated_from_unrelated_settings_and_tasks_and_leave_bytes_unchanged()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var repositoryIdentity = RepositoryIdentity.From("https://" + repository, null)!;
+            await ConductorClaimStore.ClaimAsync(repositoryIdentity, "owner", home, cancellationToken: Ct);
+            var id = TaskCommand.TaskId(repository, 78);
+            var unrelatedId = TaskCommand.TaskId(repository, 79);
+            var now = DateTimeOffset.UtcNow;
+            var targetAssignment = new FrozenWorkerAssignment("decision-4", "claude", "opus", "high",
+                "pool-hash-4", "legacy-single-candidate", "Legacy one-triple tier frozen before launch.", now);
+            var unrelatedAssignment = new FrozenWorkerAssignment("decision-5", "codex", "gpt-5.6-sol", null,
+                "pool-hash-5", "legacy-single-candidate", "Legacy one-triple tier frozen before launch.", now);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.QueueSpecFile(id))!);
+            await File.WriteAllTextAsync(BatonPaths.QueueSpecFile(id), "target brief", Ct);
+            await File.WriteAllTextAsync(BatonPaths.QueueSpecFile(unrelatedId), "unrelated brief", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = id, Role = "implement", Workspace = home,
+                        SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = 78,
+                        Stage = WorkStage.Implement,
+                        StageSelections = [new QueueStageSelection
+                        {
+                            Stage = WorkStage.Implement, Adapter = "claude", Model = "opus", Effort = "high",
+                        }],
+                        WorkerAssignment = targetAssignment,
+                        OwnedTask = new OwnedTaskSubmission(id, repository, 78, "digest", "recorded-owner", now),
+                    },
+                    new QueueItem
+                    {
+                        Tag = unrelatedId, Role = "implement", Workspace = home,
+                        SpecFile = BatonPaths.QueueSpecFile(unrelatedId), Repository = repository, Issue = 79,
+                        Stage = WorkStage.Implement,
+                        StageSelections = [new QueueStageSelection
+                        {
+                            Stage = WorkStage.Implement, Adapter = "codex", Model = "gpt-5.6-sol",
+                        }],
+                        WorkerAssignment = unrelatedAssignment,
+                        OwnedTask = new OwnedTaskSubmission(unrelatedId, repository, 79, "digest", "recorded-owner", now),
+                    },
+                ],
+            }, Ct);
+            ProjectCeilingStore.Set(home, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+            var settings = new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    Tiers = new Dictionary<string, QueueTierSettings> { ["engine"] = new() { Adapter = "agy" } },
+                },
+            };
+            await DaemonSettingsStore.SaveAsync(settings, BatonPaths.SettingsFile, Ct);
+
+            var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var trustBefore = await File.ReadAllBytesAsync(ProjectCeilingStore.DefaultPath, Ct);
+            var briefBefore = await File.ReadAllBytesAsync(BatonPaths.QueueSpecFile(id), Ct);
+            var claimPath = BatonPaths.ConductorClaimFile(repositoryIdentity.FileSlug);
+            var claimBefore = await File.ReadAllBytesAsync(claimPath, Ct);
+            var settingsBefore = await File.ReadAllBytesAsync(BatonPaths.SettingsFile, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            var selection = json.RootElement.GetProperty("initialWorkerSelection");
+            Assert.Equal("claude", selection.GetProperty("adapter").GetString());
+            Assert.Equal("opus", selection.GetProperty("model").GetString());
+            var retainedAssignment = json.RootElement.GetProperty("retainedWorkerAssignment");
+            Assert.Equal("claude", retainedAssignment.GetProperty("adapter").GetString());
+            Assert.Equal("decision-4", retainedAssignment.GetProperty("decisionId").GetString());
+            Assert.DoesNotContain("codex", jsonOutput.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("gpt-5.6-sol", jsonOutput.ToString(), StringComparison.Ordinal);
+
+            Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(trustBefore, await File.ReadAllBytesAsync(ProjectCeilingStore.DefaultPath, Ct));
+            Assert.Equal(briefBefore, await File.ReadAllBytesAsync(BatonPaths.QueueSpecFile(id), Ct));
+            Assert.Equal(claimBefore, await File.ReadAllBytesAsync(claimPath, Ct));
+            Assert.Equal(settingsBefore, await File.ReadAllBytesAsync(BatonPaths.SettingsFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Status_reports_null_worker_projections_for_an_old_source_row_missing_both_fields()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var id = TaskCommand.TaskId(repository, 80);
+            var specFile = BatonPaths.QueueSpecFile(id);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.QueueFile)!);
+
+            // Hand-written to simulate a row persisted before #2566 added StageSelections/WorkerAssignment
+            // readers, so the JSON keys are entirely absent rather than written by the current encoder.
+            // The two asserts below (`DoesNotContain`) are the actual proof of that absence; against
+            // origin/main's TaskCommand.cs, which writes neither field at all, the later
+            // `GetProperty("initialWorkerSelection"|"retainedWorkerAssignment")` calls would throw
+            // KeyNotFoundException per JsonElement's documented contract -- a language guarantee, not
+            // a claim this test re-verifies against the old binary.
+            var raw = "{\"items\":[{"
+                + "\"Tag\":" + JsonSerializer.Serialize(id) + ","
+                + "\"Role\":\"implement\","
+                + "\"Workspace\":" + JsonSerializer.Serialize(home) + ","
+                + "\"SpecFile\":" + JsonSerializer.Serialize(specFile) + ","
+                + "\"Repository\":" + JsonSerializer.Serialize(repository) + ","
+                + "\"Issue\":80,"
+                + "\"Stage\":\"Implement\","
+                + "\"OwnedTask\":{"
+                + "\"Id\":" + JsonSerializer.Serialize(id) + ","
+                + "\"Repository\":" + JsonSerializer.Serialize(repository) + ","
+                + "\"Issue\":80,"
+                + "\"InputDigest\":\"digest\","
+                + "\"ConductorHolder\":\"recorded-owner\","
+                + "\"SubmittedAt\":\"2026-01-01T00:00:00Z\""
+                + "}"
+                + "}],\"held\":false}";
+            await File.WriteAllTextAsync(BatonPaths.QueueFile, raw, Ct);
+            Assert.DoesNotContain("StageSelections", raw, StringComparison.Ordinal);
+            Assert.DoesNotContain("WorkerAssignment", raw, StringComparison.Ordinal);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("initialWorkerSelection").ValueKind);
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("retainedWorkerAssignment").ValueKind);
+            Assert.Equal("implement", json.RootElement.GetProperty("stage").GetString());
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            var text = textOutput.ToString();
+            Assert.DoesNotContain("initial implement selection", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("retained worker assignment", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
 }
