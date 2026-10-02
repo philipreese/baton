@@ -385,6 +385,234 @@ public sealed class TaskCommandTests
     }
 
     [Fact]
+    public async Task Status_separates_current_blocker_from_whitelisted_stopped_work_history()
+    {
+        var observedAt = new DateTimeOffset(2026, 9, 30, 17, 0, 0, TimeSpan.Zero);
+        const string repository = "github.com/example/repo";
+        const string historyKey = "stopped-judgment:history";
+        var cases = new[]
+        {
+            (Name: "recovered-running", State: QueueItemState.Launched, Stage: WorkStage.Continue,
+                Halted: false, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: (string?)historyKey, RetainedKey: (string?)historyKey,
+                ExpectedState: "running", ExpectedTrigger: "daemon-tick", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "re-review", State: QueueItemState.Launched, Stage: WorkStage.ReReview,
+                Halted: false, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: (string?)historyKey, RetainedKey: (string?)historyKey,
+                ExpectedState: "running", ExpectedTrigger: "daemon-tick", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "ready", State: QueueItemState.Queued, Stage: WorkStage.Ready,
+                Halted: false, Retirement: (QueueRetirement?)null, Ready: ReadyReceipt(repository, 51),
+                HasBlocked: true, BlockedKey: (string?)historyKey, RetainedKey: (string?)historyKey,
+                ExpectedState: "ready-as-of", ExpectedTrigger: "none", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "retired-operator", State: QueueItemState.Failed, Stage: WorkStage.Continue,
+                Halted: true, Retirement: new QueueRetirement(QueueRetirement.Operator, observedAt, "handled"),
+                Ready: (TaskReadyReceipt?)null, HasBlocked: true, BlockedKey: (string?)historyKey,
+                RetainedKey: (string?)historyKey, ExpectedState: "retired", ExpectedTrigger: "none",
+                ExpectedCurrent: false, HasHistory: true),
+            (Name: "retired-merged", State: QueueItemState.Failed, Stage: WorkStage.Continue,
+                Halted: true, Retirement: new QueueRetirement(QueueRetirement.Merged, observedAt, "merged"),
+                Ready: (TaskReadyReceipt?)null, HasBlocked: true, BlockedKey: (string?)historyKey,
+                RetainedKey: (string?)historyKey, ExpectedState: "retired", ExpectedTrigger: "none",
+                ExpectedCurrent: false, HasHistory: true),
+            (Name: "cancelled", State: QueueItemState.Cancelled, Stage: WorkStage.Continue,
+                Halted: false, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: (string?)historyKey, RetainedKey: (string?)historyKey,
+                ExpectedState: "cancelled", ExpectedTrigger: "none", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "stale", State: QueueItemState.Queued, Stage: WorkStage.Ready,
+                Halted: false, Retirement: (QueueRetirement?)null, Ready: ReadyReceipt(repository, 57),
+                HasBlocked: true, BlockedKey: (string?)historyKey, RetainedKey: (string?)historyKey,
+                ExpectedState: "stale", ExpectedTrigger: "conductor-reassessment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "linked-blocked", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: historyKey, RetainedKey: historyKey,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: true,
+                HasHistory: true),
+            (Name: "missing-link", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: false, BlockedKey: (string?)null, RetainedKey: historyKey,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "null-current-key", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: (string?)null, RetainedKey: historyKey,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "blank-current-key", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: " ", RetainedKey: historyKey,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "mismatched-key", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: "different-key", RetainedKey: historyKey,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "case-mismatched-key", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: historyKey.ToUpperInvariant(), RetainedKey: historyKey,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "null-retained-key", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: historyKey, RetainedKey: (string?)null,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "blank-retained-key", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: historyKey, RetainedKey: string.Empty,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "whitespace-retained-key", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: historyKey, RetainedKey: " \t",
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "equal-empty-keys", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: string.Empty, RetainedKey: string.Empty,
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "equal-whitespace-keys", State: QueueItemState.Failed, Stage: WorkStage.Review,
+                Halted: true, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: true, BlockedKey: " \t", RetainedKey: " \t",
+                ExpectedState: "blocked", ExpectedTrigger: "conductor-judgment", ExpectedCurrent: false,
+                HasHistory: true),
+            (Name: "no-judgment", State: QueueItemState.Queued, Stage: WorkStage.Implement,
+                Halted: false, Retirement: (QueueRetirement?)null, Ready: (TaskReadyReceipt?)null,
+                HasBlocked: false, BlockedKey: (string?)null, RetainedKey: (string?)null,
+                ExpectedState: "queued", ExpectedTrigger: "daemon-tick", ExpectedCurrent: false,
+                HasHistory: false),
+        };
+
+        foreach (var testCase in cases)
+        {
+            var home = Path.Combine(Path.GetTempPath(), "baton-task-status-" + testCase.Name + "-"
+                + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(home);
+            using var scope = BatonEnvironmentSnapshot.BeginScope(
+                BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+            try
+            {
+                var id = TaskCommand.TaskId(repository, 51);
+                var judgment = testCase.HasHistory
+                    ? new StoppedWorkJudgment(
+                        testCase.RetainedKey, repository, id, new FleetAttemptId("attempt-history"), WorkStage.Review,
+                        observedAt, "recorded-owner", 51, "head", "base", "Succeeded", true, "passing",
+                        observedAt, "context", StoppedWorkHaltCause.MissingVerdict,
+                        State: StoppedWorkJudgmentState.Blocked, Reason: "retained reason",
+                        Choice: "retained choice", Explanation: "retained explanation")
+                    : null;
+                var owned = new OwnedTaskSubmission(id, repository, 51, "digest", "recorded-owner", observedAt,
+                    testCase.Ready, testCase.HasBlocked
+                        ? new TaskBlockedDisposition("halted", "retained evidence", observedAt,
+                            testCase.BlockedKey)
+                        : null);
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = [new QueueItem
+                    {
+                        Tag = id, Role = "implement", Workspace = home,
+                        SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = 51,
+                        Stage = testCase.Stage, State = testCase.State, Halted = testCase.Halted,
+                        Error = testCase.ExpectedState == "stale" ? "old checks" : null,
+                        Retirement = testCase.Retirement, OwnedTask = owned,
+                        StoppedWorkJudgment = judgment,
+                    }],
+                    PullRequestObservations = testCase.ExpectedState == "stale"
+                        ? [new QueuePullRequestObservation(repository, 57, "open", "new-head",
+                            observedAt, observedAt, null)]
+                        : null,
+                }, Ct);
+                var before = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+
+                var jsonOutput = new StringWriter();
+                await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true),
+                    jsonOutput, Ct);
+                using var json = JsonDocument.Parse(jsonOutput.ToString());
+                var status = json.RootElement;
+                Assert.Equal(testCase.ExpectedState, status.GetProperty("state").GetString());
+                var haltCause = status.GetProperty("haltCause");
+                var obligationKey = status.GetProperty("obligationKey");
+                if (testCase.ExpectedCurrent)
+                {
+                    Assert.Equal("MissingVerdict", haltCause.GetString());
+                    Assert.Equal(historyKey, obligationKey.GetString());
+                }
+                else
+                {
+                    Assert.Equal(JsonValueKind.Null, haltCause.ValueKind);
+                    Assert.Equal(JsonValueKind.Null, obligationKey.ValueKind);
+                }
+
+                var history = status.GetProperty("stoppedWorkHistory");
+                if (testCase.HasHistory)
+                {
+                    Assert.Equal(JsonValueKind.Object, history.ValueKind);
+                    Assert.Equal(5, history.EnumerateObject().Count());
+                    Assert.Equal("MissingVerdict", history.GetProperty("haltCause").GetString());
+                    Assert.Equal(testCase.RetainedKey, history.GetProperty("obligationKey").GetString());
+                    Assert.Equal("attempt-history", history.GetProperty("attemptId").GetString());
+                    Assert.Equal("review", history.GetProperty("stage").GetString());
+                    Assert.Equal(observedAt, history.GetProperty("observedAt").GetDateTimeOffset());
+                    Assert.DoesNotContain(history.EnumerateObject(), property =>
+                        property.Name is "state" or "choice" or "explanation" or "holder" or "contextSha256");
+                }
+                else
+                {
+                    Assert.Equal(JsonValueKind.Null, history.ValueKind);
+                }
+                Assert.Equal(before, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+
+                var textOutput = new StringWriter();
+                await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+                var text = textOutput.ToString();
+                Assert.Contains($"Task {id}: {testCase.ExpectedState}", text, StringComparison.Ordinal);
+                Assert.Contains($"next: {testCase.ExpectedTrigger};", text, StringComparison.Ordinal);
+                if (testCase.HasBlocked)
+                {
+                    var blockerLabel = testCase.ExpectedState == "blocked"
+                        ? "  current blocker: halted; retained evidence"
+                        : "  retained blocker (historical): halted; retained evidence";
+                    Assert.Contains(blockerLabel, text, StringComparison.Ordinal);
+                }
+                if (testCase.ExpectedCurrent)
+                    Assert.Contains($"current stopped-work blocker: haltCause=MissingVerdict; obligationKey={historyKey}",
+                        text, StringComparison.Ordinal);
+                else
+                    Assert.DoesNotContain("current stopped-work blocker:", text, StringComparison.Ordinal);
+                if (testCase.HasHistory)
+                {
+                    var expectedHistoryKey = testCase.RetainedKey ?? "none";
+                    Assert.Contains(
+                        $"stopped-work history (one retained as-of snapshot; not latest or complete history): "
+                        + $"haltCause=MissingVerdict; obligationKey={expectedHistoryKey}; "
+                        + $"attemptId=attempt-history; stage=review; observedAt={observedAt:O}",
+                        text, StringComparison.Ordinal);
+                }
+                else
+                {
+                    Assert.DoesNotContain("stopped-work history", text, StringComparison.Ordinal);
+                }
+
+                Assert.Equal(before, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            }
+            finally
+            {
+                DirectoryCleanup.DeleteRecursively(home);
+            }
+        }
+
+        TaskReadyReceipt ReadyReceipt(string repository, int issue)
+            => new("ready", TaskCommand.TaskId(repository, issue), repository, issue, 77,
+                new string('a', 40), "review", new string('b', 64), "passing", "checks", observedAt, observedAt);
+    }
+
+    [Fact]
     public async Task Abandoned_reservation_is_blocked_without_reprovision_or_worker_launch()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
