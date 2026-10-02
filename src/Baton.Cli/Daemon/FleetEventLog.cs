@@ -405,6 +405,14 @@ public sealed class FleetEventLog
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
+    private static readonly JsonSerializerOptions StrictProofJson = new(Json)
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+    };
+    private static readonly JsonSerializerOptions StrictProofDraftJson = new(DraftJson)
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+    };
     private static readonly ConditionalWeakTable<FleetEvent, SourceLocation> SourceLocations = new();
 
     private readonly string _livePath;
@@ -498,7 +506,12 @@ public sealed class FleetEventLog
     /// display replay, a torn tail or unreadable segment cannot be treated as absence. The caller
     /// holds the streams through its queue commit so append/rotation cannot invalidate the proof.
     /// </summary>
-    internal FleetEventProofLease AcquireRetainedProof()
+    internal FleetEventProofLease AcquireRetainedProof(bool strictSchema = false) =>
+        MutexGuardedFileLock.RunUnderLock(_livePath, LockNamePrefix, LockTimeout, () => AcquireRetainedProofLocked(strictSchema));
+
+    // Open both segments under the append/rotation mutex, including an absent rollover. Release the
+    // mutex before taking any queue lock; the retained read-deny-write handles protect the actual commit.
+    private FleetEventProofLease AcquireRetainedProofLocked(bool strictSchema)
     {
         FileStream? rollover = null;
         FileStream? live = null;
@@ -507,8 +520,8 @@ public sealed class FleetEventLog
             try { rollover = new FileStream(_rolloverPath, FileMode.Open, FileAccess.Read, FileShare.Read); }
             catch (FileNotFoundException) { }
             live = new FileStream(_livePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var older = rollover is null ? new FleetEventReadResult([], null) : Read(_rolloverPath);
-            var newer = Read(_livePath);
+            var older = rollover is null ? new FleetEventReadResult([], null) : Read(_rolloverPath, strictSchema: strictSchema);
+            var newer = Read(_livePath, strictSchema: strictSchema);
             if (older.TornTailOffset is not null || newer.TornTailOffset is not null)
             {
                 throw new IOException("The retained fleet-event proof has an incomplete tail.");
@@ -543,9 +556,15 @@ public sealed class FleetEventLog
 
     internal static string SerializeDraft(FleetEventDraft draft) => JsonSerializer.Serialize(draft, DraftJson);
 
-    internal static FleetEventDraft DeserializeDraft(JsonElement draft) =>
-        draft.Deserialize<FleetEventDraft>(DraftJson)
-        ?? throw new JsonException("Expected a fleet event draft object.");
+    internal static FleetEventDraft DeserializeDraft(JsonElement draft, bool strictSchema = false)
+    {
+        if (strictSchema && HasDuplicateMembers(draft))
+        {
+            throw new JsonException("A proof draft has duplicate fields.");
+        }
+        return draft.Deserialize<FleetEventDraft>(strictSchema ? StrictProofDraftJson : DraftJson)
+            ?? throw new JsonException("Expected a fleet event draft object.");
+    }
 
     private FleetEvent? AppendLocked(FleetEventDraft draft)
     {
@@ -597,7 +616,7 @@ public sealed class FleetEventLog
         return entry;
     }
 
-    private static FleetEventReadResult Read(string path, bool strictMissing = false)
+    private static FleetEventReadResult Read(string path, bool strictMissing = false, bool strictSchema = false)
     {
         if (!strictMissing && !File.Exists(path))
         {
@@ -638,7 +657,7 @@ public sealed class FleetEventLog
 
             try
             {
-                result.Add(ParseCompleteRow(row, path, lineNumber));
+                result.Add(ParseCompleteRow(row, path, lineNumber, strictSchema));
             }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or OverflowException)
             {
@@ -656,7 +675,7 @@ public sealed class FleetEventLog
         return new(result, null);
     }
 
-    private static FleetEvent ParseCompleteRow(ReadOnlySpan<byte> row, string path, int lineNumber)
+    private static FleetEvent ParseCompleteRow(ReadOnlySpan<byte> row, string path, int lineNumber, bool strictSchema)
     {
         using var document = JsonDocument.Parse(row.ToArray());
         var root = document.RootElement;
@@ -673,11 +692,20 @@ public sealed class FleetEventLog
             throw new JsonException("Expected id, at, kind, and non-empty dedupeKey fields.");
         }
 
-        var entry = root.Deserialize<FleetEvent>(Json)
+        if (strictSchema && HasDuplicateMembers(root))
+        {
+            throw new JsonException("A proof event has duplicate fields.");
+        }
+        var entry = root.Deserialize<FleetEvent>(strictSchema ? StrictProofJson : Json)
             ?? throw new JsonException("Expected a fleet event object.");
         SourceLocations.Add(entry, new(path, lineNumber));
         return entry;
     }
+
+    private static bool HasDuplicateMembers(JsonElement element) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.EnumerateObject().Select(property => property.Name).Distinct(StringComparer.Ordinal).Count()
+            != element.EnumerateObject().Count();
 
     private static bool IsIncompleteJsonPrefix(ReadOnlySpan<byte> row)
     {

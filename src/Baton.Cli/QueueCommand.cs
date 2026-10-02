@@ -1390,8 +1390,22 @@ public static class QueueCommand
     /// its provisioned worktree are deliberately retained; the item state and the decision ledger are
     /// the durable cancellation record.
     /// </remarks>
-    private static async Task<int> CancelAsync(string tag, TextWriter output, CancellationToken cancellationToken)
+    internal static async Task<int> CancelAsync(
+        string tag, TextWriter output, CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? beforePrelaunchCommit = null,
+        Action? beforePrelaunchWrite = null)
     {
+        var initial = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var target = initial.Items.FirstOrDefault(item => item.Tag == tag);
+        if (target is { State: QueueItemState.Queued, Stage: WorkStage.Implement, Role: "implement", Round: 0, ParentAttemptId: not null })
+        {
+            if (initial.Items.Count(item => item.Tag == tag) != 1)
+            {
+                throw QueuePrelaunchCancellationValidator.Refusal(target, "the exact queue identity is duplicated");
+            }
+            return await CancelProvedPrelaunchAsync(
+                target, initial, output, cancellationToken, beforePrelaunchCommit, beforePrelaunchWrite).ConfigureAwait(false);
+        }
         QueueItem? observed = null;
         var cancelledAt = DateTimeOffset.UtcNow;
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
@@ -1457,6 +1471,55 @@ public static class QueueCommand
                 throw new CliArgumentException(
                     $"Queue item '{tag}' is already {observed.State.ToString().ToLowerInvariant()} and cannot be cancelled as a queued request.");
         }
+    }
+
+    private static async Task<int> CancelProvedPrelaunchAsync(
+        QueueItem source, QueueSnapshot initial, TextWriter output, CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? beforeCommit, Action? beforeWrite)
+    {
+        var sourceRevision = QueueStore.ComputeRevision([source]);
+        var at = DateTimeOffset.UtcNow;
+        FleetEventLog.FleetEventProofLease lease;
+        try
+        {
+            lease = FleetEventLog.OpenOperational().AcquireRetainedProof(strictSchema: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FleetEventLogReadException)
+        {
+            throw QueuePrelaunchCancellationValidator.Refusal(source, "retained fleet proof is unavailable: " + ex.Message);
+        }
+        using (lease)
+        {
+            var receipt = QueuePrelaunchCancellationValidator.Validate(source, initial, lease.Events, at);
+            if (beforeCommit is not null)
+            {
+                await beforeCommit(cancellationToken).ConfigureAwait(false);
+            }
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, current =>
+            {
+                var matches = current.Items.Where(item => item.Tag == source.Tag).ToList();
+                if (matches.Count != 1 || QueueStore.ComputeRevision(matches) != sourceRevision
+                    || !QueuePrelaunchCancellationReceipt.IsEligibleSource(matches[0]))
+                {
+                    throw QueuePrelaunchCancellationValidator.Refusal(source, "the exact queue row changed before commit");
+                }
+                QueuePrelaunchCancellationValidator.ValidatePending(
+                    source, current, receipt.Ancestors.Select(ancestor => ancestor.AttemptId).ToHashSet());
+                beforeWrite?.Invoke();
+                return current with
+                {
+                    Items = current.Items.Select(item => item.Tag == source.Tag
+                        ? item with { State = QueueItemState.Cancelled, CancelledAt = at, PrelaunchCancellation = receipt }
+                        : item).ToList(),
+                };
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        // Proof streams remain leased through the actual queue replacement, but must be disposed
+        // before appending any fact. The existing keyed ledger path owns retry/backfill recovery.
+        await QueueDecisionLedgerStore.AppendCancellationAsync(at, source.Tag, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+            .ConfigureAwait(false);
+        output.WriteLine($"Cancelled queued item '{source.Tag}'. Its spec, worktree, and branch were retained.");
+        return 0;
     }
 
     private static Task<int> RetireAsync(
