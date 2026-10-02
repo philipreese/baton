@@ -398,7 +398,7 @@ public sealed class MemoryCanonicalGenerationTests
             {
                 stagedHolder?.Dispose();
                 if (stagedPath is not null && File.Exists(stagedPath))
-                    File.Delete(stagedPath);
+                    FileCleanup.Delete(stagedPath);
             }
 
             AssertNoGenerationTemps(root);
