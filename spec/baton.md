@@ -8662,10 +8662,41 @@ uncertain and must not cause an automatic retry. A complete validated response a
 restart and replay without another call. Disabling the setting prevents new calls, not an already
 admitted call. Shutdown cancels and joins the tracked provider task.
 
-The first provider uses the existing tool-free Codex subscription transport and its bounded limits
-from the preceding section, with a stopped-work-specific prompt and response. The request is
-vendor-neutral; this does not claim working Claude/AGY providers or wake an external desktop session.
-No provider can invoke a fix, dispatch, merge, queue resume, permission change or automatic action.
+The advice-only provider map `Queue.StoppedWorkAdviceProvider` is independent of the exact-true
+opt-in. Missing selection means Codex; only exact canonical repository keys with `codex` or `claude`
+values select an adapter. Malformed, unknown or noncanonical selection refuses before the charged
+marker while unrelated queue settings remain usable. New obligations use the stable
+`stopped-work-advice-provider` route; existing Codex route identities remain immutable. Admission
+freezes the actual transport/model/effort descriptor under the per-key lock and persists it with the
+marker. Initial retention, replay and projection validate against that descriptor, never current
+settings. Only absent historical descriptor fields mean old Codex; null, partial, unknown or malformed
+new descriptors fail closed. Selection changes cannot retry a marked invocation or authorize fallback.
+
+Codex retains the subscription transport and limits from the preceding section. The bounded Claude
+adapter pins `claude-haiku-4-5-20251001`/low and the tested Windows CLI contract `2.1.283`; it uses the
+existing subscription login, two turns, a 70-second independent deadline, a 64 KiB typed-answer cap,
+1 MiB per native stream and a $0.20 CLI-reported API-equivalent ceiling, which is not subscription
+billing evidence. Free contained preflight checks CLI version/flags, subscription auth, a disposable
+working directory without project instruction ancestors, and managed-policy compatibility before
+admission. Invocation-local settings select `agents-md@builtin` managed-only instruction loading and
+disable auto-memory, alongside empty setting sources, tools and strict MCP config and disabled slash
+commands. Vendor config/user home is preserved; no bare/SIMPLE mode, credential handling or API fallback
+is permitted. Managed policy is never bypassed: policy sources whose compatibility is unverified
+refuse admission. Transport failures cancel/reap the complete contained tree and bound capture cleanup;
+a parent exit alone does not settle descendants.
+
+Claude accepts only a non-error successful native terminal result with matching nonempty init/result
+and requested session identity. Offered tools/MCP/skills or tool-use events refuse applicability. Only
+one complete bare JSON object or whole `json` fence in the terminal result field is decoded; duplicate
+or extra keys, identity drift and invalid typed output refuse. Assistant conversation is never parsed
+as a decision. Usage/cache fields unsupported by the envelope remain unknown. This implementation
+does not establish native instruction isolation or installed capability: independent discriminating
+instruction-loading and real stopped-work acceptance are required before a Claude support claim or
+production enablement. Each instruction class requires positive native discovery evidence; an absent
+native signal leaves that class unverified. Model silence and empty tool lists do not establish
+instruction isolation. The request stays vendor-neutral; no AGY advice provider or external desktop
+wake is added. Manual readiness remains Codex-only. No provider can invoke a fix, dispatch, merge,
+queue resume, permission change or automatic action.
 
 Fleet Glass displays the request and retained bounded advice as **advice only, no action taken**.
 Source/owner drift before launch refuses; drift after launch makes retained advice stale rather than

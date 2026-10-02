@@ -79,7 +79,25 @@ public sealed record StoppedWorkAdviceDecision(
 public sealed record StoppedWorkAdviceUsage(
     long? InputTokens,
     long? OutputTokens,
-    long? CachedInputTokens);
+    long? CachedInputTokens,
+    long? CacheCreationInputTokens = null,
+    decimal? ApiEquivalentCostUsd = null);
+
+/// <summary>The actual admitted transport, model and effort; settings cannot change this evidence.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record StoppedWorkAdviceProviderDescriptor(
+    [property: JsonRequired] string Adapter,
+    [property: JsonRequired] string Model,
+    [property: JsonRequired] string Effort)
+{
+    public static readonly StoppedWorkAdviceProviderDescriptor Codex =
+        new("codex-subscription-cli", "gpt-5.6-luna", "low");
+    public static readonly StoppedWorkAdviceProviderDescriptor Claude =
+        new("claude-subscription-cli", "claude-haiku-4-5-20251001", "low");
+
+    [JsonIgnore]
+    public bool IsSupported => this == Codex || this == Claude;
+}
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record RetainedStoppedWorkAdviceResponse(

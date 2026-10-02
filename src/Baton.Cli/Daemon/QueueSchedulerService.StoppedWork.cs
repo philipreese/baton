@@ -32,10 +32,11 @@ public sealed partial class QueueSchedulerService
             {
                 var intent = item.StoppedWorkJudgment!;
                 if (intent.Key is null || intent.AttemptId is null || string.IsNullOrWhiteSpace(intent.Holder)) continue;
+                var existing = await _conductorObligations.ReadAsync(intent.Key, cancellationToken).ConfigureAwait(false);
                 var obligation = await _conductorObligations.EnqueueAsync(new(
                     intent.Key, intent.Repository, null, intent.Tag, intent.PullRequestHead,
                     StoppedWorkJudgmentKey.Action, intent.Holder, intent.ObservedAt,
-                    StoppedWorkJudgmentKey.Adapter, StoppedWorkJudgmentKey.Capability, true,
+                    existing?.Adapter ?? StoppedWorkJudgmentKey.ProviderRoute, StoppedWorkJudgmentKey.Capability, true,
                     TargetRevision: intent.PullRequestHead, ContextSha256: intent.ContextSha256), cancellationToken)
                     .ConfigureAwait(false);
                 if (obligation.Status is ConductorObligationStatus.Blocked or ConductorObligationStatus.Unsupported
@@ -82,9 +83,22 @@ public sealed partial class QueueSchedulerService
                 {
                     await ValidateStoppedWorkSourceAsync(source, current, token).ConfigureAwait(false);
                     CodexReadinessDecisionAdapter.ValidateStoppedWorkPrelaunch(request, context);
+                    var provider = StoppedWorkAdviceSettings.SelectProvider(intent.Repository);
+                    if (_stoppedWorkAdvice is null && provider == StoppedWorkAdviceProviderDescriptor.Claude)
+                        await new ClaudeStoppedWorkAdviceAdapter().PreflightAsync(token).ConfigureAwait(false);
                     if (_stoppedWorkAdvicePreflight is not null)
                         await _stoppedWorkAdvicePreflight(current, token).ConfigureAwait(false);
-                }, _stoppedWorkAdvice!, cancellationToken).ConfigureAwait(false);
+                    // Free CLI/auth checks may take time; source/owner revocation during them
+                    // must still refuse before the irreversible charged marker.
+                    await ValidateStoppedWorkSourceAsync(source, current, token).ConfigureAwait(false);
+                    return provider;
+                }, (provider, current, input, evidence, directory, token) =>
+                    _stoppedWorkAdvice is not null
+                        ? _stoppedWorkAdvice(current, input, evidence, directory, token)
+                        : provider == StoppedWorkAdviceProviderDescriptor.Claude
+                            ? new ClaudeStoppedWorkAdviceAdapter().DecideAsync(input, evidence, directory, token)
+                            : new CodexReadinessDecisionAdapter().DecideStoppedWorkAsync(input, evidence, directory, token),
+                cancellationToken).ConfigureAwait(false);
             try
             {
                 await ValidateStoppedWorkSourceAsync(source, obligation, cancellationToken, admission: false)

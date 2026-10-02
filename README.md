@@ -88,8 +88,12 @@ all other settings, and use your exact canonical repository key:
 
 Establish the repository's conductor claim first. Missing ownership or source evidence blocks calls;
 old stopped jobs are not backfilled. Set the entry to false to stop new advice admissions. `queue hold`
-pauses worker launches, not this separately opted-in advice. The initial provider is Codex's subscription
-CLI; the request itself is vendor-neutral, but other advice providers are not yet implemented.
+pauses worker launches, not this separately opted-in advice. Codex's subscription CLI remains the
+default. To select the bounded Claude advice adapter, add
+`"StoppedWorkAdviceProvider":{"github.com/example/project":"claude"}` to that same `Queue` object.
+Selection does not opt in; only exact `codex` and `claude` values are accepted. Admission freezes the
+actual provider and replay never calls another vendor after settings change. Claude capability remains
+unverified pending the [native instruction and installed acceptance contract](spec/baton.md#stopped-work-judgment-handoff-2499).
 
 Restarting Baton reuses retained results, not paid calls. If a launch is uncertain, inspect its local
 evidence; do not delete a launch marker or recreate the request to force a retry. A changed owner or

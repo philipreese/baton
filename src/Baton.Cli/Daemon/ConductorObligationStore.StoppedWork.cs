@@ -47,6 +47,27 @@ public sealed partial class ConductorObligationStore
             Func<ConductorObligation, CancellationToken, Task> preflight,
             Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
                 string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>> launch,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(preflight);
+        ArgumentNullException.ThrowIfNull(launch);
+        return DecideStoppedWorkOnceAsync(key, request, context,
+            async (row, token) =>
+            {
+                await preflight(row, token).ConfigureAwait(false);
+                return StoppedWorkAdviceProviderDescriptor.Codex;
+            }, (_, row, input, evidence, directory, token) => launch(row, input, evidence, directory, token),
+            cancellationToken);
+    }
+
+    public Task<(ConductorObligation Obligation, RetainedStoppedWorkAdviceResponse Response)>
+        DecideStoppedWorkOnceAsync(
+            string key,
+            StoppedWorkAdviceRequest request,
+            StoppedWorkAdviceContext context,
+            Func<ConductorObligation, CancellationToken, Task<StoppedWorkAdviceProviderDescriptor>> preflight,
+            Func<StoppedWorkAdviceProviderDescriptor, ConductorObligation, StoppedWorkAdviceRequest,
+                StoppedWorkAdviceContext, string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>> launch,
             CancellationToken cancellationToken = default) =>
         WithReadinessExclusiveAsync(key,
             () => DecideStoppedWorkOnceCoreAsync(key, request, context, preflight, launch, cancellationToken),
@@ -57,9 +78,9 @@ public sealed partial class ConductorObligationStore
             string key,
             StoppedWorkAdviceRequest request,
             StoppedWorkAdviceContext context,
-            Func<ConductorObligation, CancellationToken, Task> preflight,
-            Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
-                string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>> launch,
+            Func<ConductorObligation, CancellationToken, Task<StoppedWorkAdviceProviderDescriptor>> preflight,
+            Func<StoppedWorkAdviceProviderDescriptor, ConductorObligation, StoppedWorkAdviceRequest,
+                StoppedWorkAdviceContext, string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>> launch,
             CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
@@ -73,7 +94,7 @@ public sealed partial class ConductorObligationStore
             || StoppedWorkAdviceEvidence.Hash(context) != request.ContextSha256
             || request.Holder != obligation.Owner
             || !string.Equals(obligation.RequestedAction, StoppedWorkJudgmentKey.Action, StringComparison.Ordinal)
-            || !string.Equals(obligation.Adapter, StoppedWorkJudgmentKey.Adapter, StringComparison.Ordinal)
+            || obligation.Adapter is not (StoppedWorkJudgmentKey.Adapter or StoppedWorkJudgmentKey.ProviderRoute)
             || !string.Equals(obligation.AdapterCapability, StoppedWorkJudgmentKey.Capability, StringComparison.Ordinal)
             || !obligation.AdapterSupported
             || obligation.ContextSha256 is null
@@ -115,7 +136,9 @@ public sealed partial class ConductorObligationStore
 
             // A deterministic refusal is NOT a charged/uncertain call. Keep these checks inside
             // the same per-key lock as launch, before its irreversible at-most-once marker.
-            await preflight(obligation, cancellationToken).ConfigureAwait(false);
+            var selectedProvider = await preflight(obligation, cancellationToken).ConfigureAwait(false);
+            if (selectedProvider is null || !selectedProvider.IsSupported)
+                throw new ConductorObligationStoreException("Stopped-work provider descriptor is invalid.");
             var current = await ReadAsync(key, cancellationToken).ConfigureAwait(false)
                 ?? throw new ConductorObligationStoreException("Stopped-work obligation disappeared before launch.");
             RequireSamePayload(current, obligation);
@@ -124,10 +147,10 @@ public sealed partial class ConductorObligationStore
             cancellationToken.ThrowIfCancellationRequested();
             StoppedWorkAdviceDurabilityObserver?.Invoke(StoppedWorkAdviceDurabilityPoint.BeforeLaunchMarker);
             WriteNewDurable(marker, JsonSerializer.Serialize(new StoppedWorkAdviceLaunchMarker(
-                obligation.ObligationId, obligation.ContextSha256!, _now().ToUniversalTime()), ReadinessJson));
+                obligation.ObligationId, obligation.ContextSha256!, _now().ToUniversalTime(), selectedProvider), ReadinessJson));
         }
 
-        ValidateStoppedWorkMarker(marker, obligation);
+        var provider = ValidateStoppedWorkMarker(marker, obligation);
 
         if (started)
         {
@@ -135,9 +158,9 @@ public sealed partial class ConductorObligationStore
             ActiveStoppedWorkAdvice.TryAdd(directory, 0);
             try
             {
-                var response = await launch(obligation, request, context, directory, cancellationToken)
+                var response = await launch(provider, obligation, request, context, directory, cancellationToken)
                     .ConfigureAwait(false);
-                ValidateStoppedWorkAdviceResponse(obligation, response);
+                ValidateStoppedWorkAdviceResponse(obligation, response, provider);
                 WriteNewDurable(responsePath, JsonSerializer.Serialize(response, ReadinessJson));
                 StoppedWorkAdviceDurabilityObserver?.Invoke(StoppedWorkAdviceDurabilityPoint.AfterResponse);
             }
@@ -166,7 +189,7 @@ public sealed partial class ConductorObligationStore
             retained = JsonSerializer.Deserialize<RetainedStoppedWorkAdviceResponse>(
                 ReadBounded(responsePath, 64 * 1024), ReadinessJson)
                 ?? throw new JsonException("Null stopped-work advice response.");
-            ValidateStoppedWorkAdviceResponse(obligation, retained);
+            ValidateStoppedWorkAdviceResponse(obligation, retained, provider);
         }
         catch (Exception ex) when (ex is JsonException or ArgumentException or ConductorObligationStoreException)
         {
@@ -257,8 +280,8 @@ public sealed partial class ConductorObligationStore
             var response = JsonSerializer.Deserialize<RetainedStoppedWorkAdviceResponse>(
                 responseBytes, ReadinessJson)
                 ?? throw new JsonException("Null response.");
-            ValidateStoppedWorkAdviceResponse(row, response);
-            ValidateStoppedWorkMarker(markerPath, row);
+            var provider = ValidateStoppedWorkMarker(markerPath, row);
+            ValidateStoppedWorkAdviceResponse(row, response, provider);
             if (!HasValidStoppedWorkReceipt(row, responseBytes))
                 return new(StoppedWorkJudgmentState.Uncertain, observedAt, Stage: stage);
             var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
@@ -312,10 +335,14 @@ public sealed partial class ConductorObligationStore
     }
 
     private static void ValidateStoppedWorkAdviceResponse(
-        ConductorObligation obligation, RetainedStoppedWorkAdviceResponse response)
+        ConductorObligation obligation, RetainedStoppedWorkAdviceResponse response,
+        StoppedWorkAdviceProviderDescriptor provider)
     {
         if (!StoppedWorkJudgmentKey.TryParse(obligation.IdempotencyKey, out var repository,
                 out var tag, out var attempt, out _)
+            || obligation.Adapter is not (StoppedWorkJudgmentKey.Adapter or StoppedWorkJudgmentKey.ProviderRoute)
+            || obligation.AdapterCapability != StoppedWorkJudgmentKey.Capability
+            || obligation.RequestedAction != StoppedWorkJudgmentKey.Action || !obligation.AdapterSupported
             || response.Decision is null
             || response.Decision.ObligationId != obligation.ObligationId
             || response.Decision.Repository != obligation.TargetProject
@@ -326,9 +353,9 @@ public sealed partial class ConductorObligationStore
             || !Enum.IsDefined(response.Decision.Choice)
             || string.IsNullOrWhiteSpace(response.Decision.Explanation)
             || response.Decision.Explanation.Length > 4096
-            || response.Adapter != StoppedWorkJudgmentKey.Adapter
-            || response.Model != Baton.Vendors.CodexReadinessDecisionAdapter.Model
-            || response.Effort != Baton.Vendors.CodexReadinessDecisionAdapter.Effort
+            || response.Adapter != provider.Adapter
+            || response.Model != provider.Model
+            || response.Effort != provider.Effort
             || response.CompletedAt == default)
         {
             throw new ConductorObligationStoreException(
@@ -336,14 +363,36 @@ public sealed partial class ConductorObligationStore
         }
     }
 
-    private static void ValidateStoppedWorkMarker(string path, ConductorObligation obligation)
+    private static StoppedWorkAdviceProviderDescriptor ValidateStoppedWorkMarker(string path, ConductorObligation obligation)
     {
         try
         {
-            var marker = JsonSerializer.Deserialize<StoppedWorkAdviceLaunchMarker>(ReadBounded(path, 1024), ReadinessJson);
+            var bytes = ReadBounded(path, 2048);
+            using var document = JsonDocument.Parse(bytes);
+            var root = document.RootElement;
+            RequireUniqueStoppedWorkProperties(root);
+            if (root.EnumerateObject().Any(property => property.Name is not
+                ("obligationId" or "contextSha256" or "startedAt" or "provider")))
+                throw new JsonException("Unexpected marker property.");
+            var hasProvider = root.TryGetProperty("provider", out var value);
+            if (hasProvider)
+            {
+                if (value.ValueKind != JsonValueKind.Object) throw new JsonException("Invalid provider descriptor.");
+                RequireUniqueStoppedWorkProperties(value);
+                if (value.EnumerateObject().Any(property => property.Name is not ("adapter" or "model" or "effort")))
+                    throw new JsonException("Unexpected provider descriptor property.");
+            }
+            var marker = JsonSerializer.Deserialize<StoppedWorkAdviceLaunchMarker>(bytes, ReadinessJson);
             if (marker is null || marker.ObligationId != obligation.ObligationId
                 || marker.ContextSha256 != obligation.ContextSha256 || marker.StartedAt == default)
                 throw new JsonException("Marker identity mismatch.");
+            // Only absent historical fields have the old Codex meaning. Null/partial/unknown
+            // new descriptors never authorize a fallback or a second charged invocation.
+            var provider = hasProvider ? marker.Provider : StoppedWorkAdviceProviderDescriptor.Codex;
+            if (provider is null || !provider.IsSupported
+                || !hasProvider && obligation.Adapter != StoppedWorkJudgmentKey.Adapter)
+                throw new JsonException("Marker provider descriptor is invalid.");
+            return provider;
         }
         catch (JsonException ex)
         {
@@ -351,6 +400,17 @@ public sealed partial class ConductorObligationStore
         }
     }
 
+    private static void RequireUniqueStoppedWorkProperties(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object) throw new JsonException("Expected marker object.");
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in value.EnumerateObject())
+            if (!names.Add(property.Name)) throw new JsonException("Duplicate marker property.");
+    }
+
+    [System.Text.Json.Serialization.JsonUnmappedMemberHandling(
+        System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
     private sealed record StoppedWorkAdviceLaunchMarker(
-        string ObligationId, string ContextSha256, DateTimeOffset StartedAt);
+        string ObligationId, string ContextSha256, DateTimeOffset StartedAt,
+        StoppedWorkAdviceProviderDescriptor? Provider = null);
 }
