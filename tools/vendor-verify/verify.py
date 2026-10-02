@@ -5834,11 +5834,13 @@ else:
                         raise AssertionError("native-nonzero: empty stdout was not retained as complete EOF")
                     if diag["payload"]["stderr"] != {"bytes": 0, "eof": True}:
                         raise AssertionError("native-nonzero: empty stderr was not retained as complete EOF")
-                    if receipt.get("exitCode") not in (0, None):
-                        raise AssertionError("native-nonzero: the outer receipt must stay Python's exit, not agy's")
+                    if receipt.get("exitCode") != 0 or receipt.get("timedOut") is not False:
+                        raise AssertionError("native-nonzero: only a non-timed-out wrapper exit 0 proves the helper was reaped normally")
                 if mode == "wrapper-zero":
                     if diag is None or diag["payload"].get("nativeExitCode") != 0:
                         raise AssertionError(f"wrapper-zero: diagnostic lost a real zero native exit: {events}")
+                    if receipt.get("exitCode") != 0 or receipt.get("timedOut") is not False:
+                        raise AssertionError("wrapper-zero: only a non-timed-out wrapper exit 0 proves the helper was reaped normally")
                     if diag["payload"]["stdout"] != {"bytes": 0, "eof": True}:
                         raise AssertionError("wrapper-zero: empty stdout was not retained as complete EOF")
                     if diag["payload"]["stderr"] != {"bytes": 0, "eof": True}:
