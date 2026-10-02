@@ -822,10 +822,11 @@ public static class ExecutionUsageProjector
     /// </param>
     /// <param name="ObservedBilledTokenFloorTokens">
     /// #2559: the same value as <paramref name="LiveBilled"/> once the claude-only integrity scan over
-    /// every captured line holds, null otherwise -- including on every early return above, none of
-    /// which computes it. The CALLER (<c>BuildByExecutionId</c>) still gates whether this ever reaches
-    /// <see cref="ExecutionUsageView.ObservedBilledTokenFloor"/> on there being no authoritative
-    /// terminal billed figure and no journalled stdout loss, neither of which this method can see.
+    /// every captured line holds and no captured terminal record has a billed component, null
+    /// otherwise -- including on every early return above, none of which computes it. The CALLER
+    /// (<c>BuildByExecutionId</c>) also gates whether this ever reaches
+    /// <see cref="ExecutionUsageView.ObservedBilledTokenFloor"/> on the legacy terminal reading and
+    /// journalled stdout loss; the latter is not visible to this method.
     /// </param>
     private sealed record UsageReading(
         WorkerUsage? Terminal,
