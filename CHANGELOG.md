@@ -15,6 +15,7 @@ shared version through `0.14.0`.
 ### Bug Fixes
 
 * **probes:** Retain native stream termination diagnostics ([#2548](https://github.com/philipreese/baton/issues/2548)) ([3eaea95](https://github.com/philipreese/baton/commit/3eaea95476b3f7a0953b2113dfae12f63b918622))
+* **queue:** Require complete policy-bound checks before readiness ([#2551](https://github.com/philipreese/baton/issues/2551), included in [#2548](https://github.com/philipreese/baton/pull/2548)) ([3eaea95](https://github.com/philipreese/baton/commit/3eaea95476b3f7a0953b2113dfae12f63b918622))
 * **queue:** Cancel proved wholly prelaunch refusal lineages ([#2550](https://github.com/philipreese/baton/issues/2550)) ([02697e3](https://github.com/philipreese/baton/commit/02697e3103ab26f3a76daed3a2ca69a5c7e8c374))
 
 ## [0.61.0](https://github.com/philipreese/baton/compare/v0.60.0...v0.61.0) (2026-10-02)
