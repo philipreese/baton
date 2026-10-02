@@ -3813,6 +3813,51 @@ public sealed class QueueCommandTests
         finally { DirectoryCleanup.DeleteRecursively(home); }
     }
 
+    [Fact]
+    public async Task Retire_keeps_receipt_authority_sticky_when_the_receipt_is_removed_after_observation()
+    {
+        var home = CreatePrelaunchHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await CreatePrelaunchRefusalsAsync(home, 2);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: item.Tag), TextWriter.Null, Ct));
+            var cancelled = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            byte[]? queueImage = null;
+            byte[]? ledgerImage = null;
+            async Task RemoveAndSubstitute(CancellationToken token)
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = [cancelled with { PrelaunchCancellation = null }],
+                }, token);
+                var parent = cancelled.ParentAttemptId!.Value;
+                var room = Path.Combine(home, "rooms", "late-substituted-parent");
+                Directory.CreateDirectory(room);
+                await TerminalSentinelWriter.WriteAsync(room,
+                    new WorkflowStatusView(WorkflowOutcome.Failed, [], [], "terminal control"), token);
+                var log = FleetEventLog.OpenOperational();
+                await log.Append(new FleetEventDraft(
+                    FleetEventKind.AttemptStarted, "receipt-removal-parent-start", cancelled.CancelledAt!.Value.AddSeconds(-2),
+                    AttemptId: parent, WorkId: new FleetWorkId(item.Tag),
+                    RoomId: new FleetRoomId(BatonPaths.RecordKey(room))), token);
+                await log.Append(new FleetEventDraft(
+                    FleetEventKind.AttemptSettled, "receipt-removal-parent-settle", cancelled.CancelledAt.Value.AddSeconds(-1),
+                    AttemptId: parent, WorkId: new FleetWorkId(item.Tag),
+                    RoomId: new FleetRoomId(BatonPaths.RecordKey(room)), Outcome: WorkflowOutcome.Failed), token);
+                queueImage = await File.ReadAllBytesAsync(BatonPaths.QueueFile, token);
+                ledgerImage = await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, token);
+            }
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.RetireOperatorAsync(
+                item.Tag, "receipt removal", TextWriter.Null, Ct, beforeCommit: RemoveAndSubstitute));
+            Assert.Contains("changed while", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(queueImage, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(ledgerImage, await File.ReadAllBytesAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
     private static string RemoveDecisionField(string json, string defect)
     {
         var node = JsonNode.Parse(json)!.AsObject();

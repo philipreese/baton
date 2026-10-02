@@ -1638,7 +1638,7 @@ public static class QueueCommand
                     || current.State == QueueItemState.Launched
                     || PendingDraftPullRequestHandoff(current)
                     || !SameRetirementAttempt(observed, current)
-                    || (current.PrelaunchCancellation is not null
+                    || (observed.PrelaunchCancellation is not null || current.PrelaunchCancellation is not null
                         ? (prelaunchLease = snapshot.Items.Count(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)) == 1
                             && QueueStore.ComputeRevision([current]) == observedRevision
                             ? TryAcquireReprovenPrelaunchCancellationProof(current, snapshot)
