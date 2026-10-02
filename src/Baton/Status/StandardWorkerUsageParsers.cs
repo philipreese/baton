@@ -323,14 +323,16 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
     /// <para>
     /// A recognized usage line (one carrying at least one of the two cache counters) is
     /// <see langword="false"/> when: either cache counter present is negative, non-integer, or not a
-    /// JSON number at all; either cache counter or <c>message.id</c> is duplicated as a JSON member
-    /// within its own object; or <c>message.id</c> is missing or blank. A line carrying neither cache
+    /// JSON number at all; a relevant selection member (<c>type</c>, <c>message</c>, <c>usage</c>),
+    /// cache counter or <c>message.id</c> is duplicated within its object; or <c>message.id</c> is
+    /// missing or whitespace-only. A line carrying neither cache
     /// counter is <see langword="true"/> and otherwise ignored -- placeholder-only or genuinely empty
     /// usage says nothing this check is about.
     /// </para>
     /// <para>
     /// <paramref name="seenCacheTokensByMessageId"/> is fingerprint metadata, not an accumulator: the
-    /// last (cache-read, cache-creation) pair this replay has observed for a given <c>message.id</c>.
+    /// first (cache-read, cache-creation) pair this replay has observed for a given <c>message.id</c>,
+    /// including whether each counter was present. A present non-object usage payload is invalid.
     /// <see cref="TryParseIncrementalUsage"/>'s own caller dedupes a repeated id by first sighting alone
     /// and never checks whether the repeat agrees -- so a later line repeating an id with a DIFFERENT
     /// value is an ambiguous replay this method catches as a conflicting repeat
@@ -358,12 +360,31 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
         using (doc)
         {
             var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
-                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
-                || !message.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+            if (root.ValueKind != JsonValueKind.Object)
             {
                 return true;
+            }
+            if (CountMembers(root, "type") > 1 || CountMembers(root, "message") > 1)
+            {
+                return false;
+            }
+            if (!root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String
+                || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
+            {
+                return true;
+            }
+            if (CountMembers(message, "usage") > 1)
+            {
+                return false;
+            }
+            if (!message.TryGetProperty("usage", out var usage))
+            {
+                return true;
+            }
+            if (usage.ValueKind != JsonValueKind.Object)
+            {
+                return false;
             }
 
             if (CountMembers(usage, "cache_read_input_tokens") > 1
@@ -387,7 +408,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
 
             if (!message.TryGetProperty("id", out var idProp)
                 || idProp.ValueKind != JsonValueKind.String
-                || idProp.GetString() is not { Length: > 0 } messageId)
+                || idProp.GetString() is not { } messageId || string.IsNullOrWhiteSpace(messageId))
             {
                 return false;
             }
@@ -396,8 +417,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             var observedCacheCreation = cacheCreation == CounterReading.Valid ? cacheCreationValue : (long?)null;
             if (seenCacheTokensByMessageId.TryGetValue(messageId, out var prior))
             {
-                if ((prior.CacheRead is { } priorRead && observedCacheRead is { } newRead && priorRead != newRead)
-                    || (prior.CacheCreation is { } priorCreation && observedCacheCreation is { } newCreation && priorCreation != newCreation))
+                if (prior != (observedCacheRead, observedCacheCreation))
                 {
                     return false;
                 }

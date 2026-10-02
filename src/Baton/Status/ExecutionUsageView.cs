@@ -1105,15 +1105,21 @@ public static class ExecutionUsageProjector
         // because that monitor's job is to arrest a LIVE execution and this one only ever reads --
         // ToolStepTally's own remarks state why they are not merged.
         var toolStepTally = new ToolStepTally(replayParser);
+        // With validated nonnegative Claude deltas, the first unchecked cumulative wrap is negative.
+        // Latch the monitor's own symptom: a later wrap back to positive must not restore eligibility.
+        // No second accumulator and no change to the live monitor's budget decisions.
+        var replayOverflowObserved = false;
         foreach (var line in rolledLines)
         {
             replayMonitor.OnStdoutLine(line);
+            replayOverflowObserved |= replayMonitor.SnapshotUsage().BilledTokens is < 0;
             toolStepTally.OnStdoutLine(line);
         }
 
         foreach (var line in lines)
         {
             replayMonitor.OnStdoutLine(line);
+            replayOverflowObserved |= replayMonitor.SnapshotUsage().BilledTokens is < 0;
             toolStepTally.OnStdoutLine(line);
         }
 
@@ -1125,17 +1131,15 @@ public static class ExecutionUsageProjector
         // and the figure this carries forward is `liveBilled` itself, read off the real monitor's own Σ
         // two lines above. `seenCacheTokensByMessageId` is fingerprint metadata, not a running total --
         // see that method's own doc for why a conflicting repeat is the one thing TokenBudgetMonitor's
-        // first-sighting dedupe cannot by itself catch. A negative `liveBilled` is this scan's one
-        // non-per-line check: unchecked long addition wraps on overflow, and a genuine cache-creation Σ
-        // is never negative, so a negative replay result is itself the overflow signal rather than one
-        // this method re-derives by summing a second time.
+        // first-sighting dedupe cannot by itself catch. The latched negative monitor snapshot above
+        // rejects any cumulative overflow, even when a subsequent unchecked addition wraps positive.
         long? observedBilledTokenFloorTokens = null;
         if (replayParser is ClaudeUsageParser claudeReplayParser)
         {
             var seenCacheTokensByMessageId = new Dictionary<string, (long? CacheRead, long? CacheCreation)>(StringComparer.Ordinal);
             var integrityHolds = rolledLines.Concat(lines).All(
                 line => claudeReplayParser.ObserveUsageFloorIntegrity(line, seenCacheTokensByMessageId));
-            if (integrityHolds && liveBilled is { } floor && floor >= 0)
+            if (integrityHolds && !replayOverflowObserved && liveBilled is { } floor && floor >= 0)
             {
                 observedBilledTokenFloorTokens = floor;
             }

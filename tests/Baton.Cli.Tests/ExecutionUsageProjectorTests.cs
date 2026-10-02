@@ -1109,6 +1109,119 @@ public sealed class ExecutionUsageProjectorTests
     }
 
     [Fact]
+    public void Observed_billed_token_floor_remembers_overflow_after_the_sum_wraps_positive_again()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-repeated-wrap-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", long.MaxValue),
+                ClaudeAssistantLine("msg_2", long.MaxValue),
+                ClaudeAssistantLine("msg_3", 3),
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_accepts_a_large_non_overflowing_sum()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-large-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("msg_1", long.MaxValue - 3),
+                ClaudeAssistantLine("msg_2", 3),
+            ]);
+            Assert.Equal(long.MaxValue, view.ObservedBilledTokenFloor?.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"id\":\"   \",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"id\":\"\\t\",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"system\",\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"assistant\",\"message\":{},\"message\":{\"id\":\"m\",\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    [InlineData("{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"usage\":{},\"usage\":{\"cache_creation_input_tokens\":700}}}")]
+    public void Observed_billed_token_floor_refuses_blank_identity_or_ambiguous_selection_members(string line)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-selection-{Guid.NewGuid():N}");
+        try
+        {
+            Assert.Null(ProjectStream(testRoot, "claude", [line]).ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_refuses_a_changed_counter_presence_for_a_repeated_identity()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-counter-presence-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                """{"type":"assistant","message":{"id":"m","usage":{"cache_creation_input_tokens":700}}}""",
+                """{"type":"assistant","message":{"id":"m","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":700}}}""",
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("\"700\"")]
+    [InlineData("null")]
+    [InlineData("true")]
+    [InlineData("1e3")]
+    [InlineData("9223372036854775808")]
+    public void Observed_billed_token_floor_omits_invalid_counter_types_without_crashing_status(string counter)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-counter-type-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("m1", 700),
+                "{\"type\":\"assistant\",\"message\":{\"id\":\"m2\",\"usage\":{\"cache_creation_input_tokens\":" + counter + "}}}",
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Observed_billed_token_floor_accepts_valid_unrelated_JSON_with_a_non_string_type()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-unrelated-type-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("m1", 700), """{"type":42}"""]);
+            Assert.Equal(700, view.ObservedBilledTokenFloor?.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public void Observed_billed_token_floor_reports_an_explicit_measured_zero()
     {
         // Explicit measured zero is a valid floor, never confused with the absent-evidence case below.
@@ -1119,6 +1232,28 @@ public sealed class ExecutionUsageProjectorTests
 
             Assert.NotNull(view.ObservedBilledTokenFloor);
             Assert.Equal(0, view.ObservedBilledTokenFloor!.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("true")]
+    [InlineData("[]")]
+    [InlineData("\"invalid\"")]
+    public void Observed_billed_token_floor_refuses_a_malformed_assistant_usage_object(string usage)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-usage-kind-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [
+                ClaudeAssistantLine("m1", 700),
+                "{\"type\":\"assistant\",\"message\":{\"id\":\"m2\",\"usage\":" + usage + "}}",
+            ]);
+            Assert.Null(view.ObservedBilledTokenFloor);
         }
         finally
         {

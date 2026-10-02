@@ -2884,15 +2884,11 @@ resolved and observed models. It is an observation, not a retroactive launch con
 happened, so the signal stays loud on both live status reads and later ledger analysis.
 
 **`observedBilledTokenFloor` (#2559) is Claude-only, additive, and never a substitute for the
-reconciliation triple above.** The room that motivated it: a real claude execution timed out after 30
-minutes, its retained stream carrying 236 assistant usage lines over 126 distinct message ids (110
-identical repeats) that replay to 283,255 cache-creation tokens, and no terminal `"type":"result"` line
-to reconcile against — `billedTokens`/`liveBilledTokens`/`billedUnderReadTokens` stay absent,
-`billedReconciliationUnavailable` reads `no-terminal-billed-figure` exactly as it always has, and the
-operator was left with no number for what was, despite the timeout, genuinely observed. This field is
-that number, surfaced without widening the triple's own contract.
+reconciliation triple above.** [#2559](https://github.com/philipreese/baton/issues/2559) records the
+motivating timeout measurement. This field exposes positively observed incomplete usage without
+widening the triple's contract.
 
-Eligibility is the conjunction of everything already governing the triple's absence, nothing new:
+Eligibility combines the existing capture/loss rules with the stricter integrity gate below:
 present only when `billedTokens` is absent for the `no-terminal-billed-figure` reason specifically (an
 authoritative terminal figure, when one exists, always wins and this field is omitted alongside the
 triple) — which already implies a captured stream existed, carried no loss marker
@@ -2915,10 +2911,11 @@ here; what belongs in this register is the two facts that doc comment cannot its
 check is deliberately STRICTER than `TokenBudgetMonitor`'s own dedupe, which trusts a repeated
 `message.id` by first sighting alone and so cannot, by itself, notice a replay where a later line claims
 a different count for an id it has already seen — this gate exists to catch exactly that disagreement
-before the figure it would corrupt ever reaches a reader. Second: accumulation overflow is read off the
-symptom, not re-derived — unchecked `long` addition wraps negative past its ceiling, so a negative
-`liveBilledTokens` IS the overflow finding, and this gate never sums the stream a second time to produce
-one. An identical repeat (same id, same count) still contributes once, the same dedupe
+before the figure it would corrupt ever reaches a reader. Second: accumulation overflow is read off
+the monitor's own per-line snapshots and latched. With valid nonnegative cache-creation deltas, the
+first unchecked cumulative wrap is negative; a later wrap back to positive does not erase that finding.
+This gate never sums the stream a second time. An identical repeat (same id, same counters and their
+presence) still contributes once, the same dedupe
 `liveBilledTokens` already performs, and an explicit measured zero is a valid floor distinct from the
 absent/placeholder/cache-read-only case that leaves `liveBilledTokens` — and so this field — null, per
 the absent-is-not-zero rule the triple above already enforces.
