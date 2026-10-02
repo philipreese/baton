@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -910,7 +911,7 @@ public sealed class ExactFileRestoreToolTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Noisy_git_timeout_and_cancellation_are_bounded_and_kill_the_child(
+    public async Task Startup_timeout_and_noisy_cancellation_are_bounded_and_kill_the_child(
         bool callerCancellation)
     {
         var root = await CreateRepositoryAsync();
@@ -918,6 +919,7 @@ public sealed class ExactFileRestoreToolTests
         {
             var pidFile = Path.Combine(root, "git.pid");
             var executable = CrashHostExecutable();
+            var startedProcessIds = new ConcurrentQueue<int>();
             var hooks = new ExactFileRestoreTestHooks(
                 GitFileName: executable,
                 GitTimeout: callerCancellation ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(250), // wait-ok: deliberately short production timeout under test.
@@ -925,7 +927,9 @@ public sealed class ExactFileRestoreToolTests
                 {
                     ["BATON_EXACT_RESTORE_GIT_MODE"] = "noisy",
                     ["BATON_EXACT_RESTORE_GIT_PID_FILE"] = pidFile,
-                });
+                    ["BATON_EXACT_RESTORE_GIT_STARTUP_DELAY_MS"] = callerCancellation ? null : "1000",
+                },
+                StartedGitProcessIds: startedProcessIds);
             var baseSha = await GitAsync(root, "rev-parse", "HEAD");
             var tool = new ExactFileRestoreTool(
                 root, baseSha, "execution-1", Path.Combine(root, "room"), hooks);
@@ -959,8 +963,12 @@ public sealed class ExactFileRestoreToolTests
                 result.Text,
                 StringComparison.OrdinalIgnoreCase);
             Assert.True(started.Elapsed < TimeSpan.FromSeconds(8), $"teardown took {started.Elapsed}");
-            Assert.True(File.Exists(pidFile), "the noisy native child did not reach its PID checkpoint");
-            var pid = int.Parse(await File.ReadAllTextAsync(pidFile, Ct));
+            var pid = Assert.Single(startedProcessIds);
+            // Scheduling may let startup publish its checkpoint before the timeout is observed.
+            if (callerCancellation || File.Exists(pidFile))
+            {
+                Assert.Equal(pid, int.Parse(await File.ReadAllTextAsync(pidFile, Ct)));
+            }
             await AssertProcessExitedAsync(pid);
         }
         finally
