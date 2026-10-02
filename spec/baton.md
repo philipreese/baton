@@ -2553,9 +2553,10 @@ unprovable remote query is unsafe. On every unsafe or unprovable result the engi
 ref, index, or worktree path: it preserves all observed evidence and records `WorkspaceCleanAfter:
 false`; it never uses reset or another destructive repair to make the workspace appear clean.
 
-The prompt is self-contained on purpose — it names no prior turn — so no vendor session resume is
-needed to make it actionable: the workspace on disk already carries whatever the arrested execution
-left behind. Before spawning, `MutationInterface.RunGraceTurnAsync` writes one durable
+The prompt is self-contained on purpose — it requires no vendor session resume — so the fresh worker
+can act on the workspace and the original task context the engine supplies. The workspace on disk
+already carries whatever the arrested execution left behind. Before spawning,
+`MutationInterface.RunGraceTurnAsync` writes one durable
 `GraceTurnClaimed` with a distinct child execution ID, its own request/limit snapshot, the parent's
 already-observed result (or pending monitor arrest), and a secret-free workspace baseline whose
 endpoint/configuration identities are digests. The exact captured endpoint and applicable URL rewrite
@@ -2576,6 +2577,18 @@ claim/completion/uncertainty joins before publishing a row. No Core exit, durati
 zero is synthesized. Recovery checks claims from
 the full journal before generic parent crash classification. Historical
 `GraceTurnAttempted` records remain readable, but do not gain fabricated child limits or identity.
+
+**Generated-only residue is not rescueable dirty work (#2557).** The raw `Audit` remains the first
+eligibility read, but a dirty result receives no grace child only when the existing
+`ReadWorkspaceMutation` reading is measured, reports zero changed/untracked paths after subtracting
+the journaled hash-proved engine placements, positively shows `HEAD` on its upstream, and the
+arrested execution's declared outbox already satisfies `ContractValidator`. An unknown reading,
+missing upstream proof, unpushed head, modified generated file, unrelated edit, or incomplete outbox
+keeps the existing one-child opportunity. This is a skip of unnecessary recovery spend, never a
+success classification. When a child is dispatched, its bounded prompt carries the original task
+context, exact parent and child outboxes, and the unchanged engine-placement inventory; it tells the
+fresh worker to inspect the committed source and parent handoff before deciding whether genuine
+uncommitted task work remains. The prompt is contextual advice, not a structural content gate.
 
 **A grace turn never turns an arrest into a `Succeeded` room.** It runs entirely inside the same
 `budgetMonitor is { Arrested: true }` block that already returns without ever reaching

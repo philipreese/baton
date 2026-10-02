@@ -2586,7 +2586,9 @@ public static class MutationInterface
                 var workspaceChangedWasMeasured = false;
                 if (binding.VerifiesWorkspace
                     && mutationProbePath is not null
-                    && !Workspaces.WorktreeProvisioner.Audit(mutationProbePath).IsClean)
+                    && WorkspaceRequiresGraceTurn(
+                        binding, prepared.OutputDirectory, mutationProbePath, workspaceHeadShaAtStart,
+                        enginePlacedFiles))
                 {
                     var grace = await RunGraceTurnAsync(
                             prepared, binding, mutationProbePath, dispatcher, eventLogReader, eventLogWriter,
@@ -2631,7 +2633,9 @@ public static class MutationInterface
             if (dispatchResult.Reason == CoreExitReason.TimedOut
                 && binding.VerifiesWorkspace
                 && mutationProbePath is not null
-                && !Workspaces.WorktreeProvisioner.Audit(mutationProbePath).IsClean)
+                && WorkspaceRequiresGraceTurn(
+                    binding, prepared.OutputDirectory, mutationProbePath, workspaceHeadShaAtStart,
+                    enginePlacedFiles))
             {
                 var grace = await RunGraceTurnAsync(
                         prepared, binding, mutationProbePath, dispatcher, eventLogReader, eventLogWriter,
@@ -3761,6 +3765,36 @@ public static class MutationInterface
             monitor is { Arrested: true } ? monitor.ArrestReasonValue : null), CancellationToken.None).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Keeps the existing raw audit as the eligibility gate, while recognizing the one safe
+    /// generated-only residue shape: every remaining path is an unchanged, hash-proved engine
+    /// placement, the original head is already on its upstream, and the parent's declared outbox
+    /// is complete. Every unknown or incomplete reading remains eligible for the one grace child.
+    /// </summary>
+    private static bool WorkspaceRequiresGraceTurn(
+        WorkerBinding.Process binding,
+        string outputDirectory,
+        string workspacePath,
+        string? workspaceHeadShaAtStart,
+        IReadOnlyCollection<EnginePlacedFile>? enginePlacedFiles)
+    {
+        if (Workspaces.WorktreeProvisioner.Audit(workspacePath).IsClean)
+        {
+            return false;
+        }
+
+        var reading = Workspaces.WorktreeProvisioner.ReadWorkspaceMutation(
+            workspacePath, workspaceHeadShaAtStart, enginePlacedFiles);
+        var generatedOnlyResidue = reading is
+        {
+            Measured: true,
+            ChangedPathCount: 0,
+            HeadIsPushed: true,
+        } && ContractValidator.IsSatisfied(binding.Contract, outputDirectory);
+
+        return !generatedOnlyResidue;
+    }
+
     private static async Task<(bool Claimed, FlowEvent.GraceTurnSafetyRecorded? Safety)> RunGraceTurnAsync(
         PreparedExecution prepared,
         WorkerBinding.Process binding,
@@ -3826,7 +3860,12 @@ public static class MutationInterface
             ? new TokenBudgetMonitor(GraceTurn.TokenBudget, GraceTurn.MaxToolSteps, billedRateLimit: null, graceUsageParser)
             : null;
 
-        var graceTarget = binding.Target.WithReplacedPrompt(GraceTurn.PromptText);
+        var graceTarget = binding.Target.WithReplacedPrompt(
+            GraceTurn.BuildPrompt(
+                binding.Target.PromptText,
+                prepared.OutputDirectory,
+                graceOutputDirectory,
+                enginePlacedFiles ?? []));
         if (graceMonitor is not null)
         {
             // #2162: the binding target can already capture a session id and mirror --echo-worker
