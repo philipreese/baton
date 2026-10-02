@@ -349,6 +349,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
     <button class="tabbtn" id="tab-btn-inbox" data-tab="inbox">Deliverables</button>
   </div>
   <div id="banner"></div>
+  <div id="queue-write-feedback" aria-live="polite" role="status"></div>
   <div class="tabpanel active" id="tab-stream">
     <div id="stream-summary" class="stream-summary"></div>
     <div id="stream-content" class="stream-content"></div>
@@ -1469,6 +1470,9 @@ function freshLabel(iso, prefix){
   return prefix + (a || new Date(iso).toLocaleTimeString()) + (a && a !== "just now" ? " ago" : "");
 }
 function banner(html){ $("banner").innerHTML = html ? `<div class="banner">${html}</div>` : ""; }
+function queueWriteFeedback(html){
+  $("queue-write-feedback").innerHTML = html ? `<div class="banner" role="status">${html}</div>` : "";
+}
 
 // #1391: advisory per-vendor usage runway -- one row per window per vendor, percent/reset/burn/caveat,
 // "unknown" whenever the harvester couldn't parse a field. Nothing here gates dispatch (#1848 owns
@@ -3033,6 +3037,98 @@ function startDaemonFeed(applySnapshot){
   $("inboxbanner").innerHTML = `<div class="banner"><b>Deliverables live on the mailbox plane.</b> This page is being served by <span class="mono">baton daemon</span> over the tailnet, which carries the fleet row only — open the Claude.ai artifact for the inbox.</div>`;
 }
 
+// Keep the server's command receipt separate from the periodically rebuilt fleet projection.
+// A successful POST is committed-action evidence; only a later projection can show the queue state.
+function createGlassWriteController(fetchImpl, applySnapshot, banner, renderQueueFeedback, esc){
+  let latestSnapshot = null;
+  let pendingQueueWrite = null;
+  let queueWriteInFlight = false;
+  const showQueueWriteFeedback = (snap, allowBaseline, readError) => {
+    if(!pendingQueueWrite) return;
+    const receipt = esc(pendingQueueWrite.receipt);
+    const queue = snap && snap.queue && typeof snap.queue === "object" ? snap.queue : null;
+    const held = queue && typeof queue.held === "boolean" ? queue.held : null;
+    const derivedAt = snap && typeof snap.derived_at === "string" ? snap.derived_at : "";
+    const derivedMs = Date.parse(derivedAt);
+    const heldText = held === null ? "unknown" : (held ? "held" : "unheld");
+    const when = derivedAt ? ` as of ${esc(derivedAt)}` : " at an unknown time";
+    const desiredText = pendingQueueWrite.desiredHeld ? "held" : "unheld";
+    if(pendingQueueWrite.baselineMs === null){
+      if(allowBaseline && Number.isFinite(derivedMs)){
+        pendingQueueWrite.baselineMs = derivedMs;
+        const errorText = readError ? ` The immediate projection refresh failed: ${esc(readError)}.` : "";
+        renderQueueFeedback(`<b>${receipt}</b> The queue projection reports ${heldText}${when}. This is the first valid timestamp observed after the receipt; waiting for a newer snapshot reporting the queue ${desiredText}.${errorText}`);
+        return;
+      }
+      const errorText = readError ? ` The immediate projection refresh failed: ${esc(readError)}.` : "";
+      renderQueueFeedback(`<b>${receipt}</b> The queue action was accepted; the projection reports ${heldText}${when}, but there is no valid timestamp baseline yet. Waiting for a timestamped snapshot before comparing state.${errorText}`);
+      return;
+    }
+    const isNewer = Number.isFinite(derivedMs) && derivedMs > pendingQueueWrite.baselineMs;
+    if(isNewer && held === pendingQueueWrite.desiredHeld){
+      const desiredText = pendingQueueWrite.desiredHeld ? "held" : "unheld";
+      pendingQueueWrite = null;
+      renderQueueFeedback(`<b>${receipt}</b> The newer queue snapshot reports the queue ${desiredText}${when}.`);
+      return;
+    }
+    const errorText = readError ? ` The immediate projection refresh failed: ${esc(readError)}.` : "";
+    renderQueueFeedback(`<b>${receipt}</b> The queue action was accepted; the projection reports ${heldText}${when}. Waiting for a newer snapshot reporting the queue ${desiredText}.${errorText}`);
+  };
+  const observeSnapshot = (snap) => {
+    latestSnapshot = snap;
+    applySnapshot(snap);
+    if(pendingQueueWrite) showQueueWriteFeedback(snap, true, null);
+  };
+  const write = async (button) => {
+    const route = button.dataset.glassRoute;
+    if(!route) return;
+    const isQueueWrite = route === "/queue/hold" || route === "/queue/resume";
+    if(isQueueWrite && queueWriteInFlight) return;
+    if(isQueueWrite) queueWriteInFlight = true;
+    const desiredHeld = route === "/queue/hold";
+    const baselineTime = Date.parse(latestSnapshot && latestSnapshot.derived_at || "");
+    const baselineMs = Number.isFinite(baselineTime) ? baselineTime : null;
+    button.disabled = true;
+    let committed = false;
+    try {
+      const response = await fetchImpl(route, { method: "POST" });
+      const receipt = await response.text();
+      if(!response.ok) throw new Error(receipt || `Write refused (${response.status}).`);
+      committed = true;
+      if(isQueueWrite){
+        pendingQueueWrite = { receipt, desiredHeld, baselineMs };
+        showQueueWriteFeedback(latestSnapshot, false, null);
+      } else {
+        banner(`<b>${esc(receipt)}</b> Refreshing fleet state.`);
+      }
+      const projection = await fetchImpl("/projection.json", { cache: "no-store" });
+      if(!projection.ok) throw new Error(`Projection refresh failed (${projection.status}).`);
+      observeSnapshot(await projection.json());
+    } catch(error) {
+      const detail = error && error.message ? error.message : String(error);
+      if(committed){
+        if(isQueueWrite && pendingQueueWrite) showQueueWriteFeedback(latestSnapshot, false, detail);
+        else banner(`<b>Action accepted.</b> Projection refresh failed: ${esc(detail)}`);
+      } else {
+        banner(`<b>Glass write failed.</b> ${esc(detail)}`);
+      }
+    } finally {
+      if(isQueueWrite) queueWriteInFlight = false;
+      button.disabled = false;
+    }
+  };
+  return { observeSnapshot, write };
+}
+
+function wireGlassWriteClicks(documentRef, glassWrites, confirmAction){
+  documentRef.addEventListener("click", async (event) => {
+    const button = event.target.closest && event.target.closest(".glasswrite");
+    if(!button) return;
+    if(!button.dataset.glassRoute || (button.dataset.glassConfirm && !confirmAction(button.dataset.glassConfirm))) return;
+    await glassWrites.write(button);
+  });
+}
+
 (async () => {
   // #1486: heartbeat_at (independent of the change-gated snapshot) is what tells a dead pusher
   // apart from a quiet fleet whose pushed_at is legitimately stale. Loud only past ~2 missed beats
@@ -3256,30 +3352,12 @@ function startDaemonFeed(applySnapshot){
     // navigation-only worker. It caches nothing; its one bounded-timeout fallback is a static
     // failure page, never the dashboard or fleet data. A first successful online visit is needed
     // before the browser has activated this worker for a later disconnected launch.
-    startDaemonFeed(applySnapshot, recordFleetEvent);
+    const glassWrites = createGlassWriteController(fetch, applySnapshot, banner, queueWriteFeedback, esc);
+    startDaemonFeed(glassWrites.observeSnapshot, recordFleetEvent);
     navigator.serviceWorker?.register("/fleet-glass-service-worker.js").catch(() => undefined);
     // #2078: the server performs authorization; this branch only keeps controls off the artifact.
-    // No optimistic state: after the receipt, fetch and render the settled daemon projection.
-    document.addEventListener("click", async (event) => {
-      const button = event.target.closest && event.target.closest(".glasswrite");
-      if(!button) return;
-      const route = button.dataset.glassRoute;
-      if(!route || (button.dataset.glassConfirm && !window.confirm(button.dataset.glassConfirm))) return;
-      button.disabled = true;
-      try {
-        const response = await fetch(route, { method: "POST" });
-        const receipt = await response.text();
-        if(!response.ok) throw new Error(receipt || `Write refused (${response.status}).`);
-        banner(`<b>${esc(receipt)}</b> Refreshing fleet state.`);
-        const projection = await fetch("/projection.json", { cache: "no-store" });
-        if(!projection.ok) throw new Error(`Projection refresh failed (${projection.status}).`);
-        applySnapshot(await projection.json());
-      } catch(error) {
-        banner(`<b>Glass write failed.</b> ${esc(error && error.message ? error.message : String(error))}`);
-      } finally {
-        button.disabled = false;
-      }
-    });
+    // Queue receipts stay visible until a newer projection reports the requested state.
+    wireGlassWriteClicks(document, glassWrites, window.confirm.bind(window));
     applyRoute();
     return;
   }
