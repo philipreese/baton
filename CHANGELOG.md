@@ -9,6 +9,28 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.62.0](https://github.com/philipreese/baton/compare/v0.61.1...v0.62.0) (2026-10-02)
+
+
+### Features
+
+* **status:** Show retained owned-task worker choices ([#2567](https://github.com/philipreese/baton/issues/2567)) ([eefe6c8](https://github.com/philipreese/baton/commit/eefe6c821c7435c2d8d5870dcc41d4af8f58ea24))
+* **task:** Select the initial worker without changing shared tiers ([#2564](https://github.com/philipreese/baton/issues/2564)) ([e360a82](https://github.com/philipreese/baton/commit/e360a827a86a34870cef2183f75a7790f6f35f69))
+
+
+### Bug Fixes
+
+* **flow:** Repair owned-task retirement and bounded cleanup ([#2555](https://github.com/philipreese/baton/issues/2555)) ([6699610](https://github.com/philipreese/baton/commit/6699610b16e392669464bd71863b485206219903))
+* **glass:** Retain accepted queue receipts through projection refresh ([#2575](https://github.com/philipreese/baton/issues/2575)) ([ce97537](https://github.com/philipreese/baton/commit/ce97537bdb2dca438ca15bb623b11b0b150576be))
+* **queue:** Preserve PR refusal before draft handoff ([#2576](https://github.com/philipreese/baton/issues/2576)) ([16224c3](https://github.com/philipreese/baton/commit/16224c308476c01821fd06a287368d01c04d1986))
+* **review:** Separate lifecycle source judgment from delivery gates ([#2571](https://github.com/philipreese/baton/issues/2571)) ([2f9cf85](https://github.com/philipreese/baton/commit/2f9cf85f8cc45ad69079db17e915b9cdabccca87))
+* **status:** expose trustworthy partial Claude usage and prevent refused startup debris ([#2562](https://github.com/philipreese/baton/issues/2562)) ([ebe5169](https://github.com/philipreese/baton/commit/ebe5169f99f5fad6c1f12a6e3436f2a934875777))
+
+
+### Tests
+
+* **queue:** Retain bounded queue failure evidence ([#2572](https://github.com/philipreese/baton/issues/2572)) ([f723c9f](https://github.com/philipreese/baton/commit/f723c9f770c6ccde181215588c4893b3a9d20643))
+
 ## [0.61.1](https://github.com/philipreese/baton/compare/v0.61.0...v0.61.1) (2026-10-02)
 
 
