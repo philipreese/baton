@@ -975,6 +975,55 @@ public sealed class ExecutionUsageProjectorTests
         }
     }
 
+    [Theory]
+    [InlineData(false, 900)]
+    [InlineData(true, 900)]
+    [InlineData(false, 0)]
+    [InlineData(true, 0)]
+    public void Captured_terminal_billed_authority_before_a_footer_omits_only_the_new_floor(bool terminalInRollover, long terminalTokens)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-terminal-footer-{Guid.NewGuid():N}");
+        var assistant = ClaudeAssistantLine("valid", 700);
+        var terminal = "{\"type\":\"result\",\"usage\":{\"cache_creation_input_tokens\":" + terminalTokens + "}}";
+        const string footer = """{"type":"system","subtype":"footer"}""";
+        try
+        {
+            var view = terminalInRollover
+                ? ProjectStream(testRoot, "claude", [footer], [assistant, terminal])
+                : ProjectStream(testRoot, "claude", [assistant, terminal, footer]);
+
+            Assert.Null(view.BilledTokens);
+            Assert.Null(view.LiveBilledTokens);
+            Assert.Null(view.BilledUnderReadTokens);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Null(view.ObservedBilledTokenFloor);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"result\",\"num_turns\":2}")]
+    [InlineData("{\"type\":\"result\",\"usage\":{\"cache_read_input_tokens\":900}}")]
+    public void CONTROL_terminal_without_billed_components_before_a_footer_preserves_the_observed_floor(string terminal)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-2559-nonbilled-terminal-footer-{Guid.NewGuid():N}");
+        try
+        {
+            var view = ProjectStream(testRoot, "claude", [ClaudeAssistantLine("valid", 700), terminal, """{"type":"system","subtype":"footer"}"""]);
+            Assert.Null(view.BilledTokens);
+            Assert.Null(view.LiveBilledTokens);
+            Assert.Equal("no-terminal-billed-figure", view.BilledReconciliationUnavailable);
+            Assert.Equal(700, view.ObservedBilledTokenFloor?.Tokens);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public void CONTROL_observed_billed_token_floor_is_absent_on_a_non_claude_vendor()
     {

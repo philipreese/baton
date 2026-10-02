@@ -1125,11 +1125,9 @@ public static class ExecutionUsageProjector
 
         var liveBilled = replayMonitor.SnapshotUsage().BilledTokens;
 
-        // #2559: claude-only, computed from the SAME two segments just replayed above, in the same
-        // order -- an eighth parse of a line already discussed at length in this doc comment, not a
-        // ninth accumulator: ClaudeUsageParser.ObserveUsageFloorIntegrity reports trustworthiness only,
-        // and the figure this carries forward is `liveBilled` itself, read off the real monitor's own Σ
-        // two lines above. `seenCacheTokensByMessageId` is fingerprint metadata, not a running total --
+        // #2559: Claude-only eligibility over the SAME two segments just replayed above. Integrity
+        // and terminal-authority presence decide only whether to expose the monitor's own figure;
+        // neither accumulates a second total. `seenCacheTokensByMessageId` is fingerprint metadata --
         // see that method's own doc for why a conflicting repeat is the one thing TokenBudgetMonitor's
         // first-sighting dedupe cannot by itself catch. The latched negative monitor snapshot above
         // rejects any cumulative overflow, even when a subsequent unchecked addition wraps positive.
@@ -1139,7 +1137,16 @@ public static class ExecutionUsageProjector
             var seenCacheTokensByMessageId = new Dictionary<string, (long? CacheRead, long? CacheCreation)>(StringComparer.Ordinal);
             var integrityHolds = rolledLines.Concat(lines).All(
                 line => claudeReplayParser.ObserveUsageFloorIntegrity(line, seenCacheTokensByMessageId));
-            if (integrityHolds && !replayOverflowObserved && liveBilled is { } floor && floor >= 0)
+            // A result before an ordinary footer or in the earlier segment still excludes the new
+            // floor. Use the existing terminal parser and billed-component presence only; preserve
+            // the legacy last-line terminal selection, reconciliation fields and unavailable reason.
+            var capturedTerminalBilledFigureExists = rolledLines.Concat(lines).Any(line =>
+                claudeReplayParser.TryParseFinalUsage(line, out var capturedUsage)
+                && capturedUsage is not null
+                && (capturedUsage.TokensIn is not null
+                    || capturedUsage.TokensOut is not null
+                    || capturedUsage.CacheCreationTokens is not null));
+            if (integrityHolds && !capturedTerminalBilledFigureExists && !replayOverflowObserved && liveBilled is { } floor && floor >= 0)
             {
                 observedBilledTokenFloorTokens = floor;
             }
