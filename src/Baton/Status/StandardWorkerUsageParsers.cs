@@ -68,6 +68,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("type", out var typeProp)
+                || typeProp.ValueKind != JsonValueKind.String
                 || typeProp.GetString() != "result")
             {
                 return false;
@@ -267,6 +268,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("type", out var typeProp)
+                || typeProp.ValueKind != JsonValueKind.String
                 || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message)
                 || message.ValueKind != JsonValueKind.Object
@@ -276,8 +278,9 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
                 return false;
             }
 
-            long? cacheReadTokens = usageProp.TryGetProperty("cache_read_input_tokens", out var cacheReadProp) && cacheReadProp.TryGetInt64(out var cacheReadValue) ? cacheReadValue : null;
-            long? cacheCreationTokens = usageProp.TryGetProperty("cache_creation_input_tokens", out var cacheCreationProp) && cacheCreationProp.TryGetInt64(out var cacheCreationValue) ? cacheCreationValue : null;
+            // Invalid JSON value kinds are not measurements; TryGetInt64 itself throws on them.
+            long? cacheReadTokens = usageProp.TryGetProperty("cache_read_input_tokens", out var cacheReadProp) && cacheReadProp.ValueKind == JsonValueKind.Number && cacheReadProp.TryGetInt64(out var cacheReadValue) ? cacheReadValue : null;
+            long? cacheCreationTokens = usageProp.TryGetProperty("cache_creation_input_tokens", out var cacheCreationProp) && cacheCreationProp.ValueKind == JsonValueKind.Number && cacheCreationProp.TryGetInt64(out var cacheCreationValue) ? cacheCreationValue : null;
             string? messageId = message.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.String ? idProp.GetString() : null;
             // #1666: a sub-agent's own turn carries a parent_tool_use_id field, set and non-null, at
             // the line's ROOT (not inside "message") -- spec/baton.md §3 has the measured shape.
@@ -356,7 +359,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
         {
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
             {
@@ -458,7 +461,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -504,7 +507,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -544,7 +547,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -605,7 +608,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp))
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String)
             {
                 return null;
             }
@@ -674,7 +677,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -719,7 +722,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "assistant"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
@@ -765,7 +768,7 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             using var doc = JsonDocument.Parse(rawLine);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "user"
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String || typeProp.GetString() != "user"
                 || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
             {
