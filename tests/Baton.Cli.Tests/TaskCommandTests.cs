@@ -814,6 +814,19 @@ public sealed class TaskCommandTests
         var emptySpec = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, [],
             new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" });
         Assert.NotEqual(noSpec, emptySpec);
+
+        // This pair really aliases in the historical newline header. A selected request must not
+        // reuse that ambiguous header and merely append selection fields to it.
+        var embeddedMarkers = new TaskSizeDeclaration(DeclaredTaskSize.Small, "x\nspec\npayload");
+        var capturedMarkers = new TaskSizeDeclaration(DeclaredTaskSize.Small, "x");
+        byte[] capturedSpec = Encoding.UTF8.GetBytes("payload\nno-spec\n");
+        var selection = new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" };
+        Assert.Equal(
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, embeddedMarkers, null, null),
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, capturedMarkers, capturedSpec, null));
+        Assert.NotEqual(
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, embeddedMarkers, null, selection),
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, capturedMarkers, capturedSpec, selection));
     }
 
     [Fact]
