@@ -278,6 +278,15 @@ public sealed class TaskCommandTests
     [InlineData("equivalent-offset", "recently-observed", null, "awaiting-daemon-decision")]
     [InlineData("missing", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
     [InlineData("malformed", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("wrong-tick-shape", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("wrong-pid-shape", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("wrong-start-shape", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("invalid-pid", "unavailable", "process-unavailable", "daemon-unavailable")]
+    [InlineData("absent-process", "unavailable", "process-unavailable", "daemon-unavailable")]
+    [InlineData("exited-process", "unavailable", "process-unavailable", "daemon-unavailable")]
+    [InlineData("non-access-win32", "unknown", "process-identity-unverifiable", "daemon-observation-unknown")]
+    [InlineData("stale-denied", "unavailable", "heartbeat-stale", "daemon-unavailable")]
+    [InlineData("future-denied", "unavailable", "heartbeat-in-future", "daemon-unavailable")]
     public async Task Status_rejects_stale_future_reused_and_legacy_heartbeat_evidence(
         string caseName, string expectedAvailability, string? expectedDaemonReason, string expectedReason)
     {
@@ -289,8 +298,8 @@ public sealed class TaskCommandTests
             var now = new DateTimeOffset(2026, 10, 2, 23, 0, 0, TimeSpan.Zero);
             var heartbeatAt = caseName switch
             {
-                "stale" => now.AddSeconds(-90),
-                "future" => now.AddSeconds(1),
+                "stale" or "stale-denied" => now.AddSeconds(-90),
+                "future" or "future-denied" => now.AddSeconds(1),
                 _ => now.AddSeconds(-10),
             };
             var recordedStart = now.AddMinutes(-1);
@@ -316,19 +325,33 @@ public sealed class TaskCommandTests
             {
                 "missing" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O") + "\"}",
                 "malformed" => "{not-json",
+                "wrong-tick-shape" => "{\"tickCompletedAt\":{},\"identity\":{\"pid\":1234,\"processStartTime\":\""
+                    + recordedStart.ToString("O") + "\"}}",
+                "wrong-pid-shape" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O")
+                    + "\",\"identity\":{\"pid\":\"1234\",\"processStartTime\":\""
+                    + recordedStart.ToString("O") + "\"}}",
+                "wrong-start-shape" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O")
+                    + "\",\"identity\":{\"pid\":1234,\"processStartTime\":[]}}",
                 "equivalent-offset" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToOffset(TimeSpan.FromHours(-4)).ToString("O")
                     + "\",\"identity\":{\"pid\":1234,\"processStartTime\":\""
                     + recordedStart.ToOffset(TimeSpan.FromHours(-4)).ToString("O") + "\"}}",
                 _ => JsonSerializer.Serialize(new
                 {
                     tickCompletedAt = heartbeatAt,
-                    identity = new { pid = 1234, processStartTime = recordedStart },
+                    identity = new { pid = caseName == "invalid-pid" ? 0 : 1234, processStartTime = recordedStart },
                 }),
             };
             await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, heartbeat, Ct);
-            DateTimeOffset ProcessStart(int _) => caseName == "mismatch"
-                ? recordedStart.AddSeconds(2)
-                : recordedStart;
+            var before = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            DateTimeOffset ProcessStart(int _) => caseName switch
+            {
+                "mismatch" => recordedStart.AddSeconds(2),
+                "absent-process" => throw new ArgumentException("not found"),
+                "exited-process" => throw new InvalidOperationException("exited"),
+                "non-access-win32" => throw new Win32Exception(87),
+                "stale-denied" or "future-denied" => throw new Win32Exception(5),
+                _ => recordedStart,
+            };
             Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
                 Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From("https://github.com/example/repo", null));
             Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
@@ -346,6 +369,25 @@ public sealed class TaskCommandTests
                 Assert.Equal(JsonValueKind.Null, daemon.GetProperty("reason").ValueKind);
             else
                 Assert.Equal(expectedDaemonReason, daemon.GetProperty("reason").GetString());
+            if (caseName is "future" or "future-denied" or "malformed" or "wrong-tick-shape")
+            {
+                Assert.Equal(JsonValueKind.Null, daemon.GetProperty("observedAt").ValueKind);
+                Assert.Equal(JsonValueKind.Null, daemon.GetProperty("ageSeconds").ValueKind);
+            }
+            else
+            {
+                Assert.Equal(heartbeatAt, daemon.GetProperty("observedAt").GetDateTimeOffset());
+                Assert.True(daemon.GetProperty("ageSeconds").GetInt32() >= 0);
+            }
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput,
+                Resolve, Provision, Ct, utcNow: () => now, processStartTimeAccessor: ProcessStart);
+            if (daemon.GetProperty("observedAt").ValueKind == JsonValueKind.Null)
+                Assert.Contains("(no observation)", textOutput.ToString(), StringComparison.Ordinal);
+            else if (expectedAvailability != "recently-observed")
+                Assert.Contains("recorded heartbeat time", textOutput.ToString(), StringComparison.Ordinal);
+            Assert.Equal(before, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
         }
         finally
         {
@@ -420,6 +462,8 @@ public sealed class TaskCommandTests
                 Assert.Contains("daemon: recently-observed", textOutput.ToString(), StringComparison.Ordinal);
             else
             {
+                Assert.Contains("queued (daemon-observation-unknown)",
+                    textOutput.ToString(), StringComparison.Ordinal);
                 Assert.Contains("daemon: unknown (reason process-identity-unverifiable)",
                     textOutput.ToString(), StringComparison.Ordinal);
                 Assert.Contains("recorded heartbeat time", textOutput.ToString(), StringComparison.Ordinal);
@@ -474,18 +518,32 @@ public sealed class TaskCommandTests
                     OwnedTask = new OwnedTaskSubmission(id, repository, 49, "digest", "recorded-owner", now, receipt),
                 }],
             }, Ct);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.FleetHeartbeatFile)!);
+            await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, JsonSerializer.Serialize(new
+            {
+                tickCompletedAt = now.AddSeconds(-10),
+                identity = new { pid = 1234, processStartTime = now.AddMinutes(-1) },
+            }), Ct);
+            DateTimeOffset DeniedProcessStart(int _) => throw new Win32Exception(5);
             var before = await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct);
             var output = new StringWriter();
-            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), output, Ct);
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), output,
+                static (_, _) => throw new NotSupportedException(),
+                static (_, _, _, _, _, _, _) => throw new NotSupportedException(), Ct,
+                processStartTimeAccessor: DeniedProcessStart, utcNow: () => now);
             using var json = JsonDocument.Parse(output.ToString());
             Assert.Equal(expectedState, json.RootElement.GetProperty("state").GetString());
             Assert.Equal(expectedTrigger, json.RootElement.GetProperty("nextTrigger").GetString());
+            Assert.Equal("unknown", json.RootElement.GetProperty("daemon").GetProperty("availability").GetString());
             Assert.Equal("recorded-owner", json.RootElement.GetProperty("conductorHolder").GetString());
             Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("blocked").ValueKind);
             Assert.Equal(retired ? JsonValueKind.Object : JsonValueKind.Null,
                 json.RootElement.GetProperty("retirement").ValueKind);
             var text = new StringWriter();
-            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), text, Ct);
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), text,
+                static (_, _) => throw new NotSupportedException(),
+                static (_, _, _, _, _, _, _) => throw new NotSupportedException(), Ct,
+                processStartTimeAccessor: DeniedProcessStart, utcNow: () => now);
             Assert.Contains(expectedState, text.ToString(), StringComparison.Ordinal);
             Assert.Contains($"next: {expectedTrigger}", text.ToString(), StringComparison.Ordinal);
             if (retired)
@@ -1091,9 +1149,20 @@ public sealed class TaskCommandTests
             Assert.Equal(briefBeforeReplay, await File.ReadAllBytesAsync(retained.SpecFile, Ct));
             Assert.Equal(trustBeforeReplay, await File.ReadAllBytesAsync(ProjectCeilingStore.DefaultPath, Ct));
 
-            // Exact replay is idempotent and still cannot reach a vendor or provision another lane.
-            Assert.Equal(0, await TaskCommand.ExecuteAsync(initial, TextWriter.Null, Resolve, Provision, Ct,
-                IssuePreparationRunner.NoCollisions));
+            // Exact replay is idempotent, uses the same observation seam, and still cannot reach a
+            // vendor or provision another lane.
+            var now = new DateTimeOffset(2026, 10, 2, 23, 0, 0, TimeSpan.Zero);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.FleetHeartbeatFile)!);
+            await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, JsonSerializer.Serialize(new
+            {
+                tickCompletedAt = now.AddSeconds(-10),
+                identity = new { pid = 1234, processStartTime = now.AddMinutes(-1) },
+            }), Ct);
+            DateTimeOffset DeniedProcessStart(int _) => throw new Win32Exception(5);
+            var replayOutput = new StringWriter();
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(initial, replayOutput, Resolve, Provision, Ct,
+                IssuePreparationRunner.NoCollisions, DeniedProcessStart, () => now));
+            Assert.Contains("queued (daemon-observation-unknown)", replayOutput.ToString(), StringComparison.Ordinal);
             Assert.Equal(1, provisions);
             Assert.Equal(queueBeforeReplay, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
             Assert.Equal(briefBeforeReplay, await File.ReadAllBytesAsync(retained.SpecFile, Ct));

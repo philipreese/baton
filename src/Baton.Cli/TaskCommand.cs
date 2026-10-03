@@ -70,7 +70,8 @@ public static class TaskCommand
         {
             if (existing.OwnedTask!.InputDigest != digest)
                 throw new CliArgumentException($"Task '{id}' already retains different explicit submission input.");
-            await PrintStatusAsync(id, false, output, cancellationToken).ConfigureAwait(false);
+            await PrintStatusAsync(id, false, output, cancellationToken,
+                processStartTimeAccessor, utcNow).ConfigureAwait(false);
             return 0;
         }
 
@@ -378,7 +379,7 @@ public static class TaskCommand
             output.WriteLine($"  daemon: {status.daemon.availability}"
                 + (heartbeat.Reason is { } daemonReason ? $" (reason {daemonReason})" : "")
                 + (heartbeat.ObservedAt is { } lastObserved
-                    ? heartbeat.Availability == DaemonAvailability.Unknown
+                    ? heartbeat.Availability != DaemonAvailability.RecentlyObserved
                         ? $" (recorded heartbeat time {lastObserved:O}; liveness not verified)"
                         : $" (last observed {lastObserved:O})"
                     : " (no observation)"));
@@ -436,40 +437,71 @@ public static class TaskCommand
             return new(DaemonAvailability.Unavailable, "heartbeat-unavailable", null);
         }
 
-        DateTimeOffset? observedAt = null;
+        DateTimeOffset observedAt;
+        JsonElement root;
         try
         {
             using var document = JsonDocument.Parse(heartbeat);
-            var root = document.RootElement;
+            root = document.RootElement.Clone();
             observedAt = root.GetProperty("tickCompletedAt").GetDateTimeOffset();
-            if (now < observedAt)
-                return new(DaemonAvailability.Unavailable, "heartbeat-in-future", observedAt);
-            if (now - observedAt >= TimeSpan.FromSeconds(90))
-                return new(DaemonAvailability.Unavailable, "heartbeat-stale", observedAt);
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException
+            or ArgumentException
+            or FormatException or OverflowException)
+        {
+            return new(DaemonAvailability.Unavailable, "heartbeat-unavailable", null);
+        }
 
+        if (now < observedAt)
+            return new(DaemonAvailability.Unavailable, "heartbeat-in-future", null);
+        if (now - observedAt >= TimeSpan.FromSeconds(90))
+            return new(DaemonAvailability.Unavailable, "heartbeat-stale", observedAt);
+
+        int pid;
+        DateTimeOffset processStartedAt;
+        try
+        {
             var identity = root.GetProperty("identity");
-            var pid = identity.GetProperty("pid").GetInt32();
-            var processStartedAt = identity.GetProperty("processStartTime").GetDateTimeOffset();
+            pid = identity.GetProperty("pid").GetInt32();
+            processStartedAt = identity.GetProperty("processStartTime").GetDateTimeOffset();
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException
+            or ArgumentException or FormatException or OverflowException)
+        {
+            return new(DaemonAvailability.Unavailable, "heartbeat-unavailable", observedAt);
+        }
+
+        return InspectProcessIdentity(pid, processStartedAt, observedAt, processStartTimeAccessor);
+    }
+
+    private static DaemonObservation InspectProcessIdentity(
+        int pid,
+        DateTimeOffset processStartedAt,
+        DateTimeOffset observedAt,
+        Func<int, DateTimeOffset> processStartTimeAccessor)
+    {
+        if (pid <= 0)
+            return new(DaemonAvailability.Unavailable, "process-unavailable", observedAt);
+
+        try
+        {
             var actualProcessStartedAt = processStartTimeAccessor(pid);
             var sameProcess = Math.Abs((actualProcessStartedAt - processStartedAt).TotalSeconds) < 2;
             return sameProcess
                 ? new(DaemonAvailability.RecentlyObserved, null, observedAt)
                 : new(DaemonAvailability.Unavailable, "process-identity-mismatch", observedAt);
         }
-        catch (System.ComponentModel.Win32Exception ex)
+        catch (System.ComponentModel.Win32Exception)
         {
-            return ex.NativeErrorCode == 5
-                ? new(DaemonAvailability.Unknown, "process-identity-unverifiable", observedAt)
-                : new(DaemonAvailability.Unavailable, "process-unavailable", observedAt);
+            return new(DaemonAvailability.Unknown, "process-identity-unverifiable", observedAt);
         }
         catch (UnauthorizedAccessException)
         {
             return new(DaemonAvailability.Unknown, "process-identity-unverifiable", observedAt);
         }
-        catch (Exception ex) when (ex is IOException or JsonException
-            or KeyNotFoundException or InvalidOperationException or ArgumentException)
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
-            return new(DaemonAvailability.Unavailable, "heartbeat-unavailable", observedAt);
+            return new(DaemonAvailability.Unavailable, "process-unavailable", observedAt);
         }
     }
 }
