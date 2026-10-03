@@ -66,6 +66,22 @@ internal static class StoppedWorkAdviceSettings
             return false;
         }
     }
+
+    internal static bool IsAutomaticMissingVerdictReplacementReviewEnabled(string repository)
+    {
+        if (!File.Exists(BatonPaths.SettingsFile)) return false;
+        try
+        {
+            var settings = JsonSerializer.Deserialize<DaemonSettings>(
+                File.ReadAllText(BatonPaths.SettingsFile));
+            return settings?.Queue.IsAutomaticMissingVerdictReplacementReviewEnabled(repository) == true;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine("Automatic missing-verdict replacement review settings are unreadable; automatic admission remains off.");
+            return false;
+        }
+    }
 }
 
 public sealed partial class WorkItemAdvancer

@@ -104,6 +104,14 @@ public sealed record QueueSettings
     /// </summary>
     public IReadOnlyDictionary<string, JsonElement>? StoppedWorkAdvice { get; init; }
 
+    /// <summary>
+    /// Exact canonical repositories allowed to automatically admit one replacement review after a
+    /// typed <see cref="StoppedWorkHaltCause.MissingVerdict"/> halt and a retained recommendation.
+    /// This is independent from <see cref="StoppedWorkAdvice"/>; enabling it never enables advice
+    /// or selects a provider.
+    /// </summary>
+    public IReadOnlyDictionary<string, JsonElement>? AutomaticMissingVerdictReplacementReview { get; init; }
+
     /// <summary>Independent exact-repository provider map. Raw JSON preserves unrelated settings
     /// even when the map is malformed. Selection never enables advice.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -144,6 +152,12 @@ public sealed record QueueSettings
 
     public bool IsStoppedWorkAdviceEnabled(string repository) =>
         StoppedWorkAdvice?.TryGetValue(repository, out var enabled) == true
+        && enabled.ValueKind == JsonValueKind.True
+        && string.Equals(RepositoryIdentity.TryCanonicalize(repository), repository, StringComparison.Ordinal)
+        && !repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase);
+
+    public bool IsAutomaticMissingVerdictReplacementReviewEnabled(string repository) =>
+        AutomaticMissingVerdictReplacementReview?.TryGetValue(repository, out var enabled) == true
         && enabled.ValueKind == JsonValueKind.True
         && string.Equals(RepositoryIdentity.TryCanonicalize(repository), repository, StringComparison.Ordinal)
         && !repository.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase);

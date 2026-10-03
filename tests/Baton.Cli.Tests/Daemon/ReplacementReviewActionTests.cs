@@ -289,6 +289,62 @@ public sealed class ReplacementReviewActionTests
     }
 
     [Fact]
+    public async Task Revoked_automatic_action_is_paused_and_resumes_without_a_new_slot()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home);
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item with
+                {
+                    ReplacementReviewAction = item.ReplacementReviewAction! with
+                    {
+                        Origin = QueueReplacementReviewOrigin.Automatic,
+                    },
+                }).ToList(),
+            }, Ct);
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
+
+            var launches = 0;
+            var scheduler = new QueueSchedulerService((_, _) =>
+            {
+                Interlocked.Increment(ref launches);
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                advancer: advancer, conductorObligations: store);
+            await scheduler.TickOnceAsync(Ct);
+            var paused = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Queued, paused.State);
+            Assert.NotNull(paused.ReplacementReviewAction!.PausedReason);
+            Assert.Equal(0, launches);
+
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                    {
+                        [Repository] = JsonSerializer.SerializeToElement(true),
+                    },
+                },
+            }, BatonPaths.SettingsFile, Ct);
+            await scheduler.TickOnceAsync(Ct);
+            var resumed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(1, launches);
+            Assert.Equal(QueueItemState.Launched, resumed.State);
+            Assert.Null(resumed.ReplacementReviewAction!.PausedReason);
+            Assert.Equal(2, resumed.Round);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
     public async Task Launch_claim_binds_one_target_before_the_worker_boundary()
     {
         var home = TempHome();

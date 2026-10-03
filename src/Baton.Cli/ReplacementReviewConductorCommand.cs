@@ -19,7 +19,8 @@ internal static class ReplacementReviewConductorCommand
         WorkItemAdvancer? advancer = null,
         ConductorObligationStore? obligations = null,
         CancellationToken cancellationToken = default,
-        Func<CancellationToken, Task>? beforeAdviceRead = null)
+        Func<CancellationToken, Task>? beforeAdviceRead = null,
+        bool automatic = false)
     {
         var key = options.ObligationKey!;
         var holder = options.Holder!;
@@ -91,6 +92,18 @@ internal static class ReplacementReviewConductorCommand
             throw new ConductorObligationStoreException("No complete current stopped-work advice is retained.");
         }
 
+        // Automatic admission is the one narrow exception to advice-only routing: a retained
+        // typed MissingVerdict source plus Recommend may consume this existing action slot, but
+        // neither explanation text nor any other halt or choice is authority.
+        if (automatic
+            && (intent.HaltCause != StoppedWorkHaltCause.MissingVerdict
+                || intent.Stage is not (WorkStage.Review or WorkStage.ReReview)
+                || !intent.AutomaticMissingVerdictReplacementReviewEligible
+                || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository)
+                || view.Response.Decision.Choice != StoppedWorkAdviceChoice.Recommend))
+            throw new ConductorObligationStoreException(
+                "Automatic replacement review requires an opted-in MissingVerdict source and a retained Recommend advice choice.");
+
         var identity = RepositoryIdentity.From("https://" + repository, null)
             ?? throw new ConductorObligationStoreException("Repository identity is invalid.");
         var claim = await ConductorClaimStore.GetClaimAsync(identity, batonRoot, cancellationToken)
@@ -101,7 +114,8 @@ internal static class ReplacementReviewConductorCommand
         var action = new QueueReplacementReviewAction(
             key, holder, digest, repository, tag, sourceAttempt, source.RoomDirectory,
             stage, source.Round, intent.PullRequest.Value, expectedHead, source.Workspace,
-            source.Branch, DateTimeOffset.UtcNow);
+            source.Branch, DateTimeOffset.UtcNow,
+            Origin: automatic ? QueueReplacementReviewOrigin.Automatic : QueueReplacementReviewOrigin.Manual);
         await advancer.ValidateReplacementReviewSourceAsync(source, action, cancellationToken)
             .ConfigureAwait(false);
         var destinationRole = WorkStages.RoleFor(stage);

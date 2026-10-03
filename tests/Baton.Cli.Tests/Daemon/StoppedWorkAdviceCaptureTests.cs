@@ -22,6 +22,7 @@ public sealed class StoppedWorkAdviceCaptureTests
     private sealed class FakeGh : IGhCliRunner
     {
         public List<string[]> Calls { get; } = [];
+        private bool _draft = true;
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args,
             CancellationToken cancellationToken)
@@ -37,7 +38,13 @@ public sealed class StoppedWorkAdviceCaptureTests
                     "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", ""));
             }
 
-            const string pr = "{\"number\":77,\"state\":\"OPEN\",\"isDraft\":true,"
+            if (args.Contains("ready", StringComparer.Ordinal))
+            {
+                _draft = false;
+                return Task.FromResult(new GhCliResult(true, 0, string.Empty, string.Empty));
+            }
+
+            var pr = $"{{\"number\":77,\"state\":\"OPEN\",\"isDraft\":{(_draft ? "true" : "false")},"
                 + "\"headRefOid\":\"" + Head + "\",\"headRefName\":\"1934-lane\","
                 + "\"baseRefName\":\"main\",\"isCrossRepository\":false,"
                 + "\"statusCheckRollup\":[]}";
@@ -131,6 +138,93 @@ public sealed class StoppedWorkAdviceCaptureTests
             Assert.Equal(ConductorObligationStatus.TransportAcknowledged,
                 (await store.ReadAsync(judgment.Key!, Ct))?.Status);
             await scheduler.DrainStoppedWorkAdviceAsync();
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Scheduler_recovers_an_opted_in_missing_verdict_through_advice_launch_and_exact_head_proof()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableAutomaticReplacementReviewAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture",
+                cancellationToken: Ct);
+            var sourceRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, sourceRoom,
+                new FleetAttemptId("automatic-source"));
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item with
+                {
+                    PullRequest = 77,
+                    Round = 1,
+                    AutomaticFixUsed = false,
+                }).ToList(),
+            }, Ct);
+
+            var advancer = new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var halted = await ReadBackAsync();
+            var intent = Assert.IsType<StoppedWorkJudgment>(halted.StoppedWorkJudgment);
+            Assert.True(intent.AutomaticMissingVerdictReplacementReviewEligible);
+
+            var store = Store();
+            var adviceCalls = 0;
+            var launches = 0;
+            var scheduler = new QueueSchedulerService(async (request, _) =>
+            {
+                Interlocked.Increment(ref launches);
+                Directory.CreateDirectory(request.RoomDirectory);
+                var verdictPath = Path.Combine(request.RoomDirectory, "verdict.json");
+                await File.WriteAllTextAsync(verdictPath, $$"""
+                    {"reviewedRef":"{{Head}}","completion":"complete","decision":"approve","summary":"Recovered.","findings":[]}
+                    """, Ct);
+                await TerminalSentinelWriter.WriteAsync(request.RoomDirectory,
+                    new WorkflowStatusView(WorkflowOutcome.Succeeded, [], [verdictPath], null), Ct);
+                return new QueueLaunchOutcome(request.RoomDirectory);
+            }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                advancer: advancer, conductorObligations: store,
+                stoppedWorkAdvice: (obligation, request, _, _, _) =>
+                {
+                    Interlocked.Increment(ref adviceCalls);
+                    return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+                });
+
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () => (await ReadBackAsync()).ReplacementReviewAction is not null);
+            Assert.Equal(1, adviceCalls);
+
+            await scheduler.TickOnceAsync(Ct);
+            Assert.Equal(1, launches);
+            Assert.Equal(QueueItemState.Launched, (await ReadBackAsync()).State);
+
+            await WaitForAsync(async () =>
+            {
+                await scheduler.TickOnceAsync(Ct);
+                return (await ReadBackAsync()).Stage == WorkStage.Ready;
+            });
+            var recovered = await ReadBackAsync();
+            Assert.True(recovered.Stage == WorkStage.Ready,
+                JsonSerializer.Serialize(new
+                {
+                    recovered.Stage,
+                    recovered.State,
+                    recovered.Error,
+                    recovered.AttemptId,
+                    recovered.AttemptSettledFactDurable,
+                    Action = recovered.ReplacementReviewAction
+                }));
+            Assert.NotNull(recovered.ReplacementReviewAction?.CompletionProof);
+            await scheduler.TickOnceAsync(Ct);
+            Assert.Equal(ConductorObligationStatus.ActionObserved,
+                (await store.ReadAsync(intent.Key!, Ct))?.Status);
         }
         finally
         {
@@ -357,6 +451,22 @@ public sealed class StoppedWorkAdviceCaptureTests
             },
         }, BatonPaths.SettingsFile, Ct);
 
+    private static async Task EnableAutomaticReplacementReviewAsync() =>
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                StoppedWorkAdvice = new Dictionary<string, JsonElement>
+                {
+                    [Repository] = JsonSerializer.SerializeToElement(true),
+                },
+                AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                {
+                    [Repository] = JsonSerializer.SerializeToElement(true),
+                },
+            },
+        }, BatonPaths.SettingsFile, Ct);
+
     private static ConductorObligationStore Store() => new(
         new FleetEventLog(
             BatonPaths.FleetEventsFile,
@@ -380,15 +490,18 @@ public sealed class StoppedWorkAdviceCaptureTests
             stoppedWorkAdvice: launch);
 
     private static RetainedStoppedWorkAdviceResponse Response(
-        ConductorObligation obligation, StoppedWorkAdviceRequest request) => new(
+        ConductorObligation obligation, StoppedWorkAdviceRequest request,
+        StoppedWorkAdviceChoice choice = StoppedWorkAdviceChoice.Hold) => new(
         new StoppedWorkAdviceDecision(
             obligation.ObligationId,
             request.Repository,
             request.Tag,
             request.AttemptId.Value,
             request.ContextSha256,
-            StoppedWorkAdviceChoice.Hold,
-            "The verdict is incomplete."),
+            choice,
+            choice == StoppedWorkAdviceChoice.Recommend
+                ? "A replacement review is appropriate."
+                : "The verdict is incomplete."),
         CodexReadinessDecisionAdapter.AdapterName,
         CodexReadinessDecisionAdapter.Model,
         CodexReadinessDecisionAdapter.Effort,

@@ -78,7 +78,7 @@ public sealed partial class QueueSchedulerService
             intent.HaltCause, intent.RepairAllowance, intent.VerdictAvailable, intent.RequiredChecks, intent.State);
         try
         {
-            await _conductorObligations.DecideStoppedWorkOnceAsync(intent.Key!, request, context,
+            var adviceResult = await _conductorObligations.DecideStoppedWorkOnceAsync(intent.Key!, request, context,
                 async (current, token) =>
                 {
                     await ValidateStoppedWorkSourceAsync(source, current, token).ConfigureAwait(false);
@@ -103,7 +103,33 @@ public sealed partial class QueueSchedulerService
             {
                 await ValidateStoppedWorkSourceAsync(source, obligation, cancellationToken, admission: false)
                     .ConfigureAwait(false);
+                var automaticRecommendation = intent.AutomaticMissingVerdictReplacementReviewEligible
+                    && intent.HaltCause == StoppedWorkHaltCause.MissingVerdict
+                    && adviceResult.Response.Decision.Choice == StoppedWorkAdviceChoice.Recommend;
+                if (automaticRecommendation
+                    && (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false)).Held)
+                {
+                    // A held queue pauses automatic admission. Leave source verification unmarked so
+                    // the retained response is reconsidered after the operator resumes the queue.
+                    return;
+                }
                 _conductorObligations.MarkStoppedWorkAdviceSourceChecked(intent.Key!);
+                if (automaticRecommendation)
+                {
+                    await ReplacementReviewConductorCommand.ExecuteAsync(
+                        new ConductorOptions(
+                            ConductorVerb.Act,
+                            Holder: intent.Holder,
+                            ObligationKey: intent.Key,
+                            Action: "replace-review",
+                            ExpectedHead: intent.PullRequestHead),
+                        TextWriter.Null,
+                        BatonPaths.Root,
+                        _advancer,
+                        _conductorObligations,
+                        cancellationToken,
+                        automatic: true).ConfigureAwait(false);
+                }
             }
             catch (Exception)
             {

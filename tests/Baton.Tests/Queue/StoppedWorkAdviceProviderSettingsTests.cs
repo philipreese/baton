@@ -22,6 +22,29 @@ public sealed class StoppedWorkAdviceProviderSettingsTests
     }
 
     [Theory]
+    [InlineData("true", true)]
+    [InlineData("false", false)]
+    [InlineData("\"true\"", false)]
+    public void Automatic_missing_verdict_opt_in_is_exact_true_and_independent(string value, bool expected)
+    {
+        var settings = JsonSerializer.Deserialize<QueueSettings>(
+            "{\"AutomaticMissingVerdictReplacementReview\":{\"" + Repository + "\":" + value + "}}")!;
+
+        Assert.Equal(expected, settings.IsAutomaticMissingVerdictReplacementReviewEnabled(Repository));
+        Assert.False(settings.IsStoppedWorkAdviceEnabled(Repository));
+    }
+
+    [Fact]
+    public void Automatic_missing_verdict_opt_in_rejects_noncanonical_keys_without_resetting_settings()
+    {
+        var settings = JsonSerializer.Deserialize<QueueSettings>(
+            "{\"MaxLiveWeight\":9,\"AutomaticMissingVerdictReplacementReview\":{\"https://github.com/example/project\":true}}")!;
+
+        Assert.False(settings.IsAutomaticMissingVerdictReplacementReviewEnabled(Repository));
+        Assert.Equal(9, settings.EffectiveMaxLiveWeight);
+    }
+
+    [Theory]
     [InlineData("null")]
     [InlineData("false")]
     [InlineData("[]")]

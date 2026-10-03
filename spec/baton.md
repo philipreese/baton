@@ -8801,8 +8801,9 @@ observed forge state. An empty or mismatching claim, a dirty workspace, or a mov
 before a model launch.
 
 This explicit local path is one narrow exception to the external-harness-only conductor shape in
-§10. It does not introduce a goal loop, heartbeat, queue launch, automatic action execution,
-website decision surface or paid API transport. The existing queue-owned continuation obligations
+§10. It does not introduce a goal loop, heartbeat, queue launch, website decision surface or paid API
+transport. Except for the bounded missing-verdict replacement-review action in #2591 below, it does
+not introduce automatic action execution. The existing queue-owned continuation obligations
 retain their at-least-once transport semantics. The readiness path uses the same
 `ConductorObligationStore` for identity and `TransportAcknowledged` but writes a durable launch
 marker before the vendor process. A complete validated response and matching controller receipt
@@ -8886,7 +8887,8 @@ production enablement. Each instruction class requires positive native discovery
 native signal leaves that class unverified. Model silence and empty tool lists do not establish
 instruction isolation. The request stays vendor-neutral; no AGY advice provider or external desktop
 wake is added. Manual readiness remains Codex-only. No provider can invoke a fix, dispatch, merge,
-queue resume, permission change or automatic action.
+queue resume, permission change or any automatic action other than the bounded missing-verdict
+replacement-review reconciliation described below.
 
 Fleet Glass displays the request and retained bounded advice as **advice only, no action taken**.
 Source/owner drift before launch refuses; drift after launch makes retained advice stale rather than
@@ -8899,14 +8901,24 @@ evidence; a recommendation alone cannot set it. This is a read-only advisory dis
 decision or dispatch control. The explicit replacement-review command below consumes one saved
 request under its own bounded authority; no provider response grants permission to act.
 
-### Explicit replacement review for a missing verdict (#2518)
+### Replacement review for a missing verdict (#2518, #2591)
 
 An external conductor may explicitly run `baton conductor act --obligation <key> --holder
 <holder> --action replace-review --expected-head <full-sha>` against one complete, validated
-stopped-work advice response. This is a typed command, never an interpretation or automatic
-execution of the response's prose. The stable source obligation owns one action slot, bound to the
-advice digest, holder, repository, queue tag, terminal source attempt and stage, open PR and exact
-head. Identical requests replay the retained slot; changed identity conflicts.
+stopped-work advice response. This is a typed command, never an interpretation of the response's
+prose. The stable source obligation owns one action slot, bound to the advice digest, holder,
+repository, queue tag, terminal source attempt and stage, open PR and exact head. Identical requests
+replay the retained slot; changed identity conflicts.
+
+The independent `Queue.AutomaticMissingVerdictReplacementReview` exact-canonical-repository JSON-true
+opt-in records eligibility only when a new `MissingVerdict` halt is captured. A complete retained
+advice response with typed `Recommend` may then reconcile through that same action admission and
+launch path; `Hold`, explanation text, historical halted rows, and every other halt are ineligible.
+The opt-in does not enable advice or change its provider. Manual admission remains compatible and
+does not require the opt-in. Before admission and before launch, current opt-in, hold, owner, source,
+workspace, open PR and exact head are revalidated. Revoked unlaunched automatic work is paused and
+excluded from queue candidacy, not completed or terminally blocked; re-enabling the opt-in can resume
+it. Already launched work is not revoked.
 
 Admission is limited to a current `MissingVerdict` halt at `Review` or `ReReview` with a known
 terminal source, trustworthy round and automatic-fix history, a current conductor holder, and an
