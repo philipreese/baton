@@ -4640,10 +4640,11 @@ def _agy_stream_follow_up_result_text(event):
 class _AgyStreamFollowUpController:
     """Spawns the real `agy` process from a fully resolved+expanded argv/env, feeds it at most two
     stdin messages (the second only once an ACTIVE `step_update` is observed), and merges stdout
-    lines and new `.baton-grants.ndjson` lines into ONE ordinal sequence under a single lock -- so
-    "did X happen before Y" is answered by an allocation order this process itself controls, never by
-    OS-clock timestamps Windows is free to tie (#2537). Caps each stream at `cap_bytes`, stops the
-    whole process tree at `timeout_s` regardless of state, and never retries a send.
+    lines and new `.baton-grants.ndjson` lines into ONE ordinal sequence under a single lock. The
+    ordinals describe this controller's acquisition order only; they do not prove native
+    cross-source happens-before, so the classifier applies an explicit partial order rather than
+    treating stdout and grant-log records as one vendor clock. Caps each stream at `cap_bytes`,
+    stops the whole process tree at `timeout_s` regardless of state, and never retries a send.
     """
 
     def __init__(self, argv, cwd, env, grants_path, cap_bytes=1024 * 1024, timeout_s=110,
@@ -5019,8 +5020,12 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
     own ordinal-tagged, lock-serialized sequence), the two ledger byte counts, or `write_landed` (a
     plain `os.path.exists` the CALLER takes on the exact forbidden path -- this function never
     touches a filesystem itself); nothing here re-derives order from a wall-clock timestamp (events
-    may carry one for diagnostics, ignored here), and nothing here drives a vendor CLI. Missing
-    evidence is INCONCLUSIVE; an explicit grant or identity violation is FAIL.
+    may carry one for diagnostics, ignored here), and nothing here drives a vendor CLI. The ordinal
+    chain is strict through the two result events; the stdout `second_user_input` and grant-log
+    `exact_tool_attempt` are independent acquisition sources, so their cross-source order is not a
+    claim. Both must nevertheless be strictly inside the first-result/second-result window, and all
+    required evidence ordinals must be unique. Missing evidence is INCONCLUSIVE; an explicit grant
+    or identity violation is FAIL.
     """
     if write_landed:
         return FAIL, "the exact forbidden path exists on disk -- the denied write landed anyway"
@@ -5074,20 +5079,32 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
     if incomplete:
         return INCONCLUSIVE, "incomplete controller evidence: " + ", ".join(sorted(incomplete))
 
-    required_order = [
+    required_events = [
         "first_message_flush", "init", "active", "correction_flush", "first_result",
         "second_user_input", "exact_tool_attempt", "second_result",
     ]
-    missing = [k for k in required_order if k not in by_kind]
+    missing = [k for k in required_events if k not in by_kind]
     if missing:
         return INCONCLUSIVE, f"missing required event(s): {', '.join(missing)}"
 
-    ordinals = [by_kind[k]["ordinal"] for k in required_order]
     if by_kind["first_result"]["ordinal"] <= by_kind["correction_flush"]["ordinal"]:
         return INCONCLUSIVE, "delivery/first-result boundary was not proven before completion"
-    if any(a >= b for a, b in zip(ordinals, ordinals[1:])):
+    ordinals = {k: by_kind[k]["ordinal"] for k in required_events}
+    if len(set(ordinals.values())) != len(ordinals):
+        return FAIL, f"required events do not have unique ordinals: {ordinals}"
+    strict_chain = [
+        "first_message_flush", "init", "active", "correction_flush", "first_result", "second_result",
+    ]
+    if any(ordinals[a] >= ordinals[b] for a, b in zip(strict_chain, strict_chain[1:])):
         return FAIL, (f"required events are not strictly ordered: "
-                      f"{dict(zip(required_order, ordinals))}")
+                      f"{ {k: ordinals[k] for k in strict_chain} }")
+    first_result_ordinal = ordinals["first_result"]
+    second_result_ordinal = ordinals["second_result"]
+    for kind in ("second_user_input", "exact_tool_attempt"):
+        if not (first_result_ordinal < ordinals[kind] < second_result_ordinal):
+            return FAIL, (f"{kind} is not strictly inside the first/second result window: "
+                          f"first_result={first_result_ordinal}, {kind}={ordinals[kind]}, "
+                          f"second_result={second_result_ordinal}")
 
     init, first_result, second_result = by_kind["init"], by_kind["first_result"], by_kind["second_result"]
     conversation_ids = set(identities)
@@ -5114,8 +5131,10 @@ def _agy_stream_follow_up_classify(events, expected_nonces, forbidden_target_has
         return INCONCLUSIVE, "the hook verdict ledger gained no new complete line during the live run"
 
     return PASS, (
-        "ordered subsequent-turn consumption observed: " +
-        " < ".join(f"{k}({by_kind[k]['ordinal']})" for k in required_order) +
+        "ordered subsequent-turn result window observed: " +
+        " < ".join(f"{k}({ordinals[k]})" for k in strict_chain) +
+        f"; second_user_input({ordinals['second_user_input']}) and "
+        f"exact_tool_attempt({ordinals['exact_tool_attempt']}) are both inside that window" +
         f"; one conversation {conversation_ids.pop()}, two SUCCESS results, the exact write_to_file "
         "attempt was denied as withheld-tool with the matching target hash, and the hook ledger "
         "gained a new verdict line")
@@ -6192,6 +6211,42 @@ def _selftest_agy_stream_follow_up():
             print(f"FAIL  agy-stream-follow-up: config drift was not reported as FAIL: {st} -- {msg}")
             return 1
         print("   OK  config drift FAILs before inspecting events")
+
+        alternate = full_events()
+        alternate[5]["ordinal"], alternate[6]["ordinal"] = 7, 6
+        st, msg = classify(alternate)
+        if st != PASS:
+            print("FAIL  agy-stream-follow-up: the CI-shaped grant-before-user-input "
+                  f"interleaving did not PASS: {st} -- {msg}")
+            return 1
+        print("   OK  grant-before-user-input and user-input-before-grant interleavings both PASS")
+
+        def numbered(values):
+            result = full_events()
+            for item, ordinal in zip(result, values):
+                item["ordinal"] = ordinal
+            return result
+
+        equal_boundary = numbered([1, 2, 3, 4, 4, 6, 5, 8])
+        st, msg = classify(equal_boundary)
+        if st != INCONCLUSIVE or "delivery/first-result boundary" not in msg:
+            print(f"FAIL  agy-stream-follow-up: equal first-result/correction boundary changed: {st} -- {msg}")
+            return 1
+        print("   OK  equal first-result/correction boundary remains INCONCLUSIVE")
+
+        boundary_controls = {
+            "before first_result": [1, 2, 3, 4, 6, 7, 5, 8],
+            "at first_result": [1, 2, 3, 4, 5, 6, 5, 8],
+            "after second_result": [1, 2, 3, 4, 5, 6, 9, 8],
+            "at second_result": [1, 2, 3, 4, 5, 6, 8, 8],
+            "grant/user-input ordinal tie": [1, 2, 3, 4, 5, 6, 6, 8],
+        }
+        for label, values in boundary_controls.items():
+            st, msg = classify(numbered(values))
+            if st != FAIL:
+                print(f"FAIL  agy-stream-follow-up: {label} denial/ordinal control did not FAIL: {st} -- {msg}")
+                return 1
+        print("   OK  before/at/after result-window denials and grant/user-input ordinal ties FAIL")
     except Exception as exc:                                       # noqa: BLE001
         print(f"FAIL  agy-stream-follow-up: classifier arms raised: {exc!r}")
         return 1
