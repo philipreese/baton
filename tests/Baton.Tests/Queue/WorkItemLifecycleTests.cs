@@ -127,6 +127,43 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Theory]
+    [InlineData(WorkStage.Fix)]
+    [InlineData(WorkStage.Continue)]
+    public void Past_implementation_recovery_explains_supported_manual_completion_without_changing_the_transition(
+        WorkStage stage)
+    {
+        var transition = WorkItemLifecycle.Decide(At(stage));
+        var repeated = WorkItemLifecycle.Decide(At(stage));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.False(transition.UsesAutomaticFix);
+        Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
+        Assert.Null(transition.ReconciliationKind);
+        Assert.Equal(StoppedWorkHaltCause.Other, transition.HaltCause);
+        Assert.Contains("manually complete the existing work", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("independent exact-head review under the original grants", transition.Reason,
+            StringComparison.Ordinal);
+        Assert.Contains("current delivery checks", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("after the matching PR is actually merged", transition.Reason,
+            StringComparison.Ordinal);
+        Assert.Contains("baton queue retire <tag> --reason <text> --merged-pr <n>", transition.Reason,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("queue.json", transition.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("stage/state/round", transition.Reason, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Equal(transition with { Reason = repeated.Reason }, repeated);
+        var firstKey = new QueueDecisionEntry(
+            DateTimeOffset.UnixEpoch, "1934-lane", QueueDecisionEntry.Failed, transition.Reason,
+            LiveWeight: 0, FreeGb: null, FloorGb: 0).VerdictKey;
+        var repeatedKey = new QueueDecisionEntry(
+            DateTimeOffset.UnixEpoch, "1934-lane", QueueDecisionEntry.Failed, repeated.Reason,
+            LiveWeight: 0, FreeGb: null, FloorGb: 0).VerdictKey;
+        Assert.Equal(firstKey, repeatedKey);
+    }
+
+    [Theory]
     [InlineData(WorkStage.Fix, WorkStage.ReReview)]
     [InlineData(WorkStage.Continue, WorkStage.Review)]
     public void A_repair_or_continuation_distinguishes_an_unchanged_attempt_base_from_a_distinct_one(
@@ -384,7 +421,7 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(0, transition.Round);
         Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
         Assert.Contains($"noncanonical reviewedRef {describedRef}", transition.Reason, StringComparison.Ordinal);
-        Assert.Contains("carry the round by hand", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("manually complete the existing work", transition.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -476,7 +513,7 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(0, transition.Round);
         Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
         Assert.Contains("noncanonical reviewedRef", transition.Reason, StringComparison.Ordinal);
-        Assert.Contains("carry the round by hand", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("manually complete the existing work", transition.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -802,7 +839,7 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(0, transition.Round);
         Assert.Contains("no readable", transition.Reason, StringComparison.Ordinal);
         Assert.Contains(outcome, transition.Reason, StringComparison.Ordinal);
-        Assert.Contains("carry the round by hand", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("manually complete the existing work", transition.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

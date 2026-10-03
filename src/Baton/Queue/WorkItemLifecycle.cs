@@ -488,15 +488,19 @@ public static class WorkItemLifecycle
     /// by hand no longer makes the next tick pick it up, which is what the pre-#2004 wording promised.
     /// <c>baton queue</c> has <c>add</c>, <c>list</c>, <c>hold</c>, <c>resume</c> and <c>import</c> and
     /// no verb that clears a failure, and <c>QueueCommand.RefuseIfNotReplaceable</c> refuses a re-add for
-    /// any item past <see cref="WorkStage.Implement"/> — so past implement the only recovery in the
-    /// product is the operator's own hand on <c>queue.json</c>.
+    /// any item past <see cref="WorkStage.Implement"/> — so past implement recovery is manual completion
+    /// and independent exact-head review under the original grants and current delivery checks, followed
+    /// by the supported <c>baton queue retire &lt;tag&gt; --reason &lt;text&gt; --merged-pr &lt;n&gt;</c> only after
+    /// the matching PR is actually merged.
     /// </remarks>
     private static string Recovery(WorkStage stage) =>
         stage == WorkStage.Implement
             ? "the item is still at implement, so 'baton queue add' with the same tag replaces it once you "
                 + "have fixed what it needs"
-            : $"no 'baton queue' verb reopens a failed item past implement — carry the round by hand, or edit "
-                + $"this item's stage/state/round in {Status.BatonPaths.QueueFileName} yourself";
+            : "no 'baton queue' verb reopens a failed item past implement — manually complete the existing work "
+                + "and obtain an independent exact-head review under the original grants and current delivery "
+                + "checks; after the matching PR is actually merged, use the supported 'baton queue retire <tag> "
+                + "--reason <text> --merged-pr <n>'";
 
     /// <summary>
     /// Whether the lane's work reached the PR. Both halves must be known: an unknown workspace head or
