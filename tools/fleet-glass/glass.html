@@ -2230,9 +2230,20 @@ function conductorObligationsHtml(snap){
       || (typeof advice.choice === "string" && Object.prototype.hasOwnProperty.call(adviceChoices, advice.choice));
     const completedValid = !objectAdvice || !Object.prototype.hasOwnProperty.call(advice, "completedAt")
       || isoTimestamp(advice.completedAt);
+    const action = row && row.action;
+    const objectAction = action && typeof action === "object" && !Array.isArray(action);
+    const actionStates = ["authorized", "queued", "running", "paused", "blocked",
+      "verified-pending-observation", "completed"];
+    const actionValid = !Object.prototype.hasOwnProperty.call(row, "action") || (objectAction
+      && action.kind === "replace-review" && actionStates.includes(action.state)
+      && (action.origin === "manual" || action.origin === "automatic")
+      && action.owner === "Repository conductor"
+      && (!Object.prototype.hasOwnProperty.call(action, "nextTrigger") || action.nextTrigger === null
+        || (typeof action.nextTrigger === "string" && action.nextTrigger.length <= 4096)));
     const valid = objectAdvice && issueValid && stageValid && stateValid && observedValid
-      && explanationValid && choiceValid && completedValid;
-    const prefix = `<div class="stream-card-result"><b>Advice only — no action taken</b>`;
+      && explanationValid && choiceValid && completedValid && actionValid;
+    const prefix = `<div class="stream-card-result"><b>${objectAction
+      ? "Advice with replacement-review action" : "Advice only — no action taken"}</b>`;
     if(!valid) return prefix + ` · <span class="chip c-warn">Unknown advice</span>`
       + `<div>Advice status: Unknown. Advice details are unavailable.</div></div>`;
     const [stateLabel, stateClass] = adviceStates[advice.state];
@@ -2243,8 +2254,10 @@ function conductorObligationsHtml(snap){
       + ` · Observed ${esc(advice.observedAt)}`;
     if(advice.choice && (advice.state === "available" || advice.state === "stale")) out += ` · Choice: ${esc(adviceChoices[advice.choice])}`;
     if(advice.completedAt && (advice.state === "available" || advice.state === "stale")) out += ` · Advice recorded ${esc(advice.completedAt)}`;
+    if(objectAction) out += ` · Action: ${esc(action.state)} · Origin: ${esc(action.origin)}`;
     out += `</div>`;
     if(advice.explanation && (advice.state === "available" || advice.state === "stale")) out += `<div class="stream-card-result">Advice explanation: ${esc(advice.explanation)}</div>`;
+    if(objectAction && action.nextTrigger) out += `<div class="stream-card-result">Next trigger: ${esc(action.nextTrigger)}</div>`;
     return out;
   }
   function cards(rows){

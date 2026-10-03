@@ -233,6 +233,141 @@ public sealed class StoppedWorkAdviceCaptureTests
     }
 
     [Fact]
+    public async Task Revoked_automatic_admission_keeps_advice_available_for_manual_action()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableAutomaticReplacementReviewAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture", cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room, new FleetAttemptId("revoked-source"));
+            await MakeReplacementEligibleAsync();
+            var advancer = new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var halted = await ReadBackAsync();
+            var intent = Assert.IsType<StoppedWorkJudgment>(halted.StoppedWorkJudgment);
+            var store = Store();
+            var scheduler = Scheduler(store, advancer, async (obligation, request, _, _, _) =>
+            {
+                await EnableStoppedWorkAdviceAsync();
+                return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
+            });
+
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
+                    == StoppedWorkJudgmentState.Available);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+            Assert.Equal(StoppedWorkJudgmentState.Available,
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
+
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                new ConductorOptions(ConductorVerb.Act, Holder: intent.Holder,
+                    ObligationKey: intent.Key, Action: "replace-review", ExpectedHead: Head),
+                TextWriter.Null, home, advancer, store, Ct);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual,
+                (await ReadBackAsync()).ReplacementReviewAction?.Origin);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Checked_recommendation_converges_after_restart_without_a_second_advice_call()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableAutomaticReplacementReviewAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture", cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room, new FleetAttemptId("restart-source"));
+            await MakeReplacementEligibleAsync();
+            var advancer = new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
+            var store = Store();
+            var adviceCalls = 0;
+            var first = Scheduler(store, advancer, async (obligation, request, _, _, _) =>
+            {
+                Interlocked.Increment(ref adviceCalls);
+                await EnableStoppedWorkAdviceAsync();
+                return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
+            });
+            await first.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
+                    == StoppedWorkJudgmentState.Available);
+            await first.DrainStoppedWorkAdviceAsync();
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+
+            await EnableAutomaticReplacementReviewAsync();
+            var restarted = Scheduler(store, advancer, (_, _, _, _, _) =>
+            {
+                Interlocked.Increment(ref adviceCalls);
+                throw new InvalidOperationException("Retained advice must be replayed without another model call.");
+            });
+            await restarted.TickOnceAsync(Ct);
+            await WaitForAsync(async () => (await ReadBackAsync()).ReplacementReviewAction is not null);
+            Assert.Equal(1, adviceCalls);
+            Assert.Equal(QueueReplacementReviewOrigin.Automatic,
+                (await ReadBackAsync()).ReplacementReviewAction?.Origin);
+            await restarted.DrainStoppedWorkAdviceAsync();
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Automatic_hold_retains_advice_without_admitting_an_action()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableAutomaticReplacementReviewAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture", cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room, new FleetAttemptId("hold-source"));
+            await MakeReplacementEligibleAsync();
+            var advancer = new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
+            var store = Store();
+            var calls = 0;
+            var scheduler = Scheduler(store, advancer, (obligation, request, _, _, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Hold));
+            });
+
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
+                    == StoppedWorkJudgmentState.Available);
+            await scheduler.TickOnceAsync(Ct);
+            Assert.Equal(1, calls);
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_new_needs_operator_halt_creates_no_intent_when_opt_out_is_default()
     {
         var home = CreateTempHome();
@@ -357,7 +492,7 @@ public sealed class StoppedWorkAdviceCaptureTests
             Assert.True((await ReadBackAsync()).Halted);
             Assert.Null((await ReadBackAsync()).StoppedWorkJudgment);
 
-            await EnableStoppedWorkAdviceAsync();
+            await EnableAutomaticReplacementReviewAsync();
             await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture",
                 cancellationToken: Ct);
             var secondGh = new FakeGh();
@@ -466,6 +601,17 @@ public sealed class StoppedWorkAdviceCaptureTests
                 },
             },
         }, BatonPaths.SettingsFile, Ct);
+
+    private static Task MakeReplacementEligibleAsync() =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = snapshot.Items.Select(item => item with
+            {
+                PullRequest = 77,
+                Round = 1,
+                AutomaticFixUsed = false,
+            }).ToList(),
+        }, Ct);
 
     private static ConductorObligationStore Store() => new(
         new FleetEventLog(

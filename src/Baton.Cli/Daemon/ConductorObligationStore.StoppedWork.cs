@@ -240,6 +240,12 @@ public sealed partial class ConductorObligationStore
         if (!File.Exists(path)) WriteNewDurable(path, "Source evidence verified after advice.\n");
     }
 
+    internal void MarkStoppedWorkAutomaticAdmissionRefused(string key)
+    {
+        var path = Path.Combine(StoppedWorkAdviceDirectory(key), "automatic-admission-refused");
+        if (!File.Exists(path)) WriteNewDurable(path, "Automatic action admission was refused.\n");
+    }
+
     /// <summary>
     /// Read-only projection input for a stopped-work row. Only a complete response that passes the
     /// same identity validator used after launch is exposed; private paths, receipts and failures

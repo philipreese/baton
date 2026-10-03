@@ -6558,7 +6558,8 @@ and for which realization does what to a package's bytes.
 - **A resident orchestrator that decides on a human's behalf.** There is no room-resident presence;
   the harness remains the decider for worker and queue actions (§5, §7). The explicit, one-shot
   local readiness advice and stopped-work judgment handoff in §14 are narrow opt-in model-backed
-  conductor exceptions. Neither acts on its advice or starts a standing conductor loop.
+  conductor exceptions. Only the separately opted-in, typed missing-verdict `Recommend` exception
+  acts on retained advice; neither starts a standing conductor loop.
 - **Remote *dispatch* triggering — closed, orchestrator-only.** Settled, not open: remote dispatch
   already exists as "talk to your harness from the phone" — a Claude Code mobile session (or any
   other agent that can run CLI verbs and read `terminal.json`/`fleet_status`) driving `baton dispatch`,
@@ -8890,7 +8891,8 @@ wake is added. Manual readiness remains Codex-only. No provider can invoke a fix
 queue resume, permission change or any automatic action other than the bounded missing-verdict
 replacement-review reconciliation described below.
 
-Fleet Glass displays the request and retained bounded advice as **advice only, no action taken**.
+Fleet Glass displays the request and retained bounded advice, and labels the bounded replacement-review
+action with its manual/automatic origin and current state when that shared action slot exists.
 Source/owner drift before launch refuses; drift after launch makes retained advice stale rather than
 applicable authority when observed. Available means a validated saved response with as-of source
 verification, not a continuously verified PR head or permission to act; rendering advice does not

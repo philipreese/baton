@@ -140,6 +140,46 @@ public sealed class ReplacementReviewActionTests
     }
 
     [Fact]
+    public async Task Manual_replay_promotes_an_automatic_slot_and_clears_its_pause()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home);
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item with
+                {
+                    ReplacementReviewAction = item.ReplacementReviewAction! with
+                    {
+                        Origin = QueueReplacementReviewOrigin.Automatic,
+                        PausedReason = "automatic replacement review opt-in was revoked",
+                        NextTrigger = "Re-enable the repository opt-in to resume this unlaunched action.",
+                    },
+                }).ToList(),
+            }, Ct);
+
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+
+            var action = Assert.IsType<QueueReplacementReviewAction>(
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items)
+                    .ReplacementReviewAction);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual, action.Origin);
+            Assert.Null(action.PausedReason);
+            Assert.Null(action.NextTrigger);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Held_queue_and_late_valid_block_refuse_admission()
     {
         var home = TempHome();
@@ -309,14 +349,30 @@ public sealed class ReplacementReviewActionTests
                     },
                 }).ToList(),
             }, Ct);
-            await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                    {
+                        [Repository] = JsonSerializer.SerializeToElement(true),
+                    },
+                },
+            }, BatonPaths.SettingsFile, Ct);
 
             var launches = 0;
+            var revokeAtLaunchBoundary = true;
             var scheduler = new QueueSchedulerService((_, _) =>
             {
                 Interlocked.Increment(ref launches);
                 return Task.FromResult(new QueueLaunchOutcome(null));
             }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                beforeLaunchClaim: async _ =>
+                {
+                    if (!revokeAtLaunchBoundary) return;
+                    revokeAtLaunchBoundary = false;
+                    await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
+                },
                 advancer: advancer, conductorObligations: store);
             await scheduler.TickOnceAsync(Ct);
             var paused = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);

@@ -51,6 +51,25 @@ internal static class ReplacementReviewConductorCommand
         if (source.ReplacementReviewAction is { } retained)
         {
             RequireSameRequest(retained, obligation, holder, expectedHead);
+            if (!automatic && retained.Origin == QueueReplacementReviewOrigin.Automatic)
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                {
+                    Items = current.Items.Select(item =>
+                    {
+                        if (item.Tag != source.Tag || item.ReplacementReviewAction is not { } currentAction)
+                            return item;
+                        RequireSameRequest(currentAction, obligation, holder, expectedHead);
+                        retained = currentAction with
+                        {
+                            Origin = QueueReplacementReviewOrigin.Manual,
+                            PausedReason = null,
+                            NextTrigger = null,
+                        };
+                        return item with { ReplacementReviewAction = retained };
+                    }).ToList(),
+                }, cancellationToken).ConfigureAwait(false);
+            }
             output.WriteLine($"Replacement review for '{key}' is retained; "
                 + (retained.CompletionProof is not null ? "completion verified." :
                     retained.BlockedReason is not null ? "blocked." :
@@ -133,6 +152,22 @@ internal static class ReplacementReviewConductorCommand
             {
                 RequireSameRequest(existing, obligation, holder, expectedHead);
                 replayed = true;
+                if (!automatic && existing.Origin == QueueReplacementReviewOrigin.Automatic)
+                {
+                    var promoted = existing with
+                    {
+                        Origin = QueueReplacementReviewOrigin.Manual,
+                        PausedReason = null,
+                        NextTrigger = null,
+                    };
+                    return currentSnapshot with
+                    {
+                        Items = currentSnapshot.Items.Select(item =>
+                            ReferenceEquals(item, current)
+                                ? item with { ReplacementReviewAction = promoted }
+                                : item).ToList(),
+                    };
+                }
                 return currentSnapshot;
             }
             if (currentSnapshot.Held || current is null

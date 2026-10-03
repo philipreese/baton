@@ -988,12 +988,12 @@ public sealed partial class WorkItemAdvancer
             || item.Repository is not { Length: > 0 } repository
             || item.OwnedTask is null
                 && !IsStoppedWorkAdviceEnabledNow(repository)
-                && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository)
+                && !(haltCause == StoppedWorkHaltCause.MissingVerdict
+                    && StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository))
             || item.ReplacementReviewAction is
             {
                 Origin: QueueReplacementReviewOrigin.Automatic,
                 CompletionProof: null,
-                ReplacementAttemptId: not null,
             })
         {
             return null;

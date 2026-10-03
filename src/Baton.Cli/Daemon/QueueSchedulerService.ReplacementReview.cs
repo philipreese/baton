@@ -18,6 +18,15 @@ public sealed partial class QueueSchedulerService
             throw new ConductorObligationStoreException("The authorized queue identity changed.");
         if (current.ReplacementReviewAction != action)
         {
+            var promoted = action with
+            {
+                Origin = QueueReplacementReviewOrigin.Manual,
+                PausedReason = null,
+                NextTrigger = null,
+            };
+            if (action.Origin == QueueReplacementReviewOrigin.Automatic
+                && current.ReplacementReviewAction == promoted)
+                return false;
             if (action.Origin == QueueReplacementReviewOrigin.Automatic
                 && current.ReplacementReviewAction is { PausedReason: not null }
                 && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(action.Repository))

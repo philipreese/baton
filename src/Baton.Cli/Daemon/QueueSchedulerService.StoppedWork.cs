@@ -44,9 +44,26 @@ public sealed partial class QueueSchedulerService
                 var directory = _conductorObligations.GetStoppedWorkAdviceEvidenceDirectory(intent.Key);
                 var marked = File.Exists(Path.Combine(directory, "launch.json"));
                 if (marked && !File.Exists(Path.Combine(directory, "response.json"))) continue;
-                if (obligation.Status == ConductorObligationStatus.TransportAcknowledged
-                    && (File.Exists(Path.Combine(directory, "source-checked"))
-                        || File.Exists(Path.Combine(directory, "source-stale")))) continue;
+                if (obligation.Status == ConductorObligationStatus.TransportAcknowledged)
+                {
+                    if (File.Exists(Path.Combine(directory, "source-stale"))) continue;
+                    if (File.Exists(Path.Combine(directory, "source-checked")))
+                    {
+                        var automaticCandidate = intent.AutomaticMissingVerdictReplacementReviewEligible
+                            && intent.HaltCause == StoppedWorkHaltCause.MissingVerdict
+                            && item.ReplacementReviewAction is null;
+                        if (!automaticCandidate
+                            || File.Exists(Path.Combine(directory, "automatic-admission-refused"))
+                            || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(
+                                intent.Repository)
+                            || snapshot.Held)
+                            continue;
+                        var retained = await _conductorObligations.ReadStoppedWorkAdviceViewAsync(
+                            obligation, cancellationToken).ConfigureAwait(false);
+                        if (retained?.Response?.Decision.Choice != StoppedWorkAdviceChoice.Recommend)
+                            continue;
+                    }
+                }
                 // Revocation prevents new spending, not recovery of an already retained answer.
                 if (!marked && !StoppedWorkAdviceSettings.IsEnabled(intent.Repository)) continue;
 
@@ -103,38 +120,52 @@ public sealed partial class QueueSchedulerService
             {
                 await ValidateStoppedWorkSourceAsync(source, obligation, cancellationToken, admission: false)
                     .ConfigureAwait(false);
-                var automaticRecommendation = intent.AutomaticMissingVerdictReplacementReviewEligible
-                    && intent.HaltCause == StoppedWorkHaltCause.MissingVerdict
-                    && adviceResult.Response.Decision.Choice == StoppedWorkAdviceChoice.Recommend;
-                if (automaticRecommendation
-                    && (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false)).Held)
-                {
-                    // A held queue pauses automatic admission. Leave source verification unmarked so
-                    // the retained response is reconsidered after the operator resumes the queue.
-                    return;
-                }
                 _conductorObligations.MarkStoppedWorkAdviceSourceChecked(intent.Key!);
-                if (automaticRecommendation)
-                {
-                    await ReplacementReviewConductorCommand.ExecuteAsync(
-                        new ConductorOptions(
-                            ConductorVerb.Act,
-                            Holder: intent.Holder,
-                            ObligationKey: intent.Key,
-                            Action: "replace-review",
-                            ExpectedHead: intent.PullRequestHead),
-                        TextWriter.Null,
-                        BatonPaths.Root,
-                        _advancer,
-                        _conductorObligations,
-                        cancellationToken,
-                        automatic: true).ConfigureAwait(false);
-                }
             }
             catch (Exception)
             {
-                // An answer is retained, but changed or unavailable source evidence cannot certify it as current.
+                // Only source drift makes retained advice stale. Automatic action refusal never
+                // removes the operator's independent manual authority over the retained advice.
                 _conductorObligations.MarkStoppedWorkAdviceStale(intent.Key!);
+                return;
+            }
+
+            var automaticRecommendation = intent.AutomaticMissingVerdictReplacementReviewEligible
+                && intent.HaltCause == StoppedWorkHaltCause.MissingVerdict
+                && adviceResult.Response.Decision.Choice == StoppedWorkAdviceChoice.Recommend;
+            if (!automaticRecommendation) return;
+            var admissionSnapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken)
+                .ConfigureAwait(false);
+            if (admissionSnapshot.Held
+                || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(intent.Repository))
+                return;
+            try
+            {
+                await ReplacementReviewConductorCommand.ExecuteAsync(
+                    new ConductorOptions(
+                        ConductorVerb.Act,
+                        Holder: intent.Holder,
+                        ObligationKey: intent.Key,
+                        Action: "replace-review",
+                        ExpectedHead: intent.PullRequestHead),
+                    TextWriter.Null,
+                    BatonPaths.Root,
+                    _advancer,
+                    _conductorObligations,
+                    cancellationToken,
+                    automatic: true).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                var current = await QueueStore.LoadAsync(BatonPaths.QueueFile, CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!current.Held
+                    && StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(intent.Repository))
+                    _conductorObligations.MarkStoppedWorkAutomaticAdmissionRefused(intent.Key!);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
