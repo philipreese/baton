@@ -253,6 +253,7 @@ public sealed class DispatchExecutionLimitProfileTests : IDisposable
             var limits = accepted!.Request.Limits!;
             Assert.Equal(binding.Timeout, limits.Timeout);
             Assert.Equal(ExecutionLimitSource.RoleDefault, limits.TimeoutSource);
+            Assert.False(limits.MonitorInputsKnown);
         }
         finally
         {
@@ -416,6 +417,83 @@ public sealed class DispatchExecutionLimitProfileTests : IDisposable
                 Assert.Equal(directEntry.Timeout, limits.Timeout);
                 Assert.Equal(ExecutionLimitSource.RoleDefault, limits.TimeoutSource);
             }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Direct_and_queue_launched_role_dispatch_agree_on_matched_profile_limits_and_provenance()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-queue-profile-agree-{Guid.NewGuid():N}");
+        try
+        {
+            var parserBackedAdapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            };
+            await DaemonSettingsStore.SaveAsync(
+                new DaemonSettings
+                {
+                    ExecutionLimitProfiles =
+                    [
+                        new ExecutionLimitProfile
+                        {
+                            Adapter = "claude",
+                            Model = "test-model",
+                            Role = "advise",
+                            DeclaredTaskSize = "medium",
+                            Timeout = TimeSpan.FromMinutes(16),
+                            TokenBudget = 64000,
+                            MaxToolSteps = 32,
+                            MaxRepeatedToolSteps = 7,
+                        },
+                    ],
+                },
+                BatonPaths.SettingsFile, TestContext.Current.CancellationToken);
+
+            var specPath = await WriteSpecAsync(testRoot, "Advise task with a matching profile.");
+            var taskSize = TaskSizeDeclaration.Parse("medium", "matched agreement test");
+            var directRoom = Path.Combine(testRoot, "direct-room");
+            await DispatchCommand.ExecuteAsync(
+                new DispatchOptions(
+                    "advise", specPath, directRoom, Adapter: "claude", Model: "test-model",
+                    DeclaredTaskSize: taskSize),
+                parserBackedAdapters, TestContext.Current.CancellationToken,
+                evaluateRunway: RunwayTestGate.Admit);
+
+            var queueRoom = Path.Combine(testRoot, "queue-room");
+            var item = new QueueItem
+            {
+                Tag = "q-profile-agree-tag",
+                Role = "advise",
+                Workspace = testRoot,
+                SpecFile = specPath,
+                DeclaredTaskSize = taskSize,
+            };
+            var tier = new QueueTierResolution("engine", "claude", "test-model", "high", false, null);
+            var queueOptions = QueueLauncher.BuildOptions(new QueueLaunchRequest(item, tier, queueRoom));
+            var parsedFromArgv = DispatchOptionsParser.Parse(
+                QueueLauncher.BuildArguments(queueOptions).Skip(1).ToList());
+            await DispatchCommand.ExecuteAsync(
+                parsedFromArgv, parserBackedAdapters, TestContext.Current.CancellationToken,
+                evaluateRunway: RunwayTestGate.Admit);
+
+            var directEntry = (await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(directRoom, "bindings.json"), TestContext.Current.CancellationToken))["advise"];
+            var queueEntry = (await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(queueRoom, "bindings.json"), TestContext.Current.CancellationToken))["advise"];
+
+            Assert.Equal(directEntry.Timeout, queueEntry.Timeout);
+            Assert.Equal(directEntry.TokenBudget, queueEntry.TokenBudget);
+            Assert.Equal(directEntry.MaxToolSteps, queueEntry.MaxToolSteps);
+            Assert.Equal(directEntry.MaxRepeatedToolSteps, queueEntry.MaxRepeatedToolSteps);
+            Assert.Equal(directEntry.ExecutionLimitResolution, queueEntry.ExecutionLimitResolution);
+            Assert.Equal("claude/test-model/advise/medium", directEntry.ExecutionLimitResolution?.ChosenKey);
+            Assert.Equal("claude/test-model/advise/medium", directEntry.ExecutionLimitResolution?.OriginatingSelectionKey);
+            Assert.Equal(7, directEntry.MaxRepeatedToolSteps);
         }
         finally
         {

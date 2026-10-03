@@ -195,6 +195,25 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             Assert.Equal(ExecutionLimitSource.RoleDefault, parent.ExecutionLimitResolution?.TokenBudgetSource);
             Assert.Equal(ExecutionLimitSource.RoleDefault, parent.ExecutionLimitResolution?.MaxToolStepsSource);
 
+            await DaemonSettingsStore.SaveAsync(
+                new DaemonSettings
+                {
+                    ExecutionLimitProfiles =
+                    [
+                        new ExecutionLimitProfile
+                        {
+                            Adapter = "fake",
+                            Model = "test-model",
+                            Role = "advise",
+                            DeclaredTaskSize = "unknown",
+                            Timeout = TimeSpan.FromMinutes(7),
+                            TokenBudget = 777,
+                            MaxToolSteps = 7,
+                        },
+                    ],
+                },
+                BatonPaths.SettingsFile, TestContext.Current.CancellationToken);
+
             var inheritedRoom = Path.Combine(testRoot, "child-inherited");
             var inheritedResult = await RedispatchCommand.ExecuteAsync(
                 new RedispatchOptions(parentRoom, inheritedRoom), Adapters, TestContext.Current.CancellationToken);

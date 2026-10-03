@@ -211,6 +211,51 @@ public class WorkerBindingResolverTests
         }
     }
 
+    [Theory]
+    [InlineData("legacy", null, null, null)]
+    [InlineData("adapter", null, null, null)]
+    [InlineData("model", null, null, null)]
+    [InlineData("role", null, null, null)]
+    [InlineData("size", null, null, null)]
+    [InlineData("timeout", null, ExecutionLimitSource.RoleDefault, ExecutionLimitSource.RoleDefault)]
+    [InlineData("token", ExecutionLimitSource.RoleDefault, null, ExecutionLimitSource.RoleDefault)]
+    [InlineData("steps", ExecutionLimitSource.RoleDefault, ExecutionLimitSource.RoleDefault, null)]
+    public void Default_origin_sources_require_matching_identity_and_axis_value(
+        string scenario, string? expectedTimeoutSource, string? expectedTokenSource, string? expectedStepsSource)
+    {
+        var adapter = scenario == "adapter" ? "other" : "echo";
+        var model = scenario == "model" ? "other-model" : "model";
+        var contract = scenario == "role"
+            ? new WorkerContract("other-role", ["goal"], [new ProducedOutput("plan")], [])
+            : ArchitectContract;
+        var size = scenario == "size" ? DeclaredTaskSize.Medium : DeclaredTaskSize.Small;
+        var entry = new WorkerBindingConfigEntry(
+            adapter, contract, "Draft a plan.",
+            scenario == "timeout" ? TimeSpan.FromMinutes(31) : TimeSpan.FromMinutes(30),
+            ModelResolved: model,
+            TokenBudget: scenario == "token" ? 1001 : 1000,
+            MaxToolSteps: scenario == "steps" ? 11 : 10,
+            DeclaredTaskSize: new TaskSizeDeclaration(size, "fixture"),
+            ExecutionLimitResolution: new ExecutionLimitResolution(
+                null, ExecutionLimitSource.RoleDefault, ExecutionLimitSource.RoleDefault,
+                ExecutionLimitSource.RoleDefault, TimeSpan.FromMinutes(30), 1000, 10,
+                OriginatingSelectionKey: scenario == "legacy" ? null : "echo/model/architect/small"));
+        var adapters = new Dictionary<string, IWorkerAdapter>
+        {
+            ["echo"] = new FakeEchoWorkerAdapter(),
+            ["other"] = new FakeEchoWorkerAdapter(),
+        };
+
+        var evidence = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { [contract.WorkerName] = entry }, adapters)[contract.WorkerName])
+            .EffectiveLimitEvidence;
+
+        Assert.Null(evidence.ChosenKey);
+        Assert.Equal(expectedTimeoutSource, evidence.TimeoutSource);
+        Assert.Equal(expectedTokenSource, evidence.TokenBudgetSource);
+        Assert.Equal(expectedStepsSource, evidence.MaxToolStepsSource);
+    }
+
     [Fact]
     public void Resolved_limit_evidence_keeps_sources_when_all_values_match_the_resolution()
     {
