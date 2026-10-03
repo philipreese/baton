@@ -359,6 +359,44 @@ public sealed class ReplacementReviewActionTests
         finally { DirectoryCleanup.DeleteRecursively(home); }
     }
 
+    [Fact]
+    public async Task Automatic_opt_in_revoked_during_source_validation_refuses_admission_without_spending_a_round()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, _, gh) = await SeedAsync(home,
+                automaticEligible: true, adviceChoice: StoppedWorkAdviceChoice.Recommend);
+            await EnableAutomaticReplacementReviewAsync();
+            var identity = RepositoryIdentity.From("https://" + Repository, null)!;
+            var headReads = 0;
+            var advancer = new WorkItemAdvancer(gh, async (_, token) =>
+            {
+                Interlocked.Increment(ref headReads);
+                await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, token);
+                return Head;
+            }, (_, _) => Task.FromResult<RepositoryIdentity?>(identity));
+
+            await Assert.ThrowsAsync<ConductorObligationStoreException>(() =>
+                ReplacementReviewConductorCommand.ExecuteAsync(
+                    Options(source), TextWriter.Null, home, advancer, store, Ct, automatic: true));
+            Assert.Equal(1, headReads);
+            var refused = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(1, refused.Round);
+            Assert.True(refused.Halted);
+            Assert.Null(refused.ReplacementReviewAction);
+
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            var manual = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(2, manual.Round);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual, manual.ReplacementReviewAction?.Origin);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
     [Theory]
     [InlineData("wrong-source")]
     [InlineData("wrong-holder")]

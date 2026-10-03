@@ -203,6 +203,12 @@ internal static class ReplacementReviewConductorCommand
             if (currentSnapshot.Held || current is null
                 || !string.Equals(JsonSerializer.Serialize(current), sourceJson, StringComparison.Ordinal))
                 throw new ConductorObligationStoreException("Replacement review source or queue hold changed before admission.");
+            // Revocation observed after asynchronous source validation must refuse new automatic
+            // admission before writing a brief, retaining a slot or consuming the next round.
+            if (automatic
+                && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository))
+                throw new ConductorObligationStoreException(
+                    "Automatic replacement review opt-in was revoked before admission.");
             var brief = WorkItemAdvancer.RenderReplacementReviewBrief(current, action);
             Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
             QueueCommand.WriteSpecFileAtomically(current.SpecFile, brief);

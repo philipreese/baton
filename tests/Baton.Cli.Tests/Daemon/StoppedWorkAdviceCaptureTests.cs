@@ -254,11 +254,15 @@ public sealed class StoppedWorkAdviceCaptureTests
             var sourceRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
             await SeedAsync(home, WorkStage.Review, sourceRoom,
                 new FleetAttemptId("historical-ineligible-source"));
+            await MakeReplacementEligibleAsync();
             var advancer = new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
             await advancer.AdvanceAsync(Now, Ct);
             var halted = await ReadBackAsync();
             var intent = Assert.IsType<StoppedWorkJudgment>(halted.StoppedWorkJudgment);
             Assert.False(intent.AutomaticMissingVerdictReplacementReviewEligible);
+            Assert.Equal(77, halted.PullRequest);
+            Assert.Equal(1, halted.Round);
+            Assert.False(halted.AutomaticFixUsed);
 
             await EnableAutomaticReplacementReviewAsync();
             var store = Store();
@@ -290,13 +294,18 @@ public sealed class StoppedWorkAdviceCaptureTests
             Assert.Equal(0, launches);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
 
+            await Assert.ThrowsAsync<ConductorObligationStoreException>(() =>
+                ReplacementReviewConductorCommand.ExecuteAsync(
+                    new ConductorOptions(ConductorVerb.Act, Holder: intent.Holder,
+                        ObligationKey: intent.Key, Action: "replace-review", ExpectedHead: Head),
+                    TextWriter.Null, home, advancer, store, Ct, automatic: true));
+
             await scheduler.TickOnceAsync(Ct);
             await scheduler.DrainStoppedWorkAdviceAsync();
             Assert.Equal(1, adviceCalls);
             Assert.Equal(0, launches);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
 
-            await MakeReplacementEligibleAsync();
             await ReplacementReviewConductorCommand.ExecuteAsync(
                 new ConductorOptions(ConductorVerb.Act, Holder: intent.Holder,
                     ObligationKey: intent.Key, Action: "replace-review", ExpectedHead: Head),
