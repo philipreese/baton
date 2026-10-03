@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -263,6 +264,167 @@ public sealed class TaskCommandTests
             Assert.Equal("conductor-one", changed.RootElement.GetProperty("conductorHolder").GetString());
             Assert.Equal("conductor-two", changed.RootElement.GetProperty("currentConductorHolder").GetString());
             Assert.Equal("holder-changed", changed.RootElement.GetProperty("ownership").GetString());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("stale", "unavailable", "heartbeat-stale", "daemon-unavailable")]
+    [InlineData("future", "unavailable", "heartbeat-in-future", "daemon-unavailable")]
+    [InlineData("mismatch", "unavailable", "process-identity-mismatch", "daemon-unavailable")]
+    [InlineData("equivalent-offset", "recently-observed", null, "awaiting-daemon-decision")]
+    [InlineData("missing", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("malformed", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    public async Task Status_rejects_stale_future_reused_and_legacy_heartbeat_evidence(
+        string caseName, string expectedAvailability, string? expectedDaemonReason, string expectedReason)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var now = new DateTimeOffset(2026, 10, 2, 23, 0, 0, TimeSpan.Zero);
+            var heartbeatAt = caseName switch
+            {
+                "stale" => now.AddSeconds(-90),
+                "future" => now.AddSeconds(1),
+                _ => now.AddSeconds(-10),
+            };
+            var recordedStart = now.AddMinutes(-1);
+            var id = TaskCommand.TaskId("github.com/example/repo", 2582);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id,
+                    Role = "implement",
+                    Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id),
+                    Repository = "github.com/example/repo",
+                    Issue = 2582,
+                    Stage = WorkStage.Implement,
+                    State = QueueItemState.Queued,
+                    OwnedTask = new OwnedTaskSubmission(id, "github.com/example/repo", 2582,
+                        "digest", "conductor", now),
+                }],
+            }, Ct);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.FleetHeartbeatFile)!);
+            var heartbeat = caseName switch
+            {
+                "missing" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O") + "\"}",
+                "malformed" => "{not-json",
+                "equivalent-offset" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToOffset(TimeSpan.FromHours(-4)).ToString("O")
+                    + "\",\"identity\":{\"pid\":1234,\"processStartTime\":\""
+                    + recordedStart.ToOffset(TimeSpan.FromHours(-4)).ToString("O") + "\"}}",
+                _ => JsonSerializer.Serialize(new
+                {
+                    tickCompletedAt = heartbeatAt,
+                    identity = new { pid = 1234, processStartTime = recordedStart },
+                }),
+            };
+            await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, heartbeat, Ct);
+            DateTimeOffset ProcessStart(int _) => caseName == "mismatch"
+                ? recordedStart.AddSeconds(2)
+                : recordedStart;
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From("https://github.com/example/repo", null));
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token) => throw new NotSupportedException();
+
+            var output = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), output,
+                Resolve, Provision, Ct, utcNow: () => now, processStartTimeAccessor: ProcessStart);
+            using var json = JsonDocument.Parse(output.ToString());
+            Assert.Equal(expectedReason, json.RootElement.GetProperty("reason").GetString());
+            var daemon = json.RootElement.GetProperty("daemon");
+            Assert.Equal(expectedAvailability, daemon.GetProperty("availability").GetString());
+            if (expectedDaemonReason is null)
+                Assert.Equal(JsonValueKind.Null, daemon.GetProperty("reason").ValueKind);
+            else
+                Assert.Equal(expectedDaemonReason, daemon.GetProperty("reason").GetString());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, "unknown", "process-identity-unverifiable", "daemon-observation-unknown")]
+    [InlineData(true, "recently-observed", null, "awaiting-daemon-decision")]
+    public async Task Status_distinguishes_denied_process_identity_from_matching_birth(
+        bool matchingBirth, string expectedAvailability, string? expectedDaemonReason, string? expectedReason)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var now = new DateTimeOffset(2026, 10, 2, 23, 0, 0, TimeSpan.Zero);
+            var heartbeatAt = now.AddSeconds(-10);
+            var id = TaskCommand.TaskId("github.com/example/repo", 2580);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id,
+                    Role = "implement",
+                    Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id),
+                    Repository = "github.com/example/repo",
+                    Issue = 2580,
+                    Stage = WorkStage.Implement,
+                    State = QueueItemState.Queued,
+                    OwnedTask = new OwnedTaskSubmission(id, "github.com/example/repo", 2580,
+                        "digest", "conductor", now),
+                }],
+            }, Ct);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.FleetHeartbeatFile)!);
+            await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, JsonSerializer.Serialize(new
+            {
+                tickCompletedAt = heartbeatAt,
+                identity = new { pid = 1234, processStartTime = now.AddMinutes(-1) },
+            }), Ct);
+            var before = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            DateTimeOffset ProcessStart(int _) => matchingBirth
+                ? now.AddMinutes(-1)
+                : throw new Win32Exception(5);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From("https://github.com/example/repo", null));
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int _, string __, string? ___, string ____, bool _____, TextWriter ______, CancellationToken _______)
+                => throw new NotSupportedException();
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput,
+                Resolve, Provision, Ct, utcNow: () => now, processStartTimeAccessor: ProcessStart);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            Assert.Equal(expectedReason, json.RootElement.GetProperty("reason").GetString());
+            var daemon = json.RootElement.GetProperty("daemon");
+            Assert.Equal(expectedAvailability, daemon.GetProperty("availability").GetString());
+            if (expectedDaemonReason is null)
+                Assert.Equal(JsonValueKind.Null, daemon.GetProperty("reason").ValueKind);
+            else
+                Assert.Equal(expectedDaemonReason, daemon.GetProperty("reason").GetString());
+            Assert.Equal(heartbeatAt, daemon.GetProperty("observedAt").GetDateTimeOffset());
+            Assert.Equal(10, daemon.GetProperty("ageSeconds").GetInt32());
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput,
+                Resolve, Provision, Ct, utcNow: () => now, processStartTimeAccessor: ProcessStart);
+            if (matchingBirth)
+                Assert.Contains("daemon: recently-observed", textOutput.ToString(), StringComparison.Ordinal);
+            else
+            {
+                Assert.Contains("daemon: unknown (reason process-identity-unverifiable)",
+                    textOutput.ToString(), StringComparison.Ordinal);
+                Assert.Contains("recorded heartbeat time", textOutput.ToString(), StringComparison.Ordinal);
+            }
+            Assert.Equal(before, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
         }
         finally
         {

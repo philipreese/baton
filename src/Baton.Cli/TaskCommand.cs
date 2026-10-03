@@ -29,13 +29,16 @@ public static class TaskCommand
         Func<int, string, string?, string, bool, TextWriter, CancellationToken,
             Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         CancellationToken cancellationToken = default,
-        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner = null)
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? preparationRunner = null,
+        Func<int, DateTimeOffset>? processStartTimeAccessor = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
         if (options.Verb == TaskVerb.Status)
         {
-            await PrintStatusAsync(options.Id!, options.Json, output, cancellationToken).ConfigureAwait(false);
+            await PrintStatusAsync(options.Id!, options.Json, output, cancellationToken,
+                processStartTimeAccessor, utcNow).ConfigureAwait(false);
             return 0;
         }
 
@@ -97,7 +100,8 @@ public static class TaskCommand
             // outcome; a retry must not provision another branch or overwrite the original brief.
         }
 
-        await PrintStatusAsync(id, false, output, cancellationToken).ConfigureAwait(false);
+        await PrintStatusAsync(id, false, output, cancellationToken,
+            processStartTimeAccessor, utcNow).ConfigureAwait(false);
         return 0;
     }
 
@@ -179,20 +183,26 @@ public static class TaskCommand
         catch (QueueStoreException) { return false; }
     }
 
-    private static async Task PrintStatusAsync(string id, bool json, TextWriter output, CancellationToken token)
+    private static async Task PrintStatusAsync(
+        string id,
+        bool json,
+        TextWriter output,
+        CancellationToken token,
+        Func<int, DateTimeOffset>? processStartTimeAccessor = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, token).ConfigureAwait(false);
         var item = snapshot.Items.SingleOrDefault(i => i.OwnedTask?.Id == id)
             ?? throw new CliArgumentException($"No retained task has ID '{id}'.");
         var owner = item.OwnedTask!;
-        var now = DateTimeOffset.UtcNow;
+        var now = utcNow is null ? DateTimeOffset.UtcNow : utcNow();
         var repository = RepositoryIdentity.From("https://" + owner.Repository, null)
             ?? throw new QueueStoreException($"Task '{id}' has an invalid retained repository identity.");
         var currentClaim = await ConductorClaimStore.GetClaimAsync(repository, cancellationToken: token)
             .ConfigureAwait(false);
         var ownership = currentClaim?.Holder is null ? "unclaimed"
             : currentClaim.Holder == owner.ConductorHolder ? "recorded-holder-current" : "holder-changed";
-        var heartbeat = ReadDaemonObservation(now);
+        var heartbeat = ReadDaemonObservation(now, processStartTimeAccessor ?? ReadProcessStartTime);
         var abandonedPreparation = item.IssuePreparation is { State: TaskPreparationState.Preparing } preparing
             && !TaskPreparationLiveness.IsOwnerAlive(preparing);
         var reason = item.IssuePreparation?.State switch
@@ -201,7 +211,10 @@ public static class TaskCommand
                 ? "preparation-owner-exited-unverified" : "preparation-in-progress",
             TaskPreparationState.Blocked => item.IssuePreparation.Reason ?? "preparation-blocked",
             _ when snapshot.Held && item.State == QueueItemState.Queued => "queue-held",
-            _ when item.State == QueueItemState.Queued && !heartbeat.Available => "daemon-unavailable",
+            _ when item.State == QueueItemState.Queued && heartbeat.Availability == DaemonAvailability.Unknown
+                => "daemon-observation-unknown",
+            _ when item.State == QueueItemState.Queued && heartbeat.Availability == DaemonAvailability.Unavailable
+                => "daemon-unavailable",
             _ => null,
         };
         if (reason is null && item.State == QueueItemState.Queued && item.Stage != WorkStage.Ready)
@@ -333,7 +346,13 @@ public static class TaskCommand
             retainedWorkerAssignment,
             daemon = new
             {
-                availability = heartbeat.Available ? "recently-observed" : "unavailable",
+                availability = heartbeat.Availability switch
+                {
+                    DaemonAvailability.RecentlyObserved => "recently-observed",
+                    DaemonAvailability.Unavailable => "unavailable",
+                    _ => "unknown",
+                },
+                reason = heartbeat.Reason,
                 observedAt = heartbeat.ObservedAt,
                 ageSeconds = heartbeat.ObservedAt is { } at
                     ? (int?)(now - at).TotalSeconds : null
@@ -357,7 +376,12 @@ public static class TaskCommand
                     + (item.ChecksObservedAt is { } checksAt ? $" at {checksAt:O}" : "")
                     + (item.Error is null ? "" : $"; {item.Error}"));
             output.WriteLine($"  daemon: {status.daemon.availability}"
-                + (heartbeat.ObservedAt is { } lastObserved ? $" (last observed {lastObserved:O})" : " (no observation)"));
+                + (heartbeat.Reason is { } daemonReason ? $" (reason {daemonReason})" : "")
+                + (heartbeat.ObservedAt is { } lastObserved
+                    ? heartbeat.Availability == DaemonAvailability.Unknown
+                        ? $" (recorded heartbeat time {lastObserved:O}; liveness not verified)"
+                        : $" (last observed {lastObserved:O})"
+                    : " (no observation)"));
             if (readiness is not null) output.WriteLine($"  ready receipt: {readiness.Id} at {readiness.ReadyObservedAt:O}");
             if (initialWorkerSelection is { } selected)
                 output.WriteLine("  initial implement selection (retained plan): "
@@ -380,25 +404,72 @@ public static class TaskCommand
         }
     }
 
-    private static (bool Available, DateTimeOffset? ObservedAt) ReadDaemonObservation(DateTimeOffset now)
+    private enum DaemonAvailability
     {
+        RecentlyObserved,
+        Unavailable,
+        Unknown,
+    }
+
+    private sealed record DaemonObservation(
+        DaemonAvailability Availability,
+        string? Reason,
+        DateTimeOffset? ObservedAt);
+
+    private static DateTimeOffset ReadProcessStartTime(int pid)
+    {
+        using var process = Process.GetProcessById(pid);
+        return process.StartTime.ToUniversalTime();
+    }
+
+    private static DaemonObservation ReadDaemonObservation(
+        DateTimeOffset now,
+        Func<int, DateTimeOffset> processStartTimeAccessor)
+    {
+        string heartbeat;
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(BatonPaths.FleetHeartbeatFile));
+            heartbeat = File.ReadAllText(BatonPaths.FleetHeartbeatFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new(DaemonAvailability.Unavailable, "heartbeat-unavailable", null);
+        }
+
+        DateTimeOffset? observedAt = null;
+        try
+        {
+            using var document = JsonDocument.Parse(heartbeat);
             var root = document.RootElement;
-            var observedAt = root.GetProperty("tickCompletedAt").GetDateTimeOffset();
+            observedAt = root.GetProperty("tickCompletedAt").GetDateTimeOffset();
+            if (now < observedAt)
+                return new(DaemonAvailability.Unavailable, "heartbeat-in-future", observedAt);
+            if (now - observedAt >= TimeSpan.FromSeconds(90))
+                return new(DaemonAvailability.Unavailable, "heartbeat-stale", observedAt);
+
             var identity = root.GetProperty("identity");
             var pid = identity.GetProperty("pid").GetInt32();
             var processStartedAt = identity.GetProperty("processStartTime").GetDateTimeOffset();
-            using var process = Process.GetProcessById(pid);
-            var sameProcess = Math.Abs((process.StartTime.ToUniversalTime() - processStartedAt).TotalSeconds) < 2;
-            return (sameProcess && now >= observedAt && now - observedAt < TimeSpan.FromSeconds(90), observedAt);
+            var actualProcessStartedAt = processStartTimeAccessor(pid);
+            var sameProcess = Math.Abs((actualProcessStartedAt - processStartedAt).TotalSeconds) < 2;
+            return sameProcess
+                ? new(DaemonAvailability.RecentlyObserved, null, observedAt)
+                : new(DaemonAvailability.Unavailable, "process-identity-mismatch", observedAt);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
-            or KeyNotFoundException or InvalidOperationException or ArgumentException
-            or System.ComponentModel.Win32Exception)
+        catch (System.ComponentModel.Win32Exception ex)
         {
-            return (false, null);
+            return ex.NativeErrorCode == 5
+                ? new(DaemonAvailability.Unknown, "process-identity-unverifiable", observedAt)
+                : new(DaemonAvailability.Unavailable, "process-unavailable", observedAt);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new(DaemonAvailability.Unknown, "process-identity-unverifiable", observedAt);
+        }
+        catch (Exception ex) when (ex is IOException or JsonException
+            or KeyNotFoundException or InvalidOperationException or ArgumentException)
+        {
+            return new(DaemonAvailability.Unavailable, "heartbeat-unavailable", observedAt);
         }
     }
 }
