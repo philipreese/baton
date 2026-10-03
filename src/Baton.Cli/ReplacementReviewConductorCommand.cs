@@ -105,6 +105,36 @@ internal static class ReplacementReviewConductorCommand
             {
                 RequireSameRequest(raced, obligation, holder, expectedHead);
                 RequireSameSource(raced, source);
+                if (!automatic && raced.Origin == QueueReplacementReviewOrigin.Automatic)
+                {
+                    // A racing manual request must retain manual authority on this exact slot;
+                    // promoting it under the queue lock must never consume another review round.
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, currentSnapshot =>
+                    {
+                        var current = currentSnapshot.Items.FirstOrDefault(item => item.Tag == source.Tag)
+                            ?? throw new ConductorObligationStoreException("The retained source disappeared.");
+                        var currentAction = current.ReplacementReviewAction
+                            ?? throw new ConductorObligationStoreException("The retained action slot disappeared.");
+                        RequireSameRequest(currentAction, obligation, holder, expectedHead);
+                        RequireSameSource(currentAction, source);
+                        if (currentAction.Origin != QueueReplacementReviewOrigin.Automatic)
+                            return currentSnapshot;
+                        return currentSnapshot with
+                        {
+                            Items = currentSnapshot.Items.Select(item => ReferenceEquals(item, current)
+                                ? item with
+                                {
+                                    ReplacementReviewAction = currentAction with
+                                    {
+                                        Origin = QueueReplacementReviewOrigin.Manual,
+                                        PausedReason = null,
+                                        NextTrigger = null,
+                                    },
+                                }
+                                : item).ToList(),
+                        };
+                    }, cancellationToken).ConfigureAwait(false);
+                }
                 output.WriteLine($"Replacement review for '{key}' is already authorized.");
                 return 0;
             }

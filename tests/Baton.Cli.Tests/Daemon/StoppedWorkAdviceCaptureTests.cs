@@ -239,6 +239,78 @@ public sealed class StoppedWorkAdviceCaptureTests
     }
 
     [Fact]
+    public async Task Historical_ineligible_missing_verdict_recommends_without_automatic_admission_or_repeated_advice()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // Capture while automatic replacement is disabled: this is an existing intent whose
+            // eligibility fact must not be recomputed merely because the repository opts in later.
+            await EnableStoppedWorkAdviceAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture",
+                cancellationToken: Ct);
+            var sourceRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, sourceRoom,
+                new FleetAttemptId("historical-ineligible-source"));
+            var advancer = new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var halted = await ReadBackAsync();
+            var intent = Assert.IsType<StoppedWorkJudgment>(halted.StoppedWorkJudgment);
+            Assert.False(intent.AutomaticMissingVerdictReplacementReviewEligible);
+
+            await EnableAutomaticReplacementReviewAsync();
+            var store = Store();
+            var adviceCalls = 0;
+            var launches = 0;
+            var scheduler = new QueueSchedulerService((_, _) =>
+            {
+                Interlocked.Increment(ref launches);
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                advancer: advancer, conductorObligations: store,
+                stoppedWorkAdvice: (obligation, request, _, _, _) =>
+                {
+                    Interlocked.Increment(ref adviceCalls);
+                    return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+                });
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+            {
+                var obligation = await store.ReadAsync(intent.Key!, Ct);
+                return obligation is not null
+                    && (await store.ReadStoppedWorkAdviceViewAsync(obligation, Ct))?.State
+                        == StoppedWorkJudgmentState.Available;
+            });
+            var retained = await store.ReadStoppedWorkAdviceViewAsync(
+                (await store.ReadAsync(intent.Key!, Ct))!, Ct);
+            Assert.Equal(StoppedWorkAdviceChoice.Recommend, retained?.Response?.Decision.Choice);
+            Assert.Equal(1, adviceCalls);
+            Assert.Equal(0, launches);
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+
+            await scheduler.TickOnceAsync(Ct);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            Assert.Equal(1, adviceCalls);
+            Assert.Equal(0, launches);
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+
+            await MakeReplacementEligibleAsync();
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                new ConductorOptions(ConductorVerb.Act, Holder: intent.Holder,
+                    ObligationKey: intent.Key, Action: "replace-review", ExpectedHead: Head),
+                TextWriter.Null, home, advancer, store, Ct);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual,
+                (await ReadBackAsync()).ReplacementReviewAction?.Origin);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Revoked_automatic_admission_keeps_advice_available_for_manual_action()
     {
         var home = CreateTempHome();

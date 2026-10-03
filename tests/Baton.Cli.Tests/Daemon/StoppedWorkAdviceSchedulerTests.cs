@@ -493,14 +493,18 @@ public sealed class StoppedWorkAdviceSchedulerTests
 
             await scheduler.TickOnceAsync(Ct);
             await WaitForAsync(async () =>
-                (await store.ReadStoppedWorkAdviceViewAsync(
-                    (await store.ReadAsync(first.StoppedWorkJudgment!.Key!, Ct))!, Ct))?.State
-                        == StoppedWorkJudgmentState.Available);
+            {
+                var obligation = await store.ReadAsync(first.StoppedWorkJudgment!.Key!, Ct);
+                return obligation is not null
+                    && (await store.ReadStoppedWorkAdviceViewAsync(obligation, Ct))?.State
+                        == StoppedWorkJudgmentState.Available;
+            });
             await WaitForAsync(async () =>
             {
                 await scheduler.TickOnceAsync(Ct);
-                return (await store.ReadStoppedWorkAdviceViewAsync(
-                    (await store.ReadAsync(second.StoppedWorkJudgment!.Key!, Ct))!, Ct))?.State
+                var obligation = await store.ReadAsync(second.StoppedWorkJudgment!.Key!, Ct);
+                return obligation is not null
+                    && (await store.ReadStoppedWorkAdviceViewAsync(obligation, Ct))?.State
                         == StoppedWorkJudgmentState.Available;
             });
             Assert.Equal(2, calls);
