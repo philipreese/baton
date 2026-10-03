@@ -9,6 +9,14 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.62.1](https://github.com/philipreese/baton/compare/v0.62.0...v0.62.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **dispatch:** Retain fresh role-default limit provenance ([#2579](https://github.com/philipreese/baton/issues/2579)) ([ee55f4e](https://github.com/philipreese/baton/commit/ee55f4e89726840498800d45d75c751956f6234d))
+* **status:** Distinguish unverifiable daemon observations ([#2582](https://github.com/philipreese/baton/issues/2582)) ([674bb6d](https://github.com/philipreese/baton/commit/674bb6de9851db9d236425f9d16139d39ace3c30))
+
 ## [0.62.0](https://github.com/philipreese/baton/compare/v0.61.1...v0.62.0) (2026-10-02)
 
 
