@@ -8073,8 +8073,13 @@ requiring a rationale, not an omitted field.
 The supplied size and rationale constrain and explain the existing worker admission policy; they do
 not override model, permission, runway, or queue limits. `baton task status <id> [--json]` reads the
 retained queue task, including the recorded claim holder, stage, PR, readiness proof, blocker, and
-daemon observation. Submission is not a synchronous worker call: a held queue or unavailable daemon
-leaves the task accepted and queued with that reason, never described as running. There is no
+daemon observation. The daemon observation is `recently-observed`, `unavailable`, or `unknown`;
+unknown means process identity could not be verified and never authorizes launch or liveness inference.
+The additive nullable `daemon.reason` is a stable diagnostic token, and a safely parsed nonfuture
+heartbeat time remains visible as recorded heartbeat time even when liveness is unknown. Submission
+is not a synchronous worker call: a held queue, unavailable daemon, or unknown daemon observation
+leaves the task accepted and queued with `queue-held`, `daemon-unavailable`, or
+`daemon-observation-unknown`, respectively, never described as running. There is no
 `--wait` in this slice, no new scheduler, no automatic merge, and no replacement-review authority.
 `run` and `dispatch` remain explicitly standalone, one-lane commands.
 Failed task launches display as blocked with their retained error (or `task-failed` when absent)
