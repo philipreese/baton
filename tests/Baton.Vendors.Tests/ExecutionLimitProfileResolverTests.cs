@@ -119,10 +119,22 @@ public class ExecutionLimitProfileResolverTests
         Assert.Null(result.TokenBudget);
         Assert.Null(result.MaxToolSteps);
         Assert.Null(result.ChosenKey);
-        Assert.Null(result.OriginatingSelectionKey);
+        Assert.Equal("claude/sonnet/review/medium", result.OriginatingSelectionKey);
         Assert.Equal("role-default", result.TimeoutSource);
         Assert.Equal("role-default", result.TokenBudgetSource);
         Assert.Equal("role-default", result.MaxToolStepsSource);
+    }
+
+    [Fact]
+    public void An_unknown_model_does_not_produce_selection_identity()
+    {
+        var result = ExecutionLimitProfileResolver.Resolve(
+            [Profile("opus", 10, 1000, 10)],
+            "claude", null, "review", DeclaredTaskSize.Unknown,
+            TimeSpan.FromMinutes(5), null, null);
+
+        Assert.Null(result.ChosenKey);
+        Assert.Null(result.OriginatingSelectionKey);
     }
 
     [Fact]

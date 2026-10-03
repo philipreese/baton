@@ -315,8 +315,11 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   size (including `unknown`). Every row supplies finite positive `Timeout`, `TokenBudget`, and
   `MaxToolSteps`; duplicate normalized keys, incomplete rows, invalid types, and invalid ranges refuse
   the dispatch before a worker launches. A matching row supplies each brake independently, while the
-  corresponding dispatch flag wins for that brake. A missing row preserves the role default and records
-  `role-default`; the selected key, each source, and effective values are written to `bindings.json`.
+  corresponding dispatch flag wins for that brake. A fresh known selection records its normalized
+  selection identity even when no exact profile row matches; that identity is distinct from the selected
+  key, which is present only for an actual matching profile. A missing row preserves the role default and
+  records `role-default`; the selected key, originating selection identity, each source, and effective
+  values are written to `bindings.json`.
   This is applied once to a fresh direct role dispatch, including queue-launched dispatches. A
   continuation carries the saved binding snapshot and does not re-read mutable settings. Templates,
   template phases, and finite fallback policy remain outside this slice and belong to #2416.
@@ -338,7 +341,8 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   clears that aggregate key but carries a separate originating selection identity only through
   legitimate same-identity inheritance. Consumers validate that identity against the resolved
   adapter, model, role, and size. Legacy records may use a valid existing aggregate key, but a null
-  key does not authorize inventing profile identity. An absent value remains unknown for legacy requests
+  key does not authorize inventing profile identity; only a fresh known selection may supply the separate
+  originating identity when no profile was chosen. An absent value remains unknown for legacy requests
   and supplementary paths that do not record it. Artifact-checkpoint and grace-child requests each
   record their own execution-limit evidence; grace limits come only from the fixed grace policy and
   actual monitor availability, never the parent's selected profile. A

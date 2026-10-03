@@ -328,7 +328,9 @@ public static class WorkerBindingResolver
         var resolvedModel = entry.ModelResolved ?? entry.Model;
         var role = entry.Contract.WorkerName;
         var size = entry.DeclaredTaskSize?.Size ?? DeclaredTaskSize.Unknown;
-        // OriginatingSelectionKey is the independent identity for a mixed redispatch snapshot.
+        // A fresh known selection always records OriginatingSelectionKey; ChosenKey alone means a
+        // profile actually matched. OriginatingSelectionKey is also the independent identity for a
+        // mixed redispatch snapshot.
         // Older records have no such member, so a present ChosenKey is the only identity they may
         // contribute; a null key must remain unverifiable rather than becoming a wildcard.
         var selectionKey = resolution.OriginatingSelectionKey ?? resolution.ChosenKey;

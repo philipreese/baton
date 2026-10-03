@@ -68,6 +68,7 @@ public static class ExecutionLimitProfileResolver
             ? profiles?.FirstOrDefault(candidate => actualKey.Equals(candidate.ToKey()))
             : null;
         var selectedKey = profile is null ? null : key!.Value.ToString();
+        var originatingSelectionKey = key?.ToString();
         return new ExecutionLimitResolution(
             selectedKey,
             timeoutOverride is not null ? ExecutionLimitSource.DispatchOverride : profile is not null ? ExecutionLimitSource.Profile : ExecutionLimitSource.RoleDefault,
@@ -76,7 +77,7 @@ public static class ExecutionLimitProfileResolver
             timeoutOverride ?? profile?.Timeout ?? roleTimeout,
             tokenBudgetOverride ?? profile?.TokenBudget ?? roleTokenBudget,
             maxToolStepsOverride ?? profile?.MaxToolSteps ?? roleMaxToolSteps,
-            selectedKey,
+            originatingSelectionKey,
             maxRepeatedToolStepsOverride is not null ? ExecutionLimitSource.DispatchOverride
                 : profile?.MaxRepeatedToolSteps is not null ? ExecutionLimitSource.Profile : null,
             maxRepeatedToolStepsOverride ?? profile?.MaxRepeatedToolSteps);
