@@ -15,6 +15,7 @@ public sealed class ReplacementReviewActionTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
     private static readonly DateTimeOffset Now = new(2026, 9, 30, 12, 0, 0, TimeSpan.Zero);
     private const string Repository = "github.com/aer-works/baton";
+    private const string OtherRepository = "github.com/other/baton";
     private const string Head = "0123456789abcdef0123456789abcdef01234567";
     private const string OtherHead = "ffffffffffffffffffffffffffffffffffffffff";
     private const string Holder = "conductor-one";
@@ -140,6 +141,200 @@ public sealed class ReplacementReviewActionTests
     }
 
     [Fact]
+    public async Task Manual_replay_promotes_an_automatic_slot_and_clears_its_pause()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home);
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item with
+                {
+                    ReplacementReviewAction = item.ReplacementReviewAction! with
+                    {
+                        Origin = QueueReplacementReviewOrigin.Automatic,
+                        PausedReason = "automatic replacement review opt-in was revoked",
+                        NextTrigger = "Re-enable the repository opt-in to resume this unlaunched action.",
+                    },
+                }).ToList(),
+            }, Ct);
+
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+
+            var action = Assert.IsType<QueueReplacementReviewAction>(
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items)
+                    .ReplacementReviewAction);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual, action.Origin);
+            Assert.Null(action.PausedReason);
+            Assert.Null(action.NextTrigger);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Manual_waiting_while_automatic_admits_promotes_the_one_slot_and_launches_once()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home,
+                automaticEligible: true, adviceChoice: StoppedWorkAdviceChoice.Recommend);
+            await EnableAutomaticReplacementReviewAsync();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var manual = ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct,
+                async token =>
+                {
+                    entered.TrySetResult();
+                    await release.Task.WaitAsync(token);
+                });
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                await ReplacementReviewConductorCommand.ExecuteAsync(
+                    Options(source), TextWriter.Null, home, advancer, store, Ct, automatic: true);
+            }
+            finally
+            {
+                release.TrySetResult();
+                await manual;
+            }
+
+            var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            var action = Assert.IsType<QueueReplacementReviewAction>(row.ReplacementReviewAction);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual, action.Origin);
+            Assert.Equal(2, row.Round);
+            Assert.Equal(source.StoppedWorkJudgment!.Key, action.ObligationKey);
+            Assert.Null(action.ReplacementAttemptId);
+
+            var launches = 0;
+            var scheduler = new QueueSchedulerService((_, _) =>
+            {
+                Interlocked.Increment(ref launches);
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                advancer: advancer, conductorObligations: store);
+            await scheduler.TickOnceAsync(Ct);
+            await scheduler.TickOnceAsync(Ct);
+            Assert.Equal(1, launches);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Automatic_waiting_while_manual_admits_replays_the_current_manual_slot()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home,
+                automaticEligible: true, adviceChoice: StoppedWorkAdviceChoice.Recommend);
+            await EnableAutomaticReplacementReviewAsync();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var automatic = ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct,
+                async token =>
+                {
+                    entered.TrySetResult();
+                    await release.Task.WaitAsync(token);
+                }, automatic: true);
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                await ReplacementReviewConductorCommand.ExecuteAsync(
+                    Options(source), TextWriter.Null, home, advancer, store, Ct);
+            }
+            finally
+            {
+                release.TrySetResult();
+                await automatic;
+            }
+
+            var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual, row.ReplacementReviewAction?.Origin);
+            Assert.Equal(2, row.Round);
+            Assert.Equal(source.StoppedWorkJudgment!.Key, row.ReplacementReviewAction?.ObligationKey);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Promoted_manual_snapshot_yields_the_stale_automatic_launch_then_launches_once()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home);
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            await EnableAutomaticReplacementReviewAsync();
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item with
+                {
+                    ReplacementReviewAction = item.ReplacementReviewAction! with
+                    {
+                        Origin = QueueReplacementReviewOrigin.Automatic,
+                    },
+                }).ToList(),
+            }, Ct);
+
+            var launches = 0;
+            var promoted = false;
+            var scheduler = new QueueSchedulerService((_, _) =>
+            {
+                Interlocked.Increment(ref launches);
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                beforeLaunchClaim: async _ =>
+                {
+                    if (promoted) return;
+                    promoted = true;
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        Items = snapshot.Items.Select(item => item with
+                        {
+                            ReplacementReviewAction = item.ReplacementReviewAction! with
+                            {
+                                Origin = QueueReplacementReviewOrigin.Manual,
+                            },
+                        }).ToList(),
+                        Held = true,
+                    }, Ct);
+                },
+                advancer: advancer, conductorObligations: store);
+
+            await scheduler.TickOnceAsync(Ct);
+            Assert.Equal(0, launches);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual,
+                (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single()
+                    .ReplacementReviewAction?.Origin);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                snapshot => snapshot with { Held = false }, Ct);
+            await scheduler.TickOnceAsync(Ct);
+            Assert.Equal(1, launches);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
     public async Task Held_queue_and_late_valid_block_refuse_admission()
     {
         var home = TempHome();
@@ -159,6 +354,103 @@ public sealed class ReplacementReviewActionTests
                     Options(source), TextWriter.Null, home, advancer, store, Ct));
             var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(1, row.Round);
+            Assert.Null(row.ReplacementReviewAction);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Automatic_opt_in_revoked_during_source_validation_refuses_admission_without_spending_a_round()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, _, gh) = await SeedAsync(home,
+                automaticEligible: true, adviceChoice: StoppedWorkAdviceChoice.Recommend);
+            await EnableAutomaticReplacementReviewAsync();
+            var identity = RepositoryIdentity.From("https://" + Repository, null)!;
+            var headReads = 0;
+            var advancer = new WorkItemAdvancer(gh, async (_, token) =>
+            {
+                Interlocked.Increment(ref headReads);
+                await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, token);
+                return Head;
+            }, (_, _) => Task.FromResult<RepositoryIdentity?>(identity));
+
+            await Assert.ThrowsAsync<ConductorObligationStoreException>(() =>
+                ReplacementReviewConductorCommand.ExecuteAsync(
+                    Options(source), TextWriter.Null, home, advancer, store, Ct, automatic: true));
+            Assert.Equal(1, headReads);
+            var refused = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(1, refused.Round);
+            Assert.True(refused.Halted);
+            Assert.Null(refused.ReplacementReviewAction);
+
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            var manual = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(2, manual.Round);
+            Assert.Equal(QueueReplacementReviewOrigin.Manual, manual.ReplacementReviewAction?.Origin);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Theory]
+    [InlineData("wrong-source")]
+    [InlineData("wrong-holder")]
+    [InlineData("wrong-repository")]
+    [InlineData("wrong-head")]
+    [InlineData("exhausted-round")]
+    [InlineData("unknown-fix-history")]
+    public async Task Automatic_admission_refuses_the_same_invalid_source_arms_without_consuming_a_round(
+        string refusal)
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home,
+                round: refusal == "exhausted-round" ? WorkStages.MaxRounds : 1,
+                automaticFixUsed: refusal == "unknown-fix-history" ? null : false,
+                automaticEligible: true, adviceChoice: StoppedWorkAdviceChoice.Recommend);
+            await EnableAutomaticReplacementReviewAsync();
+            var options = Options(source);
+            if (refusal == "wrong-source")
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = snapshot.Items.Select(item => item with
+                    {
+                        AttemptId = new FleetAttemptId("different-source"),
+                    }).ToList(),
+                }, Ct);
+            }
+            else if (refusal == "wrong-holder")
+            {
+                var identity = RepositoryIdentity.From("https://" + Repository, null)!;
+                await ConductorClaimStore.TakeoverAsync(identity, "different-holder", "fixture drift",
+                    cancellationToken: Ct);
+            }
+            else if (refusal == "wrong-repository")
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = snapshot.Items.Select(item => item with { Repository = OtherRepository }).ToList(),
+                }, Ct);
+            }
+            else if (refusal == "wrong-head")
+            {
+                options = options with { ExpectedHead = OtherHead };
+            }
+
+            await Assert.ThrowsAsync<ConductorObligationStoreException>(() =>
+                ReplacementReviewConductorCommand.ExecuteAsync(
+                    options, TextWriter.Null, home, advancer, store, Ct, automatic: true));
+            var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(refusal == "exhausted-round" ? WorkStages.MaxRounds : 1, row.Round);
             Assert.Null(row.ReplacementReviewAction);
         }
         finally { DirectoryCleanup.DeleteRecursively(home); }
@@ -284,6 +576,78 @@ public sealed class ReplacementReviewActionTests
             Assert.Equal(QueueItemState.Queued, row.State);
             Assert.NotNull(row.ReplacementReviewAction);
             Assert.Null(row.ReplacementReviewAction.ReplacementAttemptId);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
+    [Fact]
+    public async Task Revoked_automatic_action_is_paused_and_resumes_without_a_new_slot()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home);
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item with
+                {
+                    ReplacementReviewAction = item.ReplacementReviewAction! with
+                    {
+                        Origin = QueueReplacementReviewOrigin.Automatic,
+                    },
+                }).ToList(),
+            }, Ct);
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                    {
+                        [Repository] = JsonSerializer.SerializeToElement(true),
+                    },
+                },
+            }, BatonPaths.SettingsFile, Ct);
+
+            var launches = 0;
+            var revokeAtLaunchBoundary = true;
+            var scheduler = new QueueSchedulerService((_, _) =>
+            {
+                Interlocked.Increment(ref launches);
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                beforeLaunchClaim: async _ =>
+                {
+                    if (!revokeAtLaunchBoundary) return;
+                    revokeAtLaunchBoundary = false;
+                    await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
+                },
+                advancer: advancer, conductorObligations: store);
+            await scheduler.TickOnceAsync(Ct);
+            var paused = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Queued, paused.State);
+            Assert.NotNull(paused.ReplacementReviewAction!.PausedReason);
+            Assert.Equal(0, launches);
+
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                    {
+                        [Repository] = JsonSerializer.SerializeToElement(true),
+                    },
+                },
+            }, BatonPaths.SettingsFile, Ct);
+            await scheduler.TickOnceAsync(Ct);
+            var resumed = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(1, launches);
+            Assert.Equal(QueueItemState.Launched, resumed.State);
+            Assert.Null(resumed.ReplacementReviewAction!.PausedReason);
+            Assert.Equal(2, resumed.Round);
         }
         finally { DirectoryCleanup.DeleteRecursively(home); }
     }
@@ -710,7 +1074,8 @@ public sealed class ReplacementReviewActionTests
 
     private static async Task<(QueueItem Item, ConductorObligationStore Store, WorkItemAdvancer Advancer, FakeGh Gh)>
         SeedAsync(string home, WorkStage stage = WorkStage.Review, int round = 1,
-            bool automaticFixUsed = false)
+            bool? automaticFixUsed = false, bool automaticEligible = false,
+            StoppedWorkAdviceChoice adviceChoice = StoppedWorkAdviceChoice.Hold)
     {
         await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
         var sourceRoom = Path.Combine(home, "rooms", "source");
@@ -723,7 +1088,12 @@ public sealed class ReplacementReviewActionTests
             Repository, "replacement-test", attempt, stage, Now, Holder, 77, Head, null,
             WorkflowOutcome.Succeeded, true, "passing", Now, string.Empty,
             StoppedWorkHaltCause.MissingVerdict, "available", false, "passing");
-        intent = intent with { ContextSha256 = StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(intent)) };
+        intent = intent with
+        {
+            AutomaticMissingVerdictReplacementReviewEligible = automaticEligible,
+            ContextSha256 = StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(
+                intent with { AutomaticMissingVerdictReplacementReviewEligible = automaticEligible })),
+        };
         var source = new QueueItem
         {
             Tag = "replacement-test",
@@ -764,7 +1134,10 @@ public sealed class ReplacementReviewActionTests
             (_, _) => Task.CompletedTask,
             (row, _, _, _, _) => Task.FromResult(new RetainedStoppedWorkAdviceResponse(
                 new StoppedWorkAdviceDecision(row.ObligationId, Repository, source.Tag, attempt.Value,
-                    intent.ContextSha256, StoppedWorkAdviceChoice.Hold, "Inspect the missing verdict."),
+                    intent.ContextSha256, adviceChoice,
+                    adviceChoice == StoppedWorkAdviceChoice.Recommend
+                        ? "A replacement review is appropriate."
+                        : "Inspect the missing verdict."),
                 CodexReadinessDecisionAdapter.AdapterName, CodexReadinessDecisionAdapter.Model,
                 CodexReadinessDecisionAdapter.Effort, Now, new StoppedWorkAdviceUsage(null, null, null))), Ct);
         store.MarkStoppedWorkAdviceSourceChecked(intent.Key!);
@@ -777,6 +1150,18 @@ public sealed class ReplacementReviewActionTests
     private static ConductorOptions Options(QueueItem item) =>
         ConductorOptionsParser.Parse(["act", "--obligation", item.StoppedWorkJudgment!.Key!,
             "--holder", Holder, "--action", "replace-review", "--expected-head", Head]);
+
+    private static Task EnableAutomaticReplacementReviewAsync() =>
+        DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                {
+                    [Repository] = JsonSerializer.SerializeToElement(true),
+                },
+            },
+        }, BatonPaths.SettingsFile, Ct);
 
     private static async Task WriteVerdictAsync(string room, string decision, string reviewedRef)
     {

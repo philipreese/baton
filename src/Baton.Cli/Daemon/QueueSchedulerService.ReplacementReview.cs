@@ -7,16 +7,39 @@ namespace Baton.Cli.Daemon;
 
 public sealed partial class QueueSchedulerService
 {
-    private async Task ValidateReplacementReviewLaunchAsync(
+    private async Task<bool> ValidateReplacementReviewLaunchAsync(
         QueueItem selected, QueueReplacementReviewAction action, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var current = snapshot.Items.FirstOrDefault(item => item.Tag == action.Tag);
         if (current is null || current.Retirement is not null || current.CancelledAt is not null
             || current.Stage != action.SourceStage || current.State != QueueItemState.Queued
-            || current.ReplacementReviewAction != action
             || current.AttemptEnvelope?.AttemptId != selected.AttemptEnvelope?.AttemptId)
             throw new ConductorObligationStoreException("The authorized queue identity changed.");
+        if (current.ReplacementReviewAction != action)
+        {
+            var promoted = action with
+            {
+                Origin = QueueReplacementReviewOrigin.Manual,
+                PausedReason = null,
+                NextTrigger = null,
+            };
+            if (action.Origin == QueueReplacementReviewOrigin.Automatic
+                && current.ReplacementReviewAction == promoted)
+                return false;
+            if (action.Origin == QueueReplacementReviewOrigin.Automatic
+                && current.ReplacementReviewAction is { PausedReason: not null }
+                && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(action.Repository))
+                return false;
+            throw new ConductorObligationStoreException("The authorized queue identity changed.");
+        }
+        if (action.Origin == QueueReplacementReviewOrigin.Automatic
+            && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(action.Repository))
+        {
+            await PauseReplacementReviewAsync(action, "automatic replacement review opt-in was revoked",
+                "Re-enable the repository opt-in to resume this unlaunched action.").ConfigureAwait(false);
+            return false;
+        }
         var obligation = await _conductorObligations.ReadAsync(action.ObligationKey, cancellationToken)
             .ConfigureAwait(false);
         if (obligation is null || obligation.Status != ConductorObligationStatus.TransportAcknowledged
@@ -33,7 +56,26 @@ public sealed partial class QueueSchedulerService
             throw new ConductorObligationStoreException("Source terminal evidence is unavailable.");
         await _advancer.ValidateReplacementReviewHeadAsync(current, action, cancellationToken)
             .ConfigureAwait(false);
+        return true;
     }
+
+    private static Task PauseReplacementReviewAsync(
+        QueueReplacementReviewAction action, string reason, string trigger) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = snapshot.Items.Select(item =>
+                item.Tag == action.Tag && item.ReplacementReviewAction == action
+                    && item.State == QueueItemState.Queued && action.ReplacementAttemptId is null
+                    ? item with
+                    {
+                        ReplacementReviewAction = action with
+                        {
+                            PausedReason = reason,
+                            NextTrigger = trigger,
+                        },
+                    }
+                    : item).ToList(),
+        }, CancellationToken.None);
 
     private static Task BlockReplacementReviewAsync(string tag, string key, string reason, string trigger) =>
         QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
@@ -58,6 +100,30 @@ public sealed partial class QueueSchedulerService
         foreach (var item in snapshot.Items.Where(item => item.ReplacementReviewAction is not null))
         {
             var action = item.ReplacementReviewAction!;
+            if (action.Origin == QueueReplacementReviewOrigin.Automatic
+                && action.ReplacementAttemptId is null && item.State == QueueItemState.Queued)
+            {
+                var enabled = StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(
+                    action.Repository);
+                if (enabled == (action.PausedReason is not null))
+                {
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                    {
+                        Items = current.Items.Select(candidate =>
+                            candidate.Tag == item.Tag && candidate.ReplacementReviewAction == action
+                                ? candidate with
+                                {
+                                    ReplacementReviewAction = action with
+                                    {
+                                        PausedReason = enabled ? null : "automatic replacement review opt-in was revoked",
+                                        NextTrigger = enabled ? null : "Re-enable the repository opt-in to resume this unlaunched action.",
+                                    },
+                                }
+                                : candidate).ToList(),
+                    }, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+            }
             if (action.CompletionProof is { Length: > 0 } proof)
             {
                 var obligation = await _conductorObligations.ReadAsync(action.ObligationKey, cancellationToken)

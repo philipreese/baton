@@ -34,6 +34,11 @@ public sealed partial class WorkItemAdvancer
             || source.PullRequest != action.PullRequest || source.Round != action.SourceRound)
             throw new ConductorObligationStoreException("Replacement review source or round history is ineligible.");
 
+        if (action.Origin == QueueReplacementReviewOrigin.Automatic
+            && !intent.AutomaticMissingVerdictReplacementReviewEligible)
+            throw new ConductorObligationStoreException(
+                "Automatic replacement review source was not opted in when it halted.");
+
         if (intent.TerminalEvidenceAvailable != true || string.IsNullOrWhiteSpace(intent.TerminalOutcome)
             || source.AttemptEnvelope is { } envelope && envelope.AttemptId != intent.AttemptId)
             throw new ConductorObligationStoreException("Replacement review source terminal identity is unavailable.");

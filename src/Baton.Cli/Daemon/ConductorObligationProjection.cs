@@ -98,6 +98,7 @@ internal static class ConductorObligationProjection
                 {
                     var actionState = row.Status == ConductorObligationStatus.ActionObserved
                         && action.CompletionProof is not null ? "completed"
+                        : action.PausedReason is not null ? "paused"
                         : action.CompletionProof is not null ? "verified-pending-observation"
                         : action.BlockedReason is not null ? "blocked"
                         : source.State is QueueItemState.Cancelled or QueueItemState.Failed
@@ -108,10 +109,25 @@ internal static class ConductorObligationProjection
                     {
                         ["kind"] = "replace-review",
                         ["state"] = actionState,
+                        ["origin"] = action.Origin.ToString().ToLowerInvariant(),
                         ["owner"] = "Repository conductor",
-                        ["nextTrigger"] = action.BlockedReason is not null
-                            ? "Inspect retained replacement evidence and reconcile manually"
+                        ["nextTrigger"] = action.PausedReason is not null
+                            ? action.NextTrigger
+                            : action.BlockedReason is not null
+                                ? "Inspect retained replacement evidence and reconcile manually"
                             : null,
+                    };
+                }
+                else if (view?.AutomaticAdmissionRefused == true
+                    && row.Status != ConductorObligationStatus.ActionObserved)
+                {
+                    // A refusal is neither an action slot nor completion. Preserve saved manual
+                    // advice, expose a bounded owner/trigger, and never disclose private failures.
+                    projected["automaticAdmission"] = new JsonObject
+                    {
+                        ["state"] = "refused",
+                        ["owner"] = "Repository conductor",
+                        ["nextTrigger"] = "Inspect retained admission evidence and reconcile manually against the current PR head and permissions",
                     };
                 }
                 if (view?.Issue is > 0) projected["issue"] = view.Issue;

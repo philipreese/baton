@@ -449,6 +449,75 @@ public sealed class StoppedWorkAdviceSchedulerTests
         }
     }
 
+    [Fact]
+    public async Task Held_recommendation_does_not_starve_later_advice_reconciliation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            static QueueItem Automatic(QueueItem item) => item with
+            {
+                StoppedWorkJudgment = item.StoppedWorkJudgment! with
+                {
+                    AutomaticMissingVerdictReplacementReviewEligible = true,
+                },
+            };
+            var first = Automatic(Item("held-a", "held-attempt-a", "conductor-one", home));
+            var second = Automatic(Item("held-b", "held-attempt-b", "conductor-one", home));
+            await SeedAsync(home, [first, second], "conductor-one");
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings
+            {
+                Queue = new QueueSettings
+                {
+                    StoppedWorkAdvice = new Dictionary<string, JsonElement>
+                    {
+                        [Repository] = JsonSerializer.SerializeToElement(true),
+                    },
+                    AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                    {
+                        [Repository] = JsonSerializer.SerializeToElement(true),
+                    },
+                },
+            }, BatonPaths.SettingsFile, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = true }, Ct);
+            var calls = 0;
+            var store = Store();
+            var scheduler = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
+                Task.FromResult<string?>(Head)), (obligation, request, _, _, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+            });
+
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+            {
+                var obligation = await store.ReadAsync(first.StoppedWorkJudgment!.Key!, Ct);
+                return obligation is not null
+                    && (await store.ReadStoppedWorkAdviceViewAsync(obligation, Ct))?.State
+                        == StoppedWorkJudgmentState.Available;
+            });
+            await WaitForAsync(async () =>
+            {
+                await scheduler.TickOnceAsync(Ct);
+                var obligation = await store.ReadAsync(second.StoppedWorkJudgment!.Key!, Ct);
+                return obligation is not null
+                    && (await store.ReadStoppedWorkAdviceViewAsync(obligation, Ct))?.State
+                        == StoppedWorkJudgmentState.Available;
+            });
+            Assert.Equal(2, calls);
+            Assert.All((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items,
+                item => Assert.Null(item.ReplacementReviewAction));
+            await scheduler.DrainStoppedWorkAdviceAsync();
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     private static QueueSchedulerService Scheduler(
         ConductorObligationStore store,
         WorkItemAdvancer advancer,
@@ -510,10 +579,11 @@ public sealed class StoppedWorkAdviceSchedulerTests
     };
 
     private static RetainedStoppedWorkAdviceResponse Response(
-        ConductorObligation obligation, StoppedWorkAdviceRequest request) => new(
+        ConductorObligation obligation, StoppedWorkAdviceRequest request,
+        StoppedWorkAdviceChoice choice = StoppedWorkAdviceChoice.Hold) => new(
         new StoppedWorkAdviceDecision(
             obligation.ObligationId, request.Repository, request.Tag, request.AttemptId.Value,
-            request.ContextSha256, StoppedWorkAdviceChoice.Hold, "The verdict is incomplete."),
+            request.ContextSha256, choice, "The verdict is incomplete."),
         CodexReadinessDecisionAdapter.AdapterName,
         CodexReadinessDecisionAdapter.Model,
         CodexReadinessDecisionAdapter.Effort,

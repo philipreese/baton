@@ -986,7 +986,15 @@ public sealed partial class WorkItemAdvancer
             && (item.AttemptId is null || prior.AttemptId == item.AttemptId && prior.Stage == stage)
             || item.StoppedWorkJudgment is not null && item.AttemptId is null
             || item.Repository is not { Length: > 0 } repository
-            || item.OwnedTask is null && !IsStoppedWorkAdviceEnabledNow(repository))
+            || item.OwnedTask is null
+                && !IsStoppedWorkAdviceEnabledNow(repository)
+                && !(haltCause == StoppedWorkHaltCause.MissingVerdict
+                    && StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository))
+            || item.ReplacementReviewAction is
+            {
+                Origin: QueueReplacementReviewOrigin.Automatic,
+                CompletionProof: null,
+            })
         {
             return null;
         }
@@ -1083,7 +1091,10 @@ public sealed partial class WorkItemAdvancer
             verdictAvailable,
             requiredChecks,
             state,
-            blockedReason);
+            blockedReason,
+            AutomaticMissingVerdictReplacementReviewEligible:
+                haltCause == StoppedWorkHaltCause.MissingVerdict
+                && StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository));
         return attempt is null ? captured : captured with
         {
             ContextSha256 = StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(captured)),

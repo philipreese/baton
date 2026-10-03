@@ -266,6 +266,7 @@ public static class QueueScheduler
     /// <see cref="Candidate(IReadOnlyList{QueueItem})"/> and the pass-through pick read it.</summary>
     private static bool IsEligible(QueueItem item) =>
         item.State == QueueItemState.Queued && !item.External && item.Retirement is null && !IsReady(item)
+        && item.ReplacementReviewAction?.PausedReason is null
         && item.IssuePreparation?.State is null or TaskPreparationState.Prepared;
 
     /// <summary>

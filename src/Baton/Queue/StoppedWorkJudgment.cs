@@ -87,4 +87,6 @@ public sealed record StoppedWorkJudgment(
     string? Choice = null,
     [property: JsonPropertyName("explanation")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Explanation = null);
+    string? Explanation = null,
+    [property: JsonPropertyName("automaticMissingVerdictReplacementReviewEligible")]
+    bool AutomaticMissingVerdictReplacementReviewEligible = false);

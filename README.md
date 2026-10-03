@@ -101,6 +101,16 @@ source makes old advice stale. The [contract](spec/baton.md#stopped-work-judgmen
 exact admission, recovery and provider limits. This prepares conductor-owned judgment handoffs without
 granting automatic execution authority.
 
+The narrow missing-verdict recovery exception has a separate exact-true opt-in:
+
+```json
+{"AutomaticMissingVerdictReplacementReview":{"github.com/example/project":true}}
+```
+
+It does not enable advice or select its provider. Only a newly captured typed `MissingVerdict` halt
+with retained `Recommend` advice may use the existing replacement-review action slot; hold,
+revocation and normal queue admission still apply. The full contract is in [spec §13](spec/baton.md).
+
 For a current missing-verdict `Review` or `ReReview` halt, the claim holder may explicitly issue the
 `conductor act ... --action replace-review` command listed above. It consumes one normal lifecycle
 round and remains subject to queue hold and worker admission. The request is completed only after

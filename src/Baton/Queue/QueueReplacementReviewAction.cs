@@ -1,6 +1,14 @@
+using System.Text.Json.Serialization;
 using Baton.Domain;
 
 namespace Baton.Queue;
+
+[JsonConverter(typeof(JsonStringEnumConverter<QueueReplacementReviewOrigin>))]
+public enum QueueReplacementReviewOrigin
+{
+    Manual,
+    Automatic,
+}
 
 /// <summary>
 /// Queue-owned, single-use action slot for one missing-verdict source. The mutable current attempt
@@ -25,4 +33,6 @@ public sealed record QueueReplacementReviewAction(
     string? ReplacementRoomDirectory = null,
     string? CompletionProof = null,
     string? BlockedReason = null,
-    string? NextTrigger = null);
+    string? NextTrigger = null,
+    QueueReplacementReviewOrigin Origin = QueueReplacementReviewOrigin.Manual,
+    string? PausedReason = null);

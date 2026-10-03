@@ -19,7 +19,8 @@ internal static class ReplacementReviewConductorCommand
         WorkItemAdvancer? advancer = null,
         ConductorObligationStore? obligations = null,
         CancellationToken cancellationToken = default,
-        Func<CancellationToken, Task>? beforeAdviceRead = null)
+        Func<CancellationToken, Task>? beforeAdviceRead = null,
+        bool automatic = false)
     {
         var key = options.ObligationKey!;
         var holder = options.Holder!;
@@ -50,6 +51,25 @@ internal static class ReplacementReviewConductorCommand
         if (source.ReplacementReviewAction is { } retained)
         {
             RequireSameRequest(retained, obligation, holder, expectedHead);
+            if (!automatic && retained.Origin == QueueReplacementReviewOrigin.Automatic)
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                {
+                    Items = current.Items.Select(item =>
+                    {
+                        if (item.Tag != source.Tag || item.ReplacementReviewAction is not { } currentAction)
+                            return item;
+                        RequireSameRequest(currentAction, obligation, holder, expectedHead);
+                        retained = currentAction with
+                        {
+                            Origin = QueueReplacementReviewOrigin.Manual,
+                            PausedReason = null,
+                            NextTrigger = null,
+                        };
+                        return item with { ReplacementReviewAction = retained };
+                    }).ToList(),
+                }, cancellationToken).ConfigureAwait(false);
+            }
             output.WriteLine($"Replacement review for '{key}' is retained; "
                 + (retained.CompletionProof is not null ? "completion verified." :
                     retained.BlockedReason is not null ? "blocked." :
@@ -85,11 +105,53 @@ internal static class ReplacementReviewConductorCommand
             {
                 RequireSameRequest(raced, obligation, holder, expectedHead);
                 RequireSameSource(raced, source);
+                if (!automatic && raced.Origin == QueueReplacementReviewOrigin.Automatic)
+                {
+                    // A racing manual request must retain manual authority on this exact slot;
+                    // promoting it under the queue lock must never consume another review round.
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, currentSnapshot =>
+                    {
+                        var current = currentSnapshot.Items.FirstOrDefault(item => item.Tag == source.Tag)
+                            ?? throw new ConductorObligationStoreException("The retained source disappeared.");
+                        var currentAction = current.ReplacementReviewAction
+                            ?? throw new ConductorObligationStoreException("The retained action slot disappeared.");
+                        RequireSameRequest(currentAction, obligation, holder, expectedHead);
+                        RequireSameSource(currentAction, source);
+                        if (currentAction.Origin != QueueReplacementReviewOrigin.Automatic)
+                            return currentSnapshot;
+                        return currentSnapshot with
+                        {
+                            Items = currentSnapshot.Items.Select(item => ReferenceEquals(item, current)
+                                ? item with
+                                {
+                                    ReplacementReviewAction = currentAction with
+                                    {
+                                        Origin = QueueReplacementReviewOrigin.Manual,
+                                        PausedReason = null,
+                                        NextTrigger = null,
+                                    },
+                                }
+                                : item).ToList(),
+                        };
+                    }, cancellationToken).ConfigureAwait(false);
+                }
                 output.WriteLine($"Replacement review for '{key}' is already authorized.");
                 return 0;
             }
             throw new ConductorObligationStoreException("No complete current stopped-work advice is retained.");
         }
+
+        // Automatic admission is the one narrow exception to advice-only routing: a retained
+        // typed MissingVerdict source plus Recommend may consume this existing action slot, but
+        // neither explanation text nor any other halt or choice is authority.
+        if (automatic
+            && (intent.HaltCause != StoppedWorkHaltCause.MissingVerdict
+                || intent.Stage is not (WorkStage.Review or WorkStage.ReReview)
+                || !intent.AutomaticMissingVerdictReplacementReviewEligible
+                || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository)
+                || view.Response.Decision.Choice != StoppedWorkAdviceChoice.Recommend))
+            throw new ConductorObligationStoreException(
+                "Automatic replacement review requires an opted-in MissingVerdict source and a retained Recommend advice choice.");
 
         var identity = RepositoryIdentity.From("https://" + repository, null)
             ?? throw new ConductorObligationStoreException("Repository identity is invalid.");
@@ -101,7 +163,8 @@ internal static class ReplacementReviewConductorCommand
         var action = new QueueReplacementReviewAction(
             key, holder, digest, repository, tag, sourceAttempt, source.RoomDirectory,
             stage, source.Round, intent.PullRequest.Value, expectedHead, source.Workspace,
-            source.Branch, DateTimeOffset.UtcNow);
+            source.Branch, DateTimeOffset.UtcNow,
+            Origin: automatic ? QueueReplacementReviewOrigin.Automatic : QueueReplacementReviewOrigin.Manual);
         await advancer.ValidateReplacementReviewSourceAsync(source, action, cancellationToken)
             .ConfigureAwait(false);
         var destinationRole = WorkStages.RoleFor(stage);
@@ -119,11 +182,33 @@ internal static class ReplacementReviewConductorCommand
             {
                 RequireSameRequest(existing, obligation, holder, expectedHead);
                 replayed = true;
+                if (!automatic && existing.Origin == QueueReplacementReviewOrigin.Automatic)
+                {
+                    var promoted = existing with
+                    {
+                        Origin = QueueReplacementReviewOrigin.Manual,
+                        PausedReason = null,
+                        NextTrigger = null,
+                    };
+                    return currentSnapshot with
+                    {
+                        Items = currentSnapshot.Items.Select(item =>
+                            ReferenceEquals(item, current)
+                                ? item with { ReplacementReviewAction = promoted }
+                                : item).ToList(),
+                    };
+                }
                 return currentSnapshot;
             }
             if (currentSnapshot.Held || current is null
                 || !string.Equals(JsonSerializer.Serialize(current), sourceJson, StringComparison.Ordinal))
                 throw new ConductorObligationStoreException("Replacement review source or queue hold changed before admission.");
+            // Revocation observed after asynchronous source validation must refuse new automatic
+            // admission before writing a brief, retaining a slot or consuming the next round.
+            if (automatic
+                && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository))
+                throw new ConductorObligationStoreException(
+                    "Automatic replacement review opt-in was revoked before admission.");
             var brief = WorkItemAdvancer.RenderReplacementReviewBrief(current, action);
             Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
             QueueCommand.WriteSpecFileAtomically(current.SpecFile, brief);

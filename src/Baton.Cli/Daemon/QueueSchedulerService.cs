@@ -626,8 +626,11 @@ public sealed partial class QueueSchedulerService : BackgroundService
             {
                 try
                 {
-                    await ValidateReplacementReviewLaunchAsync(item, replacement, cancellationToken)
-                        .ConfigureAwait(false);
+                    if (!await ValidateReplacementReviewLaunchAsync(item, replacement, cancellationToken)
+                        .ConfigureAwait(false))
+                    {
+                        continue;
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
                 {
