@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.63.0](https://github.com/philipreese/baton/compare/v0.62.2...v0.63.0) (2026-10-03)
+
+
+### Features
+
+* **conductor:** Automatically recover an opted-in missing review verdict ([#2592](https://github.com/philipreese/baton/issues/2592)) ([3376eb8](https://github.com/philipreese/baton/commit/3376eb8d815442b38a1ab7df181bb08b04253f2e))
+
 ## [0.62.2](https://github.com/philipreese/baton/compare/v0.62.1...v0.62.2) (2026-10-03)
 
 
