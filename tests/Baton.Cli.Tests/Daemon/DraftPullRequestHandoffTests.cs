@@ -114,7 +114,8 @@ public sealed class DraftPullRequestHandoffTests
 
         public async Task SeedAsync(
             bool enabled = true, bool settled = true, string? settingsRepository = Repository,
-            bool awaitingMissingPullRequest = true, bool succeeded = true)
+            bool awaitingMissingPullRequest = true, bool succeeded = true,
+            WorkStage stage = WorkStage.Implement, string? attemptBaseRevision = null)
         {
             var room = Path.Combine(_home, "room");
             var workspace = Path.Combine(_home, "workspace");
@@ -138,22 +139,23 @@ public sealed class DraftPullRequestHandoffTests
                 }, BatonPaths.SettingsFile, Ct);
             var attempt = new FleetAttemptId("draft-pr-attempt");
             var envelope = new QueueAttemptEnvelope(attempt, null, Branch, 2486, null,
-                WorkStage.Implement, "implement", "codex", "test", "low", [], [], null,
-                TaskRequirementAdmission.Admitted, room, "room-id", OtherHead, Now);
+                stage, WorkStages.RoleFor(stage), "codex", "test", "low", [], [], null,
+                TaskRequirementAdmission.Admitted, room, "room-id", attemptBaseRevision ?? OtherHead, Now);
             Item = new QueueItem
             {
                 Tag = Branch,
-                Role = "implement",
+                Role = WorkStages.RoleFor(stage),
                 Workspace = workspace,
                 WorkspaceOrigin = WorkspaceOrigins.IssueProvisioned,
                 SpecFile = spec,
                 Issue = 2486,
                 Branch = Branch,
                 Repository = Repository,
-                Stage = WorkStage.Implement,
+                Stage = stage,
                 State = QueueItemState.Failed,
                 RoomDirectory = room,
                 AttemptId = attempt,
+                AttemptBaseRevision = attemptBaseRevision,
                 AttemptEnvelope = envelope,
                 AttemptAdmissionFactDurable = true,
                 AttemptStartedFactDurable = true,
@@ -339,6 +341,41 @@ public sealed class DraftPullRequestHandoffTests
         Assert.Equal(1, fixture.Forge.CreateCount);
         await fixture.Advancer().AdvanceAsync(Now.AddMinutes(2), Ct);
         Assert.Equal(1, fixture.Forge.CreateCount);
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Fix)]
+    [InlineData(WorkStage.Continue)]
+    public async Task Distinct_repair_without_pr_retains_typed_reconciliation_and_attempt_fields(WorkStage stage)
+    {
+        using var fixture = new Fixture();
+        await fixture.SeedAsync(awaitingMissingPullRequest: false, stage: stage, attemptBaseRevision: OtherHead);
+        var before = await fixture.ReadAsync();
+
+        var fact = Assert.Single(await fixture.Advancer().AdvanceAsync(Now, Ct));
+        Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+        var after = await fixture.ReadAsync();
+        var expected = $"the {WorkStages.Token(stage)} lane settled succeeded but no pull request is open on "
+            + $"'{Branch}' — a pushed branch is not PR evidence; open the exact draft PR and Baton will reconcile "
+            + "this retained terminal row";
+        Assert.Equal(expected, after.Error);
+        Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, after.ReconciliationKind);
+        Assert.Equal(before.Tag, after.Tag);
+        Assert.Equal(before.Stage, after.Stage);
+        Assert.Equal(before.State, after.State);
+        Assert.Equal(before.Round, after.Round);
+        Assert.Equal(before.AttemptId, after.AttemptId);
+        Assert.Equal(before.AttemptBaseRevision, after.AttemptBaseRevision);
+        Assert.Equal(before.AttemptEnvelope?.AttemptId, after.AttemptEnvelope?.AttemptId);
+        Assert.Equal(before.AttemptEnvelope?.Stage, after.AttemptEnvelope?.Stage);
+        Assert.Equal(before.AttemptEnvelope?.AttemptBaseRevision, after.AttemptEnvelope?.AttemptBaseRevision);
+        Assert.Equal(before.AttemptEnvelope?.RoomDirectory, after.AttemptEnvelope?.RoomDirectory);
+        Assert.Equal(before.AttemptEnvelope?.AdmissionDecision, after.AttemptEnvelope?.AdmissionDecision);
+        Assert.Equal(before.RoomDirectory, after.RoomDirectory);
+        Assert.True(after.Halted);
+        Assert.Equal(before.PullRequest, after.PullRequest);
+        Assert.Equal(before.AutomaticFixUsed, after.AutomaticFixUsed);
+        Assert.Equal(0, fixture.Forge.CreateCount);
     }
 
     [Theory]

@@ -246,7 +246,8 @@ public static class WorkItemLifecycle
         {
             return WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled succeeded but no pull request is open on "
-                + $"'{observation.Branch}' — a pushed branch is not PR evidence; {Recovery(observation.Stage)}",
+                + $"'{observation.Branch}' — a pushed branch is not PR evidence; "
+                + Recovery(observation.Stage, typedReconciliation: true),
                 QueueReconciliationKind.AwaitingVerifiedPullRequest);
         }
 
@@ -479,24 +480,30 @@ public static class WorkItemLifecycle
     }
 
     /// <summary>
-    /// What actually un-sticks a work item the queue has failed, said once because every
-    /// <see cref="WorkItemTransitionKind.NeedsOperator"/> reason ends with it.
+    /// Recovery guidance appended by the callers using this helper.
     /// </summary>
     /// <remarks>
     /// <b>Written against what the code does, not what would be convenient.</b> A failed item is out of
-    /// the advance candidate set for good (<c>WorkItemAdvancer.AdvanceAsync</c>): opening the missing PR
-    /// by hand no longer makes the next tick pick it up, which is what the pre-#2004 wording promised.
-    /// <c>baton queue</c> has <c>add</c>, <c>list</c>, <c>hold</c>, <c>resume</c> and <c>import</c> and
-    /// no verb that clears a failure, and <c>QueueCommand.RefuseIfNotReplaceable</c> refuses a re-add for
-    /// any item past <see cref="WorkStage.Implement"/> — so past implement the only recovery in the
-    /// product is the operator's own hand on <c>queue.json</c>.
+    /// the advance candidate set for good (<c>WorkItemAdvancer.AdvanceAsync</c>), except for the two typed
+    /// recovery cases <see cref="QueueReconciliationKind.AwaitingVerifiedPullRequest"/> and
+    /// <see cref="QueueReconciliationKind.AwaitingRequiredCheckEvidence"/>. Each has its own bounded
+    /// re-observation seam; no other reconciliation value opts a failed row back into advancement.
+    /// <c>QueueCommand.RefuseIfNotReplaceable</c> refuses a re-add for any item past
+    /// <see cref="WorkStage.Implement"/> — ordinary past-implement recovery is manual completion and
+    /// independent exact-head review under the original grants and current delivery checks, followed by
+    /// the supported <c>baton queue retire &lt;tag&gt; --reason &lt;text&gt; --merged-pr &lt;n&gt;</c> only after the
+    /// matching PR is actually merged.
     /// </remarks>
-    private static string Recovery(WorkStage stage) =>
+    private static string Recovery(WorkStage stage, bool typedReconciliation = false) =>
         stage == WorkStage.Implement
             ? "the item is still at implement, so 'baton queue add' with the same tag replaces it once you "
                 + "have fixed what it needs"
-            : $"no 'baton queue' verb reopens a failed item past implement — carry the round by hand, or edit "
-                + $"this item's stage/state/round in {Status.BatonPaths.QueueFileName} yourself";
+            : typedReconciliation
+                ? "open the exact draft PR and Baton will reconcile this retained terminal row"
+            : "no 'baton queue' verb reopens a failed item past implement — manually complete the existing work "
+                + "and obtain an independent exact-head review under the original grants and current delivery "
+                + "checks; after the matching PR is actually merged, use the supported 'baton queue retire <tag> "
+                + "--reason <text> --merged-pr <n>'";
 
     /// <summary>
     /// Whether the lane's work reached the PR. Both halves must be known: an unknown workspace head or
