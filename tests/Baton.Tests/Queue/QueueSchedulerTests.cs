@@ -67,6 +67,41 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void A_paused_automatic_replacement_is_excluded_while_independent_queued_work_is_selected()
+    {
+        var paused = Item("paused-replacement", role: "review") with
+        {
+            Stage = WorkStage.Review,
+            Round = 1,
+            ReplacementReviewAction = new QueueReplacementReviewAction(
+                ObligationKey: "stopped-work:paused",
+                Holder: "conductor-fixture",
+                AdviceDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Repository: "github.com/aer-works/baton",
+                Tag: "paused-replacement",
+                SourceAttemptId: FleetAttemptId.New(),
+                SourceRoomDirectory: @"C:\rooms\paused",
+                SourceStage: WorkStage.Review,
+                SourceRound: 1,
+                PullRequest: 77,
+                HeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                Workspace: @"C:\repos\paused",
+                Branch: "paused-replacement",
+                AuthorizedAt: DateTimeOffset.UtcNow,
+                Origin: QueueReplacementReviewOrigin.Automatic,
+                PausedReason: "queue held",
+                NextTrigger: "Resume after the queue hold is cleared."),
+        };
+        var independent = Item("independent", role: "implement") with { Stage = WorkStage.Implement };
+
+        var decision = QueueScheduler.Decide(
+            LocalAt(12), [paused, independent], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("independent", decision.Item!.Tag);
+    }
+
+    [Fact]
     public void A_reserved_task_cannot_launch_until_preparation_is_verified()
     {
         var preparing = Item("preparing") with

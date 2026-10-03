@@ -22,7 +22,8 @@ internal sealed record StoppedWorkAdviceView(
     DateTimeOffset ObservedAt,
     int? Issue = null,
     WorkStage? Stage = null,
-    RetainedStoppedWorkAdviceResponse? Response = null);
+    RetainedStoppedWorkAdviceResponse? Response = null,
+    bool AutomaticAdmissionRefused = false);
 
 public sealed partial class ConductorObligationStore
 {
@@ -302,7 +303,9 @@ public sealed partial class ConductorObligationStore
                 && File.Exists(Path.Combine(StoppedWorkAdviceDirectory(row.IdempotencyKey), "source-checked"))
                 && !File.Exists(Path.Combine(StoppedWorkAdviceDirectory(row.IdempotencyKey), "source-stale"));
             return new(current ? StoppedWorkJudgmentState.Available : StoppedWorkJudgmentState.Stale,
-                observedAt, Issue: source?.Issue, Stage: stage, Response: response);
+                observedAt, Issue: source?.Issue, Stage: stage, Response: response,
+                AutomaticAdmissionRefused: File.Exists(Path.Combine(
+                    StoppedWorkAdviceDirectory(row.IdempotencyKey), "automatic-admission-refused")));
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException
             or ConductorObligationStoreException or ConductorClaimException)

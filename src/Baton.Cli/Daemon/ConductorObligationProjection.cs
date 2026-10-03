@@ -118,6 +118,18 @@ internal static class ConductorObligationProjection
                             : null,
                     };
                 }
+                else if (view?.AutomaticAdmissionRefused == true
+                    && row.Status != ConductorObligationStatus.ActionObserved)
+                {
+                    // A refusal is neither an action slot nor completion. Preserve saved manual
+                    // advice, expose a bounded owner/trigger, and never disclose private failures.
+                    projected["automaticAdmission"] = new JsonObject
+                    {
+                        ["state"] = "refused",
+                        ["owner"] = "Repository conductor",
+                        ["nextTrigger"] = "Inspect retained admission evidence and reconcile manually against the current PR head and permissions",
+                    };
+                }
                 if (view?.Issue is > 0) projected["issue"] = view.Issue;
                 else if (source?.Issue is > 0) projected["issue"] = source.Issue;
                 var stage = view?.Stage ?? source?.StoppedWorkJudgment?.Stage ?? source?.Stage;

@@ -8922,6 +8922,12 @@ workspace, open PR and exact head are revalidated. Revoked unlaunched automatic 
 excluded from queue candidacy, not completed or terminally blocked; re-enabling the opt-in can resume
 it. Already launched work is not revoked.
 
+Replaying source-checked saved advice does not repeat its as-of forge verification or revoke manual
+advice on a later forge failure; action admission still revalidates the current source and exact head.
+Automatic admission refusal retains that saved response and a durable no-redispatch marker. Its safe
+projection names the repository conductor and a manual current-head/permission reconciliation trigger,
+not an action slot or completion; a subsequently admitted shared action slot takes precedence.
+
 Admission is limited to a current `MissingVerdict` halt at `Review` or `ReReview` with a known
 terminal source, trustworthy round and automatic-fix history, a current conductor holder, and an
 exact open PR, workspace and head. A usable lifecycle verdict appearing before admission refuses

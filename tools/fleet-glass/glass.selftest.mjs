@@ -740,6 +740,23 @@ const renderedAdvice = obligationPanel(obligationView([advisedRow]));
 check("advice explanation is escaped and private-shaped fields are not rendered",
   renderedAdvice.includes("Advice only — no action taken") && renderedAdvice.includes("&lt;img")
     && !renderedAdvice.includes("<img") && !renderedAdvice.includes("holder") && !renderedAdvice.includes("path"));
+const refusedAdmission = {state:"refused", owner:"Repository conductor",
+  nextTrigger:"Inspect retained evidence; reconcile manually against the current head <svg>"};
+const refusedAdvice = obligationPanel(obligationView([{...advisedRow,
+  automaticAdmission:refusedAdmission}]));
+check("automatic admission refusal shows owner and bounded manual next trigger, not completion",
+  refusedAdvice.includes("Automatic admission refused") && refusedAdvice.includes("Repository conductor")
+    && refusedAdvice.includes("Next trigger: Inspect retained evidence")
+    && refusedAdvice.includes("&lt;svg&gt;") && !refusedAdvice.includes("<svg>")
+    && !refusedAdvice.includes("Completed requests"));
+for(const malformed of [null, [], {...refusedAdmission, state:"completed"},
+  {...refusedAdmission, owner:"private-holder"}, {...refusedAdmission, nextTrigger:""},
+  {...refusedAdmission, nextTrigger:"x".repeat(4097)}]){
+  const rendered = obligationPanel(obligationView([{...advisedRow, automaticAdmission:malformed}]));
+  check("malformed automatic admission fails closed without an asserted disposition",
+    rendered.includes("Unknown advice") && !rendered.includes("Automatic admission refused")
+      && !rendered.includes("Advice only — no action taken") && !rendered.includes("private-holder"));
+}
 const staleAdvice = obligationPanel(obligationView([{...advisedRow, advice:{...validAdvice, state:"stale"}}]));
 check("stale advice is visibly stale and never styled as completed",
   staleAdvice.includes("Stale") && staleAdvice.includes("Advice recorded 2026-09-07T12:00:00Z")

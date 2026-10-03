@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Baton.Accounting;
 using Baton.Cli.Daemon;
 using Baton.Conductor;
@@ -22,12 +23,17 @@ public sealed class StoppedWorkAdviceCaptureTests
     private sealed class FakeGh : IGhCliRunner
     {
         public List<string[]> Calls { get; } = [];
+        public int? FailFromCall { get; set; }
+        public Func<bool>? RefuseWhen { get; set; }
         private bool _draft = true;
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args,
             CancellationToken cancellationToken)
         {
             Calls.Add(args.ToArray());
+            if (FailFromCall is { } failFromCall && Calls.Count >= failFromCall
+                || RefuseWhen?.Invoke() == true)
+                return Task.FromResult(new GhCliResult(false, 1, string.Empty, "transient fake GitHub failure"));
             if (args is ["api", ..])
                 return Task.FromResult(RequiredCheckFixture.Read(args, Repository, Head,
                     new GhCliResult(true, 0, """[{"name":"ci","bucket":"pass"}]""", "")));
@@ -271,6 +277,129 @@ public sealed class StoppedWorkAdviceCaptureTests
                 TextWriter.Null, home, advancer, store, Ct);
             Assert.Equal(QueueReplacementReviewOrigin.Manual,
                 (await ReadBackAsync()).ReplacementReviewAction?.Origin);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Automatic_recommendation_checked_while_held_remains_available_when_resume_source_check_fails()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableAutomaticReplacementReviewAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture", cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room, new FleetAttemptId("held-resume-source"));
+            await MakeReplacementEligibleAsync();
+            var gh = new FakeGh();
+            var advancer = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
+            var store = Store();
+            var adviceCalls = 0;
+            var scheduler = Scheduler(store, advancer, (obligation, request, _, _, _) =>
+            {
+                Interlocked.Increment(ref adviceCalls);
+                return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+            });
+
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = true }, Ct);
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
+                    == StoppedWorkJudgmentState.Available);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            Assert.Equal(1, adviceCalls);
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+
+            // Replay must not stale already checked advice on a new forge read. After the fix,
+            // this same first failing operation belongs to automatic action admission instead.
+            gh.FailFromCall = gh.Calls.Count + 1;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = false }, Ct);
+            await scheduler.TickOnceAsync(Ct);
+            var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
+            await WaitForAsync(() => Task.FromResult(
+                File.Exists(Path.Combine(evidenceDirectory, "source-stale"))
+                || File.Exists(Path.Combine(evidenceDirectory, "automatic-admission-refused"))));
+            await scheduler.DrainStoppedWorkAdviceAsync();
+
+            Assert.Equal(StoppedWorkJudgmentState.Available,
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+            Assert.True(File.Exists(Path.Combine(
+                store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!), "automatic-admission-refused")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Automatic_admission_refusal_is_durable_and_projection_preserves_manual_authority()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableAutomaticReplacementReviewAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture", cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room, new FleetAttemptId("refused-projection-source"));
+            await MakeReplacementEligibleAsync();
+            var gh = new FakeGh();
+            var advancer = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
+            var store = Store();
+            var adviceCalls = 0;
+            var scheduler = Scheduler(store, advancer, (obligation, request, _, _, _) =>
+            {
+                Interlocked.Increment(ref adviceCalls);
+                // The marker is written only after advice's source check completes. A failure
+                // triggered by it reaches the real action-admission branch, not that source check.
+                gh.RefuseWhen = () => File.Exists(Path.Combine(
+                    store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!), "source-checked"));
+                return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+            });
+
+            await scheduler.TickOnceAsync(Ct);
+            var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
+            await WaitForAsync(() => Task.FromResult(File.Exists(
+                Path.Combine(evidenceDirectory, "automatic-admission-refused"))));
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            var refused = await ReadBackAsync();
+            Assert.Null(refused.ReplacementReviewAction);
+            Assert.Equal(1, adviceCalls);
+            Assert.Equal(StoppedWorkJudgmentState.Available,
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
+
+            var callsAfterRefusal = gh.Calls.Count;
+            await scheduler.TickOnceAsync(Ct);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            Assert.Equal(callsAfterRefusal, gh.Calls.Count);
+            Assert.Equal(1, adviceCalls);
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+
+            var projection = await ConductorObligationProjection.ReadAsync(Ct);
+            var rows = Assert.IsType<JsonArray>(projection["rows"]);
+            var row = Assert.Single(rows.OfType<JsonObject>(), candidate =>
+                candidate["requestedAction"]?.GetValue<string>() == "Assess stopped work");
+            var automaticAdmission = Assert.IsType<JsonObject>(row["automaticAdmission"]);
+            Assert.Equal("refused", automaticAdmission["state"]?.GetValue<string>());
+            Assert.Equal("Repository conductor", automaticAdmission["owner"]?.GetValue<string>());
+            var nextTrigger = automaticAdmission["nextTrigger"]?.GetValue<string>();
+            Assert.NotNull(nextTrigger);
+            Assert.InRange(nextTrigger!.Length, 1, 4096);
+            Assert.Contains("manual", nextTrigger, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("head", nextTrigger, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

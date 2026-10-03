@@ -116,18 +116,22 @@ public sealed partial class QueueSchedulerService
                             ? new ClaudeStoppedWorkAdviceAdapter().DecideAsync(input, evidence, directory, token)
                             : new CodexReadinessDecisionAdapter().DecideStoppedWorkAsync(input, evidence, directory, token),
                 cancellationToken).ConfigureAwait(false);
-            try
+            var evidenceDirectory = _conductorObligations.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
+            // Saved advice is as-of evidence, never permission to act. Replay keeps that evidence;
+            // ExecuteAsync separately revalidates the current source, owner, workspace and PR head.
+            if (!File.Exists(Path.Combine(evidenceDirectory, "source-checked")))
             {
-                await ValidateStoppedWorkSourceAsync(source, obligation, cancellationToken, admission: false)
-                    .ConfigureAwait(false);
-                _conductorObligations.MarkStoppedWorkAdviceSourceChecked(intent.Key!);
-            }
-            catch (Exception)
-            {
-                // Only source drift makes retained advice stale. Automatic action refusal never
-                // removes the operator's independent manual authority over the retained advice.
-                _conductorObligations.MarkStoppedWorkAdviceStale(intent.Key!);
-                return;
+                try
+                {
+                    await ValidateStoppedWorkSourceAsync(source, obligation, cancellationToken, admission: false)
+                        .ConfigureAwait(false);
+                    _conductorObligations.MarkStoppedWorkAdviceSourceChecked(intent.Key!);
+                }
+                catch (Exception)
+                {
+                    _conductorObligations.MarkStoppedWorkAdviceStale(intent.Key!);
+                    return;
+                }
             }
 
             var automaticRecommendation = intent.AutomaticMissingVerdictReplacementReviewEligible

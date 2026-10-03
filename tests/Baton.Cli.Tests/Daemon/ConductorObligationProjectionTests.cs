@@ -217,6 +217,29 @@ public sealed class ConductorObligationProjectionTests : IDisposable
         Assert.Equal("review", projected["stage"]!.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData(ConductorObligationStatus.TransportAcknowledged, true)]
+    [InlineData(ConductorObligationStatus.ActionObserved, false)]
+    public void Automatic_refusal_is_unresolved_evidence_not_a_fabricated_action(
+        ConductorObligationStatus status, bool visible)
+    {
+        var row = StoppedRow(status);
+        var view = ConductorObligationProjection.Project(
+            new([row], new Dictionary<string, string>()),
+            new Dictionary<string, StoppedWorkAdviceView>
+            {
+                [row.IdempotencyKey] = new(StoppedWorkJudgmentState.Available, StoppedAt,
+                    Response: Response(row), AutomaticAdmissionRefused: true),
+            });
+
+        var projected = view["rows"]![0]!.AsObject();
+        Assert.Equal(visible, projected.ContainsKey("automaticAdmission"));
+        Assert.False(projected.ContainsKey("action"));
+        Assert.Equal(visible ? 1 : 0, view["unresolvedCount"]!.GetValue<int>());
+        Assert.DoesNotContain("private", view.ToJsonString());
+        Assert.DoesNotContain("stopped-work-advice-sha256:", view.ToJsonString());
+    }
+
     private static QueueItem UnboundStoppedSource(bool missingHolder, bool missingAttempt)
     {
         var attempt = new FleetAttemptId("private-attempt");
