@@ -357,8 +357,7 @@ public sealed class DraftPullRequestHandoffTests
         var after = await fixture.ReadAsync();
         var expected = $"the {WorkStages.Token(stage)} lane settled succeeded but no pull request is open on "
             + $"'{Branch}' — a pushed branch is not PR evidence; open the exact draft PR and Baton will reconcile "
-            + "this retained terminal row; after the matching PR is actually merged, use the supported 'baton queue "
-            + "retire <tag> --reason <text> --merged-pr <n>'";
+            + "this retained terminal row";
         Assert.Equal(expected, after.Error);
         Assert.Equal(QueueReconciliationKind.AwaitingVerifiedPullRequest, after.ReconciliationKind);
         Assert.Equal(before.Tag, after.Tag);

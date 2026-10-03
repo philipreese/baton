@@ -485,11 +485,10 @@ public static class WorkItemLifecycle
     /// </summary>
     /// <remarks>
     /// <b>Written against what the code does, not what would be convenient.</b> A failed item is out of
-    /// the advance candidate set for good (<c>WorkItemAdvancer.AdvanceAsync</c>), except for a row carrying
-    /// typed <see cref="QueueReconciliationKind.AwaitingVerifiedPullRequest"/> recovery: opening its exact
-    /// draft PR is the supported re-observation seam, and Baton reconciles the retained terminal row.
-    /// <c>baton queue</c> exposes <c>add</c>, <c>list</c>, <c>worktrees</c>, <c>hold</c>, <c>resume</c>,
-    /// <c>cancel</c>, <c>retire</c>, <c>restore</c> and <c>import</c>. No verb clears a failure, and
+    /// the advance candidate set for good (<c>WorkItemAdvancer.AdvanceAsync</c>), except for the two typed
+    /// recovery cases <see cref="QueueReconciliationKind.AwaitingVerifiedPullRequest"/> and
+    /// <see cref="QueueReconciliationKind.AwaitingRequiredCheckEvidence"/>. Each has its own bounded
+    /// re-observation seam; no other reconciliation value opts a failed row back into advancement.
     /// <c>QueueCommand.RefuseIfNotReplaceable</c> refuses a re-add for any item past
     /// <see cref="WorkStage.Implement"/> — ordinary past-implement recovery is manual completion and
     /// independent exact-head review under the original grants and current delivery checks, followed by
@@ -501,9 +500,7 @@ public static class WorkItemLifecycle
             ? "the item is still at implement, so 'baton queue add' with the same tag replaces it once you "
                 + "have fixed what it needs"
             : typedReconciliation
-                ? "open the exact draft PR and Baton will reconcile this retained terminal row; after the "
-                    + "matching PR is actually merged, use the supported 'baton queue retire <tag> "
-                    + "--reason <text> --merged-pr <n>'"
+                ? "open the exact draft PR and Baton will reconcile this retained terminal row"
             : "no 'baton queue' verb reopens a failed item past implement — manually complete the existing work "
                 + "and obtain an independent exact-head review under the original grants and current delivery "
                 + "checks; after the matching PR is actually merged, use the supported 'baton queue retire <tag> "
