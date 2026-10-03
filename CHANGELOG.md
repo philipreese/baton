@@ -9,6 +9,14 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.62.2](https://github.com/philipreese/baton/compare/v0.62.1...v0.62.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **codex:** Name the command tool shell in its description ([#2586](https://github.com/philipreese/baton/issues/2586)) ([d4f5bf3](https://github.com/philipreese/baton/commit/d4f5bf3542dd9336efe6892a66b748a64358e082))
+* **lifecycle:** Explain halted recovery without raw state edits ([#2585](https://github.com/philipreese/baton/issues/2585)) ([eb079d4](https://github.com/philipreese/baton/commit/eb079d4624a28ca2cf7c6c0ea5f10f4c9d28b5e9))
+
 ## [0.62.1](https://github.com/philipreese/baton/compare/v0.62.0...v0.62.1) (2026-10-03)
 
 
