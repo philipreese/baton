@@ -200,13 +200,19 @@ public sealed partial class QueueSchedulerService
         CancellationToken cancellationToken, bool admission = true)
     {
         var intent = source.StoppedWorkJudgment!;
-        if (admission && !StoppedWorkAdviceSettings.IsEnabled(intent.Repository)
+        // Protected invariant: only a halt stamped eligible while the exact repository opt-in was
+        // true may cross NEW paid-advice admission. Owned halted obligations are still enqueued and
+        // remain visible when advice is off; this check protects only an unmarked provider launch.
+        if (admission && (!intent.AdviceEligibleAtHalt
+                || !StoppedWorkAdviceSettings.IsEnabled(intent.Repository))
             || intent.State != StoppedWorkJudgmentState.Pending)
             throw new ConductorObligationStoreException("Stopped-work advice is not enabled or eligible.");
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var candidates = snapshot.Items.Where(item => item.Tag == source.Tag && item.Repository == source.Repository).ToArray();
-        if (candidates.Length != 1 || !candidates[0].Halted || candidates[0].AttemptId != intent.AttemptId
-            || candidates[0].Stage != intent.Stage || candidates[0].StoppedWorkJudgment != intent)
+        if (candidates.Length != 1 || !candidates[0].Halted || candidates[0].Retirement is not null
+            || candidates[0].CancelledAt is not null || candidates[0].State == QueueItemState.Cancelled
+            || candidates[0].AttemptId != intent.AttemptId || candidates[0].Stage != intent.Stage
+            || candidates[0].StoppedWorkJudgment != intent)
             throw new ConductorObligationStoreException("Stopped-work source evidence changed.");
         var identity = RepositoryIdentity.From("https://" + intent.Repository, null);
         var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,

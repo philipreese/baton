@@ -8828,9 +8828,13 @@ authority. An answer or delivery acknowledgement never closes the underlying req
 
 `Queue.StoppedWorkAdvice` opts exact canonical remote repository keys into this feature. Only JSON
 `true` enables a key; absence, false, malformed values and noncanonical keys disable it. Only a new
-`NeedsOperator` halt while enabled creates an intent. Existing halted rows are not a backlog of calls
-to replay when the setting is enabled. Holding the worker queue does not revoke an enabled advisory
-setting; disable that setting to prevent new advice admissions. Neither setting resumes workers.
+`NeedsOperator` halt while enabled creates an intent, and that intent durably records its exact-true
+advice eligibility at halt capture. A missing field on an older record is ineligible for a new paid
+call. Existing halted rows are not a backlog of calls to replay when the setting is enabled. Owned
+task halt obligations remain retained and visible even when advice is off; that delivery obligation
+is distinct from NEW paid advice eligibility. Holding the worker queue does not revoke an enabled
+advisory setting; disable that setting to prevent new advice admissions. Neither setting resumes
+workers.
 
 The halt mutation retains the typed source evidence, observation time and recorded conductor holder
 atomically with the queue row. Its stable identity binds repository, tag, attempt and stage, not a

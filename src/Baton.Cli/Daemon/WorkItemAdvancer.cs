@@ -1041,6 +1041,9 @@ public sealed partial class WorkItemAdvancer
         var key = attempt is null
             ? null
             : StoppedWorkJudgmentKey.For(repository, item.Tag, attempt.Value, stage);
+        // This is a NEW halt admission fact. Exact-true opt-in is sampled here and is never
+        // inferred later from mutable settings or added to the historical evidence digest.
+        var adviceEligibleAtHalt = IsStoppedWorkAdviceEnabledNow(repository);
 
         // Hash exactly the typed snapshot retained below. Transient prose (including the lifecycle
         // reason) is deliberately excluded: a replay must identify the same evidence, not a later
@@ -1094,7 +1097,8 @@ public sealed partial class WorkItemAdvancer
             blockedReason,
             AutomaticMissingVerdictReplacementReviewEligible:
                 haltCause == StoppedWorkHaltCause.MissingVerdict
-                && StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository));
+                && StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository),
+            AdviceEligibleAtHalt: adviceEligibleAtHalt);
         return attempt is null ? captured : captured with
         {
             ContextSha256 = StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(captured)),
