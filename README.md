@@ -76,45 +76,57 @@ mutations. The normative contract and recovery details are in
 
 An optional [stopped-work judgment handoff](spec/baton.md#stopped-work-judgment-handoff-2499)
 gives the repository's conductor one saved recommendation when a new lifecycle needs judgment.
-The site displays a recommendation as **advice only — no action taken**. The recommendation itself
-does not restart workers, apply a fix, merge, or wake your desktop chat; it leaves the request unresolved.
+Receiving, retaining, or displaying that recommendation is **advice only — not corrective action**.
+It does not restart workers, apply a fix, authorize a replacement review, merge, or wake your desktop
+chat; the request remains unresolved until a separately authorized action completes.
 
-To opt in, merge this member into the existing `Queue` object in `~/.baton/settings.json`, preserving
-all other settings, and use your exact canonical repository key:
+Installation enables neither switch. To opt in to both behaviors, merge this complete minimal `Queue`
+configuration into `~/.baton/settings.json`, preserving all other settings and replacing the example
+with your exact canonical repository key:
 
 ```json
-{"StoppedWorkAdvice":{"github.com/example/project":true}}
+{
+  "Queue": {
+    "StoppedWorkAdvice": {
+      "github.com/example/project": true
+    },
+    "AutomaticMissingVerdictReplacementReview": {
+      "github.com/example/project": true
+    }
+  }
+}
 ```
 
-Establish the repository's conductor claim first. Missing ownership or source evidence blocks calls;
-old stopped jobs are not backfilled. Set the entry to false to stop new advice admissions. `queue hold`
-pauses worker launches, not this separately opted-in advice. Codex's subscription CLI remains the
-default. To select the bounded Claude advice adapter, add
-`"StoppedWorkAdviceProvider":{"github.com/example/project":"claude"}` to that same `Queue` object.
-Selection does not opt in; only exact `codex` and `claude` values are accepted. Admission freezes the
-actual provider and replay never calls another vendor after settings change. Claude capability remains
+Only JSON `true` for an exact canonical repository key enables either setting; absence, false,
+malformed values, and noncanonical keys do not. Establish the repository's conductor claim first.
+Missing ownership or source evidence blocks calls, and old stopped jobs are not backfilled. `queue hold`
+pauses worker launches and blocks replacement admission or launch; it does not revoke an enabled advice
+setting. Set the advice entry to false to stop new advice admissions; an already admitted call is not revoked.
+Codex's subscription CLI remains the default advice provider. `Queue.StoppedWorkAdviceProvider` does
+not opt in; only exact `codex` and `claude` values are accepted, and Claude capability remains
 unverified pending the [native instruction and installed acceptance contract](spec/baton.md#stopped-work-judgment-handoff-2499).
+Admission freezes the actual provider, and replay never calls another vendor after settings change.
 
 Restarting Baton reuses retained results, not paid calls. If a launch is uncertain, inspect its local
 evidence; do not delete a launch marker or recreate the request to force a retry. A changed owner or
 source makes old advice stale. The [contract](spec/baton.md#stopped-work-judgment-handoff-2499) owns the
-exact admission, recovery and provider limits. This prepares conductor-owned judgment handoffs without
-granting automatic execution authority.
+exact admission, recovery, provider, and ordinary round and repair limits.
 
-The narrow missing-verdict recovery exception has a separate exact-true opt-in:
-
-```json
-{"AutomaticMissingVerdictReplacementReview":{"github.com/example/project":true}}
-```
-
-It does not enable advice or select its provider. Only a newly captured typed `MissingVerdict` halt
-with retained `Recommend` advice may use the existing replacement-review action slot; hold,
-revocation and normal queue admission still apply. The full contract is in [spec §13](spec/baton.md).
+When automatic replacement review is enabled, a newly captured typed `MissingVerdict` halt is recorded
+as eligible. If its retained advice is typed `Recommend`, Baton automatically admits one replacement
+review through the same action path as `conductor act`; the setting does not enable advice or select
+its provider. Historical halted rows, `Hold` advice, explanation text, and every other halt are ineligible.
+Current hold, revocation, owner, source, workspace, open-PR, exact-head, and normal queue admission
+checks still apply.
+The full contract is in [spec §13](spec/baton.md).
 
 For a current missing-verdict `Review` or `ReReview` halt, the claim holder may explicitly issue the
 `conductor act ... --action replace-review` command listed above. It consumes one normal lifecycle
-round and remains subject to queue hold and worker admission. The request is completed only after
-Baton verifies a terminal, exact-head `approve` or `block` verdict from that replacement attempt.
+round with the existing stage grant, model selection, runway, and execution limits; it does not reset
+the automatic-fix or round ceiling. It remains subject to queue hold and worker admission. The request
+is completed only after Baton verifies a terminal, exact-head `approve` or `block` verdict from that
+replacement attempt. This recovery does not merge anything; the queue's existing merge authority is
+unchanged.
 
 ## The conductor queue
 
