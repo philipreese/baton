@@ -379,6 +379,109 @@ public sealed class StoppedWorkAdviceSchedulerTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retired_or_canceled_eligible_source_is_refused_before_provider_launch(bool canceled)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = Item(canceled ? "stopped-canceled" : "stopped-retired",
+                canceled ? "attempt-canceled" : "attempt-retired", "conductor-one", home);
+            await SeedAsync(home, [item], "conductor-one");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(current => current with
+                {
+                    State = canceled ? QueueItemState.Cancelled : current.State,
+                    CancelledAt = canceled ? Now : null,
+                    Retirement = canceled ? null
+                        : new QueueRetirement(QueueRetirement.Merged, Now, "Merged independently."),
+                }).ToList(),
+            }, Ct);
+
+            var store = Store();
+            var calls = 0;
+            var scheduler = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(),
+                (_, _) => Task.FromResult<string?>(Head)), (_, _, _, _, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                throw new InvalidOperationException("current source disposition must refuse before launch");
+            });
+
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+                (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
+                    == ConductorObligationStatus.Blocked);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+
+            Assert.Equal(0, calls);
+            Assert.False(File.Exists(Path.Combine(
+                store.GetStoppedWorkAdviceEvidenceDirectory(item.StoppedWorkJudgment!.Key!), "launch.json")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Source_disposition_changed_during_free_preflight_is_refused_before_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = Item("stopped-preflight-disposition", "attempt-preflight-disposition",
+                "conductor-one", home);
+            await SeedAsync(home, [item], "conductor-one");
+            var store = Store();
+            var calls = 0;
+            var scheduler = new QueueSchedulerService(
+                (_, _) => Task.FromResult(new QueueLaunchOutcome(null)),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => Now,
+                advancer: new WorkItemAdvancer(new PullRequestGh(),
+                    (_, _) => Task.FromResult<string?>(Head)),
+                conductorObligations: store,
+                stoppedWorkAdvice: (_, _, _, _, _) =>
+                {
+                    Interlocked.Increment(ref calls);
+                    throw new InvalidOperationException("changed source must refuse before launch");
+                },
+                stoppedWorkAdvicePreflight: async (_, _) =>
+                {
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        Items = snapshot.Items.Select(current => current with
+                        {
+                            CancelledAt = Now,
+                            State = QueueItemState.Cancelled,
+                        }).ToList(),
+                    }, Ct);
+                });
+
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () =>
+                (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
+                    == ConductorObligationStatus.Blocked);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+
+            Assert.Equal(0, calls);
+            Assert.False(File.Exists(Path.Combine(
+                store.GetStoppedWorkAdviceEvidenceDirectory(item.StoppedWorkJudgment!.Key!), "launch.json")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task Another_lifecycle_advances_while_stopped_advice_provider_is_blocked()
     {
@@ -522,7 +625,8 @@ public sealed class StoppedWorkAdviceSchedulerTests
         ConductorObligationStore store,
         WorkItemAdvancer advancer,
         Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
-            string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>> launch) =>
+            string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>> launch,
+        Func<ConductorObligation, CancellationToken, Task>? preflight = null) =>
         new(
             (_, _) => Task.FromResult(new QueueLaunchOutcome(null)),
             _ => Task.FromResult(0d),
@@ -530,7 +634,8 @@ public sealed class StoppedWorkAdviceSchedulerTests
             () => Now,
             advancer: advancer,
             conductorObligations: store,
-            stoppedWorkAdvice: launch);
+            stoppedWorkAdvice: launch,
+            stoppedWorkAdvicePreflight: preflight);
 
     private static async Task SeedAsync(string home, IReadOnlyList<QueueItem> items, string claimHolder)
     {
@@ -575,7 +680,8 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 Repository, tag, new FleetAttemptId(attempt), WorkStage.Review, Now, Head, null,
                 "Succeeded", true, "passing", Now, StoppedWorkHaltCause.MissingVerdict,
                 "available", false, "passing")),
-            StoppedWorkHaltCause.MissingVerdict, "available", false, "passing"),
+            StoppedWorkHaltCause.MissingVerdict, "available", false, "passing",
+            AdviceEligibleAtHalt: true),
     };
 
     private static RetainedStoppedWorkAdviceResponse Response(

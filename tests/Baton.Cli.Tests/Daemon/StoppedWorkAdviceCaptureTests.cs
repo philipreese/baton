@@ -25,6 +25,7 @@ public sealed class StoppedWorkAdviceCaptureTests
         public List<string[]> Calls { get; } = [];
         public int? FailFromCall { get; set; }
         public Func<bool>? RefuseWhen { get; set; }
+        public string PullRequestState { get; set; } = "OPEN";
         private bool _draft = true;
 
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args,
@@ -50,7 +51,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 return Task.FromResult(new GhCliResult(true, 0, string.Empty, string.Empty));
             }
 
-            var pr = $"{{\"number\":77,\"state\":\"OPEN\",\"isDraft\":{(_draft ? "true" : "false")},"
+            var pr = $"{{\"number\":77,\"state\":\"{PullRequestState}\",\"isDraft\":{(_draft ? "true" : "false")},"
                 + "\"headRefOid\":\"" + Head + "\",\"headRefName\":\"1934-lane\","
                 + "\"baseRefName\":\"main\",\"isCrossRepository\":false,"
                 + "\"statusCheckRollup\":[]}";
@@ -116,6 +117,7 @@ public sealed class StoppedWorkAdviceCaptureTests
             var judgment = item.StoppedWorkJudgment!;
             Assert.True(item.Halted);
             Assert.Equal(StoppedWorkJudgmentState.Pending, judgment.State);
+            Assert.True(judgment.AdviceEligibleAtHalt);
             Assert.Equal(StoppedWorkJudgmentKey.For(Repository, item.Tag, attempt, WorkStage.Review),
                 judgment.Key);
             Assert.Equal("conductor-fixture", judgment.Holder);
@@ -123,6 +125,15 @@ public sealed class StoppedWorkAdviceCaptureTests
             Assert.Equal(Head, judgment.PullRequestHead);
             Assert.Equal(StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(judgment)),
                 judgment.ContextSha256);
+            var serialized = JsonSerializer.Serialize(judgment);
+            Assert.Contains("\"adviceEligibleAtHalt\":true", serialized, StringComparison.Ordinal);
+            var legacyJson = JsonNode.Parse(serialized)!.AsObject();
+            legacyJson.Remove("adviceEligibleAtHalt");
+            var legacy = JsonSerializer.Deserialize<StoppedWorkJudgment>(legacyJson.ToJsonString());
+            Assert.NotNull(legacy);
+            Assert.False(legacy!.AdviceEligibleAtHalt);
+            Assert.Equal(judgment.ContextSha256,
+                StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(legacy)));
 
             var store = Store();
             var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -651,6 +662,64 @@ public sealed class StoppedWorkAdviceCaptureTests
         {
             DirectoryCleanup.DeleteRecursively(home);
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Enabling_advice_does_not_charge_a_historical_owned_halt(bool retired)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await ConductorClaimStore.ClaimAsync(Identity, "recorded-owner", home, cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            var seed = await SeedAsync(home, WorkStage.Review, room,
+                new FleetAttemptId("historical-owned-halt"));
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seed with
+                {
+                    PullRequest = 77,
+                    OwnedTask = new OwnedTaskSubmission("task-historical", Repository, 1934,
+                        "explicit-input-digest", "recorded-owner", Now),
+                }],
+            }, Ct);
+            await new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head))
+                .AdvanceAsync(Now, Ct);
+            var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
+            Assert.Equal(StoppedWorkJudgmentState.Pending, intent.State);
+            Assert.False(intent.AdviceEligibleAtHalt);
+            if (retired)
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = snapshot.Items.Select(item => item with
+                    {
+                        Retirement = new QueueRetirement(QueueRetirement.Merged, Now, "Merged independently."),
+                    }).ToList(),
+                }, Ct);
+
+            await EnableStoppedWorkAdviceAsync();
+            var store = Store();
+            var calls = 0;
+            var scheduler = Scheduler(store,
+                new WorkItemAdvancer(new FakeGh { PullRequestState = retired ? "MERGED" : "OPEN" },
+                    (_, _) => Task.FromResult<string?>(Head)),
+                (obligation, request, _, _, _) =>
+                {
+                    Interlocked.Increment(ref calls);
+                    return Task.FromResult(Response(obligation, request));
+                });
+            await scheduler.TickOnceAsync(Ct);
+            await WaitForAsync(async () => (await store.ReadAsync(intent.Key!, Ct))?.Status is
+                ConductorObligationStatus.Blocked or ConductorObligationStatus.TransportAcknowledged);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            Assert.Equal(0, calls);
+            Assert.False(File.Exists(Path.Combine(store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!), "launch.json")));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
     }
 
     [Fact]
