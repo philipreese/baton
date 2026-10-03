@@ -480,8 +480,7 @@ public static class WorkItemLifecycle
     }
 
     /// <summary>
-    /// What actually un-sticks a work item the queue has failed, said once because every
-    /// <see cref="WorkItemTransitionKind.NeedsOperator"/> reason ends with it.
+    /// Recovery guidance appended by the callers using this helper.
     /// </summary>
     /// <remarks>
     /// <b>Written against what the code does, not what would be convenient.</b> A failed item is out of
