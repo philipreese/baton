@@ -298,7 +298,10 @@ public sealed class CodexDynamicToolPolicy
 
         if (_grant.RunShellCommands)
         {
-            tools.Add(Function(RunCommandTool, "Run one command line after Baton's canonical command policy approves it.",
+            tools.Add(Function(RunCommandTool,
+                "Run one command line after Baton's canonical command policy approves it. On Windows, "
+                + "commands run through COMSPEC (cmd.exe fallback), not PowerShell; on Unix, they run "
+                + "through /bin/sh.",
                 StringSchema("command", "Command line to evaluate and run.")));
             tools.Add(Function(
                 ReadCommandOutputTool,

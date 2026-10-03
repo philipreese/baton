@@ -175,6 +175,28 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
+    public void Run_command_definition_names_the_shell_used_by_the_runner()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(RunShellCommands: true), ["changes.md"]);
+        var tool = fixture.Policy.BuildToolDefinitions()
+            .Single(node => node!["name"]!.GetValue<string>() == CodexDynamicToolPolicy.RunCommandTool)!;
+
+        Assert.Equal(CodexDynamicToolPolicy.RunCommandTool, tool["name"]!.GetValue<string>());
+        Assert.Equal(
+            "Run one command line after Baton's canonical command policy approves it. On Windows, "
+            + "commands run through COMSPEC (cmd.exe fallback), not PowerShell; on Unix, they run "
+            + "through /bin/sh.",
+            tool["description"]!.GetValue<string>());
+        var schema = (JsonObject)tool["inputSchema"]!;
+        Assert.Equal("object", schema["type"]!.GetValue<string>());
+        Assert.False(schema["additionalProperties"]!.GetValue<bool>());
+        Assert.Equal(["command"], schema["required"]!.AsArray().Select(node => node!.GetValue<string>()));
+        var command = (JsonObject)((JsonObject)schema["properties"]!)["command"]!;
+        Assert.Equal("string", command["type"]!.GetValue<string>());
+        Assert.Equal("Command line to evaluate and run.", command["description"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Artifact_checkpoint_exposes_only_the_missing_declared_output_and_refuses_workspace_tools()
     {
         using var fixture = new PolicyFixture(
