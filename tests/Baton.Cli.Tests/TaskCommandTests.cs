@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -271,6 +272,175 @@ public sealed class TaskCommandTests
         }
     }
 
+    [Fact]
+    public async Task Fresh_submission_reports_unknown_daemon_without_rewriting_the_task()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2582");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "fresh brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "conductor", home, cancellationToken: Ct);
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2582-lane"));
+            }
+
+            var now = new DateTimeOffset(2026, 10, 2, 23, 0, 0, TimeSpan.Zero);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.FleetHeartbeatFile)!);
+            await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, JsonSerializer.Serialize(new
+            {
+                tickCompletedAt = now.AddSeconds(-10),
+                identity = new { pid = 1234, processStartTime = now.AddMinutes(-1) },
+            }), Ct);
+            var processStartCalls = 0;
+            DateTimeOffset DeniedProcessStart(int _)
+            {
+                processStartCalls++;
+                throw new Win32Exception(5);
+            }
+
+            var options = new TaskOptions(TaskVerb.Submit, 2582, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one acceptance cluster"), spec);
+            var submissionOutput = new StringWriter();
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(options, submissionOutput, Resolve, Provision, Ct,
+                IssuePreparationRunner.NoCollisions, DeniedProcessStart, () => now));
+            Assert.Contains("queued (daemon-observation-unknown)", submissionOutput.ToString(), StringComparison.Ordinal);
+            Assert.Contains("next: daemon-tick", submissionOutput.ToString(), StringComparison.Ordinal);
+            Assert.Contains("daemon: unknown (reason process-identity-unverifiable)", submissionOutput.ToString(),
+                StringComparison.Ordinal);
+            Assert.Equal(1, processStartCalls);
+
+            var beforeStatus = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var statusOutput = new StringWriter();
+            var id = TaskCommand.TaskId(repository.Value, 2582);
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), statusOutput,
+                Resolve, Provision, Ct, processStartTimeAccessor: DeniedProcessStart, utcNow: () => now);
+            using var status = JsonDocument.Parse(statusOutput.ToString());
+            Assert.Equal("queued", status.RootElement.GetProperty("state").GetString());
+            Assert.Equal("daemon-observation-unknown", status.RootElement.GetProperty("reason").GetString());
+            Assert.Equal("daemon-tick", status.RootElement.GetProperty("nextTrigger").GetString());
+            Assert.Equal("unknown", status.RootElement.GetProperty("daemon").GetProperty("availability").GetString());
+            Assert.Equal(2, processStartCalls);
+            Assert.Equal(beforeStatus, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("held", "queued", "queue-held", "daemon-tick")]
+    [InlineData("preparing", "preparing", "preparation-in-progress", "preparation-completion")]
+    [InlineData("blocked", "blocked", "preparation-blocked", "conductor-judgment")]
+    public async Task Status_preserves_priority_states_receipts_and_evidence_when_daemon_is_unknown(
+        string caseName, string expectedState, string expectedReason, string expectedTrigger)
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var now = new DateTimeOffset(2026, 10, 2, 23, 0, 0, TimeSpan.Zero);
+            var id = TaskCommand.TaskId(repository, 2582);
+            var ready = new TaskReadyReceipt("ready", id, repository, 2582, 50,
+                new string('a', 40), "review-attempt", new string('b', 64), "passing", "checks-observation", now, now);
+            var blocked = new TaskBlockedDisposition("retained-blocker", "preserved blocker evidence", now, "obligation-2582");
+            using var currentProcess = Process.GetCurrentProcess();
+            var preparation = caseName switch
+            {
+                "preparing" => new QueueIssuePreparation(TaskPreparationState.Preparing, now,
+                    ProcessId: currentProcess.Id, ProcessStartedAt: currentProcess.StartTime.ToUniversalTime()),
+                "blocked" => new QueueIssuePreparation(TaskPreparationState.Blocked, now, Reason: expectedReason,
+                    ExpectedBranch: "2582-lane", ReservationId: "reservation-2582"),
+                _ => null,
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Held = true,
+                Items = [new QueueItem
+                {
+                    Tag = id,
+                    Role = "implement",
+                    Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile(id),
+                    Repository = repository,
+                    Issue = 2582,
+                    Stage = WorkStage.Implement,
+                    State = QueueItemState.Queued,
+                    IssuePreparation = preparation,
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 2582, "digest", "recorded-owner", now,
+                        Ready: caseName == "held" ? null : ready, Blocked: blocked),
+                }],
+            }, Ct);
+            Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.FleetHeartbeatFile)!);
+            await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, JsonSerializer.Serialize(new
+            {
+                tickCompletedAt = now.AddSeconds(-10),
+                identity = new { pid = 1234, processStartTime = now.AddMinutes(-1) },
+            }), Ct);
+            var before = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var processStartCalls = 0;
+            DateTimeOffset DeniedProcessStart(int _)
+            {
+                processStartCalls++;
+                throw new Win32Exception(5);
+            }
+            var output = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), output,
+                static (_, _) => throw new NotSupportedException(),
+                static (_, _, _, _, _, _, _) => throw new NotSupportedException(), Ct,
+                processStartTimeAccessor: DeniedProcessStart, utcNow: () => now);
+            using var json = JsonDocument.Parse(output.ToString());
+            Assert.Equal(expectedState, json.RootElement.GetProperty("state").GetString());
+            Assert.Equal(expectedReason, json.RootElement.GetProperty("reason").GetString());
+            Assert.Equal(expectedTrigger, json.RootElement.GetProperty("nextTrigger").GetString());
+            Assert.Equal("unknown", json.RootElement.GetProperty("daemon").GetProperty("availability").GetString());
+            if (caseName == "held")
+                Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("ready").ValueKind);
+            else
+            {
+                Assert.True(json.RootElement.TryGetProperty("ready", out var readyElement), output.ToString());
+                Assert.True(readyElement.TryGetProperty("Id", out var readyId), output.ToString());
+                Assert.Equal("ready", readyId.GetString());
+            }
+            Assert.True(json.RootElement.TryGetProperty("blocked", out var blockedElement), output.ToString());
+            Assert.Equal("retained-blocker", blockedElement.GetProperty("ReasonCode").GetString());
+            Assert.Equal("preserved blocker evidence", json.RootElement.GetProperty("blocked").GetProperty("Evidence").GetString());
+            Assert.Equal(1, processStartCalls);
+
+            var text = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), text,
+                static (_, _) => throw new NotSupportedException(),
+                static (_, _, _, _, _, _, _) => throw new NotSupportedException(), Ct,
+                processStartTimeAccessor: DeniedProcessStart, utcNow: () => now);
+            Assert.Contains($"Task {id}: {expectedState} ({expectedReason})", text.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"next: {expectedTrigger}", text.ToString(), StringComparison.Ordinal);
+            if (caseName != "held")
+                Assert.Contains("ready receipt: ready", text.ToString(), StringComparison.Ordinal);
+            Assert.Contains("retained-blocker; preserved blocker evidence", text.ToString(), StringComparison.Ordinal);
+            Assert.Equal(2, processStartCalls);
+            Assert.Equal(before, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Theory]
     [InlineData("stale", "unavailable", "heartbeat-stale", "daemon-unavailable")]
     [InlineData("future", "unavailable", "heartbeat-in-future", "daemon-unavailable")]
@@ -278,9 +448,13 @@ public sealed class TaskCommandTests
     [InlineData("equivalent-offset", "recently-observed", null, "awaiting-daemon-decision")]
     [InlineData("missing", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
     [InlineData("malformed", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("invalid-tick-time", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
     [InlineData("wrong-tick-shape", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
     [InlineData("wrong-pid-shape", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
     [InlineData("wrong-start-shape", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("invalid-start-time", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("pid-overflow", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
+    [InlineData("pid-fractional", "unavailable", "heartbeat-unavailable", "daemon-unavailable")]
     [InlineData("invalid-pid", "unavailable", "process-unavailable", "daemon-unavailable")]
     [InlineData("absent-process", "unavailable", "process-unavailable", "daemon-unavailable")]
     [InlineData("exited-process", "unavailable", "process-unavailable", "daemon-unavailable")]
@@ -325,6 +499,8 @@ public sealed class TaskCommandTests
             {
                 "missing" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O") + "\"}",
                 "malformed" => "{not-json",
+                "invalid-tick-time" => "{\"tickCompletedAt\":\"not-a-date\",\"identity\":{\"pid\":1234,\"processStartTime\":\""
+                    + recordedStart.ToString("O") + "\"}}",
                 "wrong-tick-shape" => "{\"tickCompletedAt\":{},\"identity\":{\"pid\":1234,\"processStartTime\":\""
                     + recordedStart.ToString("O") + "\"}}",
                 "wrong-pid-shape" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O")
@@ -332,6 +508,14 @@ public sealed class TaskCommandTests
                     + recordedStart.ToString("O") + "\"}}",
                 "wrong-start-shape" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O")
                     + "\",\"identity\":{\"pid\":1234,\"processStartTime\":[]}}",
+                "invalid-start-time" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O")
+                    + "\",\"identity\":{\"pid\":1234,\"processStartTime\":\"not-a-date\"}}",
+                "pid-overflow" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O")
+                    + "\",\"identity\":{\"pid\":3000000000,\"processStartTime\":\""
+                    + recordedStart.ToString("O") + "\"}}",
+                "pid-fractional" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToString("O")
+                    + "\",\"identity\":{\"pid\":1234.5,\"processStartTime\":\""
+                    + recordedStart.ToString("O") + "\"}}",
                 "equivalent-offset" => "{\"tickCompletedAt\":\"" + heartbeatAt.ToOffset(TimeSpan.FromHours(-4)).ToString("O")
                     + "\",\"identity\":{\"pid\":1234,\"processStartTime\":\""
                     + recordedStart.ToOffset(TimeSpan.FromHours(-4)).ToString("O") + "\"}}",
@@ -343,15 +527,21 @@ public sealed class TaskCommandTests
             };
             await File.WriteAllTextAsync(BatonPaths.FleetHeartbeatFile, heartbeat, Ct);
             var before = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
-            DateTimeOffset ProcessStart(int _) => caseName switch
+            var processStartCalls = 0;
+            DateTimeOffset ProcessStart(int _) => ProcessStartCore();
+            DateTimeOffset ProcessStartCore()
             {
-                "mismatch" => recordedStart.AddSeconds(2),
-                "absent-process" => throw new ArgumentException("not found"),
-                "exited-process" => throw new InvalidOperationException("exited"),
-                "non-access-win32" => throw new Win32Exception(87),
-                "stale-denied" or "future-denied" => throw new Win32Exception(5),
-                _ => recordedStart,
-            };
+                processStartCalls++;
+                return caseName switch
+                {
+                    "mismatch" => recordedStart.AddSeconds(2),
+                    "absent-process" => throw new ArgumentException("not found"),
+                    "exited-process" => throw new InvalidOperationException("exited"),
+                    "non-access-win32" or "stale-denied" or "future-denied" => throw new Win32Exception(
+                        caseName is "non-access-win32" ? 87 : 5),
+                    _ => recordedStart,
+                };
+            }
             Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
                 Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From("https://github.com/example/repo", null));
             Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
@@ -369,7 +559,7 @@ public sealed class TaskCommandTests
                 Assert.Equal(JsonValueKind.Null, daemon.GetProperty("reason").ValueKind);
             else
                 Assert.Equal(expectedDaemonReason, daemon.GetProperty("reason").GetString());
-            if (caseName is "future" or "future-denied" or "malformed" or "wrong-tick-shape")
+            if (caseName is "future" or "future-denied" or "malformed" or "invalid-tick-time" or "wrong-tick-shape")
             {
                 Assert.Equal(JsonValueKind.Null, daemon.GetProperty("observedAt").ValueKind);
                 Assert.Equal(JsonValueKind.Null, daemon.GetProperty("ageSeconds").ValueKind);
@@ -379,6 +569,9 @@ public sealed class TaskCommandTests
                 Assert.Equal(heartbeatAt, daemon.GetProperty("observedAt").GetDateTimeOffset());
                 Assert.True(daemon.GetProperty("ageSeconds").GetInt32() >= 0);
             }
+            var expectedProcessStartCalls = caseName is "mismatch" or "equivalent-offset" or "absent-process"
+                or "exited-process" or "non-access-win32" ? 1 : 0;
+            Assert.Equal(expectedProcessStartCalls, processStartCalls);
 
             var textOutput = new StringWriter();
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput,
