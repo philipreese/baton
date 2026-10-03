@@ -101,7 +101,8 @@ Only JSON `true` for an exact canonical repository key enables either setting; a
 malformed values, and noncanonical keys do not. Establish the repository's conductor claim first.
 Missing ownership or source evidence blocks calls, and old stopped jobs are not backfilled. `queue hold`
 pauses worker launches and blocks replacement admission or launch; it does not revoke an enabled advice
-setting. Codex's subscription CLI remains the default advice provider. A separate provider selection does
+setting. Set the advice entry to false to stop new advice admissions; an already admitted call is not revoked.
+Codex's subscription CLI remains the default advice provider. `Queue.StoppedWorkAdviceProvider` does
 not opt in; only exact `codex` and `claude` values are accepted, and Claude capability remains
 unverified pending the [native instruction and installed acceptance contract](spec/baton.md#stopped-work-judgment-handoff-2499).
 Admission freezes the actual provider, and replay never calls another vendor after settings change.
@@ -111,10 +112,12 @@ evidence; do not delete a launch marker or recreate the request to force a retry
 source makes old advice stale. The [contract](spec/baton.md#stopped-work-judgment-handoff-2499) owns the
 exact admission, recovery, provider, and ordinary round and repair limits.
 
-The automatic replacement-review setting records eligibility only for a newly captured typed
-`MissingVerdict` halt with retained `Recommend` advice; it does not enable advice or select its provider.
-Historical halted rows, `Hold`, explanation text, and every other halt are ineligible. Current hold,
-revocation, owner, source, workspace, open-PR, exact-head, and normal queue admission checks still apply.
+When automatic replacement review is enabled, a newly captured typed `MissingVerdict` halt is recorded
+as eligible. If its retained advice is typed `Recommend`, Baton automatically admits one replacement
+review through the same action path as `conductor act`; the setting does not enable advice or select
+its provider. Historical halted rows, `Hold` advice, explanation text, and every other halt are ineligible.
+Current hold, revocation, owner, source, workspace, open-PR, exact-head, and normal queue admission
+checks still apply.
 The full contract is in [spec §13](spec/baton.md).
 
 For a current missing-verdict `Review` or `ReReview` halt, the claim holder may explicitly issue the
