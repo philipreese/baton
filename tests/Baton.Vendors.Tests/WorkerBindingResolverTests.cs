@@ -157,6 +157,61 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void Fresh_missing_profile_resolution_retains_role_default_evidence()
+    {
+        var cases = new (IReadOnlyList<ExecutionLimitProfile>? Profiles, string Model)[]
+        {
+            (null, "model"),
+            ([], "model"),
+            ([new ExecutionLimitProfile
+            {
+                Adapter = "echo",
+                Model = "other-model",
+                Role = "architect",
+                DeclaredTaskSize = "small",
+                Timeout = TimeSpan.FromMinutes(10),
+                TokenBudget = 500,
+                MaxToolSteps = 5,
+            }], "model"),
+            ([new ExecutionLimitProfile
+            {
+                Adapter = "echo",
+                Model = "other-model",
+                Role = "architect",
+                DeclaredTaskSize = "small",
+                Timeout = TimeSpan.FromMinutes(10),
+                TokenBudget = 500,
+                MaxToolSteps = 5,
+            }], " MODEL "),
+        };
+
+        foreach (var (profiles, model) in cases)
+        {
+            var resolution = ExecutionLimitProfileResolver.Resolve(
+                profiles, " ECHO ", model, " architect ", DeclaredTaskSize.Unknown,
+                TimeSpan.FromMinutes(30), 1000, 10);
+            var entry = new WorkerBindingConfigEntry(
+                "echo", ArchitectContract, "Draft a plan.", resolution.Timeout,
+                Model: model, TokenBudget: resolution.TokenBudget, MaxToolSteps: resolution.MaxToolSteps,
+                ExecutionLimitResolution: resolution);
+
+            var binding = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+                new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+                new Dictionary<string, IWorkerAdapter> { ["echo"] = new FakeEchoWorkerAdapter() })["architect"]);
+            var evidence = binding.EffectiveLimitEvidence;
+
+            Assert.Equal(resolution.Timeout, evidence.Timeout);
+            Assert.Equal(resolution.TokenBudget, evidence.TokenBudget);
+            Assert.Equal(resolution.MaxToolSteps, evidence.MaxToolSteps);
+            Assert.Null(evidence.ChosenKey);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, evidence.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, evidence.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, evidence.MaxToolStepsSource);
+            Assert.Equal("echo/model/architect/unknown", resolution.OriginatingSelectionKey);
+        }
+    }
+
+    [Fact]
     public void Resolved_limit_evidence_keeps_sources_when_all_values_match_the_resolution()
     {
         var resolution = new ExecutionLimitResolution(

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Cli.Daemon;
 using Baton.Vendors;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
@@ -154,6 +155,92 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         finally
         {
             DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Persisted_missing_profile_parent_retains_fresh_origin_through_redispatch_overrides()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-missing-profile-{Guid.NewGuid():N}");
+        try
+        {
+            await DaemonSettingsStore.SaveAsync(
+                new DaemonSettings
+                {
+                    ExecutionLimitProfiles =
+                    [
+                        new ExecutionLimitProfile
+                        {
+                            Adapter = "fake",
+                            Model = "other-model",
+                            Role = "advise",
+                            DeclaredTaskSize = "unknown",
+                            Timeout = TimeSpan.FromMinutes(10),
+                            TokenBudget = 500,
+                            MaxToolSteps = 5,
+                        },
+                    ],
+                },
+                BatonPaths.SettingsFile, TestContext.Current.CancellationToken);
+
+            var parentRoom = await DispatchTerminalParentAsync(
+                testRoot, "Continue the missing-profile limit-evidence repair.", model: "test-model");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(parentRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var parent = parentBindings["advise"];
+            var expectedOrigin = "fake/test-model/advise/unknown";
+            Assert.Null(parent.ExecutionLimitResolution?.ChosenKey);
+            Assert.Equal(expectedOrigin, parent.ExecutionLimitResolution?.OriginatingSelectionKey);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, parent.ExecutionLimitResolution?.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, parent.ExecutionLimitResolution?.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, parent.ExecutionLimitResolution?.MaxToolStepsSource);
+
+            var inheritedRoom = Path.Combine(testRoot, "child-inherited");
+            var inheritedResult = await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, inheritedRoom), Adapters, TestContext.Current.CancellationToken);
+            var inheritedBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(inheritedRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var inherited = inheritedBindings["advise"];
+            Assert.Equal(parent.Timeout, inherited.Timeout);
+            Assert.Equal(parent.TokenBudget, inherited.TokenBudget);
+            Assert.Equal(parent.MaxToolSteps, inherited.MaxToolSteps);
+            Assert.Null(inherited.ExecutionLimitResolution?.ChosenKey);
+            Assert.Equal(expectedOrigin, inherited.ExecutionLimitResolution?.OriginatingSelectionKey);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, inherited.ExecutionLimitResolution?.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, inherited.ExecutionLimitResolution?.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, inherited.ExecutionLimitResolution?.MaxToolStepsSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, await AcceptedTimeoutSource(inheritedRoom));
+            Assert.Equal(WorkflowStatus.Terminal, inheritedResult.State.Status);
+
+            var overriddenRoom = Path.Combine(testRoot, "child-overridden");
+            var overriddenResult = await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, overriddenRoom, TokenBudget: 2000),
+                Adapters, TestContext.Current.CancellationToken);
+            var overriddenBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(overriddenRoom, "bindings.json"), TestContext.Current.CancellationToken);
+            var overridden = overriddenBindings["advise"];
+            Assert.Equal(parent.Timeout, overridden.Timeout);
+            Assert.Equal(2000, overridden.TokenBudget);
+            Assert.Equal(parent.MaxToolSteps, overridden.MaxToolSteps);
+            Assert.Null(overridden.ExecutionLimitResolution?.ChosenKey);
+            Assert.Equal(expectedOrigin, overridden.ExecutionLimitResolution?.OriginatingSelectionKey);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, overridden.ExecutionLimitResolution?.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.DispatchOverride, overridden.ExecutionLimitResolution?.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, overridden.ExecutionLimitResolution?.MaxToolStepsSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, await AcceptedTimeoutSource(overriddenRoom));
+            Assert.Equal(WorkflowStatus.Terminal, overriddenResult.State.Status);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+
+        static async Task<string?> AcceptedTimeoutSource(string room)
+        {
+            var entries = await new FlowEventLogReader(Path.Combine(room, BatonPaths.FlowLogFileName))
+                .ReadAllAsync(TestContext.Current.CancellationToken);
+            var request = Assert.Single(entries.OfType<FlowEvent.ExecutionRequestAccepted>())!.Request;
+            return request.Limits!.TimeoutSource;
         }
     }
 

@@ -1,9 +1,11 @@
 using Baton.Cli.Daemon;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Queue;
 using Baton.Runway;
 using Baton.Status;
+using Baton.Store;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
@@ -230,10 +232,27 @@ public sealed class DispatchExecutionLimitProfileTests : IDisposable
             Assert.Equal(role.Timeout, binding.Timeout);
             Assert.Equal(role.MaxToolSteps, binding.MaxToolSteps);
             Assert.NotNull(binding.ExecutionLimitResolution);
-            Assert.Null(binding.ExecutionLimitResolution.ChosenKey);
-            Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution.TimeoutSource);
-            Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution.TokenBudgetSource);
-            Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution.MaxToolStepsSource);
+            var resolution = binding.ExecutionLimitResolution!;
+            Assert.Null(resolution.ChosenKey);
+            Assert.Equal("fake/unmatched-model/implement/small", resolution.OriginatingSelectionKey);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, resolution.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, resolution.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, resolution.MaxToolStepsSource);
+
+            var resolved = Assert.IsType<WorkerBinding.Process>(WorkerBindingResolver.Resolve(
+                new Dictionary<string, WorkerBindingConfigEntry> { ["implement"] = binding }, Adapters)["implement"]);
+            var evidence = resolved.EffectiveLimitEvidence!;
+            Assert.Equal(binding.Timeout, evidence.Timeout);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, evidence.TimeoutSource);
+            var entries = await new FlowEventLogReader(
+                Path.Combine(roomDir, BatonPaths.FlowLogFileName)).ReadAllEntriesWithTimestampsAsync(
+                    TestContext.Current.CancellationToken);
+            var accepted = Assert.Single(entries.OfType<LogEntry.FlowLogEntry>()
+                .Select(entry => entry.Event)
+                .OfType<FlowEvent.ExecutionRequestAccepted>());
+            var limits = accepted!.Request.Limits!;
+            Assert.Equal(binding.Timeout, limits.Timeout);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, limits.TimeoutSource);
         }
         finally
         {
@@ -330,7 +349,7 @@ public sealed class DispatchExecutionLimitProfileTests : IDisposable
                     new ExecutionLimitProfile
                     {
                         Adapter = "fake",
-                        Model = "test-model",
+                        Model = "other-model",
                         Role = "advise",
                         DeclaredTaskSize = "medium",
                         Timeout = TimeSpan.FromMinutes(16),
@@ -378,6 +397,25 @@ public sealed class DispatchExecutionLimitProfileTests : IDisposable
             Assert.Equal(directEntry.TokenBudget, queueEntry.TokenBudget);
             Assert.Equal(directEntry.MaxToolSteps, queueEntry.MaxToolSteps);
             Assert.Equal(directEntry.ExecutionLimitResolution, queueEntry.ExecutionLimitResolution);
+            var resolution = directEntry.ExecutionLimitResolution!;
+            Assert.Null(resolution.ChosenKey);
+            Assert.Equal("fake/test-model/advise/medium", resolution.OriginatingSelectionKey);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, resolution.TimeoutSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, resolution.TokenBudgetSource);
+            Assert.Equal(ExecutionLimitSource.RoleDefault, resolution.MaxToolStepsSource);
+
+            foreach (var room in new[] { directRoom, queueRoom })
+            {
+                var entries = await new FlowEventLogReader(
+                    Path.Combine(room, BatonPaths.FlowLogFileName)).ReadAllEntriesWithTimestampsAsync(
+                        TestContext.Current.CancellationToken);
+                var accepted = Assert.Single(entries.OfType<LogEntry.FlowLogEntry>()
+                    .Select(entry => entry.Event)
+                    .OfType<FlowEvent.ExecutionRequestAccepted>());
+                var limits = accepted!.Request.Limits!;
+                Assert.Equal(directEntry.Timeout, limits.Timeout);
+                Assert.Equal(ExecutionLimitSource.RoleDefault, limits.TimeoutSource);
+            }
         }
         finally
         {
