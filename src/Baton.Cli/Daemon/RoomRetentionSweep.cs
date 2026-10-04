@@ -427,8 +427,8 @@ public sealed class RoomRetentionSweep : BackgroundService
     /// What <see cref="ExecuteAsync"/> calls every tick, as opposed to <see cref="ExecuteRoomsRetentionPruneAsync"/>
     /// itself, which stays directly callable — by <c>baton rooms prune --terminal</c> typed by hand, and
     /// by every test exercising the prune mechanics — so <see cref="AutomaticPruneHoldReason"/>'s hold
-    /// closes only the unattended path, never the operator-typed one. Returns 0 without touching
-    /// anything, whether held or whether <see cref="ResolveRoomsRetentionDays"/> resolves to <c>null</c>.
+    /// closes only the unattended path, never the operator-typed one. Returns zero deletions and
+    /// leaves the room and registry unchanged; with configured retention it may publish evidence leaves.
     /// </summary>
     internal Task<int> ExecuteAutomaticRoomsRetentionPruneAsync(int? roomsRetentionDaysOverride = null) =>
         ExecuteAutomaticRoomsRetentionPruneWithCancellationAsync(roomsRetentionDaysOverride, CancellationToken.None);

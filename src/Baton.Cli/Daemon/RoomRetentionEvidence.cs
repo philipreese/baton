@@ -64,7 +64,8 @@ internal sealed class RoomRetentionEvidencePreparer
             }
 
             if (TryReadHint(candidate.RoomDirectoryPath, out var hint) &&
-                hint.MatchesCurrentCheapIdentity() && !candidate.SelectionRefused)
+                hint.MatchesCurrentCheapIdentity(sweepBudget, candidate.SelectionStartedTimestamp,
+                    candidate.SelectionBytes, cancellationToken))
             {
                 continue;
             }
@@ -134,16 +135,35 @@ internal enum RoomRetentionCapturePoint
     AfterPublication
 }
 
+internal sealed record CheapVerdictIdentity(string Path, bool Present, long Length, DateTime WriteUtc);
+
 internal sealed record SourceHint(string RoomPath, long SentinelLength, DateTime SentinelWriteUtc, long JournalLength,
-    DateTime JournalWriteUtc, long SnapshotLength, DateTime SnapshotWriteUtc)
+    DateTime JournalWriteUtc, long SnapshotLength, DateTime SnapshotWriteUtc,
+    IReadOnlyList<CheapVerdictIdentity> Verdicts)
 {
-    public bool MatchesCurrentCheapIdentity()
+    public bool MatchesCurrentCheapIdentity(RoomRetentionEvidenceStore.SweepBudget sweep, long started,
+        long selectionBytes, CancellationToken cancellationToken)
     {
-        return RoomRetentionEvidenceStore.TryGetCheapIdentity(
-            RoomPath, out var current) &&
-            SentinelLength == current.SentinelLength && SentinelWriteUtc == current.SentinelWriteUtc &&
-            JournalLength == current.JournalLength && JournalWriteUtc == current.JournalWriteUtc &&
-            SnapshotLength == current.SnapshotLength && SnapshotWriteUtc == current.SnapshotWriteUtc;
+        var budget = new RoomRetentionEvidenceStore.ReadBudget(sweep, started, cancellationToken,
+            RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - selectionBytes);
+        try { budget.Check(); }
+        catch (RoomRetentionEvidenceRefusalException) { return false; }
+        if (!RoomRetentionEvidenceStore.TryGetCheapIdentity(RoomPath, out var current) ||
+            SentinelLength != current.SentinelLength || SentinelWriteUtc != current.SentinelWriteUtc ||
+            JournalLength != current.JournalLength || JournalWriteUtc != current.JournalWriteUtc ||
+            SnapshotLength != current.SnapshotLength || SnapshotWriteUtc != current.SnapshotWriteUtc)
+            return false;
+        foreach (var verdict in Verdicts)
+        {
+            try { budget.Check(); }
+            catch (RoomRetentionEvidenceRefusalException) { return false; }
+            if (!RoomRetentionEvidenceStore.TryGetCheapVerdictIdentity(verdict.Path, out var currentVerdict) ||
+                verdict != currentVerdict)
+                return false;
+        }
+        try { budget.Check(); }
+        catch (RoomRetentionEvidenceRefusalException) { return false; }
+        return true;
     }
 }
 
@@ -255,6 +275,28 @@ public static class RoomRetentionEvidenceStore
         }
     }
 
+    internal static bool TryGetCheapVerdictIdentity(string path, out CheapVerdictIdentity identity)
+    {
+        identity = null!;
+        try
+        {
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.Directory) != 0) return false;
+            var file = new FileInfo(path);
+            identity = new CheapVerdictIdentity(path, true, file.Length, file.LastWriteTimeUtc);
+            return true;
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            identity = new CheapVerdictIdentity(path, false, 0, default);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     internal static async Task<(RoomRetentionEvidenceRecord Record, SourceHint Hint)?> CaptureAsync(
         string roomDirectoryPath,
         string roomKey,
@@ -262,7 +304,8 @@ public static class RoomRetentionEvidenceStore
         CancellationToken cancellationToken,
         Action<RoomRetentionCapturePoint>? probe = null,
         long selectionStarted = 0,
-        long selectionBytes = 0)
+        long selectionBytes = 0,
+        Action<long>? journalReadProgress = null)
     {
         var roomStarted = selectionStarted == 0 ? Stopwatch.GetTimestamp() : selectionStarted;
         sweepBudget.Check();
@@ -309,7 +352,8 @@ public static class RoomRetentionEvidenceStore
         }
 
         var snapshot = await ReadSourceAsync(Path.Combine(roomDirectoryPath, BatonPaths.SnapshotFileName), budget).ConfigureAwait(false);
-        var journal = await ReadSourceAsync(Path.Combine(roomDirectoryPath, BatonPaths.FlowLogFileName), budget).ConfigureAwait(false);
+        var journal = await ReadSourceAsync(Path.Combine(roomDirectoryPath, BatonPaths.FlowLogFileName), budget,
+            afterChunk: journalReadProgress).ConfigureAwait(false);
         probe?.Invoke(RoomRetentionCapturePoint.AfterJournalRead);
         var sentinel = await ReadSourceAsync(Path.Combine(roomDirectoryPath, TerminalSentinelWriter.TerminalSentinelFileName), budget).ConfigureAwait(false);
 
@@ -352,6 +396,7 @@ public static class RoomRetentionEvidenceStore
 
         var verdictReads = new List<SourceRead>();
         var absentVerdictPaths = new List<string>();
+        var verdictSources = new List<(string Path, SourceRead? Read)>();
         var verdicts = new List<RoomRetentionVerdictEvidence>();
         if (expectation == ReviewExpectation)
         {
@@ -362,6 +407,8 @@ public static class RoomRetentionEvidenceStore
                 var prunedPath = Path.Combine(ArtifactManager.ResolvePrunedOutputDirectory(artifactsRoot, review.Request.ExecutionId), "verdict.json");
                 var active = await TryReadOptionalSourceAsync(activePath, budget).ConfigureAwait(false);
                 var pruned = await TryReadOptionalSourceAsync(prunedPath, budget).ConfigureAwait(false);
+                verdictSources.Add((activePath, active));
+                verdictSources.Add((prunedPath, pruned));
                 if (active is not null && pruned is not null && !active.Bytes.AsSpan().SequenceEqual(pruned.Bytes))
                     throw new RoomRetentionEvidenceRefusalException("active and pruned verdict copies conflict");
 
@@ -402,6 +449,17 @@ public static class RoomRetentionEvidenceStore
             throw new RoomRetentionEvidenceRefusalException("room source identity disappeared during capture");
         }
 
+        var verdictIdentities = new List<CheapVerdictIdentity>(verdictSources.Count);
+        foreach (var (path, read) in verdictSources)
+        {
+            budget.Check();
+            if (!TryGetCheapVerdictIdentity(path, out var cheap) ||
+                cheap.Present != (read is not null) ||
+                (read is not null && (cheap.Length != read.Length || cheap.WriteUtc != read.LastWriteUtc)))
+                throw new RoomRetentionEvidenceRefusalException("a verdict identity changed during capture");
+            verdictIdentities.Add(cheap);
+        }
+
         var sources = new RoomRetentionEvidenceSources(
             Digest(snapshot.Bytes), Digest(journal.Bytes), Digest(sentinel.Bytes),
             verdicts.Count == 0 ? null : VerdictsDigest(verdicts));
@@ -419,7 +477,8 @@ public static class RoomRetentionEvidenceStore
 
         await PublishAsync(record, budget, cancellationToken, probe).ConfigureAwait(false);
         var hint = new SourceHint(roomDirectoryPath, identity.SentinelLength, identity.SentinelWriteUtc,
-            identity.JournalLength, identity.JournalWriteUtc, identity.SnapshotLength, identity.SnapshotWriteUtc);
+            identity.JournalLength, identity.JournalWriteUtc, identity.SnapshotLength, identity.SnapshotWriteUtc,
+            verdictIdentities);
         return (record, hint);
     }
 
@@ -589,7 +648,7 @@ public static class RoomRetentionEvidenceStore
             record.SchemaVersion != SchemaVersion || record.SourceKind != SourceKind ||
             record.RoomKey != roomKey || record.GenerationSha256 != generation ||
             record.PayloadSha256 is null || !IsSha256(record.PayloadSha256) ||
-            string.IsNullOrWhiteSpace(record.RoomIdentity) || record.CapturedAtUtc == default ||
+            !IsCanonicalRoomIdentity(record.RoomIdentity, roomKey) || record.CapturedAtUtc == default ||
             !record.Terminal.IsTerminal || record.Terminal.ProjectionStatus != WorkflowStatus.Terminal.ToString() ||
             record.Terminal.SentinelState is null ||
             (record.VerdictExpectation != ReviewExpectation && record.VerdictExpectation != NotApplicableExpectation) ||
@@ -599,7 +658,8 @@ public static class RoomRetentionEvidenceStore
                 (record.Verdicts.Count == 0 || record.Sources.VerdictsSha256 is null)) ||
             !IsSha256(record.Sources.SnapshotSha256) || !IsSha256(record.Sources.JournalSha256) ||
             !IsSha256(record.Sources.SentinelSha256) ||
-            (record.Sources.VerdictsSha256 is not null && !IsSha256(record.Sources.VerdictsSha256)))
+            (record.Sources.VerdictsSha256 is not null && !IsSha256(record.Sources.VerdictsSha256)) ||
+            record.Provenance.Any(item => !IsValidProvenance(item)))
         {
             throw new RoomRetentionEvidenceRefusalException("the published leaf has an invalid shape or digest");
         }
@@ -615,7 +675,7 @@ public static class RoomRetentionEvidenceStore
 
         foreach (var item in record.Verdicts)
         {
-            if (string.IsNullOrWhiteSpace(item.ExecutionId) || string.IsNullOrWhiteSpace(item.SourceIdentity) ||
+            if (!IsCanonicalVerdictSource(record.RoomIdentity, item) ||
                 string.IsNullOrEmpty(item.Text) || !IsSha256(item.Sha256))
                 throw new RoomRetentionEvidenceRefusalException("the published verdict has an invalid identity");
             var verdictBytes = Encoding.UTF8.GetBytes(item.Text);
@@ -644,6 +704,52 @@ public static class RoomRetentionEvidenceStore
             throw new RoomRetentionEvidenceRefusalException("the published verdict execution set is incomplete");
 
         return record;
+    }
+
+    private static bool IsCanonicalRoomIdentity(string? identity, string roomKey)
+    {
+        if (string.IsNullOrWhiteSpace(identity)) return false;
+        try
+        {
+            return Path.IsPathFullyQualified(identity) &&
+                string.Equals(identity, BatonPaths.RecordKey(identity), StringComparison.Ordinal) &&
+                RoomKey(identity) == roomKey;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsValidExecutionId(string? executionId) =>
+        !string.IsNullOrWhiteSpace(executionId) && executionId != "." && executionId != ".." &&
+        !executionId.Contains('/') && !executionId.Contains('\\') &&
+        executionId.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
+
+    private static bool IsValidProvenance(RoomRetentionExecutionProvenance item) =>
+        IsValidExecutionId(item.ExecutionId) &&
+        (item.StepId is null || !string.IsNullOrWhiteSpace(item.StepId)) &&
+        !string.IsNullOrWhiteSpace(item.Worker) &&
+        (item.Adapter is null || !string.IsNullOrWhiteSpace(item.Adapter)) &&
+        (item.Model is null || !string.IsNullOrWhiteSpace(item.Model));
+
+    private static bool IsCanonicalVerdictSource(string roomIdentity, RoomRetentionVerdictEvidence item)
+    {
+        if (!IsValidExecutionId(item.ExecutionId) || string.IsNullOrWhiteSpace(item.SourceIdentity)) return false;
+        try
+        {
+            if (!Path.IsPathFullyQualified(item.SourceIdentity)) return false;
+            var artifacts = Path.Combine(roomIdentity, ArtifactManager.ArtifactsDirectoryName);
+            var executionId = new ExecutionId(item.ExecutionId);
+            var active = Path.Combine(ArtifactManager.ResolveOutputDirectory(artifacts, executionId), "verdict.json");
+            var pruned = Path.Combine(ArtifactManager.ResolvePrunedOutputDirectory(artifacts, executionId), "verdict.json");
+            return string.Equals(item.SourceIdentity, active, StringComparison.Ordinal) ||
+                string.Equals(item.SourceIdentity, pruned, StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     private static bool EquivalentCapture(RoomRetentionEvidenceRecord left, RoomRetentionEvidenceRecord right)
@@ -714,7 +820,8 @@ public static class RoomRetentionEvidenceStore
         return await ReadSourceAsync(path, budget, maxFileBytes).ConfigureAwait(false);
     }
 
-    internal static async Task<SourceRead> ReadSourceAsync(string path, ReadBudget budget, long? maxFileBytes = null)
+    internal static async Task<SourceRead> ReadSourceAsync(string path, ReadBudget budget, long? maxFileBytes = null,
+        Action<long>? afterChunk = null)
     {
         budget.Check();
         FileInfo before;
@@ -757,6 +864,7 @@ public static class RoomRetentionEvidenceStore
             }
             if (read == 0) break;
             budget.Consume(read);
+            afterChunk?.Invoke(output.Length + read);
             if (maxFileBytes is { } bound && output.Length + read > bound)
                 throw new RoomRetentionEvidenceRefusalException($"source '{path}' grew beyond its bounded size");
             await output.WriteAsync(buffer.AsMemory(0, read), budget.CancellationToken).ConfigureAwait(false);
