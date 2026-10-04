@@ -787,6 +787,34 @@ check("advice-only summary uses neutral needs-attention wording",
 const legacyObligation = obligationPanel(obligationView([obligationRow("Pending")]));
 check("rows without advice retain the legacy card rendering",
   !legacyObligation.includes("Advice only") && legacyObligation.includes("Status explanation: Status explanation"));
+const unsupportedManual = obligationPanel(obligationView([obligationRow("Unsupported")]));
+check("scalar unsupported request shows the fixed manual next boundary",
+  unsupportedManual.includes("Next boundary: owner intervention; no automatic retry"));
+check("unsupported request remains unresolved without claiming completion",
+  unsupportedManual.includes("Unresolved requests (1 shown of 1)") && !unsupportedManual.includes("Completed requests"));
+check("pending request does not inherit unsupported manual guidance",
+  !legacyObligation.includes("Next boundary: owner intervention; no automatic retry"));
+const arrayUnsupported = obligationPanel(obligationView([obligationRow(["Unsupported"])]));
+check("array-shaped unsupported status does not match the scalar guidance",
+  !arrayUnsupported.includes("Next boundary: owner intervention; no automatic retry"));
+const unknownUnsupported = obligationPanel(obligationView([obligationRow("UnknownStatus")]));
+check("unknown status does not match the unsupported guidance",
+  !unknownUnsupported.includes("Next boundary: owner intervention; no automatic retry"));
+const actionTrigger = obligationPanel(obligationView([{...obligationRow("Unsupported"),
+  advice:validAdvice,
+  action:{kind:"replace-review", state:"queued", origin:"manual", owner:"Repository conductor",
+    nextTrigger:"Inspect the current head"}}]));
+check("valid action next trigger is not duplicated by fixed unsupported guidance",
+  actionTrigger.includes("Next trigger: Inspect the current head")
+    && !actionTrigger.includes("Next boundary: owner intervention; no automatic retry"));
+const admissionTrigger = obligationPanel(obligationView([{...obligationRow("Unsupported"),
+  advice:validAdvice, automaticAdmission:refusedAdmission}]));
+check("valid automatic-admission next trigger is not duplicated by fixed unsupported guidance",
+  admissionTrigger.includes("Next trigger: Inspect retained evidence")
+    && !admissionTrigger.includes("Next boundary: owner intervention; no automatic retry"));
+const escapedUnsupported = obligationPanel(obligationView([{...obligationRow("Unsupported"), owner:"<foreign-owner>"}]));
+check("unsupported manual guidance preserves escaped foreign owner labels",
+  escapedUnsupported.includes("&lt;foreign-owner&gt;") && !escapedUnsupported.includes("<foreign-owner>"));
 check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents)"));
 check("summary cannot claim all-clear for unresolved requests", streamStatusSummaryHtml(obligationView([obligationRow("Pending")]), []).includes("1 conductor request(s) unresolved"));
 check("daemon-shaped stale obligation snapshot remains visibly as-of", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z", projectionStaleAfterSeconds:90}).includes("Snapshot is stale"));
