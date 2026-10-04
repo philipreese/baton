@@ -2,6 +2,8 @@ using Baton.Artifacts;
 using Baton.Cli.Daemon;
 using Baton.Status;
 using Baton.Vendors;
+using System.Text;
+using System.Text.Json;
 
 namespace Baton.Cli;
 
@@ -30,7 +32,9 @@ public static class RoomsPruneCommand
         string State,
         DateTime TerminalAtUtc,
         bool SelectionRefused = false,
-        string? SelectionRefusalReason = null);
+        string? SelectionRefusalReason = null,
+        long SelectionBytes = 0,
+        long SelectionStartedTimestamp = 0);
 
     public sealed record Result(
         int DedupedRegistryLines,
@@ -160,34 +164,37 @@ public static class RoomsPruneCommand
         FindCandidatesAsync(registryFilePath, options, cancellationToken);
 
     /// <summary>
-    /// Retention-only discovery. It preserves the manual candidate contract while rejecting oversized
-    /// selection inputs before the existing unbounded helpers are reached. Full workflow journals are
-    /// never opened here; the capture store owns that bounded work after selection.
+    /// Retention-only discovery. Every byte is captured through the sweep budget; manual prune keeps
+    /// its original reader and behavior. Full workflow journals are opened only for selected rooms.
     /// </summary>
     internal static async Task<IReadOnlyList<Candidate>> DiscoverRetentionCandidatesAsync(
-        string registryFilePath, RoomsPruneOptions options, CancellationToken cancellationToken)
+        string registryFilePath, RoomsPruneOptions options,
+        RoomRetentionEvidenceStore.SweepBudget sweepBudget, CancellationToken cancellationToken)
     {
-        var entries = await RoomRegistryStore.ReadDistinctByRoomAsync(registryFilePath, cancellationToken)
+        if (!File.Exists(registryFilePath)) return [];
+        var registryBudget = RoomRetentionEvidenceStore.DiscoveryBudget(sweepBudget, cancellationToken, registry: true);
+        var registry = await RoomRetentionEvidenceStore.ReadSourceAsync(registryFilePath, registryBudget)
             .ConfigureAwait(false);
+        if (registry.Bytes.Length > 0 && registry.Bytes[^1] != (byte)'\n')
+            throw new RoomRetentionEvidenceRefusalException("the registry has an incomplete tail");
+        var byRoom = new Dictionary<string, RoomRegistryEntry>(BatonPaths.RecordKeyComparer);
+        foreach (var line in Encoding.UTF8.GetString(registry.Bytes).Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            sweepBudget.Check();
+            RoomRegistryEntry? entry;
+            try { entry = JsonSerializer.Deserialize<RoomRegistryEntry>(line); }
+            catch (JsonException) { throw new RoomRetentionEvidenceRefusalException("the registry has malformed input"); }
+            if (entry is null || string.IsNullOrWhiteSpace(entry.RoomPath) || string.IsNullOrWhiteSpace(entry.ProjectRoot))
+                throw new RoomRetentionEvidenceRefusalException("the registry has incomplete input");
+            byRoom[entry.RoomPath] = entry;
+        }
         var now = DateTime.UtcNow;
         var candidates = new List<Candidate>();
-        foreach (var entry in entries)
+        foreach (var entry in byRoom.Values)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            sweepBudget.Check();
             if (!Directory.Exists(entry.RoomPath)) continue;
-
-            var selectionFiles = new[]
-            {
-                Path.Combine(entry.RoomPath, TerminalSentinelWriter.TerminalSentinelFileName),
-                BatonPaths.RoomBindingsFile(entry.RoomPath),
-                Path.Combine(entry.RoomPath, BatonPaths.RoomMetadataFileName),
-            };
-            var oversized = selectionFiles.FirstOrDefault(path =>
-            {
-                try { return File.Exists(path) && new FileInfo(path).Length > RoomRetentionEvidenceLimits.MaxSelectionFileBytes; }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
-            });
-
+            var roomStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             var terminalPath = Path.Combine(entry.RoomPath, TerminalSentinelWriter.TerminalSentinelFileName);
             DateTime terminalAtUtc;
             try
@@ -195,22 +202,65 @@ public static class RoomsPruneCommand
                 if (!File.Exists(terminalPath)) continue;
                 terminalAtUtc = File.GetLastWriteTimeUtc(terminalPath);
             }
-            catch (IOException) { continue; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { continue; }
 
             if (options.OlderThanDays is { } days && now - terminalAtUtc < TimeSpan.FromDays(days)) continue;
-            if (oversized is not null)
+            var budget = RoomRetentionEvidenceStore.DiscoveryBudget(sweepBudget, cancellationToken,
+                started: roomStarted);
+            try
+            {
+                var sentinel = await RoomRetentionEvidenceStore.ReadSourceAsync(terminalPath, budget,
+                    RoomRetentionEvidenceLimits.MaxSelectionFileBytes).ConfigureAwait(false);
+                if (sentinel.LastWriteUtc != terminalAtUtc)
+                    throw new RoomRetentionEvidenceRefusalException("terminal sentinel changed during selection");
+                if (options.OlderThanDays is { } selectedDays &&
+                    now - sentinel.LastWriteUtc < TimeSpan.FromDays(selectedDays)) continue;
+                WorkflowStatusView? view;
+                try { view = JsonSerializer.Deserialize<WorkflowStatusView>(sentinel.Bytes); }
+                catch (JsonException) { throw new RoomRetentionEvidenceRefusalException("terminal sentinel is malformed"); }
+                if (view is null) throw new RoomRetentionEvidenceRefusalException("terminal sentinel is empty");
+
+                if (Path.GetFileName(Path.TrimEndingDirectorySeparator(entry.RoomPath))
+                    .Equals(ConductorRoomDetector.ConductorRole, StringComparison.OrdinalIgnoreCase) ||
+                    RoomRetentionEvidenceStore.IsPresentOrRefuse(KeepMarker.MarkerFilePath(entry.RoomPath))) continue;
+
+                var bindingsPath = BatonPaths.RoomBindingsFile(entry.RoomPath);
+                if (RoomRetentionEvidenceStore.IsPresentOrRefuse(bindingsPath))
+                {
+                    var bindings = await RoomRetentionEvidenceStore.ReadSourceAsync(bindingsPath, budget,
+                        RoomRetentionEvidenceLimits.MaxSelectionFileBytes).ConfigureAwait(false);
+                    var parsed = WorkerBindingConfigParser.Parse(Encoding.UTF8.GetString(bindings.Bytes), bindingsPath);
+                    if (ConductorRoomDetector.TryResolveSoleBinding(parsed) is { Role: ConductorRoomDetector.ConductorRole })
+                        continue;
+                }
+
+                var metadataPath = Path.Combine(entry.RoomPath, BatonPaths.RoomMetadataFileName);
+                if (RoomRetentionEvidenceStore.IsPresentOrRefuse(metadataPath))
+                {
+                    var metadata = await RoomRetentionEvidenceStore.ReadSourceAsync(metadataPath, budget,
+                        RoomRetentionEvidenceLimits.MaxSelectionFileBytes).ConfigureAwait(false);
+                    using var _ = JsonDocument.Parse(metadata.Bytes);
+                }
+
+                if (options.State is not null && !string.Equals(view.State, options.State, StringComparison.Ordinal)) continue;
+                candidates.Add(new Candidate(entry.RoomPath, view.State, terminalAtUtc,
+                    SelectionBytes: RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes,
+                    SelectionStartedTimestamp: roomStarted));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or
+                WorkerBindingConfigException or RoomRetentionEvidenceRefusalException)
             {
                 candidates.Add(new Candidate(entry.RoomPath, "retention-input-refused", terminalAtUtc, true,
-                    $"selection input '{Path.GetFileName(oversized)}' exceeds the bounded discovery size"));
-                continue;
+                    $"selection input cannot be proven ({ex.Message})",
+                    RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes, roomStarted));
             }
-
-            if (ConductorRoomDetector.IsConductorRoom(entry.RoomPath) || KeepMarker.IsKept(entry.RoomPath)) continue;
-            var view = await TerminalSentinelWriter.TryReadAsync(entry.RoomPath, cancellationToken).ConfigureAwait(false);
-            if (view is null) continue;
-            if (options.State is not null && !string.Equals(view.State, options.State, StringComparison.Ordinal)) continue;
-            candidates.Add(new Candidate(entry.RoomPath, view.State, terminalAtUtc));
         }
+
+        var recheck = await RoomRetentionEvidenceStore.ReadSourceAsync(registryFilePath, registryBudget)
+            .ConfigureAwait(false);
+        if (!registry.Bytes.AsSpan().SequenceEqual(recheck.Bytes))
+            throw new RoomRetentionEvidenceRefusalException("the registry changed during discovery");
 
         return candidates;
     }

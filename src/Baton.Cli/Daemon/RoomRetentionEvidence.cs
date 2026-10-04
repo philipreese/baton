@@ -24,16 +24,19 @@ internal sealed class RoomRetentionEvidencePreparer
 {
     private readonly Dictionary<string, SourceHint> _hints = new(BatonPaths.RecordKeyComparer);
     private int _cursor;
+    internal int Cursor => _cursor;
 
     public async Task<int> PrepareAsync(
         string registryFilePath,
         int retentionDays,
         CancellationToken cancellationToken = default)
     {
+        var started = Stopwatch.GetTimestamp();
+        var sweepBudget = new RoomRetentionEvidenceStore.SweepBudget(started, cancellationToken);
         var candidates = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(
             registryFilePath,
             new RoomsPruneOptions(Terminal: true, OlderThanDays: retentionDays, State: null, DryRun: true, Yes: false),
-            cancellationToken).ConfigureAwait(false);
+            sweepBudget, cancellationToken).ConfigureAwait(false);
 
         if (candidates.Count == 0)
         {
@@ -41,8 +44,6 @@ internal sealed class RoomRetentionEvidencePreparer
             return 0;
         }
 
-        var started = Stopwatch.GetTimestamp();
-        var sweepBudget = new RoomRetentionEvidenceStore.SweepBudget(started, cancellationToken);
         var captured = 0;
         var attempts = Math.Min(RoomRetentionEvidenceLimits.MaxAttemptsPerSweep, candidates.Count);
         for (var offset = 0; offset < attempts; offset++)
@@ -53,7 +54,7 @@ internal sealed class RoomRetentionEvidencePreparer
                 break;
             }
 
-            var index = (_cursor + offset) % candidates.Count;
+            var index = _cursor % candidates.Count;
             var candidate = candidates[index];
             var roomKey = RoomRetentionEvidenceStore.RoomKey(candidate.RoomDirectoryPath);
             _cursor = (index + 1) % candidates.Count;
@@ -64,7 +65,8 @@ internal sealed class RoomRetentionEvidencePreparer
                 continue;
             }
 
-            if (TryReadHint(candidate.RoomDirectoryPath, out var hint) && hint.MatchesCurrentCheapIdentity())
+            if (TryReadHint(candidate.RoomDirectoryPath, out var hint) &&
+                hint.MatchesCurrentCheapIdentity() && !candidate.SelectionRefused)
             {
                 continue;
             }
@@ -75,7 +77,9 @@ internal sealed class RoomRetentionEvidencePreparer
                     candidate.RoomDirectoryPath,
                     roomKey,
                     sweepBudget,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    selectionStarted: candidate.SelectionStartedTimestamp,
+                    selectionBytes: candidate.SelectionBytes).ConfigureAwait(false);
                 if (result is not null)
                 {
                     captured++;
@@ -122,6 +126,15 @@ internal static class RoomRetentionEvidenceLimits
 }
 
 internal sealed class RoomRetentionEvidenceRefusalException(string message) : Exception(message);
+
+internal enum RoomRetentionCapturePoint
+{
+    BeforeGuard,
+    AfterJournalRead,
+    BeforePublish,
+    AfterTemporaryFlush,
+    AfterPublication
+}
 
 internal sealed record SourceHint(string RoomPath, long SentinelLength, DateTime SentinelWriteUtc, long JournalLength,
     DateTime JournalWriteUtc, long SnapshotLength, DateTime SnapshotWriteUtc)
@@ -173,7 +186,8 @@ public sealed record RoomRetentionEvidenceRecord(
     [property: JsonPropertyName("verdictText")] string? VerdictText,
     [property: JsonPropertyName("verdict")] JsonElement? Verdict,
     [property: JsonPropertyName("knownUsage")] IReadOnlyDictionary<string, ExecutionUsageView>? KnownUsage,
-    [property: JsonPropertyName("provenance")] IReadOnlyList<RoomRetentionExecutionProvenance> Provenance);
+    [property: JsonPropertyName("provenance")] IReadOnlyList<RoomRetentionExecutionProvenance> Provenance,
+    [property: JsonPropertyName("payloadSha256")] string? PayloadSha256);
 
 /// <summary>The one feature-specific immutable JSON leaf store for retention evidence.</summary>
 public static class RoomRetentionEvidenceStore
@@ -242,22 +256,29 @@ public static class RoomRetentionEvidenceStore
         string roomDirectoryPath,
         string roomKey,
         SweepBudget sweepBudget,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<RoomRetentionCapturePoint>? probe = null,
+        long selectionStarted = 0,
+        long selectionBytes = 0)
     {
+        var roomStarted = selectionStarted == 0 ? Stopwatch.GetTimestamp() : selectionStarted;
+        sweepBudget.Check();
+        probe?.Invoke(RoomRetentionCapturePoint.BeforeGuard);
         using var guard = AcquireGuard(roomDirectoryPath);
-        var roomStarted = Stopwatch.GetTimestamp();
-        var budget = new ReadBudget(sweepBudget, roomStarted, cancellationToken);
+        var budget = new ReadBudget(sweepBudget, roomStarted, cancellationToken,
+            RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - selectionBytes);
+        budget.Check();
 
         if (Path.GetFileName(Path.TrimEndingDirectorySeparator(roomDirectoryPath))
                 .Equals(ConductorRoomDetector.ConductorRole, StringComparison.OrdinalIgnoreCase) ||
-            KeepMarker.IsKept(roomDirectoryPath))
+            IsPresentOrRefuse(KeepMarker.MarkerFilePath(roomDirectoryPath)))
         {
             throw new RoomRetentionEvidenceRefusalException("the room is conductor-owned or kept");
         }
 
         SourceRead? bindingsRead = null;
         var bindingsPath = BatonPaths.RoomBindingsFile(roomDirectoryPath);
-        if (File.Exists(bindingsPath))
+        if (IsPresentOrRefuse(bindingsPath))
         {
             if (new FileInfo(bindingsPath).Length > RoomRetentionEvidenceLimits.MaxSelectionFileBytes)
             {
@@ -286,6 +307,7 @@ public static class RoomRetentionEvidenceStore
 
         var snapshot = await ReadSourceAsync(Path.Combine(roomDirectoryPath, BatonPaths.SnapshotFileName), budget).ConfigureAwait(false);
         var journal = await ReadSourceAsync(Path.Combine(roomDirectoryPath, BatonPaths.FlowLogFileName), budget).ConfigureAwait(false);
+        probe?.Invoke(RoomRetentionCapturePoint.AfterJournalRead);
         var sentinel = await ReadSourceAsync(Path.Combine(roomDirectoryPath, TerminalSentinelWriter.TerminalSentinelFileName), budget).ConfigureAwait(false);
 
         if (journal.Bytes.Length == 0 || journal.Bytes[^1] != (byte)'\n')
@@ -312,6 +334,10 @@ public static class RoomRetentionEvidenceStore
         {
             throw new RoomRetentionEvidenceRefusalException("the guarded projection is live or unresolved");
         }
+        if (!string.Equals(status.State, WorkflowOutcome.Describe(projected), StringComparison.Ordinal))
+        {
+            throw new RoomRetentionEvidenceRefusalException("the terminal sentinel conflicts with the guarded projection");
+        }
 
         var instant = TerminalInstantResolver.Resolve(entries, snapshotModel);
         var expectation = DetermineExpectation(flowEvents);
@@ -322,6 +348,8 @@ public static class RoomRetentionEvidenceStore
             .ToArray();
 
         SourceRead? verdictRead = null;
+        SourceRead? otherVerdictRead = null;
+        string? absentVerdictPath = null;
         string? verdictExecutionId = null;
         string? verdictSourceIdentity = null;
         string? verdictText = null;
@@ -343,6 +371,8 @@ public static class RoomRetentionEvidenceStore
             }
 
             verdictRead = active ?? pruned;
+            otherVerdictRead = active is not null && pruned is not null ? pruned : null;
+            absentVerdictPath = active is null ? activePath : pruned is null ? prunedPath : null;
             string? verdictError = null;
             var verdictValid = verdictRead is not null &&
                 ReviewVerdictSchema.TryParse(verdictRead.Bytes, out _, out verdictError);
@@ -360,12 +390,17 @@ public static class RoomRetentionEvidenceStore
         }
 
         budget.Check();
-        var latest = new[] { bindingsRead, snapshot, journal, sentinel, verdictRead }
+        probe?.Invoke(RoomRetentionCapturePoint.BeforePublish);
+        var latest = new[] { bindingsRead, snapshot, journal, sentinel, verdictRead, otherVerdictRead }
             .Where(source => source is not null).Cast<SourceRead>().ToArray();
-        if (latest.Any(source => source.ChangedSinceRead()))
+        foreach (var source in latest)
         {
-            throw new RoomRetentionEvidenceRefusalException("a guarded source changed during capture");
+            await VerifySourceAsync(source, budget).ConfigureAwait(false);
         }
+        if (IsPresentOrRefuse(KeepMarker.MarkerFilePath(roomDirectoryPath)) ||
+            (bindingsRead is null && IsPresentOrRefuse(bindingsPath)) ||
+            (absentVerdictPath is not null && IsPresentOrRefuse(absentVerdictPath)))
+            throw new RoomRetentionEvidenceRefusalException("a guarded selection source changed during capture");
 
         if (!TryGetCheapIdentity(roomDirectoryPath, out var identity))
         {
@@ -379,14 +414,15 @@ public static class RoomRetentionEvidenceStore
         var usage = status.Steps
             .Where(step => step.Execution is not null && step.Usage is not null)
             .ToDictionary(step => step.Execution!, step => step.Usage!, StringComparer.Ordinal);
-        var record = new RoomRetentionEvidenceRecord(
+        var unsignedRecord = new RoomRetentionEvidenceRecord(
             SchemaVersion, roomKey, BatonPaths.RecordKey(roomDirectoryPath), DateTimeOffset.UtcNow, SourceKind, generation,
             sources,
             new RoomRetentionTerminalFact(projected.Status.ToString(), status.State, instant.AtUtc, true),
             expectation, verdictExecutionId, verdictSourceIdentity, verdictText, verdict, usage.Count == 0 ? null : usage,
-            provenance);
+            provenance, null);
+        var record = unsignedRecord with { PayloadSha256 = PayloadDigest(unsignedRecord) };
 
-        await PublishAsync(record, cancellationToken).ConfigureAwait(false);
+        await PublishAsync(record, budget, cancellationToken, probe).ConfigureAwait(false);
         var hint = new SourceHint(roomDirectoryPath, identity.SentinelLength, identity.SentinelWriteUtc,
             identity.JournalLength, identity.JournalWriteUtc, identity.SnapshotLength, identity.SnapshotWriteUtc);
         return (record, hint);
@@ -470,15 +506,16 @@ public static class RoomRetentionEvidenceStore
         }
     }
 
-    private static async Task PublishAsync(RoomRetentionEvidenceRecord record, CancellationToken cancellationToken)
+    private static async Task PublishAsync(RoomRetentionEvidenceRecord record, ReadBudget budget,
+        CancellationToken cancellationToken, Action<RoomRetentionCapturePoint>? probe)
     {
+        budget.Check();
         var leaf = LeafPath(record.RoomKey, record.GenerationSha256);
         Directory.CreateDirectory(Path.GetDirectoryName(leaf)!);
         var serialized = JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions);
         if (File.Exists(leaf))
         {
-            var existing = ValidatePublished(await ReadBoundedFileAsync(leaf, RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom,
-                Stopwatch.GetTimestamp(), RoomRetentionEvidenceLimits.RoomDeadline, cancellationToken).ConfigureAwait(false),
+            var existing = ValidatePublished((await ReadSourceAsync(leaf, budget).ConfigureAwait(false)).Bytes,
                 record.RoomKey, record.GenerationSha256);
             if (!EquivalentCapture(existing, record))
             {
@@ -498,10 +535,13 @@ public static class RoomRetentionEvidenceStore
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 stream.Flush(flushToDisk: true);
             }
+            probe?.Invoke(RoomRetentionCapturePoint.AfterTemporaryFlush);
 
             try
             {
+                budget.Check();
                 File.Move(temp, leaf, overwrite: false);
+                probe?.Invoke(RoomRetentionCapturePoint.AfterPublication);
             }
             catch (IOException)
             {
@@ -510,8 +550,7 @@ public static class RoomRetentionEvidenceStore
                     throw;
                 }
 
-                var existing = ValidatePublished(await ReadBoundedFileAsync(leaf, RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom,
-                    Stopwatch.GetTimestamp(), RoomRetentionEvidenceLimits.RoomDeadline, cancellationToken).ConfigureAwait(false),
+                var existing = ValidatePublished((await ReadSourceAsync(leaf, budget).ConfigureAwait(false)).Bytes,
                     record.RoomKey, record.GenerationSha256);
                 if (!EquivalentCapture(existing, record))
                 {
@@ -526,8 +565,7 @@ public static class RoomRetentionEvidenceStore
             catch (UnauthorizedAccessException) { }
         }
 
-        _ = ValidatePublished(await ReadBoundedFileAsync(leaf, RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom,
-            Stopwatch.GetTimestamp(), RoomRetentionEvidenceLimits.RoomDeadline, cancellationToken).ConfigureAwait(false),
+        _ = ValidatePublished((await ReadSourceAsync(leaf, budget).ConfigureAwait(false)).Bytes,
             record.RoomKey, record.GenerationSha256);
     }
 
@@ -543,8 +581,19 @@ public static class RoomRetentionEvidenceStore
             throw new RoomRetentionEvidenceRefusalException($"the published leaf is malformed ({ex.Message})");
         }
 
-        if (record is null || record.SchemaVersion != SchemaVersion || record.SourceKind != SourceKind ||
+        if (record is null || record.Sources is null || record.Terminal is null || record.Provenance is null ||
+            record.SchemaVersion != SchemaVersion || record.SourceKind != SourceKind ||
             record.RoomKey != roomKey || record.GenerationSha256 != generation ||
+            record.PayloadSha256 is null || !IsSha256(record.PayloadSha256) ||
+            string.IsNullOrWhiteSpace(record.RoomIdentity) || record.CapturedAtUtc == default ||
+            !record.Terminal.IsTerminal || record.Terminal.ProjectionStatus != WorkflowStatus.Terminal.ToString() ||
+            record.Terminal.SentinelState is null ||
+            (record.VerdictExpectation != ReviewExpectation && record.VerdictExpectation != NotApplicableExpectation) ||
+            (record.VerdictExpectation == NotApplicableExpectation &&
+                (record.VerdictText is not null || record.Verdict is not null || record.Sources.VerdictSha256 is not null)) ||
+            (record.VerdictExpectation == ReviewExpectation &&
+                (string.IsNullOrWhiteSpace(record.VerdictExecutionId) ||
+                 string.IsNullOrWhiteSpace(record.VerdictSourceIdentity) || record.Verdict is null)) ||
             !IsSha256(record.Sources.SnapshotSha256) || !IsSha256(record.Sources.JournalSha256) ||
             !IsSha256(record.Sources.SentinelSha256) ||
             (record.Sources.VerdictSha256 is not null && !IsSha256(record.Sources.VerdictSha256)) ||
@@ -557,6 +606,10 @@ public static class RoomRetentionEvidenceStore
         {
             throw new RoomRetentionEvidenceRefusalException("the published leaf generation digest is inconsistent");
         }
+        if (PayloadDigest(record) != record.PayloadSha256)
+            throw new RoomRetentionEvidenceRefusalException("the published leaf payload digest is inconsistent");
+        if (!bytes.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions)))
+            throw new RoomRetentionEvidenceRefusalException("the published leaf has noncanonical or extra payload");
 
         if (record.VerdictText is not null)
         {
@@ -565,6 +618,16 @@ public static class RoomRetentionEvidenceStore
                 !ReviewVerdictSchema.TryParse(verdictBytes, out _, out _))
             {
                 throw new RoomRetentionEvidenceRefusalException("the published verdict payload is invalid");
+            }
+            try
+            {
+                using var parsed = JsonDocument.Parse(verdictBytes);
+                if (!JsonElement.DeepEquals(parsed.RootElement, record.Verdict!.Value))
+                    throw new RoomRetentionEvidenceRefusalException("the published verdict differs from its text");
+            }
+            catch (JsonException)
+            {
+                throw new RoomRetentionEvidenceRefusalException("the published verdict payload is malformed");
             }
         }
 
@@ -575,10 +638,13 @@ public static class RoomRetentionEvidenceStore
     {
         // Capture time is the observation instant, not generation identity. Concurrent/replayed
         // identical captures therefore converge on the first valid authoritative leaf.
-        var leftBytes = JsonSerializer.SerializeToUtf8Bytes(left with { CapturedAtUtc = default }, JsonOptions);
-        var rightBytes = JsonSerializer.SerializeToUtf8Bytes(right with { CapturedAtUtc = default }, JsonOptions);
+        var leftBytes = JsonSerializer.SerializeToUtf8Bytes(left with { CapturedAtUtc = default, PayloadSha256 = null }, JsonOptions);
+        var rightBytes = JsonSerializer.SerializeToUtf8Bytes(right with { CapturedAtUtc = default, PayloadSha256 = null }, JsonOptions);
         return leftBytes.AsSpan().SequenceEqual(rightBytes);
     }
+
+    private static string PayloadDigest(RoomRetentionEvidenceRecord record) =>
+        Digest(JsonSerializer.SerializeToUtf8Bytes(record with { PayloadSha256 = null }, JsonOptions));
 
     private static bool IsSha256(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
 
@@ -607,50 +673,94 @@ public static class RoomRetentionEvidenceStore
         if (bytes is not null) stream.Write(bytes);
     }
 
-    private static async Task<SourceRead?> TryReadOptionalSourceAsync(string path, ReadBudget budget)
+    internal static bool IsPresentOrRefuse(string path)
     {
-        if (!File.Exists(path)) return null;
-        return await ReadSourceAsync(path, budget).ConfigureAwait(false);
+        try { _ = File.GetAttributes(path); return true; }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return false; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new RoomRetentionEvidenceRefusalException($"source '{path}' cannot be checked ({ex.Message})");
+        }
     }
 
-    private static async Task<SourceRead> ReadSourceAsync(string path, ReadBudget budget)
+    internal static async Task<SourceRead?> TryReadOptionalSourceAsync(string path, ReadBudget budget,
+        long? maxFileBytes = null)
+    {
+        if (!IsPresentOrRefuse(path)) return null;
+        return await ReadSourceAsync(path, budget, maxFileBytes).ConfigureAwait(false);
+    }
+
+    internal static async Task<SourceRead> ReadSourceAsync(string path, ReadBudget budget, long? maxFileBytes = null)
     {
         budget.Check();
         FileInfo before;
         try { before = new FileInfo(path); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { throw new RoomRetentionEvidenceRefusalException($"source '{path}' is unreadable"); }
         if (!before.Exists) throw new RoomRetentionEvidenceRefusalException($"source '{path}' is missing");
-        if (before.Length > budget.RemainingRoomBytes || before.Length > budget.RemainingSweepBytes)
+        if (before.Length > budget.RemainingRoomBytes || before.Length > budget.RemainingSweepBytes ||
+            (maxFileBytes is { } max && before.Length > max))
             throw new RoomRetentionEvidenceRefusalException($"source '{path}' exceeds the bounded read budget");
 
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        FileStream opened;
+        try
+        {
+            opened = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new RoomRetentionEvidenceRefusalException($"source '{path}' is unreadable ({ex.Message})");
+        }
+        await using var stream = opened;
         using var output = new MemoryStream(capacity: checked((int)Math.Min(before.Length, int.MaxValue)));
         var buffer = new byte[64 * 1024];
         while (true)
         {
             budget.Check();
-            if (stream.Position >= before.Length)
-            {
-                break;
-            }
-
             var allowed = (int)Math.Min(buffer.Length, Math.Min(budget.RemainingRoomBytes, budget.RemainingSweepBytes));
+            if (maxFileBytes is { } limit)
+                allowed = (int)Math.Min(allowed, limit + 1 - output.Length);
             if (allowed <= 0)
             {
                 throw new RoomRetentionEvidenceRefusalException($"source '{path}' exceeds the bounded read budget");
             }
 
-            var read = await stream.ReadAsync(buffer.AsMemory(0, allowed), budget.CancellationToken).ConfigureAwait(false);
+            int read;
+            try { read = await stream.ReadAsync(buffer.AsMemory(0, allowed), budget.CancellationToken).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new RoomRetentionEvidenceRefusalException($"source '{path}' became unreadable ({ex.Message})");
+            }
             if (read == 0) break;
             budget.Consume(read);
+            if (maxFileBytes is { } bound && output.Length + read > bound)
+                throw new RoomRetentionEvidenceRefusalException($"source '{path}' grew beyond its bounded size");
             await output.WriteAsync(buffer.AsMemory(0, read), budget.CancellationToken).ConfigureAwait(false);
         }
 
-        var after = new FileInfo(path);
+        FileInfo after;
+        try { after = new FileInfo(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new RoomRetentionEvidenceRefusalException($"source '{path}' cannot be rechecked ({ex.Message})");
+        }
         if (after.Length != before.Length || after.LastWriteTimeUtc != before.LastWriteTimeUtc || output.Length != before.Length)
             throw new RoomRetentionEvidenceRefusalException($"source '{path}' changed while it was read");
         return new SourceRead(path, output.ToArray(), before.Length, before.LastWriteTimeUtc);
+    }
+
+    internal static ReadBudget DiscoveryBudget(SweepBudget sweep, CancellationToken cancellationToken,
+        bool registry = false, long? started = null) =>
+        new(sweep, started ?? Stopwatch.GetTimestamp(), cancellationToken,
+            registry ? RoomRetentionEvidenceLimits.MaxSourceBytesPerSweep : RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom,
+            registry ? RoomRetentionEvidenceLimits.SweepDeadline : RoomRetentionEvidenceLimits.RoomDeadline);
+
+    private static async Task VerifySourceAsync(SourceRead source, ReadBudget budget)
+    {
+        var reread = await ReadSourceAsync(source.Path, budget).ConfigureAwait(false);
+        if (!source.Bytes.AsSpan().SequenceEqual(reread.Bytes) ||
+            source.Length != reread.Length || source.LastWriteUtc != reread.LastWriteUtc)
+            throw new RoomRetentionEvidenceRefusalException("a guarded source changed during capture");
     }
 
     private static async Task<byte[]> ReadBoundedFileAsync(string path, long maxBytes, long started, TimeSpan deadline,
@@ -661,7 +771,7 @@ public static class RoomRetentionEvidenceStore
         return (await ReadSourceAsync(path, budget).ConfigureAwait(false)).Bytes;
     }
 
-    private sealed class ReadBudget
+    internal sealed class ReadBudget
     {
         private long _roomBytes;
         private readonly SweepBudget _sweepBudget;
@@ -724,12 +834,5 @@ public static class RoomRetentionEvidenceStore
         }
     }
 
-    private sealed record SourceRead(string Path, byte[] Bytes, long Length, DateTime LastWriteUtc)
-    {
-        public bool ChangedSinceRead()
-        {
-            var info = new FileInfo(Path);
-            return !info.Exists || info.Length != Length || info.LastWriteTimeUtc != LastWriteUtc;
-        }
-    }
+    internal sealed record SourceRead(string Path, byte[] Bytes, long Length, DateTime LastWriteUtc);
 }

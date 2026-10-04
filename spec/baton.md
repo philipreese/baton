@@ -5381,7 +5381,8 @@ remain retained and cannot produce a complete leaf. A review verdict is parsed b
 absence of a file is not that proof. The leaf is an immutable flushed atomic JSON file outside the
 room, addressed by normalized room-key and generation SHA-256; malformed or conflicting existing
 content is a refusal, never repair or overwrite. It records exact as-of room/source identities,
-terminal fact, source/generation digests, complete validated verdict content, and only typed known
+terminal fact, source/generation digests, a digest of the complete canonical leaf payload,
+complete validated verdict content, and only typed known
 usage/frozen provenance present in the captured evidence. Missing values remain unknown and known
 zero remains zero; this is not a second accounting ledger and raw prompts, stdout, diffs and journal
 dumps are not retained. Process-local cursor and unchanged-source hints are optimization only and
