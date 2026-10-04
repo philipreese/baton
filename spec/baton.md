@@ -5372,8 +5372,9 @@ reads and a 15-second cooperative deadline per sweep, with an 8 MiB and two-seco
 attempted room. Discovery remains the cheap sentinel/bindings/metadata selection used by
 `RoomsPruneCommand`; full journals are read only for selected attempts, and failed attempts consume
 their slot and read/deadline budget. A selected attempt acquires the room guard, rechecks keep,
-conductor and terminal projection state, reads a complete snapshot/journal/sentinel and any
-journal-identified review verdict under the existing `Baton/Store` projection vocabulary, and
+conductor and terminal projection state, reads a complete snapshot/journal/sentinel and every
+journal-identified verdict-producing review execution under the existing `Baton/Store` projection
+vocabulary, and
 rechecks source identity before publication. Torn, growing, changed, missing, conflicting,
 oversized, malformed, live, held, unknown-expectation, pre-ledger and `Indeterminate` histories
 remain retained and cannot produce a complete leaf. A review verdict is parsed by
@@ -5381,8 +5382,9 @@ remain retained and cannot produce a complete leaf. A review verdict is parsed b
 absence of a file is not that proof. The leaf is an immutable flushed atomic JSON file outside the
 room, addressed by normalized room-key and generation SHA-256; malformed or conflicting existing
 content is a refusal, never repair or overwrite. It records exact as-of room/source identities,
-terminal fact, source/generation digests, a digest of the complete canonical leaf payload,
-complete validated verdict content, and only typed known
+terminal fact, source/generation digests (including the ordered execution identities, source paths
+and exact bytes of every selected review verdict), a digest of the complete canonical leaf payload,
+complete validated content for every identified review verdict, and only typed known
 usage/frozen provenance present in the captured evidence. Missing values remain unknown and known
 zero remains zero; this is not a second accounting ledger and raw prompts, stdout, diffs and journal
 dumps are not retained. Process-local cursor and unchanged-source hints are optimization only and

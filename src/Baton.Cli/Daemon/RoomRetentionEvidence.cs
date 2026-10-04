@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -33,20 +34,20 @@ internal sealed class RoomRetentionEvidencePreparer
     {
         var started = Stopwatch.GetTimestamp();
         var sweepBudget = new RoomRetentionEvidenceStore.SweepBudget(started, cancellationToken);
-        var candidates = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(
+        var discovery = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(
             registryFilePath,
             new RoomsPruneOptions(Terminal: true, OlderThanDays: retentionDays, State: null, DryRun: true, Yes: false),
-            sweepBudget, cancellationToken).ConfigureAwait(false);
+            sweepBudget, cancellationToken, _cursor).ConfigureAwait(false);
+        _cursor = discovery.NextCursor;
+        var candidates = discovery.Candidates;
 
         if (candidates.Count == 0)
         {
-            _cursor = 0;
             return 0;
         }
 
         var captured = 0;
-        var attempts = Math.Min(RoomRetentionEvidenceLimits.MaxAttemptsPerSweep, candidates.Count);
-        for (var offset = 0; offset < attempts; offset++)
+        foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (sweepBudget.Expired)
@@ -54,10 +55,7 @@ internal sealed class RoomRetentionEvidencePreparer
                 break;
             }
 
-            var index = _cursor % candidates.Count;
-            var candidate = candidates[index];
             var roomKey = RoomRetentionEvidenceStore.RoomKey(candidate.RoomDirectoryPath);
-            _cursor = (index + 1) % candidates.Count;
 
             if (candidate.SelectionRefused)
             {
@@ -156,7 +154,14 @@ public sealed record RoomRetentionEvidenceSources(
     [property: JsonPropertyName("snapshotSha256")] string SnapshotSha256,
     [property: JsonPropertyName("journalSha256")] string JournalSha256,
     [property: JsonPropertyName("sentinelSha256")] string SentinelSha256,
-    [property: JsonPropertyName("verdictSha256")] string? VerdictSha256);
+    [property: JsonPropertyName("verdictsSha256")] string? VerdictsSha256);
+
+public sealed record RoomRetentionVerdictEvidence(
+    [property: JsonPropertyName("executionId")] string ExecutionId,
+    [property: JsonPropertyName("sourceIdentity")] string SourceIdentity,
+    [property: JsonPropertyName("text")] string Text,
+    [property: JsonPropertyName("verdict")] JsonElement Verdict,
+    [property: JsonPropertyName("sha256")] string Sha256);
 
 public sealed record RoomRetentionTerminalFact(
     [property: JsonPropertyName("projectionStatus")] string ProjectionStatus,
@@ -169,7 +174,8 @@ public sealed record RoomRetentionExecutionProvenance(
     [property: JsonPropertyName("stepId")] string? StepId,
     [property: JsonPropertyName("worker")] string Worker,
     [property: JsonPropertyName("adapter")] string? Adapter,
-    [property: JsonPropertyName("model")] string? Model);
+    [property: JsonPropertyName("model")] string? Model,
+    [property: JsonPropertyName("producesVerdict")] bool ProducesVerdict);
 
 public sealed record RoomRetentionEvidenceRecord(
     [property: JsonPropertyName("schemaVersion")] int SchemaVersion,
@@ -181,10 +187,7 @@ public sealed record RoomRetentionEvidenceRecord(
     [property: JsonPropertyName("sources")] RoomRetentionEvidenceSources Sources,
     [property: JsonPropertyName("terminal")] RoomRetentionTerminalFact Terminal,
     [property: JsonPropertyName("verdictExpectation")] string VerdictExpectation,
-    [property: JsonPropertyName("verdictExecutionId")] string? VerdictExecutionId,
-    [property: JsonPropertyName("verdictSourceIdentity")] string? VerdictSourceIdentity,
-    [property: JsonPropertyName("verdictText")] string? VerdictText,
-    [property: JsonPropertyName("verdict")] JsonElement? Verdict,
+    [property: JsonPropertyName("verdicts")] IReadOnlyList<RoomRetentionVerdictEvidence> Verdicts,
     [property: JsonPropertyName("knownUsage")] IReadOnlyDictionary<string, ExecutionUsageView>? KnownUsage,
     [property: JsonPropertyName("provenance")] IReadOnlyList<RoomRetentionExecutionProvenance> Provenance,
     [property: JsonPropertyName("payloadSha256")] string? PayloadSha256);
@@ -192,7 +195,7 @@ public sealed record RoomRetentionEvidenceRecord(
 /// <summary>The one feature-specific immutable JSON leaf store for retention evidence.</summary>
 public static class RoomRetentionEvidenceStore
 {
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
     public const string SourceKind = "room-retention-as-of";
     public const string ReviewExpectation = "review";
     public const string NotApplicableExpectation = "not-applicable";
@@ -344,62 +347,54 @@ public static class RoomRetentionEvidenceStore
         var provenance = flowEvents.OfType<FlowEvent.ExecutionRequestAccepted>()
             .Select(accepted => new RoomRetentionExecutionProvenance(
                 accepted.Request.ExecutionId.ToString(), accepted.Request.StepId?.ToString(), accepted.Request.Worker,
-                accepted.Request.Adapter, accepted.Request.Model))
+                accepted.Request.Adapter, accepted.Request.Model, IsReviewRequest(accepted)))
             .ToArray();
 
-        SourceRead? verdictRead = null;
-        SourceRead? otherVerdictRead = null;
-        string? absentVerdictPath = null;
-        string? verdictExecutionId = null;
-        string? verdictSourceIdentity = null;
-        string? verdictText = null;
-        JsonElement? verdict = null;
+        var verdictReads = new List<SourceRead>();
+        var absentVerdictPaths = new List<string>();
+        var verdicts = new List<RoomRetentionVerdictEvidence>();
         if (expectation == ReviewExpectation)
         {
-            var review = flowEvents.OfType<FlowEvent.ExecutionRequestAccepted>()
-                .Where(IsReviewRequest).LastOrDefault()
-                ?? throw new RoomRetentionEvidenceRefusalException("review expectation has no identified execution");
-            verdictExecutionId = review.Request.ExecutionId.ToString();
             var artifactsRoot = Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName);
-            var activePath = Path.Combine(ArtifactManager.ResolveOutputDirectory(artifactsRoot, review.Request.ExecutionId), "verdict.json");
-            var prunedPath = Path.Combine(ArtifactManager.ResolvePrunedOutputDirectory(artifactsRoot, review.Request.ExecutionId), "verdict.json");
-            var active = await TryReadOptionalSourceAsync(activePath, budget).ConfigureAwait(false);
-            var pruned = await TryReadOptionalSourceAsync(prunedPath, budget).ConfigureAwait(false);
-            if (active is not null && pruned is not null && !active.Bytes.AsSpan().SequenceEqual(pruned.Bytes))
+            foreach (var review in flowEvents.OfType<FlowEvent.ExecutionRequestAccepted>().Where(IsReviewRequest))
             {
-                throw new RoomRetentionEvidenceRefusalException("active and pruned verdict copies conflict");
-            }
+                var activePath = Path.Combine(ArtifactManager.ResolveOutputDirectory(artifactsRoot, review.Request.ExecutionId), "verdict.json");
+                var prunedPath = Path.Combine(ArtifactManager.ResolvePrunedOutputDirectory(artifactsRoot, review.Request.ExecutionId), "verdict.json");
+                var active = await TryReadOptionalSourceAsync(activePath, budget).ConfigureAwait(false);
+                var pruned = await TryReadOptionalSourceAsync(prunedPath, budget).ConfigureAwait(false);
+                if (active is not null && pruned is not null && !active.Bytes.AsSpan().SequenceEqual(pruned.Bytes))
+                    throw new RoomRetentionEvidenceRefusalException("active and pruned verdict copies conflict");
 
-            verdictRead = active ?? pruned;
-            otherVerdictRead = active is not null && pruned is not null ? pruned : null;
-            absentVerdictPath = active is null ? activePath : pruned is null ? prunedPath : null;
-            string? verdictError = null;
-            var verdictValid = verdictRead is not null &&
-                ReviewVerdictSchema.TryParse(verdictRead.Bytes, out _, out verdictError);
-            if (!verdictValid)
-            {
-                throw new RoomRetentionEvidenceRefusalException(
-                    $"the expected review verdict is missing or invalid ({verdictError ?? "unavailable"})");
-            }
+                var selected = active ?? pruned;
+                string? verdictError = null;
+                if (selected is null || !ReviewVerdictSchema.TryParse(selected.Bytes, out _, out verdictError))
+                    throw new RoomRetentionEvidenceRefusalException(
+                        $"the expected review verdict is missing or invalid ({verdictError ?? "unavailable"})");
 
-            var selectedVerdict = verdictRead ??
-                throw new RoomRetentionEvidenceRefusalException("the expected review verdict is missing");
-            verdictSourceIdentity = active is not null ? activePath : prunedPath;
-            verdictText = Encoding.UTF8.GetString(selectedVerdict.Bytes);
-            verdict = JsonDocument.Parse(selectedVerdict.Bytes).RootElement.Clone();
+                var verdictText = Encoding.UTF8.GetString(selected.Bytes);
+                if (!Encoding.UTF8.GetBytes(verdictText).AsSpan().SequenceEqual(selected.Bytes))
+                    throw new RoomRetentionEvidenceRefusalException("the expected review verdict is not exact UTF-8");
+                verdictReads.Add(selected);
+                if (active is not null && pruned is not null) verdictReads.Add(pruned);
+                if (active is null) absentVerdictPaths.Add(activePath);
+                if (pruned is null) absentVerdictPaths.Add(prunedPath);
+                verdicts.Add(new RoomRetentionVerdictEvidence(review.Request.ExecutionId.ToString(),
+                    active is not null ? activePath : prunedPath, verdictText,
+                    JsonDocument.Parse(selected.Bytes).RootElement.Clone(), Digest(selected.Bytes)));
+            }
         }
 
         budget.Check();
         probe?.Invoke(RoomRetentionCapturePoint.BeforePublish);
-        var latest = new[] { bindingsRead, snapshot, journal, sentinel, verdictRead, otherVerdictRead }
-            .Where(source => source is not null).Cast<SourceRead>().ToArray();
+        var latest = new[] { bindingsRead, snapshot, journal, sentinel }
+            .Where(source => source is not null).Cast<SourceRead>().Concat(verdictReads).ToArray();
         foreach (var source in latest)
         {
             await VerifySourceAsync(source, budget).ConfigureAwait(false);
         }
         if (IsPresentOrRefuse(KeepMarker.MarkerFilePath(roomDirectoryPath)) ||
             (bindingsRead is null && IsPresentOrRefuse(bindingsPath)) ||
-            (absentVerdictPath is not null && IsPresentOrRefuse(absentVerdictPath)))
+            absentVerdictPaths.Any(IsPresentOrRefuse))
             throw new RoomRetentionEvidenceRefusalException("a guarded selection source changed during capture");
 
         if (!TryGetCheapIdentity(roomDirectoryPath, out var identity))
@@ -409,7 +404,7 @@ public static class RoomRetentionEvidenceStore
 
         var sources = new RoomRetentionEvidenceSources(
             Digest(snapshot.Bytes), Digest(journal.Bytes), Digest(sentinel.Bytes),
-            verdictRead is null ? null : Digest(verdictRead.Bytes));
+            verdicts.Count == 0 ? null : VerdictsDigest(verdicts));
         var generation = GenerationDigest(sources);
         var usage = status.Steps
             .Where(step => step.Execution is not null && step.Usage is not null)
@@ -418,7 +413,7 @@ public static class RoomRetentionEvidenceStore
             SchemaVersion, roomKey, BatonPaths.RecordKey(roomDirectoryPath), DateTimeOffset.UtcNow, SourceKind, generation,
             sources,
             new RoomRetentionTerminalFact(projected.Status.ToString(), status.State, instant.AtUtc, true),
-            expectation, verdictExecutionId, verdictSourceIdentity, verdictText, verdict, usage.Count == 0 ? null : usage,
+            expectation, verdicts, usage.Count == 0 ? null : usage,
             provenance, null);
         var record = unsignedRecord with { PayloadSha256 = PayloadDigest(unsignedRecord) };
 
@@ -469,7 +464,14 @@ public static class RoomRetentionEvidenceStore
             try
             {
                 var entry = FlowEventLogJson.DeserializeLine(line);
-                if (entry.GetType().Name.Contains("Unknown", StringComparison.Ordinal))
+                if (!typeof(LogEntry).GetCustomAttributes<JsonDerivedTypeAttribute>()
+                        .Any(known => known.DerivedType == entry.GetType()) ||
+                    entry is LogEntry.FlowLogEntry flow &&
+                    !typeof(FlowEvent).GetCustomAttributes<JsonDerivedTypeAttribute>()
+                        .Any(known => known.DerivedType == flow.Event.GetType()) ||
+                    entry is LogEntry.RoomLogEntry room &&
+                    !typeof(RoomEvent).GetCustomAttributes<JsonDerivedTypeAttribute>()
+                        .Any(known => known.DerivedType == room.Event.GetType()))
                 {
                     throw new RoomRetentionEvidenceRefusalException("the workflow journal contains an unknown event");
                 }
@@ -582,6 +584,8 @@ public static class RoomRetentionEvidenceStore
         }
 
         if (record is null || record.Sources is null || record.Terminal is null || record.Provenance is null ||
+            record.Verdicts is null || record.Verdicts.Any(item => item is null) ||
+            record.Provenance.Any(item => item is null) ||
             record.SchemaVersion != SchemaVersion || record.SourceKind != SourceKind ||
             record.RoomKey != roomKey || record.GenerationSha256 != generation ||
             record.PayloadSha256 is null || !IsSha256(record.PayloadSha256) ||
@@ -590,14 +594,12 @@ public static class RoomRetentionEvidenceStore
             record.Terminal.SentinelState is null ||
             (record.VerdictExpectation != ReviewExpectation && record.VerdictExpectation != NotApplicableExpectation) ||
             (record.VerdictExpectation == NotApplicableExpectation &&
-                (record.VerdictText is not null || record.Verdict is not null || record.Sources.VerdictSha256 is not null)) ||
+                (record.Verdicts.Count != 0 || record.Sources.VerdictsSha256 is not null)) ||
             (record.VerdictExpectation == ReviewExpectation &&
-                (string.IsNullOrWhiteSpace(record.VerdictExecutionId) ||
-                 string.IsNullOrWhiteSpace(record.VerdictSourceIdentity) || record.Verdict is null)) ||
+                (record.Verdicts.Count == 0 || record.Sources.VerdictsSha256 is null)) ||
             !IsSha256(record.Sources.SnapshotSha256) || !IsSha256(record.Sources.JournalSha256) ||
             !IsSha256(record.Sources.SentinelSha256) ||
-            (record.Sources.VerdictSha256 is not null && !IsSha256(record.Sources.VerdictSha256)) ||
-            (record.VerdictExpectation == ReviewExpectation && string.IsNullOrEmpty(record.VerdictText)))
+            (record.Sources.VerdictsSha256 is not null && !IsSha256(record.Sources.VerdictsSha256)))
         {
             throw new RoomRetentionEvidenceRefusalException("the published leaf has an invalid shape or digest");
         }
@@ -611,10 +613,13 @@ public static class RoomRetentionEvidenceStore
         if (!bytes.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions)))
             throw new RoomRetentionEvidenceRefusalException("the published leaf has noncanonical or extra payload");
 
-        if (record.VerdictText is not null)
+        foreach (var item in record.Verdicts)
         {
-            var verdictBytes = Encoding.UTF8.GetBytes(record.VerdictText);
-            if (record.Sources.VerdictSha256 != Digest(verdictBytes) ||
+            if (string.IsNullOrWhiteSpace(item.ExecutionId) || string.IsNullOrWhiteSpace(item.SourceIdentity) ||
+                string.IsNullOrEmpty(item.Text) || !IsSha256(item.Sha256))
+                throw new RoomRetentionEvidenceRefusalException("the published verdict has an invalid identity");
+            var verdictBytes = Encoding.UTF8.GetBytes(item.Text);
+            if (item.Sha256 != Digest(verdictBytes) ||
                 !ReviewVerdictSchema.TryParse(verdictBytes, out _, out _))
             {
                 throw new RoomRetentionEvidenceRefusalException("the published verdict payload is invalid");
@@ -622,7 +627,7 @@ public static class RoomRetentionEvidenceStore
             try
             {
                 using var parsed = JsonDocument.Parse(verdictBytes);
-                if (!JsonElement.DeepEquals(parsed.RootElement, record.Verdict!.Value))
+                if (!JsonElement.DeepEquals(parsed.RootElement, item.Verdict))
                     throw new RoomRetentionEvidenceRefusalException("the published verdict differs from its text");
             }
             catch (JsonException)
@@ -630,6 +635,13 @@ public static class RoomRetentionEvidenceStore
                 throw new RoomRetentionEvidenceRefusalException("the published verdict payload is malformed");
             }
         }
+
+        if (record.Sources.VerdictsSha256 !=
+            (record.Verdicts.Count == 0 ? null : VerdictsDigest(record.Verdicts)))
+            throw new RoomRetentionEvidenceRefusalException("the published verdict set digest is inconsistent");
+        if (!record.Provenance.Where(item => item.ProducesVerdict).Select(item => item.ExecutionId)
+                .SequenceEqual(record.Verdicts.Select(item => item.ExecutionId)))
+            throw new RoomRetentionEvidenceRefusalException("the published verdict execution set is incomplete");
 
         return record;
     }
@@ -656,8 +668,20 @@ public static class RoomRetentionEvidenceStore
         AppendTyped(stream, "snapshot", Encoding.UTF8.GetBytes(sources.SnapshotSha256));
         AppendTyped(stream, "complete-journal", Encoding.UTF8.GetBytes(sources.JournalSha256));
         AppendTyped(stream, "terminal-sentinel", Encoding.UTF8.GetBytes(sources.SentinelSha256));
-        AppendTyped(stream, "selected-verdict",
-            sources.VerdictSha256 is null ? null : Encoding.UTF8.GetBytes(sources.VerdictSha256));
+        AppendTyped(stream, "selected-verdicts",
+            sources.VerdictsSha256 is null ? null : Encoding.UTF8.GetBytes(sources.VerdictsSha256));
+        return Digest(stream.ToArray());
+    }
+
+    private static string VerdictsDigest(IReadOnlyList<RoomRetentionVerdictEvidence> verdicts)
+    {
+        using var stream = new MemoryStream();
+        foreach (var item in verdicts)
+        {
+            AppendTyped(stream, "execution", Encoding.UTF8.GetBytes(item.ExecutionId));
+            AppendTyped(stream, "source", Encoding.UTF8.GetBytes(item.SourceIdentity));
+            AppendTyped(stream, "verdict", Encoding.UTF8.GetBytes(item.Text));
+        }
         return Digest(stream.ToArray());
     }
 

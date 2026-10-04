@@ -19,6 +19,7 @@ namespace Baton.Cli.Tests.Daemon;
 public class RoomRetentionSweepTests
 {
     private static readonly StepId StepA = new("stepA");
+    private static readonly StepId StepB = new("stepB");
 
     private static WorkflowDefinitionSnapshot SingleStepSnapshot(bool review = false) => new(
         new WorkflowDefinitionSnapshotId("snapshot-1"),
@@ -958,16 +959,18 @@ public class RoomRetentionSweepTests
             TestContext.Current.CancellationToken);
         Assert.NotNull(record);
         Assert.Equal(RoomRetentionEvidenceStore.ReviewExpectation, record.VerdictExpectation);
-        Assert.Equal(ModelWrittenVerdictFixture.Json, record.VerdictText);
+        var archivedVerdict = Assert.Single(record.Verdicts);
+        Assert.Equal(ModelWrittenVerdictFixture.Json, archivedVerdict.Text);
         Assert.Equal(Path.GetFileNameWithoutExtension(leaf), record.GenerationSha256);
         static string Sha(string path) => Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
         Assert.Equal(Sha(Path.Combine(old, BatonPaths.SnapshotFileName)), record.Sources.SnapshotSha256);
         Assert.Equal(Sha(Path.Combine(old, BatonPaths.FlowLogFileName)), record.Sources.JournalSha256);
         Assert.Equal(Sha(Path.Combine(old, TerminalSentinelWriter.TerminalSentinelFileName)), record.Sources.SentinelSha256);
-        Assert.Equal(Sha(record.VerdictSourceIdentity!), record.Sources.VerdictSha256);
-        Assert.Equal("exec-review", record.VerdictExecutionId);
-        Assert.EndsWith("verdict.json", record.VerdictSourceIdentity);
+        Assert.Equal(Sha(archivedVerdict.SourceIdentity), archivedVerdict.Sha256);
+        Assert.NotNull(record.Sources.VerdictsSha256);
+        Assert.Equal("exec-review", archivedVerdict.ExecutionId);
+        Assert.EndsWith("verdict.json", archivedVerdict.SourceIdentity);
         Assert.Equal("Succeeded", record.Terminal.SentinelState);
         Assert.True(record.Terminal.IsTerminal);
         Assert.Equal(0, record.KnownUsage!["exec-review"].TokensIn);
@@ -1000,7 +1003,7 @@ public class RoomRetentionSweepTests
         var key = RoomRetentionEvidenceStore.RoomKey(room);
         var first = await RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken);
         Assert.NotNull(first);
-        Assert.Equal(pruned, first.Value.Record.VerdictSourceIdentity);
+        Assert.Equal(pruned, Assert.Single(first.Value.Record.Verdicts).SourceIdentity);
         await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
             RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken,
                 point =>
@@ -1009,13 +1012,108 @@ public class RoomRetentionSweepTests
                 }));
         await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
             RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken));
-        File.Delete(active);
-        File.Delete(pruned);
+        FileCleanup.EnsureDeleted(active);
+        FileCleanup.EnsureDeleted(pruned);
         await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
             RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken));
         await File.AppendAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{", TestContext.Current.CancellationToken);
         await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
             RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Capture_TwoReviewExecutions_BindsEveryVerdictAndRefusesEarlierEvidenceChanges()
+    {
+        using var home = new IsolatedBatonHome();
+        var room = Path.Combine(home.Path, "two-reviews");
+        Directory.CreateDirectory(room);
+        var firstId = new ExecutionId("exec-first-review");
+        var secondId = new ExecutionId("exec-second-review");
+        var snapshot = new WorkflowDefinitionSnapshot(
+            new WorkflowDefinitionSnapshotId("two-reviews"), new WorkflowTemplateId("two-reviews"), 1,
+            [
+                new WorkflowStepDefinition(StepA, "reviewer", [], ["verdict.json"], DependsOn: [], RetryPolicy: new RetryPolicy(1)),
+                new WorkflowStepDefinition(StepB, "reviewer", [], ["verdict.json"], DependsOn: [], RetryPolicy: new RetryPolicy(1)),
+            ]);
+        await SnapshotBinder.PersistAsync(snapshot, Path.Combine(room, BatonPaths.SnapshotFileName),
+            TestContext.Current.CancellationToken);
+        await WriteLogEventsAsync(Path.Combine(room, BatonPaths.FlowLogFileName),
+            new FlowEvent.ExecutionRequestAccepted(TestRequest(firstId, review: true)),
+            new FlowEvent.ExecutionSucceeded(firstId),
+            new FlowEvent.ExecutionRequestAccepted(TestRequest(secondId, review: true) with { StepId = StepB }),
+            new FlowEvent.ExecutionSucceeded(secondId));
+        await WriteRoomTerminalSentinelAsync(room);
+        var artifacts = Path.Combine(room, ArtifactManager.ArtifactsDirectoryName);
+        var first = Path.Combine(ArtifactManager.AllocateOutputDirectory(artifacts, firstId), "verdict.json");
+        var second = Path.Combine(ArtifactManager.AllocateOutputDirectory(artifacts, secondId), "verdict.json");
+        await File.WriteAllTextAsync(first, ModelWrittenVerdictFixture.Json, TestContext.Current.CancellationToken);
+        var secondText = ModelWrittenVerdictFixture.Json.Replace("all good", "second review", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(second, secondText, TestContext.Current.CancellationToken);
+        var secondPruned = Path.Combine(ArtifactManager.ResolvePrunedOutputDirectory(artifacts, secondId), "verdict.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(secondPruned)!);
+        File.Move(second, secondPruned);
+
+        var key = RoomRetentionEvidenceStore.RoomKey(room);
+        var original = await RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(),
+            TestContext.Current.CancellationToken);
+        Assert.NotNull(original);
+        Assert.Equal([firstId.ToString(), secondId.ToString()],
+            original.Value.Record.Verdicts.Select(item => item.ExecutionId));
+        Assert.Equal([ModelWrittenVerdictFixture.Json, secondText],
+            original.Value.Record.Verdicts.Select(item => item.Text));
+        Assert.Equal([first, secondPruned], original.Value.Record.Verdicts.Select(item => item.SourceIdentity));
+        var archived = await RoomRetentionEvidenceStore.ReadAsync(key, original.Value.Record.GenerationSha256,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(original.Value.Record.Verdicts.Select(item => (item.ExecutionId, item.SourceIdentity, item.Text, item.Sha256)),
+            archived!.Verdicts.Select(item => (item.ExecutionId, item.SourceIdentity, item.Text, item.Sha256)));
+        Assert.All(archived.Verdicts, item =>
+            Assert.True(JsonElement.DeepEquals(JsonDocument.Parse(item.Text).RootElement, item.Verdict)));
+
+        FileCleanup.EnsureDeleted(first);
+        await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
+            RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken));
+        await File.WriteAllTextAsync(first, ModelWrittenVerdictFixture.Json, TestContext.Current.CancellationToken);
+        var changedText = ModelWrittenVerdictFixture.Json.Replace("all good", "changed first review", StringComparison.Ordinal);
+        await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
+            RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken,
+                point =>
+                {
+                    if (point == RoomRetentionCapturePoint.BeforePublish) File.WriteAllText(first, changedText);
+                }));
+        var changed = await RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(),
+            TestContext.Current.CancellationToken);
+        Assert.NotNull(changed);
+        Assert.NotEqual(original.Value.Record.GenerationSha256, changed.Value.Record.GenerationSha256);
+        Assert.Equal(changedText, changed.Value.Record.Verdicts[0].Text);
+        Assert.Equal(ModelWrittenVerdictFixture.Json, original.Value.Record.Verdicts[0].Text);
+
+        var pruned = Path.Combine(ArtifactManager.ResolvePrunedOutputDirectory(artifacts, firstId), "verdict.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(pruned)!);
+        await File.WriteAllTextAsync(pruned, ModelWrittenVerdictFixture.Json, TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
+            RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData("flow")]
+    [InlineData("future-owner")]
+    public async Task Capture_UnknownJournalEntryAfterTerminal_RefusesCompleteLeaf(string owner)
+    {
+        using var home = new IsolatedBatonHome();
+        var room = await CreateTerminalRoomWithArtifactsAsync(home.Path, $"unknown-{owner}-after-terminal",
+            new ExecutionId("exec-unknown"));
+        await WriteRoomTerminalSentinelAsync(room);
+        var unknownLine = owner == "flow"
+            ? "{\"owner\":\"flow\",\"Event\":{\"eventType\":\"future-event\"},\"WriterUtcTimestamp\":null}\n"
+            : "{\"owner\":\"future-owner\"}\n";
+        await File.AppendAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName),
+            unknownLine,
+            TestContext.Current.CancellationToken);
+        var key = RoomRetentionEvidenceStore.RoomKey(room);
+        var refusal = await Assert.ThrowsAsync<RoomRetentionEvidenceRefusalException>(() =>
+            RoomRetentionEvidenceStore.CaptureAsync(room, key, NewCaptureBudget(), TestContext.Current.CancellationToken));
+        Assert.Contains("unknown event", refusal.Message);
+        Assert.False(Directory.Exists(Path.Combine(BatonPaths.RoomRetentionEvidence, key)));
     }
 
     [Fact]
@@ -1058,7 +1156,7 @@ public class RoomRetentionSweepTests
         var archived = await RoomRetentionEvidenceStore.ReadAsync(key, captured.Value.Record.GenerationSha256,
             TestContext.Current.CancellationToken);
         Assert.NotNull(archived);
-        Assert.Equal(ModelWrittenVerdictFixture.Json, archived.VerdictText);
+        Assert.Equal(ModelWrittenVerdictFixture.Json, Assert.Single(archived.Verdicts).Text);
         Assert.Equal(captured.Value.Record.Terminal, archived.Terminal);
     }
 
@@ -1236,6 +1334,99 @@ public class RoomRetentionSweepTests
     }
 
     [Fact]
+    public async Task Discovery_BoundedSelectionExhaustion_AdvancesToLaterRoom()
+    {
+        using var home = new IsolatedBatonHome();
+        var registry = BatonPaths.RoomRegistryFile;
+        var lines = new System.Text.StringBuilder();
+        var old = DateTime.UtcNow.AddDays(-15);
+        var padding = new string('x', (int)RoomRetentionEvidenceLimits.MaxSelectionFileBytes - 200);
+        var largeSentinel = "{\"state\":\"Succeeded\",\"steps\":[],\"outputs\":[],\"error\":null,\"padding\":\"" +
+            padding + "\"}";
+        var largeMetadata = "{\"padding\":\"" + padding + "\"}";
+        string? ninthRoom = null;
+        for (var index = 0; index < 12; index++)
+        {
+            var room = Path.Combine(home.Path, $"budget-room-{index:0000}");
+            if (index == 8)
+                ninthRoom = await CreateTerminalRoomWithArtifactsAsync(home.Path, $"budget-room-{index:0000}",
+                    new ExecutionId("exec-budget-ninth"));
+            else
+                Directory.CreateDirectory(room);
+            var sentinel = Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName);
+            await File.WriteAllTextAsync(sentinel, index < 8 ? largeSentinel :
+                "{\"state\":\"Succeeded\",\"steps\":[],\"outputs\":[],\"error\":null}",
+                TestContext.Current.CancellationToken);
+            File.SetLastWriteTimeUtc(sentinel, old);
+            if (index < 8)
+                await File.WriteAllTextAsync(Path.Combine(room, BatonPaths.RoomMetadataFileName),
+                    largeMetadata, TestContext.Current.CancellationToken);
+            lines.AppendLine(JsonSerializer.Serialize(new Baton.Vendors.RoomRegistryEntry(room, home.Path, old)));
+        }
+        await File.WriteAllTextAsync(registry, lines.ToString(), TestContext.Current.CancellationToken);
+        var preparer = new RoomRetentionEvidencePreparer();
+        Assert.Equal(0, await preparer.PrepareAsync(registry, 14, TestContext.Current.CancellationToken));
+        Assert.Equal(8, preparer.Cursor);
+        Assert.Equal(1, await preparer.PrepareAsync(registry, 14, TestContext.Current.CancellationToken));
+        Assert.Equal(4, preparer.Cursor);
+        var key = RoomRetentionEvidenceStore.RoomKey(ninthRoom!);
+        Assert.Single(Directory.GetFiles(Path.Combine(BatonPaths.RoomRetentionEvidence, key), "*.json"));
+    }
+
+    [Fact]
+    public async Task Discovery_950LargeEligibleSentinels_AdvancesBeyondPrefixAcrossSweeps()
+    {
+        using var home = new IsolatedBatonHome();
+        var registry = BatonPaths.RoomRegistryFile;
+        var lines = new System.Text.StringBuilder();
+        var old = DateTime.UtcNow.AddDays(-15);
+        var largeSentinel = "{\"state\":\"Succeeded\",\"steps\":[],\"outputs\":[],\"error\":null,\"padding\":\"" +
+            new string('x', 20 * 1024) + "\"}";
+        string? ninthRoom = null;
+        for (var index = 0; index < 950; index++)
+        {
+            var room = Path.Combine(home.Path, $"large-room-{index:0000}");
+            if (index == 8)
+            {
+                ninthRoom = await CreateTerminalRoomWithArtifactsAsync(home.Path, $"large-room-{index:0000}",
+                    new ExecutionId("exec-ninth"));
+            }
+            else
+            {
+                Directory.CreateDirectory(room);
+            }
+            var sentinel = Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName);
+            await File.WriteAllTextAsync(sentinel, largeSentinel, TestContext.Current.CancellationToken);
+            File.SetLastWriteTimeUtc(sentinel, old);
+            lines.AppendLine(JsonSerializer.Serialize(new Baton.Vendors.RoomRegistryEntry(room, home.Path, old)));
+        }
+        await File.WriteAllTextAsync(registry, lines.ToString(), TestContext.Current.CancellationToken);
+        Assert.True(950L * 20 * 1024 > RoomRetentionEvidenceLimits.MaxSourceBytesPerSweep);
+        var options = new RoomsPruneOptions(Terminal: true, OlderThanDays: 14, State: null, DryRun: true, Yes: false);
+        var budget = NewCaptureBudget();
+        var page = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(registry, options, budget,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(8, page.Candidates.Count);
+        Assert.Equal(8, page.NextCursor);
+        Assert.All(page.Candidates, candidate =>
+        {
+            Assert.False(candidate.SelectionRefused);
+            Assert.InRange(candidate.SelectionBytes, 1, RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom);
+        });
+        Assert.InRange(RoomRetentionEvidenceLimits.MaxSourceBytesPerSweep - budget.Remaining, 1,
+            RoomRetentionEvidenceLimits.MaxSourceBytesPerSweep);
+
+        var preparer = new RoomRetentionEvidencePreparer();
+        Assert.Equal(0, await preparer.PrepareAsync(registry, 14, TestContext.Current.CancellationToken));
+        Assert.Equal(8, preparer.Cursor);
+        Assert.Equal(1, await preparer.PrepareAsync(registry, 14, TestContext.Current.CancellationToken));
+        Assert.Equal(16, preparer.Cursor);
+        var key = RoomRetentionEvidenceStore.RoomKey(ninthRoom!);
+        Assert.Single(Directory.GetFiles(Path.Combine(BatonPaths.RoomRetentionEvidence, key), "*.json"));
+        Assert.True(Directory.Exists(ninthRoom));
+    }
+
+    [Fact]
     public async Task Discovery_950Rooms_MetersWholeSweep_AndAdvancesPastRefusals()
     {
         using var home = new IsolatedBatonHome();
@@ -1257,10 +1448,11 @@ public class RoomRetentionSweepTests
         await File.WriteAllTextAsync(registry, lines.ToString(), TestContext.Current.CancellationToken);
         var options = new RoomsPruneOptions(Terminal: true, OlderThanDays: 14, State: null, DryRun: true, Yes: false);
         var budget = NewCaptureBudget();
-        var candidates = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(registry, options, budget,
+        var page = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(registry, options, budget,
             TestContext.Current.CancellationToken);
-        Assert.Equal(950, candidates.Count);
-        Assert.Equal(8, candidates.Count(candidate => candidate.SelectionRefused));
+        Assert.Equal(8, page.Candidates.Count);
+        Assert.Equal(8, page.Candidates.Count(candidate => candidate.SelectionRefused));
+        Assert.Equal(8, page.NextCursor);
         Assert.InRange(RoomRetentionEvidenceLimits.MaxSourceBytesPerSweep - budget.Remaining, 1,
             RoomRetentionEvidenceLimits.MaxSourceBytesPerSweep);
 
@@ -1306,9 +1498,9 @@ public class RoomRetentionSweepTests
             RoomsPruneCommand.DiscoverRetentionCandidatesAsync(registry, options, NewCaptureBudget(),
                 TestContext.Current.CancellationToken));
         await File.WriteAllTextAsync(registry, line + "\n", TestContext.Current.CancellationToken);
-        var candidates = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(registry, options,
+        var page = await RoomsPruneCommand.DiscoverRetentionCandidatesAsync(registry, options,
             NewCaptureBudget(), TestContext.Current.CancellationToken);
-        Assert.True(Assert.Single(candidates).SelectionRefused);
+        Assert.True(Assert.Single(page.Candidates).SelectionRefused);
         Assert.False(Directory.Exists(Path.Combine(BatonPaths.RoomRetentionEvidence,
             RoomRetentionEvidenceStore.RoomKey(room))));
     }

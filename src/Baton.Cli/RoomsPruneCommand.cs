@@ -36,6 +36,8 @@ public static class RoomsPruneCommand
         long SelectionBytes = 0,
         long SelectionStartedTimestamp = 0);
 
+    internal sealed record RetentionDiscoveryPage(IReadOnlyList<Candidate> Candidates, int NextCursor);
+
     public sealed record Result(
         int DedupedRegistryLines,
         int MissingDirectoryRegistryLines,
@@ -167,11 +169,12 @@ public static class RoomsPruneCommand
     /// Retention-only discovery. Every byte is captured through the sweep budget; manual prune keeps
     /// its original reader and behavior. Full workflow journals are opened only for selected rooms.
     /// </summary>
-    internal static async Task<IReadOnlyList<Candidate>> DiscoverRetentionCandidatesAsync(
+    internal static async Task<RetentionDiscoveryPage> DiscoverRetentionCandidatesAsync(
         string registryFilePath, RoomsPruneOptions options,
-        RoomRetentionEvidenceStore.SweepBudget sweepBudget, CancellationToken cancellationToken)
+        RoomRetentionEvidenceStore.SweepBudget sweepBudget, CancellationToken cancellationToken,
+        int startCursor = 0)
     {
-        if (!File.Exists(registryFilePath)) return [];
+        if (!File.Exists(registryFilePath)) return new RetentionDiscoveryPage([], 0);
         var registryBudget = RoomRetentionEvidenceStore.DiscoveryBudget(sweepBudget, cancellationToken, registry: true);
         var registry = await RoomRetentionEvidenceStore.ReadSourceAsync(registryFilePath, registryBudget)
             .ConfigureAwait(false);
@@ -188,11 +191,22 @@ public static class RoomsPruneCommand
                 throw new RoomRetentionEvidenceRefusalException("the registry has incomplete input");
             byRoom[entry.RoomPath] = entry;
         }
+        var entries = byRoom.Values.ToArray();
+        if (entries.Length == 0) return new RetentionDiscoveryPage([], 0);
         var now = DateTime.UtcNow;
         var candidates = new List<Candidate>();
-        foreach (var entry in byRoom.Values)
+        var cursor = startCursor % entries.Length;
+        var inspected = 0;
+        while (inspected < entries.Length && candidates.Count < RoomRetentionEvidenceLimits.MaxAttemptsPerSweep)
         {
-            sweepBudget.Check();
+            cancellationToken.ThrowIfCancellationRequested();
+            // Reserve the bytes needed to verify the registry after selection. A depleted
+            // sweep still returns its advanced cursor.
+            if (sweepBudget.Expired || sweepBudget.Remaining <= registry.Bytes.Length + 64 * 1024)
+                break;
+            var entry = entries[cursor];
+            cursor = (cursor + 1) % entries.Length;
+            inspected++;
             if (!Directory.Exists(entry.RoomPath)) continue;
             var roomStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             var terminalPath = Path.Combine(entry.RoomPath, TerminalSentinelWriter.TerminalSentinelFileName);
@@ -254,14 +268,27 @@ public static class RoomsPruneCommand
                 candidates.Add(new Candidate(entry.RoomPath, "retention-input-refused", terminalAtUtc, true,
                     $"selection input cannot be proven ({ex.Message})",
                     RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes, roomStarted));
+                if (sweepBudget.Expired || sweepBudget.Remaining <= registry.Bytes.Length + 64 * 1024)
+                    break;
             }
         }
 
-        var recheck = await RoomRetentionEvidenceStore.ReadSourceAsync(registryFilePath, registryBudget)
-            .ConfigureAwait(false);
-        if (!registry.Bytes.AsSpan().SequenceEqual(recheck.Bytes))
-            throw new RoomRetentionEvidenceRefusalException("the registry changed during discovery");
+        try
+        {
+            var recheck = await RoomRetentionEvidenceStore.ReadSourceAsync(registryFilePath, registryBudget)
+                .ConfigureAwait(false);
+            if (!registry.Bytes.AsSpan().SequenceEqual(recheck.Bytes))
+                throw new RoomRetentionEvidenceRefusalException("the registry changed during discovery");
+        }
+        catch (RoomRetentionEvidenceRefusalException ex)
+        {
+            candidates = candidates.Select(candidate => candidate with
+            {
+                SelectionRefused = true,
+                SelectionRefusalReason = $"registry cannot be proven ({ex.Message})"
+            }).ToList();
+        }
 
-        return candidates;
+        return new RetentionDiscoveryPage(candidates, cursor);
     }
 }
