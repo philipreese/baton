@@ -58,6 +58,82 @@ public sealed class TaskCommandTests
         Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--effort", " "]));
     }
 
+    [Theory]
+    [InlineData("ENGINE", "engine")]
+    [InlineData("Tooling", "tooling")]
+    [InlineData("docs", "docs")]
+    public void Parser_normalizes_each_supported_scope_and_forwards_implement_reason(string raw, string normalized)
+    {
+        var options = TaskOptionsParser.Parse(["submit", "--issue", "42", "--project", "C:/repo",
+            "--declared-size", "small", "--size-rationale", "one cluster", "--scope", raw,
+            "--model", "opus", "--reason", "matches the implementation tier"]);
+
+        Assert.Equal(normalized, options.ScopeClass);
+        Assert.Equal("matches the implementation tier", options.Reason);
+    }
+
+    [Fact]
+    public void Parser_refuses_scope_reason_combinations_before_admission()
+    {
+        string[] baseArgs =
+            ["submit", "--issue", "42", "--project", "C:/repo", "--declared-size", "small", "--size-rationale", "one cluster"];
+
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--reason", "why", "--model", "opus"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--scope", "engine", "--reason", "why"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--scope", "engine", "--model", "opus"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--scope", "other"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--scope", "engine", "--scope", "docs"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--scope", "engine", "--model", "opus", "--reason", " "]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--scope", "engine", "--model", "opus", "--reason", "why", "--reason", "again"]));
+    }
+
+    [Fact]
+    public async Task Task_admission_refuses_invalid_scope_inputs_before_resolution_or_provisioning()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-scope-refusal-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            Directory.CreateDirectory(project);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            var resolutions = 0;
+            var provisions = 0;
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token)
+            {
+                resolutions++;
+                return Task.FromResult<RepositoryIdentity?>(repository);
+            }
+
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                provisions++;
+                throw new InvalidOperationException("provision must not run");
+            }
+
+            var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one cluster");
+            var invalid = new TaskOptions(TaskVerb.Submit, 42, project, size,
+                ScopeClass: "ENGINE", Reason: "why");
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(0, resolutions);
+            Assert.Equal(0, provisions);
+
+            invalid = invalid with { ScopeClass = "engine", Reason = null, Model = "opus" };
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(0, resolutions);
+            Assert.Equal(0, provisions);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task Identical_concurrent_submissions_reserve_once_before_provisioning_and_replay_keeps_snapshot()
     {
@@ -1240,6 +1316,79 @@ public sealed class TaskCommandTests
         Assert.NotEqual(
             TaskCommand.ComputeInputDigest("github.com/example/repo", 1, embeddedMarkers, null, selection),
             TaskCommand.ComputeInputDigest("github.com/example/repo", 1, capturedMarkers, capturedSpec, selection));
+    }
+
+    [Fact]
+    public void Scoped_digest_is_distinct_and_collision_safe_without_changing_old_branches()
+    {
+        var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "ab");
+        var selection = new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" };
+        var first = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, selection,
+            "engine", "cd");
+        var changedScope = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, selection,
+            "tooling", "cd");
+        var changedReason = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, selection,
+            "engine", "different");
+        var boundaryRight = TaskCommand.ComputeInputDigest("github.com/example/repo", 1,
+            new TaskSizeDeclaration(DeclaredTaskSize.Small, "a"), null, selection, "engine", "bcd");
+
+        Assert.NotEqual(first, changedScope);
+        Assert.NotEqual(first, changedReason);
+        Assert.NotEqual(first, boundaryRight);
+        Assert.NotEqual(first,
+            TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, selection));
+    }
+
+    [Fact]
+    public async Task Changed_scope_or_reason_conflicts_before_a_second_reservation_or_provision()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-scope-conflict-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w63");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "one frozen brief", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+            var provisions = 0;
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                provisions++;
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "63-lane"));
+            }
+
+            var first = new TaskOptions(TaskVerb.Submit, 63, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one issue"), spec,
+                Adapter: "claude", Model: "opus", Effort: "high", ScopeClass: "ENGINE", Reason: "first reason");
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(first, TextWriter.Null, Resolve, Provision, Ct,
+                IssuePreparationRunner.NoCollisions));
+            var scopeConflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(first with { ScopeClass = "tooling" }, TextWriter.Null,
+                    Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            var reasonConflict = await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(first with { Reason = "second reason" }, TextWriter.Null,
+                    Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Contains("already retains different explicit submission input", scopeConflict.Message, StringComparison.Ordinal);
+            Assert.Contains("already retains different explicit submission input", reasonConflict.Message, StringComparison.Ordinal);
+            Assert.Equal(1, provisions);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("engine", retained.ScopeClass);
+            Assert.Equal("first reason", retained.StageSelections!.Single().Reason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
     }
 
     [Fact]

@@ -93,11 +93,13 @@ public sealed class OwnedTaskJourneyTests
             }
 
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 44, project,
-                new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple lifecycle seams"), brief),
+                new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple lifecycle seams"), brief,
+                ScopeClass: "ENGINE"),
                 TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
             var accepted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Prepared, accepted.IssuePreparation!.State);
             Assert.Equal("recorded-conductor", accepted.OwnedTask!.ConductorHolder);
+            Assert.Equal("engine", accepted.ScopeClass);
 
             var forge = new Forge();
             var head = HeadA;
@@ -158,10 +160,12 @@ public sealed class OwnedTaskJourneyTests
 
             await TickUntilLaunchCount(1);
             Assert.Equal(WorkStage.Implement, launches[0].Item.Stage);
+            Assert.Equal("engine", launches[0].Tier.TierKey);
             forge.HasPullRequest = true; // worker-created PR, no draft-create opt-in
             await Settle(launches[0]);
             await TickUntilLaunchCount(2);
             Assert.Equal(WorkStage.Review, launches[1].Item.Stage);
+            Assert.Equal("review-engine", launches[1].Tier.TierKey);
             await Settle(launches[1], "block");
             await TickUntilLaunchCount(3);
             Assert.Equal(WorkStage.Fix, launches[2].Item.Stage);

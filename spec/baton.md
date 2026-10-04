@@ -8067,7 +8067,8 @@ departed from. Nothing in the queue substitutes a model.
 ### Conductor-owned issue tasks (#2521)
 
 `baton task submit --issue <n> --project <dir> --declared-size small|medium|large|unknown
---size-rationale <why> [--spec <file>] [--adapter <name>] [--model <name>] [--effort <name>]` is the
+--size-rationale <why> [--spec <file>] [--scope engine|tooling|docs] [--adapter <name>] [--model <name>]
+[--effort <name>] [--reason <why>]` is the
 ordinary project-work entry point. It accepts exactly one canonical remote repository and issue under
 an existing conductor claim and returns a stable `task-` ID. `unknown` is an explicit size declaration
 requiring a rationale, not an omitted field.
@@ -8120,11 +8121,17 @@ An identical submission returns that same row at any stage; a differing declarat
 worker selection is a conflict. Import cannot erase task-owned rows or a matching issue lifecycle.
 These checks protect the pre-provisioning window as well as the later queue lifecycle.
 
-**Task-local initial worker selection (#2563).** `--adapter`/`--model`/`--effort` each independently
+**Task-local scope and initial worker selection (#2600).** `--scope` is optional, case-insensitive input
+normalized to one of `engine`, `tooling`, or `docs`, then retained on the queue item so the existing
+scope tier table resolves the implement and later review stages. No scope is inferred and an absent
+scope keeps the role's previous defaults. `--reason` is accepted only with a scope and at least one
+explicit implement axis; a nonblank reason is mandatory whenever a scope is combined with an explicit
+adapter, model, or effort, including when the explicit tuple happens to equal today's tier. The reason
+is forwarded only to the existing implement-stage selection; review, fix, and re-review resolve their
+own scope/default tiers. Scope-only submissions use configured defaults. `--adapter`/`--model`/`--effort` each independently
 select the task's **implement stage only**, as one `QueueStageSelection` forwarded through the
 existing `QueueCommand` lifecycle-add path — never a whole-item axis, a `LifecyclePin`, or a routing
-reason (this entry point names no scope class, so there is no tier to depart from and nothing to
-justify). Admission reuses every existing seam exactly as `queue add --lifecycle` does: offline
+reason. Admission reuses every existing seam exactly as `queue add --lifecycle` does: offline
 adapter/model validation, model-to-adapter inference, and conductor-only/known-mismatch refusals all
 run before reservation; the resolved tuple is frozen at accept time and survives a later settings
 edit; `WorkItemAdvancer` clears the assignment on advance so review/fix/re-review resolve their own
@@ -8142,7 +8149,11 @@ size, rationale, spec presence and its exact captured bytes, and each of the thr
 exact value — and never an ambient resolved default (an adapter's own fallback model, a role's tier),
 so two submissions that happen to resolve to the same launch tuple by different explicit paths still
 conflict. Changing or dropping any previously-explicit axis conflicts exactly as a changed size or
-spec would, including while the task is still preparing.
+spec would, including while the task is still preparing. A submission naming scope or rationale uses
+a new typed, length-delimited domain that includes both new fields' presence and exact bytes alongside
+the complete prior explicit input; this keeps scope, rationale, newline, delimiter, and spec bytes
+distinct while leaving legacy and selected-input-v1 preimages byte-for-byte unchanged when both new
+fields are absent.
 
 The existing daemon drives implement → PR → review → one allowed fix → re-review → ready without
 another operator prompt. Readiness requires the existing exact-current-head approval and passing
