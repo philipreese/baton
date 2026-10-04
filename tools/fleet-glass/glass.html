@@ -1944,6 +1944,36 @@ function streamEventReceiptHtml(e){
         : streamOutcomeToken(e.outcome) === "indeterminate" ? "indeterminate"
         : "failure";
       break;
+    case "conductorObligationPending":
+      what = `Conductor request pending: ${e.obligationRequestedAction || "request"}`;
+      where = "conductor obligation ledger";
+      status = "pending";
+      break;
+    case "conductorObligationSubmitted":
+      what = "Conductor request submitted";
+      where = "conductor obligation ledger";
+      status = "pending";
+      break;
+    case "conductorObligationTransportAcknowledged":
+      what = "Conductor request: Transport acknowledged";
+      where = "conductor obligation ledger";
+      status = "pending";
+      break;
+    case "conductorObligationActionObserved":
+      what = "Conductor request action observed";
+      where = "conductor obligation ledger";
+      status = "success";
+      break;
+    case "conductorObligationBlocked":
+      what = `Conductor request blocked: ${e.obligationReason || "reason unavailable"}`;
+      where = "conductor obligation ledger";
+      status = "refused";
+      break;
+    case "conductorObligationUnsupported":
+      what = `Conductor request unsupported: ${e.obligationReason || "reason unavailable"}`;
+      where = "conductor obligation ledger";
+      status = "refused";
+      break;
     case "revisionProduced":
       what = `Revision produced: ${e.revisionId ? e.revisionId.slice(0, 8) : "commit unknown"}${e.revisionKind ? " (" + e.revisionKind + ")" : ""}`;
       where = "git commit";
@@ -2005,7 +2035,32 @@ function streamEventReceiptHtml(e){
     + evidenceSpan
     + `</div>`;
 }
-function streamGroupedEventsHtml(events, historyOnly = false){
+function isConductorObligationEvent(e){
+  return !!(e && typeof e.kind === "string"
+    && ["conductorObligationPending", "conductorObligationSubmitted",
+      "conductorObligationTransportAcknowledged", "conductorObligationActionObserved",
+      "conductorObligationBlocked", "conductorObligationUnsupported"].includes(e.kind));
+}
+function retiredTaskForEvents(queue, evts){
+  if(!queue || typeof queue !== "object" || !Array.isArray(queue.retiredHistory)) return null;
+  const workIds = evts.map(e => e && e.workId).filter(id => typeof id === "string" && id.length > 0);
+  if(!workIds.length || workIds.some(id => id !== workIds[0])) return null;
+  const matches = queue.retiredHistory.filter(row => row && row.task && typeof row.task === "object"
+    && typeof row.task.id === "string" && row.task.id === workIds[0]);
+  if(matches.length !== 1) return null;
+  const row = matches[0];
+  const task = row.task;
+  const evidence = row.retirement;
+  if(typeof task.repository !== "string" || !task.repository
+      || !Number.isSafeInteger(task.issue) || task.issue <= 0
+      || !evidence || typeof evidence !== "object"
+      || !["merged", "operator"].includes(evidence.kind)
+      || typeof evidence.at !== "string" || !Number.isFinite(Date.parse(evidence.at))
+      || typeof evidence.reason !== "string" || !evidence.reason) return null;
+  if(evts.some(e => e && e.issueId != null && e.issueId !== task.issue)) return null;
+  return row;
+}
+function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
   const list = Array.isArray(events) ? events : [];
   if(!list.length){
     return `<div class="stream-empty">No events recorded in fleet stream yet.</div>`;
@@ -2034,7 +2089,9 @@ function streamGroupedEventsHtml(events, historyOnly = false){
     // An item can have multiple attempts (retry, continuation, fix). Attempt identity is the
     // narrowest producer-owned correlation key; grouping by work first would collapse those
     // lifecycles and let an earlier terminal result describe the current attempt.
-    const key = e.attemptId ? ("attempt:" + e.attemptId)
+    const key = isConductorObligationEvent(e) && e.obligationId ? ("obligation:" + e.obligationId)
+      : isConductorObligationEvent(e) ? ("obligation-event:" + e.id)
+      : e.attemptId ? ("attempt:" + e.attemptId)
       : e.workId ? ("work:" + e.workId)
       : e.pullRequestId ? ("pr:" + e.pullRequestId)
       : e.issueId ? ("issue:" + e.issueId)
@@ -2049,6 +2106,7 @@ function streamGroupedEventsHtml(events, historyOnly = false){
 
   const activeCards = [];
   const retainedCards = [];
+  const obligationCards = [];
 
   for(const [key, evts] of groups.entries()){
     evts.sort((a, b) => a.id - b.id);
@@ -2070,6 +2128,8 @@ function streamGroupedEventsHtml(events, historyOnly = false){
       e => e.kind === "admissionDecided" && e.admissionDecision && e.admissionDecision !== "admitted");
     const mergedEvt = evts.slice().reverse().find(e => e.kind === "mergeObserved");
     const daemonEvt = key === "daemon";
+    const obligationGroup = evts.some(isConductorObligationEvent);
+    const retirement = obligationGroup ? null : retiredTaskForEvents(queue, evts);
 
     const isSettled = !!(settledEvt || refusedEvt || refusedAdmissionEvt || mergedEvt || daemonEvt);
     const outcome = settledEvt ? streamOutcomeToken(settledEvt.outcome)
@@ -2079,7 +2139,7 @@ function streamGroupedEventsHtml(events, historyOnly = false){
       : null;
 
     const isCancelled = outcome === "cancelled";
-    const isRetained = isSettled || isCancelled;
+    const isRetained = isSettled || isCancelled || !!retirement;
 
     // Unknown fields remain visibly unknown
     const workHtml = workId ? `<span class="stream-id-chip">work: ${esc(workId)}</span>` : `<span class="stream-id-chip unknown-field">work: unknown</span>`;
@@ -2091,7 +2151,13 @@ function streamGroupedEventsHtml(events, historyOnly = false){
 
     let chipClass = "c-run";
     let chipText = "ACTIVE";
-    if(isCancelled){
+    if(obligationGroup){
+      chipClass = "c-idle";
+      chipText = "REQUEST RECEIPT";
+    } else if(retirement){
+      chipClass = retirement.retirement.kind === "merged" ? "c-ok" : "c-warn";
+      chipText = retirement.retirement.kind === "merged" ? "MERGED (RETAINED)" : "RETIRED (RETAINED)";
+    } else if(isCancelled){
       chipClass = "c-idle";
       chipText = "CANCELLED (RETAINED)";
     } else if(streamOutcomeIsSuccess(settledEvt?.outcome) || outcome === "merged"){
@@ -2106,7 +2172,11 @@ function streamGroupedEventsHtml(events, historyOnly = false){
     }
 
     let currentAction = "";
-    if(isSettled){
+    if(obligationGroup){
+      currentAction = `Conductor request receipt: ${last.kind}`;
+    } else if(retirement){
+      currentAction = `Retired ${retirement.retirement.kind}`;
+    } else if(isSettled){
       currentAction = refusedAdmissionEvt ? `Admission ${refusedAdmissionEvt.admissionDecision}`
         : `Settled ${outcome || "terminal"}${settledEvt && settledEvt.elapsedMilliseconds ? " in " + durStr(settledEvt.elapsedMilliseconds) : ""}`;
     } else {
@@ -2118,7 +2188,9 @@ function streamGroupedEventsHtml(events, historyOnly = false){
     }
 
     let lastResult = "none recorded";
-    if(settledEvt && settledEvt.outcome){
+    if(retirement){
+      lastResult = `Retirement evidence: ${retirement.retirement.kind} · ${retirement.retirement.at} · ${retirement.retirement.reason}`;
+    } else if(settledEvt && settledEvt.outcome){
       lastResult = `Outcome: ${outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}`;
     } else if(refusedEvt){
       lastResult = `Refused: ${refusedEvt.outcomeDetail || refusedEvt.outcome || "missing capability"}`;
@@ -2154,7 +2226,9 @@ function streamGroupedEventsHtml(events, historyOnly = false){
       + `<details class="stream-receipts-details"><summary>Action Receipts (${evts.length})</summary><div class="stream-receipts">${receiptsHtml}</div></details>`
       + `</div>`;
 
-    if(isRetained){
+    if(obligationGroup){
+      obligationCards.push(card);
+    } else if(isRetained){
       retainedCards.push(card);
     } else {
       activeCards.push(card);
@@ -2162,9 +2236,13 @@ function streamGroupedEventsHtml(events, historyOnly = false){
   }
 
   if(historyOnly){
-    return retainedCards.length
+    let history = retainedCards.length
       ? `<div class="stream-section-title">Retained Lifecycle History · #2200 (${retainedCards.length})</div>` + retainedCards.join("")
       : `<div class="stream-empty">No retained lifecycle history recorded yet.</div>`;
+    if(obligationCards.length){
+      history += `<div class="stream-section-title">Conductor Request Receipt History (${obligationCards.length})</div>` + obligationCards.join("");
+    }
+    return history;
   }
 
   let out = "";
@@ -2176,13 +2254,26 @@ function streamGroupedEventsHtml(events, historyOnly = false){
     out += retainedCards.join("");
   }
 
+  if(obligationCards.length > 0){
+    out += `<div class="stream-section-title">Conductor Request Receipts (${obligationCards.length})</div>`;
+    out += obligationCards.join("");
+  }
+
   return out;
 }
-function streamHistoryHtml(events){
-  return streamGroupedEventsHtml(events, true);
+function streamHistoryHtml(events, queue = null){
+  return streamGroupedEventsHtml(events, queue, true);
+}
+function streamQueueProjection(snap){
+  if(!snap || !snap.queue || typeof snap.queue !== "object") return null;
+  if(snap.projection && snap.projection.stale === true) return null;
+  if(typeof snap.projectionStaleAfterSeconds === "number"
+      && conductorProjectionFreshness(snap) === "stale") return null;
+  return snap.queue;
 }
 function streamHomeHtml(snap, events){
-  return streamStatusSummaryHtml(snap, events) + conductorObligationsHtml(snap) + streamGroupedEventsHtml(events);
+  return streamStatusSummaryHtml(snap, events) + conductorObligationsHtml(snap)
+    + streamGroupedEventsHtml(events, streamQueueProjection(snap));
 }
 function conductorObligationsHtml(snap){
   const section = snap && snap.conductorObligations;
@@ -2821,12 +2912,12 @@ function renderStream(){
   const summaryEl = $("stream-summary");
   const contentEl = $("stream-content");
   if(summaryEl) summaryEl.innerHTML = streamStatusSummaryHtml(lastGood, fleetEvents);
-  if(contentEl) contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents);
+  if(contentEl) contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents, streamQueueProjection(lastGood));
 }
 
 function renderHistory(){
   const historyEl = $("historycontent");
-  if(historyEl) historyEl.innerHTML = streamHistoryHtml(fleetEvents);
+  if(historyEl) historyEl.innerHTML = streamHistoryHtml(fleetEvents, streamQueueProjection(lastGood));
 }
 
 const fleetEventBatcher = createFleetEventBatcher({

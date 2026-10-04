@@ -523,6 +523,68 @@ check("(control) an unheld queue does not",
   const refusedSummary = streamStatusSummaryHtml(null, [refusedAdmission]);
   check("a refused admission appears in the blocked summary",
         refusedSummary.includes("admission refused: file-write, network"));
+
+  // #2612: the live tail can contain only checks/PR receipts after a settled event rolled over.
+  // Retirement is safe only when the queue supplies one exact task identity; issue/PR-only or
+  // malformed/mismatched evidence must leave the tail visible as unknown active work.
+  const retiredTask = {
+    tag: "2583-implement", stage: "review", state: "Done", issue: 2583, pr: 2585,
+    task: { id: "task-2583", repository: "github.com/philipreese/baton", issue: 2583 },
+    retirement: { kind: "merged", at: "2026-09-07T10:30:00Z", reason: "PR merged" },
+  };
+  const retiredQueue = { retiredHistory: [retiredTask] };
+  const truncatedRetiredTail = [
+    { id: 101, workId: "task-2583", attemptId: "attempt-2583", issueId: 2583, pullRequestId: 2585,
+      kind: "checkObserved", checkName: "gates", checkStatus: "COMPLETED", checkConclusion: "SUCCESS" },
+    { id: 102, workId: "task-2583", attemptId: "attempt-2583", issueId: 2583, pullRequestId: 2585,
+      kind: "checkObserved", checkName: "audit", checkStatus: "COMPLETED", checkConclusion: "SUCCESS" },
+    { id: 103, kind: "conductorObligationPending", obligationId: "obligation-1", obligationRequestedAction: "Continue work" },
+    { id: 104, kind: "conductorObligationBlocked", obligationId: "obligation-1", obligationReason: "awaiting operator" },
+    { id: 105, kind: "conductorObligationSubmitted", obligationId: "obligation-1" },
+    { id: 106, kind: "conductorObligationTransportAcknowledged", obligationId: "obligation-1" },
+  ];
+  const truthfulTail = streamGroupedEventsHtml(truncatedRetiredTail, retiredQueue);
+  check("exact retired task evidence moves a truncated check/PR tail to retained history",
+        truthfulTail.includes("Current Work (0)") && truthfulTail.includes("Retained History · #2200 (1)"));
+  check("retained stream card shows queue retirement kind, time, and reason",
+        truthfulTail.includes("MERGED") && truthfulTail.includes("Retirement evidence: merged")
+        && truthfulTail.includes("PR merged"));
+  check("conductor obligation receipts are visible but do not become worker activity",
+        truthfulTail.includes("Conductor Request Receipts (1)")
+        && truthfulTail.includes("REQUEST RECEIPT") && !truthfulTail.includes("Current Work (5)"));
+  check("transport acknowledgment remains a receipt, not action completion",
+        truthfulTail.includes("Transport acknowledged") && !truthfulTail.includes("Action observed"));
+
+  const tailOnly = truncatedRetiredTail.slice(0, 2);
+  check("without the current queue projection the same tail stays explicitly active/unknown",
+        streamGroupedEventsHtml(tailOnly).includes("Current Work (1)")
+        && streamGroupedEventsHtml(tailOnly).includes("ACTIVE"));
+  check("issue/PR-only identity cannot borrow retirement evidence",
+        streamGroupedEventsHtml([{ id: 107, issueId: 2583, pullRequestId: 2585, kind: "checkObserved" }], retiredQueue)
+          .includes("Current Work (1)"));
+  check("mismatched task identity cannot borrow retirement evidence",
+        streamGroupedEventsHtml([{ id: 108, workId: "task-other", issueId: 2583, kind: "checkObserved" }], retiredQueue)
+          .includes("Current Work (1)"));
+  check("mismatched issue evidence cannot borrow an exact task retirement",
+        streamGroupedEventsHtml([{ id: 109, workId: "task-2583", issueId: 9999, kind: "checkObserved" }], retiredQueue)
+          .includes("Current Work (1)"));
+  check("a stale queue projection leaves the live tail explicitly active",
+        streamHomeHtml({ queue: retiredQueue, projection: { stale: true }, conductorObligations: { available: true, rows: [] } }, tailOnly)
+          .includes("Current Work (1)"));
+  check("ambiguous duplicate retired task identities remain unknown",
+        streamGroupedEventsHtml([{ id: 110, workId: "task-2583", kind: "checkObserved" }],
+          { retiredHistory: [retiredTask, { ...retiredTask, tag: "duplicate" }] }).includes("Current Work (1)"));
+  check("malformed retirement evidence remains unknown rather than inventing terminal status",
+        streamGroupedEventsHtml([{ id: 111, workId: "task-2583", kind: "checkObserved" }],
+          { retiredHistory: [{ ...retiredTask, task: null }] }).includes("Current Work (1)"));
+
+  const integratedProjection = { queue: retiredQueue, conductorObligations: { available: true, rows: [] } };
+  const integratedHome = streamHomeHtml(integratedProjection, truncatedRetiredTail);
+  const integratedHistory = streamHistoryHtml(truncatedRetiredTail, retiredQueue);
+  check("actual stream and history callers pass the current queue projection",
+        integratedHome.includes("Current Work (0)") && integratedHistory.includes("Retained Lifecycle History · #2200 (1)")
+        && html.includes("streamGroupedEventsHtml(fleetEvents, streamQueueProjection(lastGood))")
+        && html.includes("streamHistoryHtml(fleetEvents, streamQueueProjection(lastGood))"));
 }
 
 const batcherSource = sliceOne(/^function createFleetEventBatcher\(options\)\{[\s\S]*?\n\}$/gm, "definition of `createFleetEventBatcher`");
@@ -829,7 +891,7 @@ check("valid action and admission do not suppress fallback when advice is malfor
 const escapedUnsupported = obligationPanel(obligationView([{...obligationRow("Unsupported"), owner:"<foreign-owner>"}]));
 check("unsupported manual guidance preserves escaped foreign owner labels",
   escapedUnsupported.includes("&lt;foreign-owner&gt;") && !escapedUnsupported.includes("<foreign-owner>"));
-check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents)"));
+check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents, streamQueueProjection(lastGood))"));
 check("summary cannot claim all-clear for unresolved requests", streamStatusSummaryHtml(obligationView([obligationRow("Pending")]), []).includes("1 conductor request(s) unresolved"));
 check("daemon-shaped stale obligation snapshot remains visibly as-of", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z", projectionStaleAfterSeconds:90}).includes("Snapshot is stale"));
 check("snapshot timestamp shown even with no rooms", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z"}).includes("Snapshot as of 2026-09-01T00:00:00Z"));
