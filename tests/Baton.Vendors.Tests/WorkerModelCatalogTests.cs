@@ -5,6 +5,7 @@ namespace Baton.Vendors.Tests;
 public sealed class WorkerModelCatalogTests
 {
     [Theory]
+    [InlineData("gpt-6.1-sol")]
     [InlineData("gpt-6-sol")]
     [InlineData("gpt-6-luna")]
     [InlineData("gpt-5.6-sol")]

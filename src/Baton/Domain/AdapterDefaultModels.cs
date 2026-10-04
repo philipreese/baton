@@ -33,11 +33,10 @@ public static class AdapterDefaultModels
     /// hand-run <c>baton dispatch --adapter agy</c> name the same model the queue path already does.
     /// </description></item>
     /// <item><description>
-    /// <c>codex</c> — <c>gpt-6-astra</c>, the single entry marked <c>"isDefault": true</c> in the
-    /// captured <c>model/list</c> answer <c>docs/vendor-codex-probe-2026-09-04.md</c> shipped and
-    /// documents the exact recording for — that doc is the record, and it can go stale: a codex
-    /// release that moves the default makes this entry wrong, and re-running that probe is what
-    /// corrects it.
+    /// <c>codex</c> — <c>gpt-6.1-sol</c>, the single entry marked <c>"isDefault": true</c> in the
+    /// 2026-10-04 raw <c>model/list</c> recording embedded in <c>Baton.Vendors</c>. This is a
+    /// measurement of the CLI's implicit choice, not a routing preference; a later recording may
+    /// correct it.
     /// </description></item>
     /// </list>
     /// </summary>
@@ -45,7 +44,7 @@ public static class AdapterDefaultModels
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["agy"] = "gemini-3.8-flash-high",
-            ["codex"] = "gpt-6-astra",
+            ["codex"] = "gpt-6.1-sol",
         };
 
     /// <summary>

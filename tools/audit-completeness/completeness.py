@@ -526,7 +526,7 @@ def step9_pinned_models_exist():
 # it. `docs/vendor-codex-probe-2026-09-04.md` is the record of how it was captured, and says the list
 # should be re-probed rather than trusted forever; a codex release that retires a model makes this
 # file stale, and re-running that probe is what corrects it.
-CODEX_RECORDING = "src/Baton.Vendors/codex-model-list-2026-09-27.jsonl"
+CODEX_RECORDING = "src/Baton.Vendors/codex-model-list-2026-10-04.jsonl"
 
 
 def _codex_tier_pins_are_recorded(tier_map):

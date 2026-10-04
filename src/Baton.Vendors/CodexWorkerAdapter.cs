@@ -32,10 +32,10 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
     /// is what selects the catalog line out of it. Its provenance and what it settles are recorded
     /// once, in <c>docs/vendor-capabilities.md</c>'s effort table section (#1875); before that the
     /// table was hand-written while <see cref="ValidateModel"/> called it a probed snapshot.
-    /// Re-pinned to 2026-09-27 from Codex Desktop 0.158.0-alpha.2.1 after the Sol 6 and Luna 6
-    /// entries were measured in the live catalog. Older recorded models remain in the snapshot.
+    /// Re-pinned to 2026-10-04 from Codex Desktop 0.160.0 after the Sol 6.1 entry was measured as
+    /// the CLI default in the live catalog. Older recorded models remain in the snapshot.
     /// </summary>
-    internal const string ModelCatalogResourceName = "Baton.Vendors.codex-model-list-2026-09-27.jsonl";
+    internal const string ModelCatalogResourceName = "Baton.Vendors.codex-model-list-2026-10-04.jsonl";
 
     private static readonly Lazy<RecordedCatalog> RecordedEffortsByModel = new(LoadRecordedEffortTable);
 

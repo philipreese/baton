@@ -12,6 +12,7 @@ and where a row says something is *absent*, it names the surfaces that absence w
 
 | established | against | covers |
 |---|---|---|
+| 2026-10-04, `#2609` | Codex Desktop **0.160.0** | The exact raw Codex `model/list` recording is embedded as `src/Baton.Vendors/codex-model-list-2026-10-04.jsonl` (SHA256 `82f1e132faefb5fe464e012e680e147e99e38ee871759206fccc4787192c085d`). It has eight visible models and 44 advertised model/effort entries; `gpt-6.1-sol` advertises `low/medium/high/xhigh/max/ultra` and is marked `isDefault: true`. This settles recorded availability and the CLI's measured implicit default only, not ranking, quota, or benchmark claims. |
 | 2026-09-27, `#2438` | Codex Desktop **0.158.0-alpha.2.1**; Claude result records for **claude-opus-5-5**; AGY catalog | Codex `model/list` was captured as raw initialize plus model/list JSONL. Sol 6 advertises `low/medium/high/xhigh/max/ultra`; Luna 6 advertises `low/medium/high/xhigh/max`; previously recorded models remain in the dated snapshot. Two bounded, tool-free Claude PONG turns requested `claude-opus-5-5` and `opus`, and both reported canonical model `claude-opus-5-5`. AGY's measured 14-entry catalog is unchanged. These checks do not claim full vendor capability re-certification. |
 | 2026-09-15, `#2346` | `claude` **2.1.265**, `agy` **1.2.3**, `codex` **0.153.2** | The live probe re-established all 21 capability findings on their named surfaces. No capability classification changed from the 2026-09-08 probe; reported usage percentages and per-turn cost are point-in-time observations, not capability changes. The operator-account `codex model/list` no longer listed `gpt-5.3-codex-spark`, so the embedded 2026-09-08 catalog recording is stale for that account; this does not establish global removal. |
 | 2026-09-12, `#2246` | `agy` **1.2.2** | **`--mode plan` is behavioral, not only permissional, in print mode.** An otherwise trivial `agy -p` control reported `expanded_commands:[{"name":"plan","type":"system"}]` and 14,198 input tokens. Adding `--disable-slash-commands` removed the expansion and reported 13,403 input tokens; all other prompt/model/effort/workspace inputs were identical. The CLI warned that plan mode has no effect with slash expansion disabled. Baton's hook remains the write boundary, so its production argv now disables ambient slash and vendor-skill expansion; `agy.hooks-load-from-add-dir-not-only-cwd` carries that flag in all three live control arms. |
@@ -456,9 +457,10 @@ by any canonical level; it remains available only as a raw, unvalidated escape h
 `#566` already threads through `WorkerInvocation.Effort`), not through the canonical picker.
 Codex likewise keeps `xhigh` and `ultra` on the raw path. Availability is model-specific, and Baton
 rejects unknown models and unsupported pairs before a process starts. Note which `model/list` that
-check reads (#1875, #2126, #2438): a **dated recording** of one, `src/Baton.Vendors/codex-model-list-2026-09-27.jsonl`
-(Codex Desktop 0.158.0-alpha.2.1, 2026-09-27), kept as the raw app-server JSONL the CLI
-wrote — initialize line included, which is where that CLI version comes from — embedded in
+check reads (#1875, #2126, #2438, #2609): the current **dated recording** of one,
+`src/Baton.Vendors/codex-model-list-2026-10-04.jsonl` (Codex Desktop 0.160.0, 2026-10-04),
+kept as the raw app-server JSONL the CLI wrote — initialize line included, which is where that CLI
+version comes from — embedded in
 `Baton.Vendors`, and parsed into `CodexWorkerAdapter`'s validation table by the same parser live
 discovery uses. Live `model/list` is asked separately — `DiscoverCapabilitiesAsync`, from the
 real-dispatch preflight that prints a worker's skills (`DispatchCommand`; that preflight prints only
@@ -543,10 +545,11 @@ so `gemini-3.8-flash-high` and `gemini-3.8-flash-low` land in different tiers on
 table does not carry — a retired family such as `gemini-3.5-flash-*`, or a future one — resolves no tier
 until it is placed here.
 
-**`codex` — placed from the dated visible catalog.** The purpose table remains unchanged by #2438:
-the new Sol 6 and Luna 6 records establish model/effort validation only. No new model-purpose
-ranking is inferred from the bounded refresh; older visible models remain deliberately unplaced,
-and a recognizable name is not evidence of the model-purpose tier the current product assigns it.
+**`codex` — placed from the dated visible catalog.** The purpose table remains unchanged by #2609:
+the 2026-10-04 recording establishes model/effort validation and the measured CLI default only. No
+new model-purpose ranking is inferred from the bounded refresh; older visible models remain
+deliberately unplaced, and a recognizable name is not evidence of the model-purpose tier the current
+product assigns it.
 
 ## A blocking MCP tool holds a turn open — on both vendors
 

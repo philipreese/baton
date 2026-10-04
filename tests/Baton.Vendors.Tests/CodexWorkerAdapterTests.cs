@@ -553,17 +553,17 @@ public sealed class CodexWorkerAdapterTests
                 NoOutputContract));
 
         Assert.Contains("absent from the recorded Codex capability snapshot", exception.Message);
-        Assert.Contains("codex-model-list-2026-09-27.jsonl", exception.Message);
+        Assert.Contains("codex-model-list-2026-10-04.jsonl", exception.Message);
 
         // #1880: the refusal names which CLI's catalog said so, read from the recording's own
         // initialize line rather than restated here — the file's name already carries the date.
-        Assert.Contains("codex-cli 0.158.0-alpha.2.1", exception.Message);
+        Assert.Contains("codex-cli 0.160.0", exception.Message);
     }
 
     /// <summary>
     /// #1875: the validation table is derived from the embedded recording, so these are values a reader
     /// checks against that file by eye rather than by re-running the parser the table itself uses.
-    /// Why `gpt-6-astra` keeps `ultra` despite the vendor's web page: `docs/vendor-capabilities.md`.
+    /// Why the recorded Astra entry keeps `ultra`: `docs/vendor-capabilities.md`.
     /// </summary>
     [Fact]
     public void Astra_accepts_ultra_because_the_recorded_catalog_advertises_it()
@@ -609,6 +609,23 @@ public sealed class CodexWorkerAdapterTests
                 NoOutputContract));
 
         Assert.Contains("(available: low, medium, high, xhigh, max)", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("high")]
+    [InlineData("xhigh")]
+    [InlineData("max")]
+    [InlineData("ultra")]
+    public void The_measured_Codex_default_accepts_every_advertised_effort(string effort)
+    {
+        var target = new CodexWorkerAdapter().Resolve(
+            new WorkerInvocation("Inspect.", Model: "gpt-6.1-sol", Effort: effort),
+            NoOutputContract);
+
+        Assert.Equal("gpt-6.1-sol", ArgValue(target, "--model"));
+        Assert.Contains($"model_reasoning_effort=\"{effort}\"", ArgValues(target, "--config"));
     }
 
     /// <summary>
@@ -671,10 +688,13 @@ public sealed class CodexWorkerAdapterTests
     {
         var recorded = CodexWorkerAdapter.BuildEffortTable(RecordedRecording(), "recording.jsonl");
 
+        Assert.Equal(["low", "medium", "high", "xhigh", "max", "ultra"], recorded.EffortsByModel["gpt-6.1-sol"]);
         Assert.Equal(["low", "medium", "high", "xhigh", "max", "ultra"], recorded.EffortsByModel["gpt-6-astra"]);
         Assert.Equal(["low", "medium", "high", "xhigh", "max"], recorded.EffortsByModel["gpt-5.6-luna"]);
         Assert.False(recorded.EffortsByModel.ContainsKey("gpt-5.4"));
-        Assert.Equal("0.158.0-alpha.2.1", recorded.CliVersion);
+        Assert.Equal(8, recorded.EffortsByModel.Count);
+        Assert.Equal(44, recorded.EffortsByModel.Values.Sum(efforts => efforts.Count));
+        Assert.Equal("0.160.0", recorded.CliVersion);
     }
 
     /// <summary>
@@ -1003,11 +1023,12 @@ public sealed class CodexWorkerAdapterTests
         Assert.Equal("codex", capabilities.Vendor);
         Assert.Equal(
             [
-                "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+                "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
                 "gpt-5.6-luna", "gpt-5.5",
             ],
             capabilities.Models);
-        Assert.Equal(38, capabilities.Items.Count);
+        Assert.Equal(44, capabilities.Items.Count);
+        Assert.Contains(capabilities.Items, item => item.Name == "gpt-6.1-sol[ultra]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-astra[ultra]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-sol[ultra]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-luna[max]" && item.Kind == "mode");
