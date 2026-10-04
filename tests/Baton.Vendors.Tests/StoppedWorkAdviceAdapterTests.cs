@@ -11,6 +11,7 @@ public sealed class StoppedWorkAdviceAdapterTests
     private static readonly DateTimeOffset ObservedAt = new(2026, 9, 29, 15, 30, 0, TimeSpan.Zero);
     private const string Repository = "philipreese/baton";
     private const string Tag = "2499-stopped-work-advice";
+    private const string KnownPullRequestHead = "0123456789abcdef0123456789abcdef01234567";
 
     private static readonly StoppedWorkAdviceContext Context = new(
         Repository, Tag, Attempt, WorkStage.Review, ObservedAt, null,
@@ -98,7 +99,7 @@ public sealed class StoppedWorkAdviceAdapterTests
         Assert.Equal(request.ContextSha256, evidence.RootElement.GetProperty("contextSha256").GetString());
         Assert.Equal(WorkStages.Token(request.Stage), evidence.RootElement.GetProperty("stage").GetString());
         Assert.Equal(request.ObservedAt, evidence.RootElement.GetProperty("observedAt").GetDateTimeOffset());
-        Assert.Equal("known-head-2602", evidence.RootElement.GetProperty("pullRequestHead").GetString());
+        Assert.Equal(KnownPullRequestHead, evidence.RootElement.GetProperty("pullRequestHead").GetString());
         Assert.Equal("unknown", evidence.RootElement.GetProperty("attemptBaseRevision").GetString());
         Assert.Equal("MissingVerdict", evidence.RootElement.GetProperty("haltCause").GetString());
         Assert.Equal("available", evidence.RootElement.GetProperty("repairAllowance").GetString());
@@ -111,22 +112,9 @@ public sealed class StoppedWorkAdviceAdapterTests
         Assert.Equal(context.ObservedAt, evidence.RootElement.GetProperty("evidenceObservedAt").GetDateTimeOffset());
     }
 
-    [Fact]
-    public void Removing_the_changed_trusted_instructions_breaks_the_real_builder_contract()
-    {
-        var (request, context) = SourceReviewEvidence(WorkStage.Review);
-        var prompt = CodexReadinessDecisionAdapter.BuildStoppedWorkPrompt(request, context);
-        var withoutClarification = prompt.Replace(TrustedSourceReviewInstructions, string.Empty, StringComparison.Ordinal);
-
-        var failure = Record.Exception(() => Assert.Contains(
-            TrustedSourceReviewInstructions, withoutClarification, StringComparison.Ordinal));
-
-        Assert.NotNull(failure);
-    }
-
     [Theory]
-    [InlineData(WorkStage.Review, StoppedWorkHaltCause.Other, "known-head-2602", true)]
-    [InlineData(WorkStage.Fix, StoppedWorkHaltCause.MissingVerdict, "known-head-2602", true)]
+    [InlineData(WorkStage.Review, StoppedWorkHaltCause.Other, KnownPullRequestHead, true)]
+    [InlineData(WorkStage.Fix, StoppedWorkHaltCause.MissingVerdict, KnownPullRequestHead, true)]
     public void Other_halts_and_stages_keep_general_advice_meaning(WorkStage stage,
         StoppedWorkHaltCause haltCause, string head, bool terminalEvidenceAvailable)
     {
@@ -134,17 +122,20 @@ public sealed class StoppedWorkAdviceAdapterTests
         var request = SourceReviewRequest(context);
         var prompt = CodexReadinessDecisionAdapter.BuildStoppedWorkPrompt(request, context);
 
-        Assert.Contains("Other halt causes and stages retain their general advisory meaning.", prompt,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain("A replacement review is warranted.", prompt, StringComparison.Ordinal);
+        // The whole trusted block guards conditional wording; these arms also guard the typed facts.
+        Assert.Contains(TrustedSourceReviewInstructions, prompt, StringComparison.Ordinal);
         using var evidence = ParseGeneratedEvidence(prompt);
         Assert.Equal(WorkStages.Token(stage), evidence.RootElement.GetProperty("stage").GetString());
         Assert.Equal(haltCause.ToString(), evidence.RootElement.GetProperty("haltCause").GetString());
+        Assert.Equal(head, evidence.RootElement.GetProperty("pullRequestHead").GetString());
+        Assert.Equal(terminalEvidenceAvailable.ToString(),
+            evidence.RootElement.GetProperty("terminalEvidenceAvailable").GetString());
     }
 
     [Theory]
     [InlineData(null, false)]
-    [InlineData("known-head-2602", false)]
+    [InlineData(null, true)]
+    [InlineData(KnownPullRequestHead, false)]
     public void Unknown_head_or_unavailable_terminal_evidence_preserves_insufficient_facts(
         string? pullRequestHead, bool terminalEvidenceAvailable)
     {
@@ -153,8 +144,7 @@ public sealed class StoppedWorkAdviceAdapterTests
         var request = SourceReviewRequest(context);
         var prompt = CodexReadinessDecisionAdapter.BuildStoppedWorkPrompt(request, context);
 
-        Assert.Contains("Hold when source facts are insufficient; never force recommend.", prompt,
-            StringComparison.Ordinal);
+        Assert.Contains(TrustedSourceReviewInstructions, prompt, StringComparison.Ordinal);
         using var evidence = ParseGeneratedEvidence(prompt);
         Assert.Equal(pullRequestHead ?? "unknown", evidence.RootElement.GetProperty("pullRequestHead").GetString());
         Assert.Equal(terminalEvidenceAvailable.ToString(),
@@ -198,7 +188,7 @@ public sealed class StoppedWorkAdviceAdapterTests
     private static (StoppedWorkAdviceRequest Request, StoppedWorkAdviceContext Context) SourceReviewEvidence(
         WorkStage stage)
     {
-        var context = SourceReviewContext(stage, StoppedWorkHaltCause.MissingVerdict, "known-head-2602", true);
+        var context = SourceReviewContext(stage, StoppedWorkHaltCause.MissingVerdict, KnownPullRequestHead, true);
         return (SourceReviewRequest(context), context);
     }
 
