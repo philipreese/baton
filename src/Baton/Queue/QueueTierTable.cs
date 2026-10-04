@@ -34,7 +34,7 @@ public static class QueueTierTable
     /// <b>Why the rows are two different shapes (#1863).</b> <c>tooling</c> names the
     /// <c>WorkerTiers.json</c> tier <c>standard</c> rather than a vendor triple, because both describe
     /// the same thing — the tooling-shaped implement work — and stating it twice is what let them
-    /// disagree: <c>standard</c> moved to codex/<c>gpt-5.6-sol</c>/medium on 2026-09-06 while this row
+    /// disagree: <c>standard</c> moved to codex/<c>gpt-6-astra</c>/medium on 2026-09-06 while this row
     /// and spec/baton.md §13 still read claude/opus/medium, so an item with <c>--scope tooling</c>
     /// launched on the pin the ruling had retired. Naming the tier makes the disagreement
     /// unrepresentable rather than merely corrected.
