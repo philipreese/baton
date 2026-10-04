@@ -30,7 +30,7 @@ if (beginAt < 0 || endAt < 0 || endAt < beginAt) {
   process.exit(1);
 }
 const source = html.slice(html.indexOf("\n", beginAt) + 1, endAt).replace(/^\s*\/\/.*$/gm, "");
-const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueRetiredHistoryHtml", "queueBoardHtml", "streamStatusSummaryHtml", "streamEventReceiptHtml", "streamGroupedEventsHtml", "streamHistoryHtml", "streamHomeHtml"];
+const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueRetiredHistoryHtml", "queueBoardHtml", "streamStatusSummaryHtml", "streamEventReceiptHtml", "streamGroupedEventsHtml", "streamHistoryHtml", "streamHomeHtml", "streamQueueProjection"];
 const missing = REQUIRED.filter(fn => !source.includes(`function ${fn}`));
 if (missing.length) {
   console.error(`glass.selftest.mjs: FAIL -- the marked block no longer defines: ${missing.join(", ")}`);
@@ -39,8 +39,8 @@ if (missing.length) {
 
 // The two page-level helpers the block calls, SLICED from glass.html for the same reason the panel
 // itself is (see the header): a hand copy is a second copy, and this one is load-bearing -- the
-// panel's freshness clauses are built on `age` returning the literal word "just now" and null, so a
-// re-typed shim would keep asserting against itself after the page reworded either.
+// panel's displayed age clauses are built on `age` returning the literal word "just now" and null,
+// while projection freshness is tested against the panel's live Date.now() below.
 function sliceOne(pattern, what) {
   const found = [...html.matchAll(pattern)];
   if (found.length !== 1) {
@@ -123,7 +123,7 @@ check("a valid weekly-only account renders its vendor window without manufacturi
       && !vendorUsageSink.innerHTML.includes("5h"));
 
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
-const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrRowsHtml, queuePrHistoryHtml, queueRetiredHistoryHtml, queueLanesTableHtml, queueBoardHtml, streamStatusSummaryHtml, streamEventReceiptHtml, streamGroupedEventsHtml, streamHistoryHtml, streamHomeHtml } = panel;
+const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrRowsHtml, queuePrHistoryHtml, queueRetiredHistoryHtml, queueLanesTableHtml, queueBoardHtml, streamStatusSummaryHtml, streamEventReceiptHtml, streamGroupedEventsHtml, streamHistoryHtml, streamHomeHtml, streamQueueProjection } = panel;
 
 // -- no board is THREE facts, and each gets its own word (#1912 fix round) --
 // FleetProjectionWriter.BuildQueueSectionAsync's remarks are the register for which state produces
@@ -523,6 +523,141 @@ check("(control) an unheld queue does not",
   const refusedSummary = streamStatusSummaryHtml(null, [refusedAdmission]);
   check("a refused admission appears in the blocked summary",
         refusedSummary.includes("admission refused: file-write, network"));
+
+  // #2612: the live tail can contain only checks/PR receipts after a settled event rolled over.
+  // Retirement is safe only when the queue supplies one exact task identity; issue/PR-only or
+  // malformed/mismatched evidence must leave the tail visible as unknown active work.
+  const retiredTask = {
+    tag: "2583-implement", stage: "review", state: "Done", issue: 2583, pr: 2585,
+    task: { id: "task-2583", repository: "github.com/philipreese/baton", issue: 2583 },
+    retirement: { kind: "merged", at: "2026-09-07T10:30:00Z", reason: "PR merged" },
+  };
+  const retiredQueue = { retiredHistory: [retiredTask] };
+  const truncatedRetiredTail = [
+    { id: 101, workId: "task-2583", attemptId: "attempt-2583", issueId: 2583, pullRequestId: 2585,
+      kind: "checkObserved", checkName: "gates", checkStatus: "COMPLETED", checkConclusion: "SUCCESS" },
+    { id: 102, workId: "task-2583", attemptId: "attempt-2583", issueId: 2583, pullRequestId: 2585,
+      kind: "checkObserved", checkName: "audit", checkStatus: "COMPLETED", checkConclusion: "SUCCESS" },
+    { id: 103, kind: "conductorObligationPending", obligationId: "obligation-1", obligationRequestedAction: "Continue work" },
+    { id: 104, kind: "conductorObligationBlocked", obligationId: "obligation-1", obligationReason: "awaiting operator" },
+    { id: 105, kind: "conductorObligationSubmitted", obligationId: "obligation-1" },
+    { id: 106, kind: "conductorObligationTransportAcknowledged", obligationId: "obligation-1" },
+  ];
+  const truthfulTail = streamGroupedEventsHtml(truncatedRetiredTail, retiredQueue);
+  check("exact retired task evidence moves a truncated check/PR tail to retained history",
+        truthfulTail.includes("Current Work (0)") && truthfulTail.includes("Retained History · #2200 (1)"));
+  check("retained stream card shows queue retirement kind, time, and reason",
+        truthfulTail.includes("MERGED") && truthfulTail.includes("Retirement evidence: merged")
+        && truthfulTail.includes("PR merged"));
+  check("conductor obligation receipts are visible but do not become worker activity",
+        truthfulTail.includes("Conductor Request Receipts (1)")
+        && truthfulTail.includes("REQUEST RECEIPT") && !truthfulTail.includes("Current Work (5)"));
+  check("transport acknowledgment remains a receipt, not action completion",
+        truthfulTail.includes("Transport acknowledged") && !truthfulTail.includes("Action observed"));
+
+  const terminalRetiredAttempts = [
+    { id: 112, workId: "task-2583", attemptId: "attempt-succeeded", issueId: 2583,
+      kind: "attemptSettled", outcome: "Succeeded", outcomeDetail: "published", elapsedMilliseconds: 5000 },
+    { id: 113, workId: "task-2583", attemptId: "attempt-failed", issueId: 2583,
+      kind: "attemptSettled", outcome: "Failed", outcomeDetail: "compiler error", elapsedMilliseconds: 61000 },
+    { id: 114, workId: "task-2583", attemptId: "attempt-cancelled", issueId: 2583,
+      kind: "attemptSettled", outcome: "Cancelled", outcomeDetail: "operator requested", elapsedMilliseconds: 2000 },
+    { id: 115, workId: "task-2583", attemptId: "attempt-indeterminate", issueId: 2583,
+      kind: "attemptSettled", outcome: "Indeterminate", outcomeDetail: "tail ended", elapsedMilliseconds: 3000 },
+    { id: 116, workId: "task-2583", attemptId: "attempt-refused", issueId: 2583,
+      kind: "attemptRefused", outcome: "capacity", outcomeDetail: "runway held", elapsedMilliseconds: 4000 },
+  ];
+  const terminalRetirementHtml = streamGroupedEventsHtml(terminalRetiredAttempts, retiredQueue);
+  check("terminal attempts keep their own outcomes when the overall task was later merged",
+        terminalRetirementHtml.includes("SUCCEEDED") && terminalRetirementHtml.includes("FAILED (RETAINED)")
+        && terminalRetirementHtml.includes("CANCELLED (RETAINED)")
+        && terminalRetirementHtml.includes("INDETERMINATE (RETAINED)")
+        && terminalRetirementHtml.includes("REFUSED (RETAINED)")
+        && !terminalRetirementHtml.includes("MERGED (RETAINED)"));
+  check("terminal attempt details and elapsed times survive later retirement",
+        terminalRetirementHtml.includes("Outcome: failed") && terminalRetirementHtml.includes("compiler error")
+        && terminalRetirementHtml.includes("Settled failed in 1m")
+        && terminalRetirementHtml.includes("operator requested")
+        && terminalRetirementHtml.includes("capacity")
+        && terminalRetirementHtml.includes("runway held") && terminalRetirementHtml.includes("5s"));
+
+  const laterAttempts = [
+    ...truncatedRetiredTail.slice(0, 2),
+    { id: 117, workId: "task-2583", attemptId: "attempt-known-later", issueId: 2583,
+      kind: "attemptStarted", at: "2026-09-07T11:00:00Z" },
+    { id: 118, workId: "task-2583", attemptId: "attempt-unknown-later", issueId: 2583,
+      kind: "attemptProgressed", at: "2026-09-07T11:01:00Z" },
+  ];
+  const laterAttemptsHtml = streamGroupedEventsHtml(laterAttempts, retiredQueue);
+  check("known and unknown later attempts remain current despite older retirement evidence",
+        laterAttemptsHtml.includes("Current Work (2)") && laterAttemptsHtml.includes("attempt-known-later")
+        && laterAttemptsHtml.includes("attempt-unknown-later"));
+
+  const receiptHtml = streamGroupedEventsHtml([
+    { id: 119, kind: "conductorObligationPending", obligationId: "obligation-receipt-1",
+      obligationRequestedAction: "Continue work" },
+    { id: 120, kind: "conductorObligationTransportAcknowledged", obligationId: "obligation-receipt-1" },
+  ]);
+  check("request receipt cards show the obligation identity and request fields without worker unknown chips",
+        receiptHtml.includes("obligation: obligation-receipt-1")
+        && receiptHtml.includes("requested: Continue work")
+        && !receiptHtml.includes("work: unknown") && !receiptHtml.includes("attempt: unknown")
+        && !receiptHtml.includes("issue: unknown") && !receiptHtml.includes("PR: unknown"));
+
+  const tailOnly = truncatedRetiredTail.slice(0, 2);
+  check("without the current queue projection the same tail stays explicitly active/unknown",
+        streamGroupedEventsHtml(tailOnly).includes("Current Work (1)")
+        && streamGroupedEventsHtml(tailOnly).includes("ACTIVE"));
+  check("issue/PR-only identity cannot borrow retirement evidence",
+        streamGroupedEventsHtml([{ id: 107, issueId: 2583, pullRequestId: 2585, kind: "checkObserved" }], retiredQueue)
+          .includes("Current Work (1)"));
+  check("mismatched task identity cannot borrow retirement evidence",
+        streamGroupedEventsHtml([{ id: 108, workId: "task-other", issueId: 2583, kind: "checkObserved" }], retiredQueue)
+          .includes("Current Work (1)"));
+  check("mismatched issue evidence cannot borrow an exact task retirement",
+        streamGroupedEventsHtml([{ id: 109, workId: "task-2583", issueId: 9999, kind: "checkObserved" }], retiredQueue)
+          .includes("Current Work (1)"));
+  check("a stale queue projection leaves the live tail explicitly active",
+        streamHomeHtml({ queue: retiredQueue, projection: { stale: true }, conductorObligations: { available: true, rows: [] } }, tailOnly)
+          .includes("Current Work (1)"));
+  const panelNow = Date.now();
+  const freshProjectionBase = {
+    queue: retiredQueue,
+    derived_at: new Date(panelNow - 60_000).toISOString(),
+    projectionStaleAfterSeconds: 90,
+    conductorObligations: { available: true, rows: [] },
+  };
+  const freshnessCases = [
+    ["missing freshness threshold", (projection) => { delete projection.projectionStaleAfterSeconds; }],
+    ["invalid freshness threshold", (projection) => { projection.projectionStaleAfterSeconds = "90"; }],
+    ["missing freshness timestamp", (projection) => { delete projection.derived_at; }],
+    ["invalid freshness timestamp", (projection) => { projection.derived_at = "not-a-timestamp"; }],
+    ["future freshness timestamp", (projection) => { projection.derived_at = new Date(panelNow + 60_000).toISOString(); }],
+  ];
+  for(const [label, change] of freshnessCases){
+    const projection = { ...freshProjectionBase };
+    change(projection);
+    const stream = streamHomeHtml(projection, tailOnly);
+    const history = streamHistoryHtml(tailOnly, streamQueueProjection(projection));
+    check(`${label} keeps stream and history tails explicitly active`,
+          stream.includes("Current Work (1)") && history.includes("No retained lifecycle history recorded yet."));
+  }
+  check("ambiguous duplicate retired task identities remain unknown",
+        streamGroupedEventsHtml([{ id: 110, workId: "task-2583", kind: "checkObserved" }],
+          { retiredHistory: [retiredTask, { ...retiredTask, tag: "duplicate" }] }).includes("Current Work (1)"));
+  check("malformed retirement evidence remains unknown rather than inventing terminal status",
+        streamGroupedEventsHtml([{ id: 111, workId: "task-2583", kind: "checkObserved" }],
+          { retiredHistory: [{ ...retiredTask, task: null }] }).includes("Current Work (1)"));
+
+  const integratedProjection = {
+    ...freshProjectionBase,
+  };
+  const integratedHome = streamHomeHtml(integratedProjection, truncatedRetiredTail);
+  const integratedHistory = streamHistoryHtml(truncatedRetiredTail, streamQueueProjection(integratedProjection));
+  check("actual stream and history callers pass the current queue projection",
+        integratedHome.includes("Current Work (0)") && integratedHistory.includes("Retained Lifecycle History · #2200 (1)")
+        && html.includes("streamGroupedEventsHtml(fleetEvents, streamQueueProjection(lastGood))")
+        && html.includes("streamHistoryHtml(fleetEvents, streamQueueProjection(lastGood))"));
 }
 
 const batcherSource = sliceOne(/^function createFleetEventBatcher\(options\)\{[\s\S]*?\n\}$/gm, "definition of `createFleetEventBatcher`");
@@ -829,7 +964,7 @@ check("valid action and admission do not suppress fallback when advice is malfor
 const escapedUnsupported = obligationPanel(obligationView([{...obligationRow("Unsupported"), owner:"<foreign-owner>"}]));
 check("unsupported manual guidance preserves escaped foreign owner labels",
   escapedUnsupported.includes("&lt;foreign-owner&gt;") && !escapedUnsupported.includes("<foreign-owner>"));
-check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents)"));
+check("real stream rendering includes obligation panel", html.includes("contentEl.innerHTML = conductorObligationsHtml(lastGood) + streamGroupedEventsHtml(fleetEvents, streamQueueProjection(lastGood))"));
 check("summary cannot claim all-clear for unresolved requests", streamStatusSummaryHtml(obligationView([obligationRow("Pending")]), []).includes("1 conductor request(s) unresolved"));
 check("daemon-shaped stale obligation snapshot remains visibly as-of", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z", projectionStaleAfterSeconds:90}).includes("Snapshot is stale"));
 check("snapshot timestamp shown even with no rooms", obligationPanel({...obligationView([]), derived_at:"2026-09-01T00:00:00Z"}).includes("Snapshot as of 2026-09-01T00:00:00Z"));
