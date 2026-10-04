@@ -2213,7 +2213,9 @@ function conductorObligationsHtml(snap){
     // Advice is optional for backwards compatibility. If a producer sends the field, however,
     // its disposition must validate before any advice content is shown; source identity is
     // optional for blocked/pending captures and is labelled unknown when it is absent.
-    if(!row || !Object.prototype.hasOwnProperty.call(row, "advice") || typeof row.advice === "undefined") return "";
+    if(!row || !Object.prototype.hasOwnProperty.call(row, "advice") || typeof row.advice === "undefined") {
+      return {html:"", hasNextTrigger:false};
+    }
     const advice = row.advice;
     const objectAdvice = advice !== null && typeof advice === "object" && !Array.isArray(advice);
     const issuePresent = Object.prototype.hasOwnProperty.call(row, "issue");
@@ -2251,8 +2253,8 @@ function conductorObligationsHtml(snap){
     const prefix = `<div class="stream-card-result"><b>${!valid ? "Advice status" : objectAction
       ? "Advice with replacement-review action" : objectAdmission
         ? "Advice retained — automatic action not admitted" : "Advice only — no action taken"}</b>`;
-    if(!valid) return prefix + ` · <span class="chip c-warn">Unknown advice</span>`
-      + `<div>Advice status: Unknown. Advice details are unavailable.</div></div>`;
+    if(!valid) return {html:prefix + ` · <span class="chip c-warn">Unknown advice</span>`
+      + `<div>Advice status: Unknown. Advice details are unavailable.</div></div>`, hasNextTrigger:false};
     const [stateLabel, stateClass] = adviceStates[advice.state];
     let out = prefix + ` · <span class="chip ${stateClass}">${stateLabel}</span>`
       + (issuePresent && stagePresent
@@ -2267,34 +2269,21 @@ function conductorObligationsHtml(snap){
     if(advice.explanation && (advice.state === "available" || advice.state === "stale")) out += `<div class="stream-card-result">Advice explanation: ${esc(advice.explanation)}</div>`;
     if(objectAction && action.nextTrigger) out += `<div class="stream-card-result">Next trigger: ${esc(action.nextTrigger)}</div>`;
     if(objectAdmission) out += `<div class="stream-card-result">Next trigger: ${esc(admission.nextTrigger)}</div>`;
-    return out;
+    return {html:out, hasNextTrigger:Boolean((objectAction && action.nextTrigger) || objectAdmission)};
   }
-  function hasValidNextTrigger(row){
-    const action = row && row.action;
-    const objectAction = action !== null && typeof action === "object" && !Array.isArray(action);
-    const actionStates = ["authorized", "queued", "running", "paused", "blocked",
-      "verified-pending-observation", "completed"];
-    if(objectAction && action.kind === "replace-review" && actionStates.includes(action.state)
-      && (action.origin === "manual" || action.origin === "automatic")
-      && action.owner === "Repository conductor"
-      && typeof action.nextTrigger === "string" && action.nextTrigger.trim().length > 0
-      && action.nextTrigger.length <= 4096) return true;
-    const admission = row && row.automaticAdmission;
-    const objectAdmission = admission !== null && typeof admission === "object" && !Array.isArray(admission);
-    return objectAdmission && admission.state === "refused" && admission.owner === "Repository conductor"
-      && typeof admission.nextTrigger === "string" && admission.nextTrigger.trim().length > 0
-      && admission.nextTrigger.length <= 4096;
-  }
-  function unsupportedFollowupHtml(row){
-    if(!row || row.status !== "Unsupported" || hasValidNextTrigger(row)) return "";
+  function unsupportedFollowupHtml(row, hasRenderedNextTrigger){
+    if(!row || row.status !== "Unsupported" || hasRenderedNextTrigger) return "";
     return `<div class="stream-card-result">Next boundary: owner intervention; no automatic retry.</div>`;
   }
   function cards(rows){
-    return rows.map(row => `<div class="stream-group-card"><div class="stream-card-action"><b>${esc(row.requestedAction)}</b></div>`
+    return rows.map(row => {
+      const advice = adviceHtml(row);
+      return `<div class="stream-group-card"><div class="stream-card-action"><b>${esc(row.requestedAction)}</b></div>`
       + `<div class="stream-card-result">Owner: ${esc(row.owner)} · ${esc(labels[row.status] || "Unknown state")} · Created ${esc(age(row.createdAt) || "unknown")}</div>`
       + `<div class="stream-card-result">Status explanation: ${esc(row.reason)}</div>`
-      + unsupportedFollowupHtml(row)
-      + adviceHtml(row) + `</div>`).join("");
+      + unsupportedFollowupHtml(row, advice.hasNextTrigger)
+      + advice.html + `</div>`;
+    }).join("");
   }
   out += `<div class="stream-section-title">Unresolved requests (${unresolved.length} shown of ${esc(section.unresolvedCount ?? "unknown")})</div>` + cards(unresolved);
   if(!unresolved.length && !section.quarantinedCount && !section.omittedCount) out += `<div class="stream-empty">No unresolved conductor requests in this snapshot.</div>`;

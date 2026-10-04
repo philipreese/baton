@@ -812,6 +812,20 @@ const admissionTrigger = obligationPanel(obligationView([{...obligationRow("Unsu
 check("valid automatic-admission next trigger is not duplicated by fixed unsupported guidance",
   admissionTrigger.includes("Next trigger: Inspect retained evidence")
     && !admissionTrigger.includes("Next boundary: owner intervention; no automatic retry"));
+const mixedTrigger = obligationPanel(obligationView([{...obligationRow("Unsupported"),
+  action:{kind:"replace-review", state:"queued", origin:"manual", owner:"Repository conductor",
+    nextTrigger:"Inspect the current head"}, automaticAdmission:refusedAdmission}]));
+check("valid action and admission do not suppress fallback when advice is absent",
+  mixedTrigger.includes("Next boundary: owner intervention; no automatic retry")
+    && !mixedTrigger.includes("Next trigger:"));
+const malformedMixedTrigger = obligationPanel(obligationView([{...obligationRow("Unsupported"),
+  advice:null,
+  action:{kind:"replace-review", state:"queued", origin:"manual", owner:"Repository conductor",
+    nextTrigger:"Inspect the current head"}, automaticAdmission:refusedAdmission}]));
+check("valid action and admission do not suppress fallback when advice is malformed",
+  malformedMixedTrigger.includes("Unknown advice")
+    && malformedMixedTrigger.includes("Next boundary: owner intervention; no automatic retry")
+    && !malformedMixedTrigger.includes("Next trigger:"));
 const escapedUnsupported = obligationPanel(obligationView([{...obligationRow("Unsupported"), owner:"<foreign-owner>"}]));
 check("unsupported manual guidance preserves escaped foreign owner labels",
   escapedUnsupported.includes("&lt;foreign-owner&gt;") && !escapedUnsupported.includes("<foreign-owner>"));
