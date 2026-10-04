@@ -34,7 +34,7 @@ public static class RoomsPruneCommand
         bool SelectionRefused = false,
         string? SelectionRefusalReason = null,
         long SelectionBytes = 0,
-        long SelectionStartedTimestamp = 0);
+        TimeSpan SelectionElapsed = default);
 
     internal sealed record RetentionDiscoveryPage(IReadOnlyList<Candidate> Candidates, int NextCursor);
 
@@ -157,15 +157,6 @@ public static class RoomsPruneCommand
     }
 
     /// <summary>
-    /// Read-only candidate discovery shared by the daemon's retention-evidence preparation. This
-    /// intentionally uses the same sentinel/bindings/metadata selection vocabulary as manual prune;
-    /// it does not inspect or replay workflow journals.
-    /// </summary>
-    internal static Task<IReadOnlyList<Candidate>> DiscoverCandidatesAsync(
-        string registryFilePath, RoomsPruneOptions options, CancellationToken cancellationToken) =>
-        FindCandidatesAsync(registryFilePath, options, cancellationToken);
-
-    /// <summary>
     /// Retention-only discovery. Every byte is captured through the sweep budget; manual prune keeps
     /// its original reader and behavior. Full workflow journals are opened only for selected rooms.
     /// </summary>
@@ -186,9 +177,9 @@ public static class RoomsPruneCommand
             sweepBudget.Check();
             RoomRegistryEntry? entry;
             try { entry = JsonSerializer.Deserialize<RoomRegistryEntry>(line); }
-            catch (JsonException) { throw new RoomRetentionEvidenceRefusalException("the registry has malformed input"); }
+            catch (JsonException) { continue; }
             if (entry is null || string.IsNullOrWhiteSpace(entry.RoomPath) || string.IsNullOrWhiteSpace(entry.ProjectRoot))
-                throw new RoomRetentionEvidenceRefusalException("the registry has incomplete input");
+                continue;
             byRoom[entry.RoomPath] = entry;
         }
         var entries = byRoom.Values.ToArray();
@@ -244,7 +235,7 @@ public static class RoomsPruneCommand
                     var bindings = await RoomRetentionEvidenceStore.ReadSourceAsync(bindingsPath, budget,
                         RoomRetentionEvidenceLimits.MaxSelectionFileBytes).ConfigureAwait(false);
                     var parsed = WorkerBindingConfigParser.Parse(Encoding.UTF8.GetString(bindings.Bytes), bindingsPath);
-                    if (ConductorRoomDetector.TryResolveSoleBinding(parsed) is { Role: ConductorRoomDetector.ConductorRole })
+                    if (ConductorRoomDetector.IsConductorRole(ConductorRoomDetector.TryResolveSoleBinding(parsed)))
                         continue;
                 }
 
@@ -259,7 +250,7 @@ public static class RoomsPruneCommand
                 if (options.State is not null && !string.Equals(view.State, options.State, StringComparison.Ordinal)) continue;
                 candidates.Add(new Candidate(entry.RoomPath, view.State, terminalAtUtc,
                     SelectionBytes: RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes,
-                    SelectionStartedTimestamp: roomStarted));
+                    SelectionElapsed: System.Diagnostics.Stopwatch.GetElapsedTime(roomStarted)));
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or
@@ -267,7 +258,8 @@ public static class RoomsPruneCommand
             {
                 candidates.Add(new Candidate(entry.RoomPath, "retention-input-refused", terminalAtUtc, true,
                     $"selection input cannot be proven ({ex.Message})",
-                    RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes, roomStarted));
+                    RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes,
+                    System.Diagnostics.Stopwatch.GetElapsedTime(roomStarted)));
                 if (sweepBudget.Expired || sweepBudget.Remaining <= registry.Bytes.Length + 64 * 1024)
                     break;
             }

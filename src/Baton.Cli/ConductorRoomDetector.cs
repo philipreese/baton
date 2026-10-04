@@ -40,8 +40,11 @@ public static class ConductorRoomDetector
         }
 
         var sole = TryResolveSoleBinding(bindings);
-        return sole is { } resolved && string.Equals(resolved.Role, ConductorRole, StringComparison.OrdinalIgnoreCase);
+        return IsConductorRole(sole);
     }
+
+    internal static bool IsConductorRole((string Role, WorkerBindingConfigEntry Entry)? binding) =>
+        binding is { } resolved && string.Equals(resolved.Role, ConductorRole, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// A <c>bindings.json</c> with exactly one entry resolves that entry's dictionary key as the

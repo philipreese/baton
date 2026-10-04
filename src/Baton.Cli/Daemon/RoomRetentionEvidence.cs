@@ -20,6 +20,9 @@ namespace Baton.Cli.Daemon;
 /// The bounded, archive-only preparation used by <see cref="RoomRetentionSweep"/>. A successful
 /// record is immutable as-of history. It is never a deletion proof, accounting ledger, event, receipt,
 /// or assertion that the current room is still terminal.
+/// Missing, torn, conflicting, changed or bounded-out sources cannot produce a complete leaf.
+/// Hints carry no authority. Automatic deletion remains held until separately proven final
+/// removal and a rerun fence govern deletion.
 /// </summary>
 internal sealed class RoomRetentionEvidencePreparer
 {
@@ -30,7 +33,8 @@ internal sealed class RoomRetentionEvidencePreparer
     public async Task<int> PrepareAsync(
         string registryFilePath,
         int retentionDays,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<int>? beforeCandidate = null)
     {
         var started = Stopwatch.GetTimestamp();
         var sweepBudget = new RoomRetentionEvidenceStore.SweepBudget(started, cancellationToken);
@@ -47,8 +51,10 @@ internal sealed class RoomRetentionEvidencePreparer
         }
 
         var captured = 0;
+        var attempted = 0;
         foreach (var candidate in candidates)
         {
+            beforeCandidate?.Invoke(++attempted);
             cancellationToken.ThrowIfCancellationRequested();
             if (sweepBudget.Expired)
             {
@@ -63,11 +69,14 @@ internal sealed class RoomRetentionEvidencePreparer
                 continue;
             }
 
-            if (TryReadHint(candidate.RoomDirectoryPath, out var hint) &&
-                hint.MatchesCurrentCheapIdentity(sweepBudget, candidate.SelectionStartedTimestamp,
-                    candidate.SelectionBytes, cancellationToken))
+            var elapsedBeforeCapture = candidate.SelectionElapsed;
+            if (TryReadHint(candidate.RoomDirectoryPath, out var hint))
             {
-                continue;
+                var hintStarted = Stopwatch.GetTimestamp();
+                if (hint.MatchesCurrentCheapIdentity(sweepBudget, candidate.SelectionBytes,
+                    elapsedBeforeCapture, cancellationToken))
+                    continue;
+                elapsedBeforeCapture += Stopwatch.GetElapsedTime(hintStarted);
             }
 
             try
@@ -77,8 +86,8 @@ internal sealed class RoomRetentionEvidencePreparer
                     roomKey,
                     sweepBudget,
                     cancellationToken,
-                    selectionStarted: candidate.SelectionStartedTimestamp,
-                    selectionBytes: candidate.SelectionBytes).ConfigureAwait(false);
+                    selectionBytes: candidate.SelectionBytes,
+                    selectionElapsed: elapsedBeforeCapture).ConfigureAwait(false);
                 if (result is not null)
                 {
                     captured++;
@@ -141,11 +150,12 @@ internal sealed record SourceHint(string RoomPath, long SentinelLength, DateTime
     DateTime JournalWriteUtc, long SnapshotLength, DateTime SnapshotWriteUtc,
     IReadOnlyList<CheapVerdictIdentity> Verdicts)
 {
-    public bool MatchesCurrentCheapIdentity(RoomRetentionEvidenceStore.SweepBudget sweep, long started,
-        long selectionBytes, CancellationToken cancellationToken)
+    public bool MatchesCurrentCheapIdentity(RoomRetentionEvidenceStore.SweepBudget sweep,
+        long selectionBytes, TimeSpan selectionElapsed, CancellationToken cancellationToken)
     {
-        var budget = new RoomRetentionEvidenceStore.ReadBudget(sweep, started, cancellationToken,
-            RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - selectionBytes);
+        var budget = new RoomRetentionEvidenceStore.ReadBudget(sweep, Stopwatch.GetTimestamp(), cancellationToken,
+            RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - selectionBytes,
+            RoomRetentionEvidenceLimits.RoomDeadline - selectionElapsed);
         try { budget.Check(); }
         catch (RoomRetentionEvidenceRefusalException) { return false; }
         if (!RoomRetentionEvidenceStore.TryGetCheapIdentity(RoomPath, out var current) ||
@@ -224,7 +234,7 @@ public static class RoomRetentionEvidenceStore
 
     public static string RoomKey(string roomDirectoryPath)
     {
-        var normalized = BatonPaths.RecordKey(roomDirectoryPath);
+        var normalized = BatonPaths.RecordKey(roomDirectoryPath).ToUpperInvariant();
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized))).ToLowerInvariant();
     }
 
@@ -305,15 +315,24 @@ public static class RoomRetentionEvidenceStore
         Action<RoomRetentionCapturePoint>? probe = null,
         long selectionStarted = 0,
         long selectionBytes = 0,
-        Action<long>? journalReadProgress = null)
+        Action<long>? journalReadProgress = null,
+        TimeSpan selectionElapsed = default)
     {
-        var roomStarted = selectionStarted == 0 ? Stopwatch.GetTimestamp() : selectionStarted;
+        var roomStarted = Stopwatch.GetTimestamp();
+        roomDirectoryPath = BatonPaths.RecordKey(roomDirectoryPath);
         sweepBudget.Check();
         probe?.Invoke(RoomRetentionCapturePoint.BeforeGuard);
+        if (!Directory.Exists(roomDirectoryPath) ||
+            !IsPresentOrRefuse(Path.Combine(roomDirectoryPath, TerminalSentinelWriter.TerminalSentinelFileName)))
+            throw new RoomRetentionEvidenceRefusalException("the selected room or sentinel disappeared");
         using var guard = AcquireGuard(roomDirectoryPath);
         var budget = new ReadBudget(sweepBudget, roomStarted, cancellationToken,
-            RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - selectionBytes);
+            RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - selectionBytes,
+            RoomRetentionEvidenceLimits.RoomDeadline - selectionElapsed);
         budget.Check();
+        if (!Directory.Exists(roomDirectoryPath) ||
+            !IsPresentOrRefuse(Path.Combine(roomDirectoryPath, TerminalSentinelWriter.TerminalSentinelFileName)))
+            throw new RoomRetentionEvidenceRefusalException("the guarded room or sentinel disappeared");
 
         if (Path.GetFileName(Path.TrimEndingDirectorySeparator(roomDirectoryPath))
                 .Equals(ConductorRoomDetector.ConductorRole, StringComparison.OrdinalIgnoreCase) ||
@@ -336,7 +355,7 @@ public static class RoomRetentionEvidenceStore
             {
                 var bindings = WorkerBindingConfigParser.Parse(Encoding.UTF8.GetString(bindingsRead.Bytes), bindingsPath);
                 var sole = ConductorRoomDetector.TryResolveSoleBinding(bindings);
-                if (sole is { Role: ConductorRoomDetector.ConductorRole })
+                if (ConductorRoomDetector.IsConductorRole(sole))
                 {
                     throw new RoomRetentionEvidenceRefusalException("the room is conductor-owned");
                 }
@@ -468,7 +487,7 @@ public static class RoomRetentionEvidenceStore
             .Where(step => step.Execution is not null && step.Usage is not null)
             .ToDictionary(step => step.Execution!, step => step.Usage!, StringComparer.Ordinal);
         var unsignedRecord = new RoomRetentionEvidenceRecord(
-            SchemaVersion, roomKey, BatonPaths.RecordKey(roomDirectoryPath), DateTimeOffset.UtcNow, SourceKind, generation,
+            SchemaVersion, roomKey, roomDirectoryPath, DateTimeOffset.UtcNow, SourceKind, generation,
             sources,
             new RoomRetentionTerminalFact(projected.Status.ToString(), status.State, instant.AtUtc, true),
             expectation, verdicts, usage.Count == 0 ? null : usage,
@@ -486,7 +505,7 @@ public static class RoomRetentionEvidenceStore
     {
         try
         {
-            return ConcurrencyGuard.Acquire(roomDirectoryPath, "room retention evidence");
+            return ConcurrencyGuard.AcquireExisting(roomDirectoryPath, "room retention evidence");
         }
         catch (WorkflowLockedException ex)
         {
@@ -501,17 +520,23 @@ public static class RoomRetentionEvidenceStore
     private static string DetermineExpectation(IReadOnlyList<FlowEvent> events)
     {
         var requests = events.OfType<FlowEvent.ExecutionRequestAccepted>().ToArray();
-        if (requests.Any(request => request.Request.Worker.Contains("unknown", StringComparison.OrdinalIgnoreCase)))
+        if (requests.Any(request => request.Request.ProducedOutputs is null &&
+            !request.Request.Outputs.Any(output => string.Equals(output, "verdict.json", StringComparison.OrdinalIgnoreCase))))
         {
             throw new RoomRetentionEvidenceRefusalException("review expectation is unknown");
         }
 
+        if (requests.Any(request => request.Request.ProducedOutputs?.Any(output =>
+            output.Schema == OutputSchema.ReviewVerdict &&
+            !string.Equals(output.Name, "verdict.json", StringComparison.OrdinalIgnoreCase)) == true))
+            throw new RoomRetentionEvidenceRefusalException("a review verdict uses an unsupported output name");
         return requests.Any(IsReviewRequest) ? ReviewExpectation : NotApplicableExpectation;
     }
 
     private static bool IsReviewRequest(FlowEvent.ExecutionRequestAccepted accepted) =>
-        accepted.Request.Worker.Contains("review", StringComparison.OrdinalIgnoreCase) ||
-        accepted.Request.Outputs.Any(output => string.Equals(output, "verdict.json", StringComparison.OrdinalIgnoreCase));
+        accepted.Request.ProducedOutputs?.Any(output => output.Schema == OutputSchema.ReviewVerdict) == true ||
+        (accepted.Request.ProducedOutputs is null &&
+            accepted.Request.Outputs.Any(output => string.Equals(output, "verdict.json", StringComparison.OrdinalIgnoreCase)));
 
     private static IReadOnlyList<LogEntry> ParseJournal(byte[] bytes)
     {
@@ -574,6 +599,7 @@ public static class RoomRetentionEvidenceStore
         var leaf = LeafPath(record.RoomKey, record.GenerationSha256);
         Directory.CreateDirectory(Path.GetDirectoryName(leaf)!);
         var serialized = JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions);
+        _ = ValidatePublished(serialized, record.RoomKey, record.GenerationSha256);
         if (File.Exists(leaf))
         {
             var existing = ValidatePublished((await ReadSourceAsync(leaf, budget).ConfigureAwait(false)).Bytes,
@@ -659,7 +685,11 @@ public static class RoomRetentionEvidenceStore
             !IsSha256(record.Sources.SnapshotSha256) || !IsSha256(record.Sources.JournalSha256) ||
             !IsSha256(record.Sources.SentinelSha256) ||
             (record.Sources.VerdictsSha256 is not null && !IsSha256(record.Sources.VerdictsSha256)) ||
-            record.Provenance.Any(item => !IsValidProvenance(item)))
+            record.Provenance.Any(item => !IsValidProvenance(item)) ||
+            (record.KnownUsage is not null && record.KnownUsage.Any(item =>
+                item.Value is null || !record.Provenance.Any(source => source.ExecutionId == item.Key))) ||
+            record.Verdicts.Any(item => item.Verdict.ValueKind == JsonValueKind.Undefined ||
+                item.Verdict.ValueKind == JsonValueKind.Null))
         {
             throw new RoomRetentionEvidenceRefusalException("the published leaf has an invalid shape or digest");
         }
@@ -713,7 +743,7 @@ public static class RoomRetentionEvidenceStore
         {
             return Path.IsPathFullyQualified(identity) &&
                 string.Equals(identity, BatonPaths.RecordKey(identity), StringComparison.Ordinal) &&
-                RoomKey(identity) == roomKey;
+                (RoomKey(identity) == roomKey || LegacyRoomKey(identity) == roomKey);
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
@@ -764,7 +794,10 @@ public static class RoomRetentionEvidenceStore
     private static string PayloadDigest(RoomRetentionEvidenceRecord record) =>
         Digest(JsonSerializer.SerializeToUtf8Bytes(record with { PayloadSha256 = null }, JsonOptions));
 
-    private static bool IsSha256(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
+    private static bool IsSha256(string? value) => value?.Length == 64 && value.All(Uri.IsHexDigit);
+
+    private static string LegacyRoomKey(string roomDirectoryPath) =>
+        Digest(Encoding.UTF8.GetBytes(BatonPaths.RecordKey(roomDirectoryPath)));
 
     private static string Digest(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 

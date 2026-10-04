@@ -53,6 +53,25 @@ public sealed class ConcurrencyGuard : IDisposable
         return AcquireCore(roomDirectoryPath, FlowLockFileName, FlowHolderFileName, holderDescription);
     }
 
+    /// <summary>Acquire an already existing flow lock without creating a room or lock file.
+    /// Archive capture uses this when a concurrently removed room must stay removed.</summary>
+    public static ConcurrencyGuard AcquireExisting(string roomDirectoryPath, string? holderDescription = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
+        var lockPath = Path.Combine(roomDirectoryPath, FlowLockFileName);
+        try
+        {
+            var stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            return CreateWithSidecar(stream, roomDirectoryPath, FlowHolderFileName, holderDescription);
+        }
+        catch (IOException ex)
+        {
+            var holder = TryReadHolderInfoCore(roomDirectoryPath, FlowHolderFileName);
+            throw new WorkflowLockedException(BuildLockedMessage(roomDirectoryPath, holder, FlowLockFileName),
+                ex, holder?.HolderDescription, holder?.AcquiredAtUtc);
+        }
+    }
+
     /// <summary>
     /// Acquires the room-events lock for <paramref name="roomDirectoryPath"/>, creating the directory first
     /// if it does not yet exist.
