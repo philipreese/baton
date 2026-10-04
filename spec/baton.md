@@ -8860,6 +8860,12 @@ as-of evidence, not a fresh forge read. The response binds the obligation, repos
 and snapshot digest. A failed worker's dirty checkout is not forced through the manual readiness
 command's clean-workspace contract, and that command's existing validation is not weakened.
 
+For a `MissingVerdict` halt at `Review` or `ReReview`, stopped-work advice asks only whether one
+independent review of a known pull-request head is worth considering to recover a usable source
+verdict; it does not decide source approval, check success, merge readiness or permission to launch.
+Other halt causes and stages retain general advisory meaning, and this conditional judgment remains
+separate from the exact-head recovered-review proof below.
+
 The existing scheduler reconciles retained intents without a new model polling loop. One tracked,
 cancellable advice invocation may be active at a time; a waiting provider does not block worker
 scheduling and never holds the queue mutex. Deterministic opt-in, ownership, source and prompt-limit
