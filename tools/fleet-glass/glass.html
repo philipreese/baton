@@ -1899,6 +1899,7 @@ function streamEventReceiptHtml(e){
   let where = "";
   let status = "success";
   let evidence = "";
+  const obligationIdSuffix = e.obligationId ? ` [${e.obligationId}]` : "";
   const durStr = (ms) => {
     if(ms == null) return "unknown duration";
     const m = Math.round(ms / 60000);
@@ -1945,32 +1946,32 @@ function streamEventReceiptHtml(e){
         : "failure";
       break;
     case "conductorObligationPending":
-      what = `Conductor request pending: ${e.obligationRequestedAction || "request"}`;
+      what = `Conductor request pending${obligationIdSuffix}: ${e.obligationRequestedAction || "request"}`;
       where = "conductor obligation ledger";
       status = "pending";
       break;
     case "conductorObligationSubmitted":
-      what = "Conductor request submitted";
+      what = `Conductor request submitted${obligationIdSuffix}`;
       where = "conductor obligation ledger";
       status = "pending";
       break;
     case "conductorObligationTransportAcknowledged":
-      what = "Conductor request: Transport acknowledged";
+      what = `Conductor request${obligationIdSuffix}: Transport acknowledged`;
       where = "conductor obligation ledger";
       status = "pending";
       break;
     case "conductorObligationActionObserved":
-      what = "Conductor request action observed";
+      what = `Conductor request${obligationIdSuffix}: action observed`;
       where = "conductor obligation ledger";
       status = "success";
       break;
     case "conductorObligationBlocked":
-      what = `Conductor request blocked: ${e.obligationReason || "reason unavailable"}`;
+      what = `Conductor request${obligationIdSuffix} blocked: ${e.obligationReason || "reason unavailable"}`;
       where = "conductor obligation ledger";
       status = "refused";
       break;
     case "conductorObligationUnsupported":
-      what = `Conductor request unsupported: ${e.obligationReason || "reason unavailable"}`;
+      what = `Conductor request${obligationIdSuffix} unsupported: ${e.obligationReason || "reason unavailable"}`;
       where = "conductor obligation ledger";
       status = "refused";
       break;
@@ -2058,6 +2059,13 @@ function retiredTaskForEvents(queue, evts){
       || typeof evidence.at !== "string" || !Number.isFinite(Date.parse(evidence.at))
       || typeof evidence.reason !== "string" || !evidence.reason) return null;
   if(evts.some(e => e && e.issueId != null && e.issueId !== task.issue)) return null;
+  const retirementAt = Date.parse(evidence.at);
+  if(evts.some(e => {
+    const eventAt = e && typeof e.at === "string" ? Date.parse(e.at) : NaN;
+    if(Number.isFinite(eventAt) && eventAt > retirementAt) return true;
+    return e && (e.kind === "attemptStarted" || e.kind === "attemptProgressed")
+      && !Number.isFinite(eventAt);
+  })) return null;
   return row;
 }
 function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
@@ -2140,6 +2148,9 @@ function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
 
     const isCancelled = outcome === "cancelled";
     const isRetained = isSettled || isCancelled || !!retirement;
+    const elapsedEvent = settledEvt || refusedEvt;
+    const elapsedSuffix = elapsedEvent && typeof elapsedEvent.elapsedMilliseconds === "number"
+      ? ` in ${durStr(elapsedEvent.elapsedMilliseconds)}` : "";
 
     // Unknown fields remain visibly unknown
     const workHtml = workId ? `<span class="stream-id-chip">work: ${esc(workId)}</span>` : `<span class="stream-id-chip unknown-field">work: unknown</span>`;
@@ -2148,15 +2159,20 @@ function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
     const prHtml = pullRequestId != null ? `<span class="stream-id-chip">PR #${esc(pullRequestId)}</span>` : `<span class="stream-id-chip unknown-field">PR: unknown</span>`;
     const revHtml = revisionId ? `<span class="stream-id-chip">${esc(revisionId.slice(0, 8))}${revisionKind ? " (" + esc(revisionKind) + ")" : ""}</span>` : `<span class="stream-id-chip unknown-field">revision: unknown</span>`;
     const roleHtml = declaredRole ? `<span class="stream-id-chip">${esc(declaredRole)}${vendor ? " · " + esc(vendor) : ""}</span>` : `<span class="stream-id-chip unknown-field">role: unknown</span>`;
+    const obligationId = evts.slice().reverse().find(e => typeof e.obligationId === "string" && e.obligationId)?.obligationId || null;
+    const obligationAction = evts.slice().reverse().find(e => typeof e.obligationRequestedAction === "string" && e.obligationRequestedAction)?.obligationRequestedAction || null;
+    const obligationReason = evts.slice().reverse().find(e => typeof e.obligationReason === "string" && e.obligationReason)?.obligationReason || null;
+    const identityHtml = obligationGroup
+      ? `<span class="stream-id-chip">obligation: ${esc(obligationId || "unknown")}</span>`
+        + (obligationAction ? `<span class="stream-id-chip">requested: ${esc(obligationAction)}</span>` : "")
+        + (obligationReason ? `<span class="stream-id-chip">reason: ${esc(obligationReason)}</span>` : "")
+      : `${workHtml} ${attemptHtml} ${issueHtml} ${prHtml} ${revHtml} ${roleHtml}`;
 
     let chipClass = "c-run";
     let chipText = "ACTIVE";
     if(obligationGroup){
       chipClass = "c-idle";
       chipText = "REQUEST RECEIPT";
-    } else if(retirement){
-      chipClass = retirement.retirement.kind === "merged" ? "c-ok" : "c-warn";
-      chipText = retirement.retirement.kind === "merged" ? "MERGED (RETAINED)" : "RETIRED (RETAINED)";
     } else if(isCancelled){
       chipClass = "c-idle";
       chipText = "CANCELLED (RETAINED)";
@@ -2169,16 +2185,23 @@ function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
     } else if(outcome === "failed" || outcome === "refused"){
       chipClass = outcome === "refused" ? "c-warn" : "c-bad";
       chipText = (outcome || "FAILED").toUpperCase() + " (RETAINED)";
+    } else if(isSettled){
+      chipClass = "c-warn";
+      chipText = `${(outcome || "TERMINAL").toUpperCase()} (RETAINED)`;
+    } else if(retirement){
+      chipClass = retirement.retirement.kind === "merged" ? "c-ok" : "c-warn";
+      chipText = retirement.retirement.kind === "merged" ? "MERGED (RETAINED)" : "RETIRED (RETAINED)";
     }
 
     let currentAction = "";
     if(obligationGroup){
       currentAction = `Conductor request receipt: ${last.kind}`;
-    } else if(retirement){
-      currentAction = `Retired ${retirement.retirement.kind}`;
     } else if(isSettled){
       currentAction = refusedAdmissionEvt ? `Admission ${refusedAdmissionEvt.admissionDecision}`
-        : `Settled ${outcome || "terminal"}${settledEvt && settledEvt.elapsedMilliseconds ? " in " + durStr(settledEvt.elapsedMilliseconds) : ""}`;
+        : refusedEvt ? `Attempt refused${elapsedSuffix}`
+        : `Settled ${outcome || "terminal"}${elapsedSuffix}`;
+    } else if(retirement){
+      currentAction = `Retired ${retirement.retirement.kind}`;
     } else {
       currentAction = last.kind === "attemptStarted" ? `Started ${declaredRole || "execution"}${vendor ? " on " + vendor : ""}`
         : last.kind === "attemptProgressed" ? "In progress"
@@ -2188,12 +2211,10 @@ function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
     }
 
     let lastResult = "none recorded";
-    if(retirement){
-      lastResult = `Retirement evidence: ${retirement.retirement.kind} · ${retirement.retirement.at} · ${retirement.retirement.reason}`;
-    } else if(settledEvt && settledEvt.outcome){
-      lastResult = `Outcome: ${outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}`;
+    if(settledEvt && settledEvt.outcome){
+      lastResult = `Outcome: ${outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}${elapsedSuffix}`;
     } else if(refusedEvt){
-      lastResult = `Refused: ${refusedEvt.outcomeDetail || refusedEvt.outcome || "missing capability"}`;
+      lastResult = `Refused: ${refusedEvt.outcomeDetail || refusedEvt.outcome || "missing capability"}${elapsedSuffix}`;
     } else if(refusedAdmissionEvt){
       const missing = Array.isArray(refusedAdmissionEvt.missingCapabilities)
         ? refusedAdmissionEvt.missingCapabilities.join(", ") : "no reason recorded";
@@ -2213,16 +2234,24 @@ function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
         }
       }
     }
+    const retirementEvidence = retirement
+      ? `Retirement evidence: ${retirement.retirement.kind} · ${retirement.retirement.at} · ${retirement.retirement.reason}`
+      : "";
+    if(!isSettled && !isCancelled && retirementEvidence) lastResult = retirementEvidence;
+    const retirementHtml = retirement && (isSettled || isCancelled)
+      ? `<div class="stream-card-result"><b>Retirement evidence:</b> ${esc(retirement.retirement.kind)} · ${esc(retirement.retirement.at)} · ${esc(retirement.retirement.reason)}</div>`
+      : "";
 
     const receiptsHtml = evts.map(streamEventReceiptHtml).join("");
 
     const card = `<div class="stream-group-card">`
       + `<div class="stream-group-top">`
-      + `<div class="stream-group-id">${workHtml} ${attemptHtml} ${issueHtml} ${prHtml} ${revHtml} ${roleHtml}</div>`
+      + `<div class="stream-group-id">${identityHtml}</div>`
       + `<span class="chip ${chipClass}">${chipText}</span>`
       + `</div>`
       + `<div class="stream-card-action"><b>Current action:</b> ${esc(currentAction)}</div>`
       + `<div class="stream-card-result"><b>Last meaningful result:</b> ${esc(lastResult)}</div>`
+      + retirementHtml
       + `<details class="stream-receipts-details"><summary>Action Receipts (${evts.length})</summary><div class="stream-receipts">${receiptsHtml}</div></details>`
       + `</div>`;
 

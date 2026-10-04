@@ -555,6 +555,54 @@ check("(control) an unheld queue does not",
   check("transport acknowledgment remains a receipt, not action completion",
         truthfulTail.includes("Transport acknowledged") && !truthfulTail.includes("Action observed"));
 
+  const terminalRetiredAttempts = [
+    { id: 112, workId: "task-2583", attemptId: "attempt-succeeded", issueId: 2583,
+      kind: "attemptSettled", outcome: "Succeeded", outcomeDetail: "published", elapsedMilliseconds: 5000 },
+    { id: 113, workId: "task-2583", attemptId: "attempt-failed", issueId: 2583,
+      kind: "attemptSettled", outcome: "Failed", outcomeDetail: "compiler error", elapsedMilliseconds: 61000 },
+    { id: 114, workId: "task-2583", attemptId: "attempt-cancelled", issueId: 2583,
+      kind: "attemptSettled", outcome: "Cancelled", outcomeDetail: "operator requested", elapsedMilliseconds: 2000 },
+    { id: 115, workId: "task-2583", attemptId: "attempt-indeterminate", issueId: 2583,
+      kind: "attemptSettled", outcome: "Indeterminate", outcomeDetail: "tail ended", elapsedMilliseconds: 3000 },
+    { id: 116, workId: "task-2583", attemptId: "attempt-refused", issueId: 2583,
+      kind: "attemptRefused", outcome: "capacity", outcomeDetail: "runway held", elapsedMilliseconds: 4000 },
+  ];
+  const terminalRetirementHtml = streamGroupedEventsHtml(terminalRetiredAttempts, retiredQueue);
+  check("terminal attempts keep their own outcomes when the overall task was later merged",
+        terminalRetirementHtml.includes("SUCCEEDED") && terminalRetirementHtml.includes("FAILED (RETAINED)")
+        && terminalRetirementHtml.includes("CANCELLED (RETAINED)")
+        && terminalRetirementHtml.includes("INDETERMINATE (RETAINED)")
+        && terminalRetirementHtml.includes("REFUSED (RETAINED)")
+        && !terminalRetirementHtml.includes("MERGED (RETAINED)"));
+  check("terminal attempt details and elapsed times survive later retirement",
+        terminalRetirementHtml.includes("Outcome: failed") && terminalRetirementHtml.includes("compiler error")
+        && terminalRetirementHtml.includes("Settled failed in 1m")
+        && terminalRetirementHtml.includes("operator requested")
+        && terminalRetirementHtml.includes("runway held") && terminalRetirementHtml.includes("5s"));
+
+  const laterAttempts = [
+    ...truncatedRetiredTail.slice(0, 2),
+    { id: 117, workId: "task-2583", attemptId: "attempt-known-later", issueId: 2583,
+      kind: "attemptStarted", at: "2026-09-07T11:00:00Z" },
+    { id: 118, workId: "task-2583", attemptId: "attempt-unknown-later", issueId: 2583,
+      kind: "attemptProgressed", at: "2026-09-07T11:01:00Z" },
+  ];
+  const laterAttemptsHtml = streamGroupedEventsHtml(laterAttempts, retiredQueue);
+  check("known and unknown later attempts remain current despite older retirement evidence",
+        laterAttemptsHtml.includes("Current Work (2)") && laterAttemptsHtml.includes("attempt-known-later")
+        && laterAttemptsHtml.includes("attempt-unknown-later"));
+
+  const receiptHtml = streamGroupedEventsHtml([
+    { id: 119, kind: "conductorObligationPending", obligationId: "obligation-receipt-1",
+      obligationRequestedAction: "Continue work" },
+    { id: 120, kind: "conductorObligationTransportAcknowledged", obligationId: "obligation-receipt-1" },
+  ]);
+  check("request receipt cards show the obligation identity and request fields without worker unknown chips",
+        receiptHtml.includes("obligation: obligation-receipt-1")
+        && receiptHtml.includes("requested: Continue work")
+        && !receiptHtml.includes("work: unknown") && !receiptHtml.includes("attempt: unknown")
+        && !receiptHtml.includes("issue: unknown") && !receiptHtml.includes("PR: unknown"));
+
   const tailOnly = truncatedRetiredTail.slice(0, 2);
   check("without the current queue projection the same tail stays explicitly active/unknown",
         streamGroupedEventsHtml(tailOnly).includes("Current Work (1)")
