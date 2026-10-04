@@ -5366,6 +5366,34 @@ actually deletes something, with the room count and the retention window, on std
 (`ExecuteRoomsRetentionPruneAsync`); a tick that finds nothing eligible stays silent, the same
 once-per-signal posture `RoomRetentionSweep`'s legacy-journal warning already takes.
 
+**Bounded retention evidence is archive-only preparation (#2607).** While that hold remains, the
+automatic wrapper may prepare at most eight old candidates per sweep, bounded by 16 MiB of source
+reads and a 15-second cooperative deadline per sweep, with an 8 MiB and two-second bound per
+attempted room. Discovery remains the cheap sentinel/bindings/metadata selection used by
+`RoomsPruneCommand`; full journals are read only for selected attempts, and failed attempts consume
+their slot and read/deadline budget. A selected attempt acquires the room guard, rechecks keep,
+conductor and terminal projection state, reads a complete snapshot/journal/sentinel and every
+journal-identified verdict-producing review execution under the existing `Baton/Store` projection
+vocabulary, and
+rechecks source identity before publication. Torn, growing, changed, missing, conflicting,
+oversized, malformed, live, held, unknown-expectation, pre-ledger and `Indeterminate` histories
+remain retained and cannot produce a complete leaf. A review verdict is parsed by
+`ReviewVerdictSchema.TryParse`; a journal-proven non-review execution may carry `not-applicable`, but
+absence of a file is not that proof. The leaf is an immutable flushed atomic JSON file outside the
+room, addressed by normalized room-key and generation SHA-256; malformed or conflicting existing
+content is a refusal, never repair or overwrite. It records exact as-of room/source identities,
+terminal fact, source/generation digests (including the ordered execution identities, source paths
+and exact bytes of every selected review verdict), a digest of the complete canonical leaf payload,
+complete validated content for every identified review verdict, and only typed known
+usage/frozen provenance present in the captured evidence. Missing values remain unknown and known
+zero remains zero; this is not a second accounting ledger and raw prompts, stdout, diffs and journal
+dumps are not retained. Process-local cursor and unchanged-source hints are optimization only and
+reset on restart; they never certify equality, terminality, archive validity, deletion authority or
+current settings. The resulting evidence is historical as-of information, not current deletion proof
+and not satisfaction, replacement, weakening or removal of this automatic deletion hold. No event,
+receipt, outbox or retention operational fact is emitted or claimed, and rooms and registry lines
+remain unchanged.
+
 **Standing conductor room and `baton deliver` (#1669).** A standing orchestrator room under `{BATON_HOME}/rooms/conductor/` (`role: conductor` in its `bindings.json` stub) holds deliverables authored directly by an orchestrator rather than a worker subprocess. `baton deliver <file> [--title <text>] [--room <room-dir>]` (`--room-dir` also accepted as an alias for `--room`) copies the file to `<room>/artifacts/conductor/<hash-of-source-path>-<basename>` — the destination filename, hashed off the absolute source path rather than the basename alone so two sources sharing a basename never collide on one on-disk file — and appends/replaces an entry in `<room>/artifacts/conductor/manifest.jsonl` keyed on the absolute `source_path` (`title`, `source_path`, `delivered_at`, `sha256`, `artifact_file`). The manifest is encoded as UTF-8 without BOM; readers tolerate a BOM. Re-delivery replaces the entry and updates the file in place. `pusher.py` reads the destination filename from the manifest's `artifact_file` field, never re-deriving it from the basename. The conductor room is never terminal (has no `terminal.json`), is explicitly excluded from `rooms prune --terminal` candidate discovery, from `room delete` (including `--force`), and from the stall detector — one shared check (`ConductorRoomDetector`, `src/Baton.Cli/ConductorRoomDetector.cs`) decides role for all three call sites, the same resolution `fleet_status` already used, so the definition cannot drift between them. `fleet_status` carries the conductor room's `artifacts_path` so it is visible in the Fleet Glass fleet tab with copyable text, and `pusher.py` scans `manifest.jsonl` to push items to `/deliver` with `kind: conductor` and upsert identity on `source_path`, surfacing them in the Glass inbox with a `CONDUCTOR` chip (newest first). The Fleet Glass conductor card renders a `deliverables →` link filtered to the conductor room along with the count of conductor items in the inbox index (#1677).
 
 ---

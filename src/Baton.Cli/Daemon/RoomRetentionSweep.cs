@@ -23,6 +23,7 @@ public sealed class RoomRetentionSweep : BackgroundService
     /// treats that exactly like an explicit <c>null</c> setting: retention prune stays off.
     /// </summary>
     private readonly DaemonSettings? _settings;
+    private readonly RoomRetentionEvidencePreparer _evidencePreparer = new();
 
     public RoomRetentionSweep()
         : this(settings: null)
@@ -426,11 +427,15 @@ public sealed class RoomRetentionSweep : BackgroundService
     /// What <see cref="ExecuteAsync"/> calls every tick, as opposed to <see cref="ExecuteRoomsRetentionPruneAsync"/>
     /// itself, which stays directly callable — by <c>baton rooms prune --terminal</c> typed by hand, and
     /// by every test exercising the prune mechanics — so <see cref="AutomaticPruneHoldReason"/>'s hold
-    /// closes only the unattended path, never the operator-typed one. Returns 0 without touching
-    /// anything, whether held or whether <see cref="ResolveRoomsRetentionDays"/> resolves to <c>null</c>.
+    /// closes only the unattended path, never the operator-typed one. Returns zero deletions and
+    /// leaves the room and registry unchanged; with configured retention it may publish evidence leaves.
     /// </summary>
-    internal Task<int> ExecuteAutomaticRoomsRetentionPruneAsync(
-        int? roomsRetentionDaysOverride = null)
+    internal Task<int> ExecuteAutomaticRoomsRetentionPruneAsync(int? roomsRetentionDaysOverride = null) =>
+        ExecuteAutomaticRoomsRetentionPruneWithCancellationAsync(roomsRetentionDaysOverride, CancellationToken.None);
+
+    internal Task<int> ExecuteAutomaticRoomsRetentionPruneWithCancellationAsync(
+        int? roomsRetentionDaysOverride,
+        CancellationToken cancellationToken)
     {
         if (ResolveRoomsRetentionDays(roomsRetentionDaysOverride) is null)
         {
@@ -443,7 +448,33 @@ public sealed class RoomRetentionSweep : BackgroundService
             Console.Error.WriteLine($"RoomRetentionSweep: automatic rooms-retention prune is held: {AutomaticPruneHoldReason}.");
         }
 
-        return Task.FromResult(0);
+        return PrepareRetentionEvidenceAsync(roomsRetentionDaysOverride, cancellationToken);
+    }
+
+    private async Task<int> PrepareRetentionEvidenceAsync(int? roomsRetentionDaysOverride, CancellationToken cancellationToken)
+    {
+        var days = ResolveRoomsRetentionDays(roomsRetentionDaysOverride);
+        if (days is null)
+        {
+            return 0;
+        }
+
+        try
+        {
+            await _evidencePreparer.PrepareAsync(BatonPaths.RoomRegistryFile, days.Value, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"RoomRetentionSweep: retention evidence preparation failed: {ex.Message}");
+        }
+
+        // The wrapper remains archive-only and held: no deletion is ever returned from this path.
+        return 0;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -474,7 +505,7 @@ public sealed class RoomRetentionSweep : BackgroundService
                     // #2111: not a direct call to ExecuteRoomsRetentionPruneAsync -- see
                     // AutomaticPruneHoldReason for why the automatic path holds while the direct one
                     // (baton rooms prune --terminal, typed by hand) still runs today.
-                    await ExecuteAutomaticRoomsRetentionPruneAsync().ConfigureAwait(false);
+                    await ExecuteAutomaticRoomsRetentionPruneWithCancellationAsync(null, stoppingToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {

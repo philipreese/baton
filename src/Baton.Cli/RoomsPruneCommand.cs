@@ -1,6 +1,9 @@
 using Baton.Artifacts;
+using Baton.Cli.Daemon;
 using Baton.Status;
 using Baton.Vendors;
+using System.Text;
+using System.Text.Json;
 
 namespace Baton.Cli;
 
@@ -24,7 +27,16 @@ namespace Baton.Cli;
 public static class RoomsPruneCommand
 {
     /// <summary>One terminal room <see cref="RoomsPruneOptions.Terminal"/>'s filters selected.</summary>
-    public sealed record Candidate(string RoomDirectoryPath, string State, DateTime TerminalAtUtc);
+    public sealed record Candidate(
+        string RoomDirectoryPath,
+        string State,
+        DateTime TerminalAtUtc,
+        bool SelectionRefused = false,
+        string? SelectionRefusalReason = null,
+        long SelectionBytes = 0,
+        TimeSpan SelectionElapsed = default);
+
+    internal sealed record RetentionDiscoveryPage(IReadOnlyList<Candidate> Candidates, int NextCursor);
 
     public sealed record Result(
         int DedupedRegistryLines,
@@ -142,5 +154,133 @@ public static class RoomsPruneCommand
         }
 
         return candidates;
+    }
+
+    /// <summary>
+    /// Retention-only discovery. Every byte is captured through the sweep budget; manual prune keeps
+    /// its original reader and behavior. Full workflow journals are opened only for selected rooms.
+    /// </summary>
+    internal static async Task<RetentionDiscoveryPage> DiscoverRetentionCandidatesAsync(
+        string registryFilePath, RoomsPruneOptions options,
+        RoomRetentionEvidenceStore.SweepBudget sweepBudget, CancellationToken cancellationToken,
+        int startCursor = 0)
+    {
+        if (!File.Exists(registryFilePath)) return new RetentionDiscoveryPage([], 0);
+        var registryBudget = RoomRetentionEvidenceStore.DiscoveryBudget(sweepBudget, cancellationToken, registry: true);
+        var registry = await RoomRetentionEvidenceStore.ReadSourceAsync(registryFilePath, registryBudget)
+            .ConfigureAwait(false);
+        if (registry.Bytes.Length > 0 && registry.Bytes[^1] != (byte)'\n')
+            throw new RoomRetentionEvidenceRefusalException("the registry has an incomplete tail");
+        var byRoom = new Dictionary<string, RoomRegistryEntry>(BatonPaths.RecordKeyComparer);
+        foreach (var line in Encoding.UTF8.GetString(registry.Bytes).Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            sweepBudget.Check();
+            RoomRegistryEntry? entry;
+            try { entry = JsonSerializer.Deserialize<RoomRegistryEntry>(line); }
+            catch (JsonException) { continue; }
+            if (entry is null || string.IsNullOrWhiteSpace(entry.RoomPath) || string.IsNullOrWhiteSpace(entry.ProjectRoot))
+                continue;
+            byRoom[entry.RoomPath] = entry;
+        }
+        var entries = byRoom.Values.ToArray();
+        if (entries.Length == 0) return new RetentionDiscoveryPage([], 0);
+        var now = DateTime.UtcNow;
+        var candidates = new List<Candidate>();
+        var cursor = startCursor % entries.Length;
+        var inspected = 0;
+        while (inspected < entries.Length && candidates.Count < RoomRetentionEvidenceLimits.MaxAttemptsPerSweep)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Reserve the bytes needed to verify the registry after selection. A depleted
+            // sweep still returns its advanced cursor.
+            if (sweepBudget.Expired || sweepBudget.Remaining <= registry.Bytes.Length + 64 * 1024)
+                break;
+            var entry = entries[cursor];
+            cursor = (cursor + 1) % entries.Length;
+            inspected++;
+            if (!Directory.Exists(entry.RoomPath)) continue;
+            var roomStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            var terminalPath = Path.Combine(entry.RoomPath, TerminalSentinelWriter.TerminalSentinelFileName);
+            DateTime terminalAtUtc;
+            try
+            {
+                if (!File.Exists(terminalPath)) continue;
+                terminalAtUtc = File.GetLastWriteTimeUtc(terminalPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { continue; }
+
+            if (options.OlderThanDays is { } days && now - terminalAtUtc < TimeSpan.FromDays(days)) continue;
+            var budget = RoomRetentionEvidenceStore.DiscoveryBudget(sweepBudget, cancellationToken,
+                started: roomStarted);
+            try
+            {
+                var sentinel = await RoomRetentionEvidenceStore.ReadSourceAsync(terminalPath, budget,
+                    RoomRetentionEvidenceLimits.MaxSelectionFileBytes).ConfigureAwait(false);
+                if (sentinel.LastWriteUtc != terminalAtUtc)
+                    throw new RoomRetentionEvidenceRefusalException("terminal sentinel changed during selection");
+                if (options.OlderThanDays is { } selectedDays &&
+                    now - sentinel.LastWriteUtc < TimeSpan.FromDays(selectedDays)) continue;
+                WorkflowStatusView? view;
+                try { view = JsonSerializer.Deserialize<WorkflowStatusView>(sentinel.Bytes); }
+                catch (JsonException) { throw new RoomRetentionEvidenceRefusalException("terminal sentinel is malformed"); }
+                if (view is null) throw new RoomRetentionEvidenceRefusalException("terminal sentinel is empty");
+
+                if (Path.GetFileName(Path.TrimEndingDirectorySeparator(entry.RoomPath))
+                    .Equals(ConductorRoomDetector.ConductorRole, StringComparison.OrdinalIgnoreCase) ||
+                    RoomRetentionEvidenceStore.IsPresentOrRefuse(KeepMarker.MarkerFilePath(entry.RoomPath))) continue;
+
+                var bindingsPath = BatonPaths.RoomBindingsFile(entry.RoomPath);
+                if (RoomRetentionEvidenceStore.IsPresentOrRefuse(bindingsPath))
+                {
+                    var bindings = await RoomRetentionEvidenceStore.ReadSourceAsync(bindingsPath, budget,
+                        RoomRetentionEvidenceLimits.MaxSelectionFileBytes).ConfigureAwait(false);
+                    var parsed = WorkerBindingConfigParser.Parse(Encoding.UTF8.GetString(bindings.Bytes), bindingsPath);
+                    if (ConductorRoomDetector.IsConductorRole(ConductorRoomDetector.TryResolveSoleBinding(parsed)))
+                        continue;
+                }
+
+                var metadataPath = Path.Combine(entry.RoomPath, BatonPaths.RoomMetadataFileName);
+                if (RoomRetentionEvidenceStore.IsPresentOrRefuse(metadataPath))
+                {
+                    var metadata = await RoomRetentionEvidenceStore.ReadSourceAsync(metadataPath, budget,
+                        RoomRetentionEvidenceLimits.MaxSelectionFileBytes).ConfigureAwait(false);
+                    using var _ = JsonDocument.Parse(metadata.Bytes);
+                }
+
+                if (options.State is not null && !string.Equals(view.State, options.State, StringComparison.Ordinal)) continue;
+                candidates.Add(new Candidate(entry.RoomPath, view.State, terminalAtUtc,
+                    SelectionBytes: RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes,
+                    SelectionElapsed: System.Diagnostics.Stopwatch.GetElapsedTime(roomStarted)));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or
+                WorkerBindingConfigException or RoomRetentionEvidenceRefusalException)
+            {
+                candidates.Add(new Candidate(entry.RoomPath, "retention-input-refused", terminalAtUtc, true,
+                    $"selection input cannot be proven ({ex.Message})",
+                    RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom - budget.RemainingRoomBytes,
+                    System.Diagnostics.Stopwatch.GetElapsedTime(roomStarted)));
+                if (sweepBudget.Expired || sweepBudget.Remaining <= registry.Bytes.Length + 64 * 1024)
+                    break;
+            }
+        }
+
+        try
+        {
+            var recheck = await RoomRetentionEvidenceStore.ReadSourceAsync(registryFilePath, registryBudget)
+                .ConfigureAwait(false);
+            if (!registry.Bytes.AsSpan().SequenceEqual(recheck.Bytes))
+                throw new RoomRetentionEvidenceRefusalException("the registry changed during discovery");
+        }
+        catch (RoomRetentionEvidenceRefusalException ex)
+        {
+            candidates = candidates.Select(candidate => candidate with
+            {
+                SelectionRefused = true,
+                SelectionRefusalReason = $"registry cannot be proven ({ex.Message})"
+            }).ToList();
+        }
+
+        return new RetentionDiscoveryPage(candidates, cursor);
     }
 }
