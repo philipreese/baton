@@ -30,7 +30,7 @@ if (beginAt < 0 || endAt < 0 || endAt < beginAt) {
   process.exit(1);
 }
 const source = html.slice(html.indexOf("\n", beginAt) + 1, endAt).replace(/^\s*\/\/.*$/gm, "");
-const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueRetiredHistoryHtml", "queueBoardHtml", "streamStatusSummaryHtml", "streamEventReceiptHtml", "streamGroupedEventsHtml", "streamHistoryHtml", "streamHomeHtml"];
+const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueRetiredHistoryHtml", "queueBoardHtml", "streamStatusSummaryHtml", "streamEventReceiptHtml", "streamGroupedEventsHtml", "streamHistoryHtml", "streamHomeHtml", "streamQueueProjection"];
 const missing = REQUIRED.filter(fn => !source.includes(`function ${fn}`));
 if (missing.length) {
   console.error(`glass.selftest.mjs: FAIL -- the marked block no longer defines: ${missing.join(", ")}`);
@@ -123,7 +123,7 @@ check("a valid weekly-only account renders its vendor window without manufacturi
       && !vendorUsageSink.innerHTML.includes("5h"));
 
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
-const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrRowsHtml, queuePrHistoryHtml, queueRetiredHistoryHtml, queueLanesTableHtml, queueBoardHtml, streamStatusSummaryHtml, streamEventReceiptHtml, streamGroupedEventsHtml, streamHistoryHtml, streamHomeHtml } = panel;
+const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrRowsHtml, queuePrHistoryHtml, queueRetiredHistoryHtml, queueLanesTableHtml, queueBoardHtml, streamStatusSummaryHtml, streamEventReceiptHtml, streamGroupedEventsHtml, streamHistoryHtml, streamHomeHtml, streamQueueProjection } = panel;
 
 // -- no board is THREE facts, and each gets its own word (#1912 fix round) --
 // FleetProjectionWriter.BuildQueueSectionAsync's remarks are the register for which state produces
@@ -578,6 +578,7 @@ check("(control) an unheld queue does not",
         terminalRetirementHtml.includes("Outcome: failed") && terminalRetirementHtml.includes("compiler error")
         && terminalRetirementHtml.includes("Settled failed in 1m")
         && terminalRetirementHtml.includes("operator requested")
+        && terminalRetirementHtml.includes("capacity")
         && terminalRetirementHtml.includes("runway held") && terminalRetirementHtml.includes("5s"));
 
   const laterAttempts = [
@@ -619,6 +620,18 @@ check("(control) an unheld queue does not",
   check("a stale queue projection leaves the live tail explicitly active",
         streamHomeHtml({ queue: retiredQueue, projection: { stale: true }, conductorObligations: { available: true, rows: [] } }, tailOnly)
           .includes("Current Work (1)"));
+  for(const [label, overrides] of [
+    ["missing freshness evidence", { derived_at: undefined, projectionStaleAfterSeconds: undefined }],
+    ["invalid freshness threshold", { derived_at: "2026-09-07T11:59:00Z", projectionStaleAfterSeconds: "90" }],
+    ["invalid freshness timestamp", { derived_at: "not-a-timestamp", projectionStaleAfterSeconds: 90 }],
+    ["future freshness timestamp", { derived_at: "2026-09-07T12:01:00Z", projectionStaleAfterSeconds: 90 }],
+  ]){
+    const projection = { queue: retiredQueue, conductorObligations: { available: true, rows: [] }, ...overrides };
+    const stream = streamHomeHtml(projection, tailOnly);
+    const history = streamHistoryHtml(tailOnly, streamQueueProjection(projection));
+    check(`${label} keeps stream and history tails explicitly active`,
+          stream.includes("Current Work (1)") && history.includes("No retained lifecycle history recorded yet."));
+  }
   check("ambiguous duplicate retired task identities remain unknown",
         streamGroupedEventsHtml([{ id: 110, workId: "task-2583", kind: "checkObserved" }],
           { retiredHistory: [retiredTask, { ...retiredTask, tag: "duplicate" }] }).includes("Current Work (1)"));
@@ -626,9 +639,12 @@ check("(control) an unheld queue does not",
         streamGroupedEventsHtml([{ id: 111, workId: "task-2583", kind: "checkObserved" }],
           { retiredHistory: [{ ...retiredTask, task: null }] }).includes("Current Work (1)"));
 
-  const integratedProjection = { queue: retiredQueue, conductorObligations: { available: true, rows: [] } };
+  const integratedProjection = {
+    queue: retiredQueue, derived_at: new Date(Date.now() - 60_000).toISOString(), projectionStaleAfterSeconds: 90,
+    conductorObligations: { available: true, rows: [] },
+  };
   const integratedHome = streamHomeHtml(integratedProjection, truncatedRetiredTail);
-  const integratedHistory = streamHistoryHtml(truncatedRetiredTail, retiredQueue);
+  const integratedHistory = streamHistoryHtml(truncatedRetiredTail, streamQueueProjection(integratedProjection));
   check("actual stream and history callers pass the current queue projection",
         integratedHome.includes("Current Work (0)") && integratedHistory.includes("Retained Lifecycle History · #2200 (1)")
         && html.includes("streamGroupedEventsHtml(fleetEvents, streamQueueProjection(lastGood))")

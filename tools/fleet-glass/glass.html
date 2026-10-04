@@ -2214,7 +2214,7 @@ function streamGroupedEventsHtml(events, queue = null, historyOnly = false){
     if(settledEvt && settledEvt.outcome){
       lastResult = `Outcome: ${outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}${elapsedSuffix}`;
     } else if(refusedEvt){
-      lastResult = `Refused: ${refusedEvt.outcomeDetail || refusedEvt.outcome || "missing capability"}${elapsedSuffix}`;
+      lastResult = `Refused: ${refusedEvt.outcome || "missing capability"}${refusedEvt.outcomeDetail ? " — " + refusedEvt.outcomeDetail : ""}${elapsedSuffix}`;
     } else if(refusedAdmissionEvt){
       const missing = Array.isArray(refusedAdmissionEvt.missingCapabilities)
         ? refusedAdmissionEvt.missingCapabilities.join(", ") : "no reason recorded";
@@ -2296,8 +2296,7 @@ function streamHistoryHtml(events, queue = null){
 function streamQueueProjection(snap){
   if(!snap || !snap.queue || typeof snap.queue !== "object") return null;
   if(snap.projection && snap.projection.stale === true) return null;
-  if(typeof snap.projectionStaleAfterSeconds === "number"
-      && conductorProjectionFreshness(snap) === "stale") return null;
+  if(conductorProjectionFreshness(snap) !== "fresh") return null;
   return snap.queue;
 }
 function streamHomeHtml(snap, events){
