@@ -39,8 +39,8 @@ if (missing.length) {
 
 // The two page-level helpers the block calls, SLICED from glass.html for the same reason the panel
 // itself is (see the header): a hand copy is a second copy, and this one is load-bearing -- the
-// panel's freshness clauses are built on `age` returning the literal word "just now" and null, so a
-// re-typed shim would keep asserting against itself after the page reworded either.
+// panel's displayed age clauses are built on `age` returning the literal word "just now" and null,
+// while projection freshness is tested against the panel's live Date.now() below.
 function sliceOne(pattern, what) {
   const found = [...html.matchAll(pattern)];
   if (found.length !== 1) {
@@ -620,13 +620,23 @@ check("(control) an unheld queue does not",
   check("a stale queue projection leaves the live tail explicitly active",
         streamHomeHtml({ queue: retiredQueue, projection: { stale: true }, conductorObligations: { available: true, rows: [] } }, tailOnly)
           .includes("Current Work (1)"));
-  for(const [label, overrides] of [
-    ["missing freshness evidence", { derived_at: undefined, projectionStaleAfterSeconds: undefined }],
-    ["invalid freshness threshold", { derived_at: "2026-09-07T11:59:00Z", projectionStaleAfterSeconds: "90" }],
-    ["invalid freshness timestamp", { derived_at: "not-a-timestamp", projectionStaleAfterSeconds: 90 }],
-    ["future freshness timestamp", { derived_at: "2026-09-07T12:01:00Z", projectionStaleAfterSeconds: 90 }],
-  ]){
-    const projection = { queue: retiredQueue, conductorObligations: { available: true, rows: [] }, ...overrides };
+  const panelNow = Date.now();
+  const freshProjectionBase = {
+    queue: retiredQueue,
+    derived_at: new Date(panelNow - 60_000).toISOString(),
+    projectionStaleAfterSeconds: 90,
+    conductorObligations: { available: true, rows: [] },
+  };
+  const freshnessCases = [
+    ["missing freshness threshold", (projection) => { delete projection.projectionStaleAfterSeconds; }],
+    ["invalid freshness threshold", (projection) => { projection.projectionStaleAfterSeconds = "90"; }],
+    ["missing freshness timestamp", (projection) => { delete projection.derived_at; }],
+    ["invalid freshness timestamp", (projection) => { projection.derived_at = "not-a-timestamp"; }],
+    ["future freshness timestamp", (projection) => { projection.derived_at = new Date(panelNow + 60_000).toISOString(); }],
+  ];
+  for(const [label, change] of freshnessCases){
+    const projection = { ...freshProjectionBase };
+    change(projection);
     const stream = streamHomeHtml(projection, tailOnly);
     const history = streamHistoryHtml(tailOnly, streamQueueProjection(projection));
     check(`${label} keeps stream and history tails explicitly active`,
@@ -640,8 +650,7 @@ check("(control) an unheld queue does not",
           { retiredHistory: [{ ...retiredTask, task: null }] }).includes("Current Work (1)"));
 
   const integratedProjection = {
-    queue: retiredQueue, derived_at: new Date(Date.now() - 60_000).toISOString(), projectionStaleAfterSeconds: 90,
-    conductorObligations: { available: true, rows: [] },
+    ...freshProjectionBase,
   };
   const integratedHome = streamHomeHtml(integratedProjection, truncatedRetiredTail);
   const integratedHistory = streamHistoryHtml(truncatedRetiredTail, streamQueueProjection(integratedProjection));
