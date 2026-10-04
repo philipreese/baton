@@ -480,8 +480,7 @@ public static class RoomRetentionEvidenceStore
             var existing = ValidatePublished(await ReadBoundedFileAsync(leaf, RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom,
                 Stopwatch.GetTimestamp(), RoomRetentionEvidenceLimits.RoomDeadline, cancellationToken).ConfigureAwait(false),
                 record.RoomKey, record.GenerationSha256);
-            if (!JsonSerializer.SerializeToUtf8Bytes(existing, JsonOptions).AsSpan()
-                .SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions)))
+            if (!EquivalentCapture(existing, record))
             {
                 throw new RoomRetentionEvidenceRefusalException("the authoritative leaf conflicts with this capture");
             }
@@ -514,8 +513,7 @@ public static class RoomRetentionEvidenceStore
                 var existing = ValidatePublished(await ReadBoundedFileAsync(leaf, RoomRetentionEvidenceLimits.MaxSourceBytesPerRoom,
                     Stopwatch.GetTimestamp(), RoomRetentionEvidenceLimits.RoomDeadline, cancellationToken).ConfigureAwait(false),
                     record.RoomKey, record.GenerationSha256);
-                if (!JsonSerializer.SerializeToUtf8Bytes(existing, JsonOptions).AsSpan()
-                    .SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions)))
+                if (!EquivalentCapture(existing, record))
                 {
                     throw new RoomRetentionEvidenceRefusalException("a concurrent authoritative leaf conflicts with this capture");
                 }
@@ -571,6 +569,15 @@ public static class RoomRetentionEvidenceStore
         }
 
         return record;
+    }
+
+    private static bool EquivalentCapture(RoomRetentionEvidenceRecord left, RoomRetentionEvidenceRecord right)
+    {
+        // Capture time is the observation instant, not generation identity. Concurrent/replayed
+        // identical captures therefore converge on the first valid authoritative leaf.
+        var leftBytes = JsonSerializer.SerializeToUtf8Bytes(left with { CapturedAtUtc = default }, JsonOptions);
+        var rightBytes = JsonSerializer.SerializeToUtf8Bytes(right with { CapturedAtUtc = default }, JsonOptions);
+        return leftBytes.AsSpan().SequenceEqual(rightBytes);
     }
 
     private static bool IsSha256(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
