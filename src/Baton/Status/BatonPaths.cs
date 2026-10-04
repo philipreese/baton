@@ -80,6 +80,16 @@ public static class BatonPaths
     public const string ByWorkstreamDirectoryName = "by-workstream";
 
     /// <summary>
+    /// <c>{Root}/fleet/room-retention</c> — immutable, feature-specific as-of evidence for bounded
+    /// room-retention preparation. It is deliberately outside <see cref="Rooms"/> and is not an
+    /// accounting ledger, event log, receipt, or deletion-authority store.
+    /// </summary>
+    public static string RoomRetentionEvidence => Path.Combine(Root, RoomRetentionEvidenceDirectoryName);
+
+    /// <summary>Directory name of <see cref="RoomRetentionEvidence"/> relative to the root.</summary>
+    public const string RoomRetentionEvidenceDirectoryName = "fleet/room-retention";
+
+    /// <summary>
     /// Filename, under a room's <c>.baton</c> directory, of the room marker whose <c>Kind</c> field
     /// distinguishes an interactive-session room from a workflow room. For an interactive room this
     /// file is the serialized session metadata (kind included); for a workflow room it is a minimal

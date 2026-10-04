@@ -1,4 +1,5 @@
 using Baton.Artifacts;
+using Baton.Cli.Daemon;
 using Baton.Status;
 using Baton.Vendors;
 
@@ -24,7 +25,12 @@ namespace Baton.Cli;
 public static class RoomsPruneCommand
 {
     /// <summary>One terminal room <see cref="RoomsPruneOptions.Terminal"/>'s filters selected.</summary>
-    public sealed record Candidate(string RoomDirectoryPath, string State, DateTime TerminalAtUtc);
+    public sealed record Candidate(
+        string RoomDirectoryPath,
+        string State,
+        DateTime TerminalAtUtc,
+        bool SelectionRefused = false,
+        string? SelectionRefusalReason = null);
 
     public sealed record Result(
         int DedupedRegistryLines,
@@ -138,6 +144,71 @@ public static class RoomsPruneCommand
                 continue;
             }
 
+            candidates.Add(new Candidate(entry.RoomPath, view.State, terminalAtUtc));
+        }
+
+        return candidates;
+    }
+
+    /// <summary>
+    /// Read-only candidate discovery shared by the daemon's retention-evidence preparation. This
+    /// intentionally uses the same sentinel/bindings/metadata selection vocabulary as manual prune;
+    /// it does not inspect or replay workflow journals.
+    /// </summary>
+    internal static Task<IReadOnlyList<Candidate>> DiscoverCandidatesAsync(
+        string registryFilePath, RoomsPruneOptions options, CancellationToken cancellationToken) =>
+        FindCandidatesAsync(registryFilePath, options, cancellationToken);
+
+    /// <summary>
+    /// Retention-only discovery. It preserves the manual candidate contract while rejecting oversized
+    /// selection inputs before the existing unbounded helpers are reached. Full workflow journals are
+    /// never opened here; the capture store owns that bounded work after selection.
+    /// </summary>
+    internal static async Task<IReadOnlyList<Candidate>> DiscoverRetentionCandidatesAsync(
+        string registryFilePath, RoomsPruneOptions options, CancellationToken cancellationToken)
+    {
+        var entries = await RoomRegistryStore.ReadDistinctByRoomAsync(registryFilePath, cancellationToken)
+            .ConfigureAwait(false);
+        var now = DateTime.UtcNow;
+        var candidates = new List<Candidate>();
+        foreach (var entry in entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Directory.Exists(entry.RoomPath)) continue;
+
+            var selectionFiles = new[]
+            {
+                Path.Combine(entry.RoomPath, TerminalSentinelWriter.TerminalSentinelFileName),
+                BatonPaths.RoomBindingsFile(entry.RoomPath),
+                Path.Combine(entry.RoomPath, BatonPaths.RoomMetadataFileName),
+            };
+            var oversized = selectionFiles.FirstOrDefault(path =>
+            {
+                try { return File.Exists(path) && new FileInfo(path).Length > RoomRetentionEvidenceLimits.MaxSelectionFileBytes; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
+            });
+
+            var terminalPath = Path.Combine(entry.RoomPath, TerminalSentinelWriter.TerminalSentinelFileName);
+            DateTime terminalAtUtc;
+            try
+            {
+                if (!File.Exists(terminalPath)) continue;
+                terminalAtUtc = File.GetLastWriteTimeUtc(terminalPath);
+            }
+            catch (IOException) { continue; }
+
+            if (options.OlderThanDays is { } days && now - terminalAtUtc < TimeSpan.FromDays(days)) continue;
+            if (oversized is not null)
+            {
+                candidates.Add(new Candidate(entry.RoomPath, "retention-input-refused", terminalAtUtc, true,
+                    $"selection input '{Path.GetFileName(oversized)}' exceeds the bounded discovery size"));
+                continue;
+            }
+
+            if (ConductorRoomDetector.IsConductorRoom(entry.RoomPath) || KeepMarker.IsKept(entry.RoomPath)) continue;
+            var view = await TerminalSentinelWriter.TryReadAsync(entry.RoomPath, cancellationToken).ConfigureAwait(false);
+            if (view is null) continue;
+            if (options.State is not null && !string.Equals(view.State, options.State, StringComparison.Ordinal)) continue;
             candidates.Add(new Candidate(entry.RoomPath, view.State, terminalAtUtc));
         }
 

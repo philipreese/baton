@@ -873,6 +873,64 @@ public class RoomRetentionSweepTests
         }
     }
 
+    [Fact]
+    public async Task AutomaticHeldSweep_CapturesImmutableEvidence_WithoutDeletingRoomOrRegistry()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "baton_retention_evidence_test_" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(tempRoot);
+        var registryPath = BatonPaths.RoomRegistryFile;
+        var registryExisted = File.Exists(registryPath);
+        var registryBefore = registryExisted
+            ? await File.ReadAllTextAsync(registryPath, TestContext.Current.CancellationToken)
+            : null;
+        string? roomDir = null;
+        try
+        {
+            roomDir = await CreateTerminalRoomWithArtifactsAsync(tempRoot, "old-room", new ExecutionId("exec-evidence"));
+            var terminalSentinelPath = await WriteRoomTerminalSentinelAsync(roomDir);
+            File.SetLastWriteTimeUtc(terminalSentinelPath, DateTime.UtcNow.AddDays(-15));
+            await Baton.Vendors.RoomRegistryStore.AppendAsync(
+                roomDir, tempRoot, registryPath, explicitRegister: true, cancellationToken: TestContext.Current.CancellationToken);
+
+            var sweep = new RoomRetentionSweep(new Baton.Vendors.DaemonSettings { RoomsRetentionDays = 14 });
+            var result = await sweep.ExecuteAutomaticRoomsRetentionPruneAsync();
+
+            Assert.Equal(0, result);
+            Assert.True(Directory.Exists(roomDir));
+            var roomKey = RoomRetentionEvidenceStore.RoomKey(roomDir);
+            var leaves = Directory.Exists(Path.Combine(BatonPaths.RoomRetentionEvidence, roomKey))
+                ? Directory.GetFiles(Path.Combine(BatonPaths.RoomRetentionEvidence, roomKey), "*.json")
+                : [];
+            var leafPath = Assert.Single(leaves);
+            var generation = Path.GetFileNameWithoutExtension(leafPath);
+            var evidence = await RoomRetentionEvidenceStore.ReadAsync(roomKey, generation, TestContext.Current.CancellationToken);
+            Assert.NotNull(evidence);
+            Assert.Equal(RoomRetentionEvidenceStore.NotApplicableExpectation, evidence.VerdictExpectation);
+            Assert.True(evidence.Terminal.IsTerminal);
+        }
+        finally
+        {
+            if (roomDir is not null)
+            {
+                await Baton.Vendors.RoomRegistryStore.RemoveByRoomPathAsync(
+                    registryPath, roomDir, TestContext.Current.CancellationToken);
+                DirectoryCleanup.DeleteRecursively(roomDir);
+                DirectoryCleanup.DeleteRecursively(Path.Combine(BatonPaths.RoomRetentionEvidence, RoomRetentionEvidenceStore.RoomKey(roomDir)));
+            }
+
+            if (registryExisted && registryBefore is not null)
+            {
+                await File.WriteAllTextAsync(registryPath, registryBefore, TestContext.Current.CancellationToken);
+            }
+            else
+            {
+                FileCleanup.Delete(registryPath);
+            }
+
+            DirectoryCleanup.DeleteRecursively(tempRoot);
+        }
+    }
+
     private static async Task<string> WriteRoomTerminalSentinelAsync(string roomDir)
     {
         var view = new Baton.Status.WorkflowStatusView(Baton.Status.WorkflowOutcome.Succeeded, [], [], null);
