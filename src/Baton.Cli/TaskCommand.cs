@@ -42,6 +42,10 @@ public static class TaskCommand
             return 0;
         }
 
+        var scopeClass = TaskSubmissionInput.NormalizeScopeClass(options.ScopeClass);
+        TaskSubmissionInput.ValidateScopeAndReason(
+            scopeClass, options.Adapter, options.Model, options.Effort, options.Reason);
+
         var project = Path.GetFullPath(options.Project!);
         if (!Directory.Exists(project)) throw new CliArgumentException($"Project '{project}' does not exist.");
         if (options.Spec is { } spec && !File.Exists(spec))
@@ -61,9 +65,11 @@ public static class TaskCommand
                 Adapter = options.Adapter,
                 Model = options.Model,
                 Effort = options.Effort,
+                Reason = options.Reason,
             };
         var digest = ComputeInputDigest(
-            identity.Value, issue, options.Size!.Value, options.Spec is null ? null : specBytes, selection);
+            identity.Value, issue, options.Size!.Value, options.Spec is null ? null : specBytes, selection,
+            scopeClass, options.Reason);
         var existing = (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
             .Items.FirstOrDefault(item => item.OwnedTask?.Id == id);
         if (existing is not null)
@@ -84,6 +90,7 @@ public static class TaskCommand
         var queueOptions = new QueueOptions(QueueVerb.Add, Tag: id, Role: "implement",
             SpecFilePath: options.Spec, Issue: issue, Lifecycle: true,
             DeclaredTaskSize: options.Size, Requirements: [],
+            ScopeClass: scopeClass,
             StageSelections: selection is null ? null : [selection]);
 
         // QueueCommand owns the shared locked reservation and the exact existing provisioning path.
@@ -113,21 +120,47 @@ public static class TaskCommand
     }
 
     /// <summary>
-    /// No-selection submissions preserve the exact historical newline-header preimage (legacy
-    /// digest/idempotency fixtures depend on these exact bytes). A selected submission instead uses a
-    /// distinct, domain-separated, typed/length-delimited encoding of the complete explicit input —
-    /// never suffixed onto the ambiguous legacy header, so a delimiter/newline/spec-marker byte inside
-    /// a rationale or spec cannot alias two different submissions onto the same digest.
+    /// Submissions with no scope, reason, or worker selection preserve the exact historical
+    /// newline-header preimage (legacy digest/idempotency fixtures depend on these exact bytes).
+    /// Selection-only submissions use the selected-input-v1 domain; submissions with a scope or
+    /// reason use the scoped-input-v1 domain. Both newer domains are distinct, typed, and
+    /// length-delimited encodings of the complete explicit input — never suffixes onto the ambiguous
+    /// legacy header, so a delimiter/newline/spec-marker byte inside a rationale or spec cannot alias
+    /// two different submissions onto the same digest.
     /// </summary>
     internal static string ComputeInputDigest(
-        string repository, int issue, TaskSizeDeclaration size, byte[]? specBytes, QueueStageSelection? selection)
+        string repository, int issue, TaskSizeDeclaration size, byte[]? specBytes, QueueStageSelection? selection,
+        string? scopeClass = null, string? reason = null)
     {
-        if (selection is null)
+        var effectiveReason = reason ?? selection?.Reason;
+        if (scopeClass is null && effectiveReason is null && selection is null)
         {
             var explicitHeader = $"{repository}\n{issue}\n{size.Size}\n{size.Rationale}\n"
                 + (specBytes is null ? "no-spec\n" : "spec\n");
             return Convert.ToHexString(SHA256.HashData([
                 .. Encoding.UTF8.GetBytes(explicitHeader), .. (specBytes ?? [])])).ToLowerInvariant();
+        }
+
+        if (scopeClass is not null || effectiveReason is not null)
+        {
+            var scopedBuffer = new List<byte>();
+            AppendField(scopedBuffer, Encoding.UTF8.GetBytes(ScopedInputDomain));
+            AppendField(scopedBuffer, Encoding.UTF8.GetBytes(repository));
+            AppendField(scopedBuffer, Encoding.UTF8.GetBytes(issue.ToString(CultureInfo.InvariantCulture)));
+            AppendField(scopedBuffer, Encoding.UTF8.GetBytes(size.Size.ToString()));
+            AppendOptionalField(scopedBuffer, size.Rationale is null ? null : Encoding.UTF8.GetBytes(size.Rationale));
+            AppendOptionalField(scopedBuffer, specBytes);
+            AppendOptionalField(scopedBuffer, selection?.Adapter is { } adapter
+                ? Encoding.UTF8.GetBytes(adapter) : null);
+            AppendOptionalField(scopedBuffer, selection?.Model is { } model
+                ? Encoding.UTF8.GetBytes(model) : null);
+            AppendOptionalField(scopedBuffer, selection?.Effort is { } effort
+                ? Encoding.UTF8.GetBytes(effort) : null);
+            AppendOptionalField(scopedBuffer, scopeClass is { } scope
+                ? Encoding.UTF8.GetBytes(scope) : null);
+            AppendOptionalField(scopedBuffer, effectiveReason is { } rationale
+                ? Encoding.UTF8.GetBytes(rationale) : null);
+            return Convert.ToHexString(SHA256.HashData(scopedBuffer.ToArray())).ToLowerInvariant();
         }
 
         var buffer = new List<byte>();
@@ -137,7 +170,7 @@ public static class TaskCommand
         AppendField(buffer, Encoding.UTF8.GetBytes(size.Size.ToString()));
         AppendOptionalField(buffer, size.Rationale is null ? null : Encoding.UTF8.GetBytes(size.Rationale));
         AppendOptionalField(buffer, specBytes);
-        AppendOptionalField(buffer, selection.Adapter is null ? null : Encoding.UTF8.GetBytes(selection.Adapter));
+        AppendOptionalField(buffer, selection!.Adapter is null ? null : Encoding.UTF8.GetBytes(selection.Adapter));
         AppendOptionalField(buffer, selection.Model is null ? null : Encoding.UTF8.GetBytes(selection.Model));
         AppendOptionalField(buffer, selection.Effort is null ? null : Encoding.UTF8.GetBytes(selection.Effort));
         return Convert.ToHexString(SHA256.HashData(buffer.ToArray())).ToLowerInvariant();
@@ -146,6 +179,9 @@ public static class TaskCommand
     // "v1" of the selected-submission domain. Bumping this value is the only way the encoding below
     // may ever change shape; a version bump is itself a new domain, never a mutation of this one.
     private const string SelectedInputDomain = "baton-task-selected-input-v1";
+
+    // New scope/reason (--reason) fields use a new domain so selected-input-v1 remains byte-for-byte stable.
+    private const string ScopedInputDomain = "baton-task-scoped-input-v1";
 
     /// <summary>A present, always-required field: a 1-byte present tag, a 4-byte big-endian length,
     /// then the bytes. The length prefix is what makes two fields' boundary unambiguous regardless of

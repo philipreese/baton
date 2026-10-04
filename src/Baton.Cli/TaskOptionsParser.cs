@@ -1,4 +1,5 @@
 using Baton.Domain;
+using Baton.Queue;
 
 namespace Baton.Cli;
 
@@ -14,14 +15,16 @@ public sealed record TaskOptions(
     bool Json = false,
     string? Adapter = null,
     string? Model = null,
-    string? Effort = null);
+    string? Effort = null,
+    string? ScopeClass = null,
+    string? Reason = null);
 
 public static class TaskOptionsParser
 {
     public const string Usage =
         "baton task submit --issue <number> --project <repository-directory> "
         + "--declared-size <small|medium|large|unknown> --size-rationale <clause> [--spec <file>] "
-        + "[--adapter <name>] [--model <name>] [--effort <name>]\n"
+        + "[--scope <engine|tooling|docs>] [--adapter <name>] [--model <name>] [--effort <name>] [--reason <why>]\n"
         + "       baton task status <task-id> [--json]";
 
     public static TaskOptions Parse(IReadOnlyList<string> args)
@@ -38,13 +41,14 @@ public static class TaskOptionsParser
 
         if (args[0] != "submit") throw new CliArgumentException(Usage);
         int? issue = null;
-        string? project = null, size = null, rationale = null, spec = null, adapter = null, model = null, effort = null;
+        string? project = null, size = null, rationale = null, spec = null, adapter = null, model = null, effort = null,
+            scope = null, reason = null;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 1; i < args.Count; i++)
         {
             var flag = args[i];
             if (flag is not ("--issue" or "--project" or "--declared-size" or "--size-rationale" or "--spec"
-                    or "--adapter" or "--model" or "--effort")
+                    or "--scope" or "--adapter" or "--model" or "--effort" or "--reason")
                 || !seen.Add(flag) || ++i == args.Count || string.IsNullOrWhiteSpace(args[i]))
                 throw new CliArgumentException(Usage);
             switch (flag)
@@ -58,14 +62,19 @@ public static class TaskOptionsParser
                 case "--declared-size": size = args[i]; break;
                 case "--size-rationale": rationale = args[i]; break;
                 case "--spec": spec = args[i]; break;
+                case "--scope": scope = args[i]; break;
                 case "--adapter": adapter = args[i]; break;
                 case "--model": model = args[i]; break;
                 case "--effort": effort = args[i]; break;
+                case "--reason": reason = args[i]; break;
             }
         }
 
         if (issue is null || project is null || size is null || rationale is null)
             throw new CliArgumentException(Usage);
+
+        scope = TaskSubmissionInput.NormalizeScopeClass(scope);
+        TaskSubmissionInput.ValidateScopeAndReason(scope, adapter, model, effort, reason);
 
         TaskSizeDeclaration declaration;
         if (string.Equals(size, "unknown", StringComparison.OrdinalIgnoreCase))
@@ -79,6 +88,32 @@ public static class TaskOptionsParser
             catch (ArgumentException ex) { throw new CliArgumentException(ex.Message); }
         }
         return new TaskOptions(TaskVerb.Submit, issue, project, declaration, spec,
-            Adapter: adapter, Model: model, Effort: effort);
+            Adapter: adapter, Model: model, Effort: effort, ScopeClass: scope, Reason: reason);
+    }
+}
+
+internal static class TaskSubmissionInput
+{
+    internal static string? NormalizeScopeClass(string? scopeClass)
+    {
+        if (scopeClass is null)
+            return null;
+
+        var normalized = scopeClass.Trim().ToLowerInvariant();
+        if (!QueueTierTable.ScopeClasses.Contains(normalized, StringComparer.Ordinal))
+            throw new CliArgumentException(
+                $"Unknown scope class '{scopeClass}'. Pass one of: {string.Join(", ", QueueTierTable.ScopeClasses)}.");
+        return normalized;
+    }
+
+    internal static void ValidateScopeAndReason(
+        string? scopeClass, string? adapter, string? model, string? effort, string? reason)
+    {
+        var hasImplementationAxis = adapter is not null || model is not null || effort is not null;
+        if (reason is not null && (scopeClass is null || !hasImplementationAxis))
+            throw new CliArgumentException("'--reason' requires '--scope' and at least one explicit implement axis.");
+        if (scopeClass is not null && hasImplementationAxis && string.IsNullOrWhiteSpace(reason))
+            throw new CliArgumentException(
+                "An explicit adapter, model or effort combined with '--scope' requires a non-blank '--reason'.");
     }
 }
