@@ -121,7 +121,7 @@ public class WorkerRoleCatalogTests
 
         var implement = WorkerRoleCatalog.For("implement");
         Assert.Equal("codex", implement.Adapter);
-        Assert.Equal("gpt-5.6-sol", implement.Model);
+        Assert.Equal("gpt-6.1-sol", implement.Model);
         Assert.Equal("medium", implement.Effort);
         Assert.True(implement.Grant.RunShellCommands);
         // #1355: network stays granted here -- a CATEGORICAL RunShellCommands grant without

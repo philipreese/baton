@@ -54,7 +54,7 @@ public class DecideCommandEndToEndTests
     }
 
     [Fact]
-    public async Task Deciding_with_an_omitted_Codex_model_refuses_before_mutating_or_launching()
+    public async Task Deciding_with_an_explicit_Codex_conductor_model_refuses_before_mutating_or_launching()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-decide-conductor-model-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
@@ -82,7 +82,7 @@ public class DecideCommandEndToEndTests
                     WriteFileCommand("out_a", "a-out"), TimeSpan.FromSeconds(30)),
                 ["b"] = new WorkerBindingConfigEntry(
                     "codex", new WorkerContract("b", ["out_a"], [new ProducedOutput("out_b")], []),
-                    "must not launch", TimeSpan.FromSeconds(30)),
+                    "must not launch", TimeSpan.FromSeconds(30), Model: "gpt-6-astra"),
             };
             await File.WriteAllTextAsync(
                 bindingsFilePath, JsonSerializer.Serialize(conductorConfig), TestContext.Current.CancellationToken);

@@ -45,13 +45,13 @@ public sealed class OwnedTaskJourneyTests
             "claude", "opus", "low", "claude", "opus", "high", "claude", "opus", "high",
             "low", "explicit implement effort")],
         [new ScopeCase("Tooling", "tooling", "tooling", "review-tooling",
-            "codex", "gpt-5.6-sol", "medium", "codex", "gpt-5.6-sol", "high", "codex", "gpt-5.6-sol", "medium",
+            "codex", "gpt-6.1-sol", "medium", "codex", "gpt-5.6-sol", "high", "codex", "gpt-6.1-sol", "medium",
             null, null)],
         [new ScopeCase("Docs", "docs", "docs", "review-docs",
             "claude", "opus", "medium", "codex", "gpt-5.6-sol", "high", "claude", "opus", "medium",
             null, null)],
         [new ScopeCase(null, null, null, null,
-            "codex", "gpt-5.6-sol", "medium", "claude", "opus", "high", "codex", "gpt-5.6-sol", "medium",
+            "codex", "gpt-6.1-sol", "medium", "claude", "opus", "high", "codex", "gpt-6.1-sol", "medium",
             null, null)],
     ];
 

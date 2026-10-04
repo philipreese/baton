@@ -90,7 +90,7 @@ public sealed class QueueSchedulerServiceTests
             await service.TickOnceAsync(Ct);
             var launch = Assert.Single(launches);
             Assert.Equal("good", launch.Item.Tag);
-            Assert.Equal(("codex", "gpt-5.6-sol", "medium"),
+            Assert.Equal(("codex", "gpt-6.1-sol", "medium"),
                 (launch.Tier.Adapter, launch.Tier.Model, launch.Tier.Effort));
             var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
             Assert.Equal(QueueItemState.Launched, items[1].State);

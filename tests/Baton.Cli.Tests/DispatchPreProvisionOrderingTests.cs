@@ -320,7 +320,7 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
     }
 
     [Fact]
-    public async Task An_unpinned_codex_dispatch_refuses_its_recorded_Astra_default_before_room_creation()
+    public async Task An_unpinned_codex_dispatch_uses_its_measured_default_before_provisioning()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-codex-default-{Guid.NewGuid():N}");
         try
@@ -329,11 +329,14 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
             // drops that tier's vendor-specific model and reaches Codex's unpinned default.
             var options = (await BuildDispatchAsync(testRoot)) with { Name = "review", Adapter = "codex" };
 
-            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
-                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit));
+            await DispatchCommand.ExecuteAsync(
+                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit);
 
-            Assert.Contains("Astra is conductor-only", refusal.Message, StringComparison.Ordinal);
-            Assert.False(Directory.Exists(options.RoomDirectoryPath));
+            var binding = Assert.Single(await WorkerBindingConfigParser.LoadFromFileAsync(
+                BatonPaths.RoomBindingsFile(options.RoomDirectoryPath), TestContext.Current.CancellationToken)).Value;
+            Assert.Equal("gpt-6.1-sol", binding.ModelResolved);
+            Assert.Null(binding.EffortResolved);
+            Assert.True(Directory.Exists(options.RoomDirectoryPath));
         }
         finally
         {

@@ -35,7 +35,7 @@ public sealed class QueueTierTableTests
     /// per-axis rule.
     /// </summary>
     private static Func<string, QueueTierSettings?> NamedTiers(
-        string adapter = "codex", string model = "gpt-5.6-sol", string effort = "medium") =>
+        string adapter = "codex", string model = "gpt-6.1-sol", string effort = "medium") =>
         name => string.Equals(name, "standard", StringComparison.Ordinal)
             ? new QueueTierSettings { Tier = name, Adapter = adapter, Model = model, Effort = effort }
             : null;
@@ -81,7 +81,7 @@ public sealed class QueueTierTableTests
             Item("implement", "tooling"), new QueueSettings(),
             NamedTiers(adapter: "claude", model: "opus", effort: "low"), NoNamedTiers);
 
-        Assert.Equal(("codex", "gpt-5.6-sol", "medium"), (shipped.Adapter, shipped.Model, shipped.Effort));
+        Assert.Equal(("codex", "gpt-6.1-sol", "medium"), (shipped.Adapter, shipped.Model, shipped.Effort));
         Assert.Equal(("claude", "opus", "low"), (moved.Adapter, moved.Model, moved.Effort));
         // Following a tier is not departing from one: the item asked for nothing.
         Assert.False(shipped.IsOverride);
@@ -119,7 +119,7 @@ public sealed class QueueTierTableTests
         var resolved = QueueTierTable.Resolve(Item("implement", "tooling"), settings, NamedTiers(), NoNamedTiers);
 
         Assert.Equal("codex", resolved.Adapter);
-        Assert.Equal("gpt-5.6-sol", resolved.Model);
+        Assert.Equal("gpt-6.1-sol", resolved.Model);
         Assert.Equal("high", resolved.Effort);
     }
 
@@ -221,7 +221,7 @@ public sealed class QueueTierTableTests
     /// #1927: this table is a deliberate SUBSET of <c>AdapterDefaultModels.Shipped</c>, and the arm
     /// that keeps it one. That type gained a codex entry so a room can DISPLAY what codex will run;
     /// this table's value becomes the CLI's own <c>--model</c>, and naming codex's default here would
-    /// start passing a frozen 2026-09-04 reading as a flag — see <c>ShippedAdapterDefaultModels</c>'s
+    /// start passing a frozen 2026-10-04 reading as a flag — see <c>ShippedAdapterDefaultModels</c>'s
     /// own remarks. The agy arm above is the control: the two adapters must NOT resolve alike here,
     /// which is exactly what a future "just use the shared table" edit would make them do.
     /// </summary>
@@ -254,10 +254,10 @@ public sealed class QueueTierTableTests
             Item(),
             new QueueSettings(),
             NoNamedTiers,
-            _ => new QueueTierSettings { Adapter = "codex", Model = "gpt-6-astra", Effort = "medium" });
+            _ => new QueueTierSettings { Adapter = "codex", Model = "gpt-6.1-sol", Effort = "medium" });
 
         Assert.Null(resolved.TierKey);
-        Assert.Equal(("codex", "gpt-6-astra", "medium"), (resolved.Adapter, resolved.Model, resolved.Effort));
+        Assert.Equal(("codex", "gpt-6.1-sol", "medium"), (resolved.Adapter, resolved.Model, resolved.Effort));
         Assert.False(resolved.IsOverride);
     }
 
@@ -313,7 +313,7 @@ public sealed class QueueTierTableTests
             defaults, WorkStage.Review, new QueueSettings(), NamedTiers(), NoNamedTiers);
 
         Assert.Equal(QueueSelectionSource.StageDefault, implement.SelectionSource);
-        Assert.Equal(("codex", "gpt-5.6-sol", "medium"), (implement.Adapter, implement.Model, implement.Effort));
+        Assert.Equal(("codex", "gpt-6.1-sol", "medium"), (implement.Adapter, implement.Model, implement.Effort));
         Assert.Equal(QueueSelectionSource.StageDefault, review.SelectionSource);
         Assert.Equal(("codex", "gpt-5.6-sol", "high"), (review.Adapter, review.Model, review.Effort));
 

@@ -590,7 +590,7 @@ public class RoleDispatchTests
     // A vendor swap drops the tier's model, so the vendor's own measured CLI default answers -- the
     // exact dispatch shape that produced the bare vendor.
     [InlineData("agy", "gemini-3.8-flash-high")]
-    [InlineData("codex", "gpt-6-astra")]
+    [InlineData("codex", "gpt-6.1-sol")]
     public void A_dispatch_with_no_model_records_the_model_it_resolved_and_says_it_was_resolved(
         string? adapterOverride, string expectedModel)
     {

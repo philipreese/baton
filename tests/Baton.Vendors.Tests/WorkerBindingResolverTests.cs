@@ -455,17 +455,30 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
-    public void The_pre_provision_admission_check_refuses_the_Codex_default()
+    public void The_pre_provision_admission_check_keeps_the_measured_Codex_default_admissible()
     {
         var config = new Dictionary<string, WorkerBindingConfigEntry>
         {
             ["architect"] = new WorkerBindingConfigEntry("codex", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(5)),
         };
+        WorkerBindingResolver.RefuseConductorOnlyWorkerModels(config);
+        Assert.Equal("gpt-6.1-sol", AdapterDefaultModels.For("codex"));
+    }
+
+    [Fact]
+    public void The_pre_provision_admission_check_refuses_an_unsafe_resolved_Codex_model_without_a_request()
+    {
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["architect"] = new WorkerBindingConfigEntry(
+                "codex", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(5),
+                ModelResolved: "gpt-6-astra"),
+        };
+
         var ex = Assert.Throws<ConductorOnlyWorkerModelException>(
             () => WorkerBindingResolver.RefuseConductorOnlyWorkerModels(config));
 
-        Assert.Equal("architect", ex.WorkerName);
-        Assert.Contains("Astra is conductor-only", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Astra", ex.Message, StringComparison.Ordinal);
         Assert.Null(ex.TryInvocation);
     }
 

@@ -438,9 +438,10 @@ The role's positional shell denies are defense in depth, not a categorical no-sh
 mechanically enforced boundary would require.
 
 Each tier pins one vendor, model and effort in
-[`src/Baton.Vendors/WorkerTiers.json`](../src/Baton.Vendors/WorkerTiers.json). The shipped pins are the
-operator's ruling of 2026-09-06 (#1863), taken after two independent role-by-role reads posted on that
-issue the same evening — a codex `gpt-5.6-sol` high read at 16:47–16:56 ET and an agy
+[`src/Baton.Vendors/WorkerTiers.json`](../src/Baton.Vendors/WorkerTiers.json). The shipped pins retain
+the operator's 2026-09-06 ruling (#1863), with the `standard` pin refreshed from the 2026-10-04
+recorded Codex catalog (#2609). The original ruling was taken after two independent role-by-role reads
+posted on that issue the same evening — a codex `gpt-5.6-sol` high read at 16:47–16:56 ET and an agy
 `gemini-3.8-flash-high` read at 16:55–16:58 ET, neither reader having seen the other. Every quality and
 step figure cited below is a row of
 [`benchmarks/deepswe/2026-09-05`](../benchmarks/deepswe/2026-09-05/README.md) — read the row rather than
@@ -451,12 +452,12 @@ own weighting, which no vendor publishes.
 - **`frontier` — claude opus, high.** Unmoved, and the one pin both reads agreed on: the
   `claude-opus-5`/`high` row. Engine work does not move.
 <!-- record-once-ok: #2233 src/Baton.Vendors/WorkerTiers.json -->
-- **`standard` — codex `gpt-5.6-sol`, medium.** Astra is conductor-only and cannot be selected for a
+- **`standard` — codex `gpt-6.1-sol`, medium.** Astra is conductor-only and cannot be selected for a
   worker lane; `standard` therefore uses the lower worker model for tooling-shaped implement work. It
   still spends a separate subscription pool:
   [`benchmarks/subscription-usage/2026-09-04`](../benchmarks/subscription-usage/2026-09-04/README.md)
   attributes an early weekly Claude exhaustion to fleet volume with cache re-reads as the amplifier, so
-  moving bounded implement work off claude is the point of the change as much as the score is. `advise`
+  moving bounded implement work off claude is the point of the change. `advise`
   rides this tier too, so it moves vendor with it. One consequence is settled and worth stating, because
   #1861's move in the other direction changed it: `advise` still runs **enforced against the caller's own
   directory** rather than audited in a provisioned worktree, because `RoleDispatch`'s audited-worktree
