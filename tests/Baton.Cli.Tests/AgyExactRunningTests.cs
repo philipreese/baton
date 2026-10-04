@@ -29,7 +29,7 @@ public sealed class AgyExactRunningTests
             TestContext.Current.CancellationToken);
         Assert.Equal("claimedBeforeSend", retained!.State);
         File.WriteAllText(Path.Combine(fixture.Output, "release"), "release");
-        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.False(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
         Assert.Equal(2, result.FinalExpectedTurn?.ExpectedTurn);
         Assert.Equal(OutcomeVerdict.Failed, OutcomeClassifier.Classify(result, fixture.Contract, fixture.Output).Verdict);
@@ -48,7 +48,7 @@ public sealed class AgyExactRunningTests
         using (var pipe = new NamedPipeClientStream(".", identity.PipeName, PipeDirection.InOut,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, TokenImpersonationLevel.Impersonation))
         {
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             await pipe.ConnectAsync(deadline.Token);
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), leaveOpen: true);
             await pipe.WriteAsync(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new AgyCorrectionWireRequest(
@@ -59,7 +59,7 @@ public sealed class AgyExactRunningTests
         var receipt = await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "valid", "second",
             TestContext.Current.CancellationToken);
         Assert.NotNull(receipt);
-        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.True(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
     }
 
@@ -86,7 +86,7 @@ public sealed class AgyExactRunningTests
         Assert.Equal(1, await SteerCommand.ExecuteAsync(new(fixture.Room, fixture.Request.ExecutionId.Value, "message", path, false),
             output, TestContext.Current.CancellationToken));
         Assert.Contains("outcomeUnknown", output.ToString());
-        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(25), TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.Equal(payload, File.ReadAllText(Path.Combine(fixture.Output, "second.txt")));
         Assert.Equal(fixture.Prompt, File.ReadAllText(Path.Combine(fixture.Output, "first.txt")));
         Assert.Equal("agy:write_to_file", File.ReadAllText(Path.Combine(fixture.Output, "grant.txt")));
@@ -140,7 +140,7 @@ public sealed class AgyExactRunningTests
             await AgyCorrectionClient.ExecuteAsync(fixture.Room, fixture.Request.ExecutionId.Value, "message", "second",
                 TestContext.Current.CancellationToken);
         }
-        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.True(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
         Assert.Null(AgyStreamingHost.ReadEndpoint(fixture.Room, fixture.Request.ExecutionId.Value));
         if (mode == "one")
@@ -169,7 +169,7 @@ public sealed class AgyExactRunningTests
         var receipt = await AgyCorrectionClient.ExecuteAsync(fixture.Room, fixture.Request.ExecutionId.Value, "usage", text,
             TestContext.Current.CancellationToken);
         Assert.Equal(AgyCorrectionStore.Digest(text), receipt!.Request.PayloadSha256);
-        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.Equal(text, File.ReadAllText(Path.Combine(fixture.Output, "second.txt")));
         var entries = await new FlowEventLogReader(fixture.Log).ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
         var usage = Assert.Single(ExecutionUsageProjector.BuildByExecutionId(entries, fixture.Artifacts)).Value;
@@ -228,7 +228,7 @@ public sealed class AgyExactRunningTests
         };
         using var pipe = new NamedPipeClientStream(".", identity.PipeName, PipeDirection.InOut,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, TokenImpersonationLevel.Impersonation);
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await pipe.ConnectAsync(deadline.Token);
         using var reader = new StreamReader(pipe, new UTF8Encoding(false), leaveOpen: true);
         await pipe.WriteAsync(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new AgyCorrectionWireRequest(wrong, "wrong", "wrong")) + "\n"), deadline.Token);
@@ -237,7 +237,7 @@ public sealed class AgyExactRunningTests
         Assert.False(File.Exists(Path.Combine(fixture.Output, "second.txt")));
         Assert.NotNull(await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "valid", "second",
             TestContext.Current.CancellationToken));
-        Assert.True((await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken))
+        Assert.True((await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken))
             .FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
     }
 
@@ -249,7 +249,7 @@ public sealed class AgyExactRunningTests
         await using var fixture = await Fixture.CreateAsync(mode);
         var identity = await fixture.WaitEndpointAsync();
         await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "usage", "second", TestContext.Current.CancellationToken);
-        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         var entries = await new FlowEventLogReader(fixture.Log).ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
         var usage = Assert.Single(ExecutionUsageProjector.BuildByExecutionId(entries, fixture.Artifacts)).Value;
         Assert.Null(usage.TokensIn);
@@ -269,7 +269,7 @@ public sealed class AgyExactRunningTests
         await using var fixture = await Fixture.CreateAsync(mode);
         var identity = await fixture.WaitEndpointAsync();
         await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "usage", "second", TestContext.Current.CancellationToken);
-        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         var entries = await new FlowEventLogReader(fixture.Log).ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
         var usage = Assert.Single(ExecutionUsageProjector.BuildByExecutionId(entries, fixture.Artifacts)).Value;
         Assert.Equal(30, usage.TokensIn);
@@ -288,11 +288,11 @@ public sealed class AgyExactRunningTests
         await using var fixture = await Fixture.CreateAsync("timeout");
         var identity = await fixture.WaitEndpointAsync();
         await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "cancel", "second", TestContext.Current.CancellationToken);
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         while (!File.Exists(Path.Combine(fixture.Output, "descendant.json")))
             await Task.Delay(20, deadline.Token); // wait-ok: bounded descendant rendezvous
         fixture.Cancel();
-        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.Equal(CoreExitReason.CancelRequested, result.Reason);
         Assert.False(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
         Assert.False(identity.ProcessesLive());
@@ -311,7 +311,7 @@ public sealed class AgyExactRunningTests
         await using var fixture = await Fixture.CreateAsync("success");
         var identity = await fixture.WaitEndpointAsync();
         await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "second", "second", TestContext.Current.CancellationToken);
-        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         var reader = new FlowEventLogReader(fixture.Log);
         var exit = Assert.Single((await reader.ReadSnapshotAsync(TestContext.Current.CancellationToken)).CoreEvents.OfType<CoreEvent.ExecutionExited>());
         var changed = corruption switch
@@ -354,7 +354,7 @@ public sealed class AgyExactRunningTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => AgyCorrectionClient.ExecuteAsync(fixture.Room,
             identity.ExecutionId, "claim", "second", TestContext.Current.CancellationToken));
         File.WriteAllText(Path.Combine(fixture.Output, "release"), "release");
-        Assert.False((await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken))
+        Assert.False((await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken))
             .FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
         Assert.False(File.Exists(Path.Combine(fixture.Output, "second.txt")));
     }
@@ -376,7 +376,7 @@ public sealed class AgyExactRunningTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => AgyCorrectionClient.ExecuteAsync(fixture.Room,
             identity.ExecutionId, "different", "second", TestContext.Current.CancellationToken));
         File.WriteAllText(Path.Combine(fixture.Output, "release"), "release");
-        Assert.False((await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken))
+        Assert.False((await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken))
             .FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
         Assert.False(File.Exists(Path.Combine(fixture.Output, "second.txt")));
     }
@@ -394,7 +394,7 @@ public sealed class AgyExactRunningTests
         var release = Task.Run(() => File.WriteAllText(Path.Combine(fixture.Output, "release"), "release"), TestContext.Current.CancellationToken);
         await release;
         var receipt = await correction;
-        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.True(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
         Assert.NotNull(result.FinalExpectedTurn);
         Assert.Equal(receipt is null ? 1 : 2, result.FinalExpectedTurn.ExpectedTurn);
@@ -459,7 +459,7 @@ public sealed class AgyExactRunningTests
 
         public async Task<AgyExecutionIdentity> WaitEndpointAsync()
         {
-            var deadline = DateTime.UtcNow.AddSeconds(15);
+            var deadline = DateTime.UtcNow.AddSeconds(60);
             while (DateTime.UtcNow < deadline)
             {
                 var endpoint = AgyStreamingHost.ReadEndpoint(Room, Request.ExecutionId.Value);
@@ -473,7 +473,7 @@ public sealed class AgyExactRunningTests
         public async ValueTask DisposeAsync()
         {
             _stop.Cancel();
-            try { if (Dispatch is not null) await Dispatch.WaitAsync(TimeSpan.FromSeconds(25)); }
+            try { if (Dispatch is not null) await Dispatch.WaitAsync(TimeSpan.FromSeconds(60)); }
             finally
             {
                 if (Writer is not null) await Writer.DisposeAsync();

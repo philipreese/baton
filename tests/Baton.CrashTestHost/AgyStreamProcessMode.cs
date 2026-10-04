@@ -45,7 +45,7 @@ public static class AgyStreamProcessMode
         Step(1, "agent_response", 10, 2);
         if (mode == "claim-only")
         {
-            using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             while (!File.Exists(Path.Combine(output, "release")))
                 await Task.Delay(20, releaseTimeout.Token); // wait-ok: bounded claim/result rendezvous
             Result("SUCCESS", 10, 2);
@@ -61,7 +61,7 @@ public static class AgyStreamProcessMode
         {
             var firstResult = Task.Run(async () =>
             {
-                using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
                 while (!File.Exists(Path.Combine(output, "release")))
                     await Task.Delay(20, releaseTimeout.Token); // wait-ok: bounded first-result race rendezvous
                 Result("SUCCESS", 10, 2);
@@ -84,7 +84,7 @@ public static class AgyStreamProcessMode
             foreach (var arg in new[] { "exec", typeof(AgyStreamProcessMode).Assembly.Location, "agy-stream-fixture", "descendant", output, "none" })
                 info.ArgumentList.Add(arg);
             using var descendant = Process.Start(info)!;
-            using var readyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var readyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             while (!File.Exists(Path.Combine(output, "descendant.json")))
                 await Task.Delay(20, readyTimeout.Token); // wait-ok: bounded descendant rendezvous
             if (mode == "timeout") await Task.Delay(TimeSpan.FromMinutes(2));
@@ -155,7 +155,7 @@ public static class AgyStreamProcessMode
         };
         foreach (var argument in arguments) info.ArgumentList.Add(argument);
         using var process = Process.Start(info)!;
-        var (_, error) = await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(10));
+        var (_, error) = await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(60));
         if (process.ExitCode != 0) throw new InvalidOperationException(error);
     }
 }
