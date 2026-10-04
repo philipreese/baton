@@ -8130,7 +8130,7 @@ adapter, model, or effort, including when the explicit tuple happens to equal to
 is forwarded only to the existing implement-stage selection; review, fix, and re-review resolve their
 own scope/default tiers. Scope-only submissions use configured defaults. `--adapter`/`--model`/`--effort` each independently
 select the task's **implement stage only**, as one `QueueStageSelection` forwarded through the
-existing `QueueCommand` lifecycle-add path — never a whole-item axis, a `LifecyclePin`, or a routing
+existing `QueueCommand` lifecycle-add path — never a whole-item axis, a `LifecyclePin`, or an item-level
 reason. Admission reuses every existing seam exactly as `queue add --lifecycle` does: offline
 adapter/model validation, model-to-adapter inference, and conductor-only/known-mismatch refusals all
 run before reservation; the resolved tuple is frozen at accept time and survives a later settings

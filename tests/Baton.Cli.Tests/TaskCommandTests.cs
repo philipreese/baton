@@ -127,6 +127,24 @@ public sealed class TaskCommandTests
                 TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
             Assert.Equal(0, resolutions);
             Assert.Equal(0, provisions);
+
+            invalid = invalid with { ScopeClass = "not-a-scope", Model = null };
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(0, resolutions);
+            Assert.Equal(0, provisions);
+
+            invalid = invalid with { ScopeClass = null, Reason = "why" };
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(0, resolutions);
+            Assert.Equal(0, provisions);
+
+            invalid = invalid with { ScopeClass = "engine", Model = "opus", Reason = "  " };
+            await Assert.ThrowsAsync<CliArgumentException>(() =>
+                TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
+            Assert.Equal(0, resolutions);
+            Assert.Equal(0, provisions);
         }
         finally
         {
@@ -1261,6 +1279,7 @@ public sealed class TaskCommandTests
             new QueueStageSelection { Stage = WorkStage.Implement });
         var oneAxisSelection = TaskCommand.ComputeInputDigest("github.com/example/repo", 77, size, null,
             new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" });
+        Assert.Equal("7843616743270887fd33e21fe183c9e45f9a4817d3d0d5096febc1c044ca58a8", oneAxisSelection);
         Assert.NotEqual(noSelection, emptySelection);
         Assert.NotEqual(noSelection, oneAxisSelection);
         Assert.NotEqual(emptySelection, oneAxisSelection);
@@ -1325,6 +1344,7 @@ public sealed class TaskCommandTests
         var selection = new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" };
         var first = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, selection,
             "engine", "cd");
+        Assert.Equal("026052a33efe14e44cc68fe311626b29ac23f026f441f8cdc896c8cf979dd646", first);
         var changedScope = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, selection,
             "tooling", "cd");
         var changedReason = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, selection,

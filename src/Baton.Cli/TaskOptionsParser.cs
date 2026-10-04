@@ -73,20 +73,8 @@ public static class TaskOptionsParser
         if (issue is null || project is null || size is null || rationale is null)
             throw new CliArgumentException(Usage);
 
-        if (scope is not null)
-        {
-            if (!QueueTierTable.ScopeClasses.Contains(scope, StringComparer.OrdinalIgnoreCase))
-                throw new CliArgumentException(
-                    $"Unknown scope class '{scope}'. Pass one of: {string.Join(", ", QueueTierTable.ScopeClasses)}.");
-            scope = scope.ToLowerInvariant();
-        }
-
-        var hasImplementationAxis = adapter is not null || model is not null || effort is not null;
-        if (reason is not null && (scope is null || !hasImplementationAxis))
-            throw new CliArgumentException("'--reason' requires '--scope' and at least one explicit implement axis.");
-        if (scope is not null && hasImplementationAxis && string.IsNullOrWhiteSpace(reason))
-            throw new CliArgumentException(
-                "An explicit adapter, model or effort combined with '--scope' requires a non-blank '--reason'.");
+        scope = TaskSubmissionInput.NormalizeScopeClass(scope);
+        TaskSubmissionInput.ValidateScopeAndReason(scope, adapter, model, effort, reason);
 
         TaskSizeDeclaration declaration;
         if (string.Equals(size, "unknown", StringComparison.OrdinalIgnoreCase))
@@ -101,5 +89,31 @@ public static class TaskOptionsParser
         }
         return new TaskOptions(TaskVerb.Submit, issue, project, declaration, spec,
             Adapter: adapter, Model: model, Effort: effort, ScopeClass: scope, Reason: reason);
+    }
+}
+
+internal static class TaskSubmissionInput
+{
+    internal static string? NormalizeScopeClass(string? scopeClass)
+    {
+        if (scopeClass is null)
+            return null;
+
+        var normalized = scopeClass.Trim().ToLowerInvariant();
+        if (!QueueTierTable.ScopeClasses.Contains(normalized, StringComparer.Ordinal))
+            throw new CliArgumentException(
+                $"Unknown scope class '{scopeClass}'. Pass one of: {string.Join(", ", QueueTierTable.ScopeClasses)}.");
+        return normalized;
+    }
+
+    internal static void ValidateScopeAndReason(
+        string? scopeClass, string? adapter, string? model, string? effort, string? reason)
+    {
+        var hasImplementationAxis = adapter is not null || model is not null || effort is not null;
+        if (reason is not null && (scopeClass is null || !hasImplementationAxis))
+            throw new CliArgumentException("'--reason' requires '--scope' and at least one explicit implement axis.");
+        if (scopeClass is not null && hasImplementationAxis && string.IsNullOrWhiteSpace(reason))
+            throw new CliArgumentException(
+                "An explicit adapter, model or effort combined with '--scope' requires a non-blank '--reason'.");
     }
 }

@@ -42,13 +42,9 @@ public static class TaskCommand
             return 0;
         }
 
-        var scopeClass = NormalizeScopeClass(options.ScopeClass);
-        var hasImplementationAxis = options.Adapter is not null || options.Model is not null || options.Effort is not null;
-        if (options.Reason is not null && (scopeClass is null || !hasImplementationAxis))
-            throw new CliArgumentException("'--reason' requires '--scope' and at least one explicit implement axis.");
-        if (scopeClass is not null && hasImplementationAxis && string.IsNullOrWhiteSpace(options.Reason))
-            throw new CliArgumentException(
-                "An explicit adapter, model or effort combined with '--scope' requires a non-blank '--reason'.");
+        var scopeClass = TaskSubmissionInput.NormalizeScopeClass(options.ScopeClass);
+        TaskSubmissionInput.ValidateScopeAndReason(
+            scopeClass, options.Adapter, options.Model, options.Effort, options.Reason);
 
         var project = Path.GetFullPath(options.Project!);
         if (!Directory.Exists(project)) throw new CliArgumentException($"Project '{project}' does not exist.");
@@ -124,11 +120,13 @@ public static class TaskCommand
     }
 
     /// <summary>
-    /// No-selection submissions preserve the exact historical newline-header preimage (legacy
-    /// digest/idempotency fixtures depend on these exact bytes). A selected submission instead uses a
-    /// distinct, domain-separated, typed/length-delimited encoding of the complete explicit input —
-    /// never suffixed onto the ambiguous legacy header, so a delimiter/newline/spec-marker byte inside
-    /// a rationale or spec cannot alias two different submissions onto the same digest.
+    /// Submissions with no scope, reason, or worker selection preserve the exact historical
+    /// newline-header preimage (legacy digest/idempotency fixtures depend on these exact bytes).
+    /// Selection-only submissions use the selected-input-v1 domain; submissions with a scope or
+    /// reason use the scoped-input-v1 domain. Both newer domains are distinct, typed, and
+    /// length-delimited encodings of the complete explicit input — never suffixes onto the ambiguous
+    /// legacy header, so a delimiter/newline/spec-marker byte inside a rationale or spec cannot alias
+    /// two different submissions onto the same digest.
     /// </summary>
     internal static string ComputeInputDigest(
         string repository, int issue, TaskSizeDeclaration size, byte[]? specBytes, QueueStageSelection? selection,
@@ -184,18 +182,6 @@ public static class TaskCommand
 
     // New scope/rationale fields use a new domain so selected-input-v1 remains byte-for-byte stable.
     private const string ScopedInputDomain = "baton-task-scoped-input-v1";
-
-    private static string? NormalizeScopeClass(string? scopeClass)
-    {
-        if (scopeClass is null)
-            return null;
-
-        var normalized = scopeClass.Trim().ToLowerInvariant();
-        if (!QueueTierTable.ScopeClasses.Contains(normalized, StringComparer.Ordinal))
-            throw new CliArgumentException(
-                $"Unknown scope class '{scopeClass}'. Pass one of: {string.Join(", ", QueueTierTable.ScopeClasses)}.");
-        return normalized;
-    }
 
     /// <summary>A present, always-required field: a 1-byte present tag, a 4-byte big-endian length,
     /// then the bytes. The length prefix is what makes two fields' boundary unambiguous regardless of

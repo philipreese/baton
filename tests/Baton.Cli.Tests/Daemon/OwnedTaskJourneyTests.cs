@@ -22,6 +22,39 @@ public sealed class OwnedTaskJourneyTests
     private const string HeadB = "abcdef0123456789abcdef0123456789abcdef01";
     private static readonly RepositoryIdentity Identity = RepositoryIdentity.From("https://" + Repository, null)!;
 
+    public sealed record ScopeCase(
+        string? RawScope,
+        string? Scope,
+        string? ImplementTierKey,
+        string? ReviewTierKey,
+        string ImplementAdapter,
+        string ImplementModel,
+        string ImplementEffort,
+        string ReviewAdapter,
+        string ReviewModel,
+        string ReviewEffort,
+        string FixAdapter,
+        string FixModel,
+        string FixEffort,
+        string? SubmissionEffort,
+        string? SubmissionReason);
+
+    public static IEnumerable<object[]> OwnedTaskScopeCases() =>
+    [
+        [new ScopeCase("ENGINE", "engine", "engine", "review-engine",
+            "claude", "opus", "low", "claude", "opus", "high", "claude", "opus", "high",
+            "low", "explicit implement effort")],
+        [new ScopeCase("Tooling", "tooling", "tooling", "review-tooling",
+            "codex", "gpt-5.6-sol", "medium", "codex", "gpt-5.6-sol", "high", "codex", "gpt-5.6-sol", "medium",
+            null, null)],
+        [new ScopeCase("Docs", "docs", "docs", "review-docs",
+            "claude", "opus", "medium", "codex", "gpt-5.6-sol", "high", "claude", "opus", "medium",
+            null, null)],
+        [new ScopeCase(null, null, null, null,
+            "codex", "gpt-5.6-sol", "medium", "claude", "opus", "high", "codex", "gpt-5.6-sol", "medium",
+            null, null)],
+    ];
+
     private sealed class Forge : IGhCliRunner
     {
         public string Head { get; set; } = HeadA;
@@ -67,8 +100,10 @@ public sealed class OwnedTaskJourneyTests
         }
     }
 
-    [Fact]
-    public async Task Submit_then_implement_review_block_fix_rereview_ready_survives_restart_without_relaunch()
+    [Theory]
+    [MemberData(nameof(OwnedTaskScopeCases))]
+    public async Task Submit_then_implement_review_block_fix_rereview_ready_survives_restart_without_relaunch(
+        ScopeCase testCase)
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_owned_journey_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(home);
@@ -94,12 +129,16 @@ public sealed class OwnedTaskJourneyTests
 
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 44, project,
                 new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple lifecycle seams"), brief,
-                ScopeClass: "ENGINE"),
+                ScopeClass: testCase.RawScope, Effort: testCase.SubmissionEffort, Reason: testCase.SubmissionReason),
                 TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
             var accepted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Prepared, accepted.IssuePreparation!.State);
             Assert.Equal("recorded-conductor", accepted.OwnedTask!.ConductorHolder);
-            Assert.Equal("engine", accepted.ScopeClass);
+            Assert.Equal(testCase.Scope, accepted.ScopeClass);
+            var frozen = Assert.IsType<FrozenWorkerAssignment>(accepted.WorkerAssignment);
+            Assert.Equal(testCase.ImplementAdapter, frozen.Adapter);
+            Assert.Equal(testCase.ImplementModel, frozen.Model);
+            Assert.Equal(testCase.ImplementEffort, frozen.Effort);
 
             var forge = new Forge();
             var head = HeadA;
@@ -160,20 +199,38 @@ public sealed class OwnedTaskJourneyTests
 
             await TickUntilLaunchCount(1);
             Assert.Equal(WorkStage.Implement, launches[0].Item.Stage);
-            Assert.Equal("engine", launches[0].Tier.TierKey);
+            Assert.Equal(testCase.ImplementTierKey, launches[0].Tier.TierKey);
+            Assert.Equal(testCase.ImplementAdapter, launches[0].Tier.Adapter);
+            Assert.Equal(testCase.ImplementModel, launches[0].Tier.Model);
+            Assert.Equal(testCase.ImplementEffort, launches[0].Tier.Effort);
+            Assert.Equal(testCase.SubmissionEffort is not null, launches[0].Tier.IsOverride);
             forge.HasPullRequest = true; // worker-created PR, no draft-create opt-in
             await Settle(launches[0]);
             await TickUntilLaunchCount(2);
             Assert.Equal(WorkStage.Review, launches[1].Item.Stage);
-            Assert.Equal("review-engine", launches[1].Tier.TierKey);
+            Assert.Equal(testCase.ReviewTierKey, launches[1].Tier.TierKey);
+            Assert.Equal(testCase.ReviewAdapter, launches[1].Tier.Adapter);
+            Assert.Equal(testCase.ReviewModel, launches[1].Tier.Model);
+            Assert.Equal(testCase.ReviewEffort, launches[1].Tier.Effort);
+            Assert.False(launches[1].Tier.IsOverride);
             await Settle(launches[1], "block");
             await TickUntilLaunchCount(3);
             Assert.Equal(WorkStage.Fix, launches[2].Item.Stage);
+            Assert.Equal(testCase.ImplementTierKey, launches[2].Tier.TierKey);
+            Assert.Equal(testCase.FixAdapter, launches[2].Tier.Adapter);
+            Assert.Equal(testCase.FixModel, launches[2].Tier.Model);
+            Assert.Equal(testCase.FixEffort, launches[2].Tier.Effort);
+            Assert.False(launches[2].Tier.IsOverride);
             head = HeadB;
             forge.Head = HeadB;
             await Settle(launches[2]);
             await TickUntilLaunchCount(4);
             Assert.Equal(WorkStage.ReReview, launches[3].Item.Stage);
+            Assert.Equal(testCase.ReviewTierKey, launches[3].Tier.TierKey);
+            Assert.Equal(testCase.ReviewAdapter, launches[3].Tier.Adapter);
+            Assert.Equal(testCase.ReviewModel, launches[3].Tier.Model);
+            Assert.Equal(testCase.ReviewEffort, launches[3].Tier.Effort);
+            Assert.False(launches[3].Tier.IsOverride);
             await Settle(launches[3], "approve");
             for (var i = 0; i < 5; i++) await Scheduler().TickOnceAsync(Ct);
 
