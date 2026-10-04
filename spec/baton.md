@@ -8149,9 +8149,9 @@ size, rationale, spec presence and its exact captured bytes, and each of the thr
 exact value — and never an ambient resolved default (an adapter's own fallback model, a role's tier),
 so two submissions that happen to resolve to the same launch tuple by different explicit paths still
 conflict. Changing or dropping any previously-explicit axis conflicts exactly as a changed size or
-spec would, including while the task is still preparing. A submission naming scope or rationale uses
+spec would, including while the task is still preparing. A submission naming scope or reason (`--reason`) uses
 a new typed, length-delimited domain that includes both new fields' presence and exact bytes alongside
-the complete prior explicit input; this keeps scope, rationale, newline, delimiter, and spec bytes
+the complete prior explicit input; this keeps scope, reason (`--reason`), newline, delimiter, and spec bytes
 distinct while leaving legacy and selected-input-v1 preimages byte-for-byte unchanged when both new
 fields are absent.
 

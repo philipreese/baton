@@ -180,7 +180,7 @@ public static class TaskCommand
     // may ever change shape; a version bump is itself a new domain, never a mutation of this one.
     private const string SelectedInputDomain = "baton-task-selected-input-v1";
 
-    // New scope/rationale fields use a new domain so selected-input-v1 remains byte-for-byte stable.
+    // New scope/reason (--reason) fields use a new domain so selected-input-v1 remains byte-for-byte stable.
     private const string ScopedInputDomain = "baton-task-scoped-input-v1";
 
     /// <summary>A present, always-required field: a 1-byte present tag, a 4-byte big-endian length,
