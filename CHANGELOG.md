@@ -9,6 +9,23 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.64.0](https://github.com/philipreese/baton/compare/v0.63.1...v0.64.0) (2026-10-04)
+
+
+### Features
+
+* **task:** Forward scoped tier selection from owned submissions ([#2601](https://github.com/philipreese/baton/issues/2601)) ([61591d6](https://github.com/philipreese/baton/commit/61591d688b3ff7694dfaa2a1304f83eca2fa12ad))
+
+
+### Bug Fixes
+
+* **advice:** Clarify stopped-work source-review decisions ([#2603](https://github.com/philipreese/baton/issues/2603)) ([1c6db1a](https://github.com/philipreese/baton/commit/1c6db1afd79ed17a0e72bc04bdd3dcd4d73e0f86))
+
+
+### Documentation
+
+* **conductor:** Clarify advice and replacement-review recovery ([#2598](https://github.com/philipreese/baton/issues/2598)) ([faad4c0](https://github.com/philipreese/baton/commit/faad4c020073b1b6d787d3f9601202f6e73427bb))
+
 ## [0.63.1](https://github.com/philipreese/baton/compare/v0.63.0...v0.63.1) (2026-10-03)
 
 
