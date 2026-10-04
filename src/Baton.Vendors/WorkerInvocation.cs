@@ -144,6 +144,7 @@ namespace Baton.Vendors;
 /// </para>
 /// </param>
 /// <param name="AttachmentPaths">Exact current-room harness input files resolved from the binding; see spec/baton.md §2.</param>
+/// <param name="EnableAgyCorrection">Explicit transport selection; see spec/baton.md §10.</param>
 public sealed record WorkerInvocation(
     string PromptTemplate,
     string? Model = null,
@@ -169,5 +170,6 @@ public sealed record WorkerInvocation(
     Baton.Queue.MemoryAddDispatchGrant? MemoryAddGrant = null,
     bool EnableExactFileRestoreTool = false,
     string? ExactFileRestoreBaseSha = null,
-    IReadOnlyList<string>? AttachmentPaths = null);
+    IReadOnlyList<string>? AttachmentPaths = null,
+    bool EnableAgyCorrection = false);
 

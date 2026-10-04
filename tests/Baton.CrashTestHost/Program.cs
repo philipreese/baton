@@ -9,6 +9,9 @@ using Baton.Status;
 using Baton.Steering;
 using Baton.Store;
 
+if (args is ["agy-stream-fixture", var fixtureMode, var fixtureOutput, var fixtureWorkspace])
+    return await AgyStreamProcessMode.RunAsync(fixtureMode, fixtureOutput, fixtureWorkspace);
+
 if (Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "claude-advice-helper")
     return await ClaudeAdviceProcessMode.RunAsync(args);
 

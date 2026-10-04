@@ -6543,7 +6543,7 @@ and for which realization does what to a package's bytes.
   `baton steer <room-dir> --execution <id> --message-id <id> --file <text-file>` routes a text
   correction to the exact *running Codex app-server broker turn* already owned by Baton on
   Windows. It neither
-  starts a worker nor changes its frozen permission grant. AGY returns `unsupported`;
+  starts a worker nor changes its frozen permission grant. Ordinary AGY remains unsupported;
   desktop-session injection, phone/Glass writes, and automatic continuation remain out of scope.
   A conductor may query `baton steer <room-dir> --execution <id> --message-id <id> --receipt`.
   The room journal owns immutable request, write-ahead send-started, and semantic transport-response
@@ -6578,6 +6578,43 @@ and for which realization does what to a package's bytes.
   A matched native message receipt yields `transportAcknowledged`, not consumption or compliance.
   Receipt lookup starts no model. General automated continuation, remote writes, and desktop injection
   remain excluded; only this explicitly requested same-process peer follow-up is permitted.
+  **AGY correction exception (#2611, operator approved 2026-10-04):** a Windows binding may
+  explicitly set `EnableAgyCorrection: true` together with `StreamJson: true` for a fresh AGY
+  execution. Defaults remain one-shot; other adapters, unsupported platforms and vendor-session
+  resume cannot select this transport. Accepted evidence freezes `ExactRunningTransport` as
+  `agy-stream-v1`. The vendor-owned streaming host uses Core's existing native child containment,
+  hooks, environment, grant and original clock; the first native message is the actual resolved
+  prompt, including replacement and oversized-prompt expansion. It owns stdin and capture, not a
+  new execution or supervisor. The same local `steer` command admits at most one subsequent user
+  turn while that exact original execution is alive. It does not interrupt the current response.
+  Native init must supply the conversation before the same-user pipe is published. Before claim
+  and immediately before send, the host validates the authoritative, untorn journal and full tuple:
+  room, accepted execution/provenance, host PID/birth, child PID/birth, native conversation, endpoint
+  incarnation and OS principal. Unknown or changed identity refuses before bytes. A descriptor
+  grants no authority. An AGY-only side journal uses the existing room-events lock and fsyncs claim
+  and send-started separately before sending. Message ID and lossless UTF-8 payload hash are
+  immutable, including LF, CRLF and final LF. Identical requests return retained evidence without
+  resending, even after a claimed-before-send interruption; changed payloads or IDs conflict.
+  Send-started with lost evidence stays `outcomeUnknown`, never replay or retarget authority.
+  Receipt lookup validates the retained adapter/provenance and starts no model. Native write/flush
+  and DONE user_input are descriptive input/consumption evidence only: native AGY exposes no
+  exact-payload acknowledgment, and neither model prose nor a nonce upgrades the receipt.
+  Admission and the first result share one serialization gate. If the result wins, stdin closes
+  normally without waiting for a correction. A durable claim requires turn two even if sending
+  fails; admission winning permits just that one final turn under the original deadline. Timeout
+  and cancellation reap the owned process tree and pipe. Selected transport cannot launch grace,
+  artifact checkpoint continuation or grace recovery. Every success path, including cap-artifact,
+  late-failure and both timeout salvages, requires valid final-expected-turn completion plus the
+  ordinary grant, contract, workspace and delivery predicates. Core records the host-derived fact
+  with ExecutionExited; live and restart settlement reject missing, torn, inconsistent or newer
+  evidence. Native stdout is wrapped and cannot mint that fact or a host footer. One vendor-owned
+  decoder serves existing stream readers; first-result success cannot stand in for the final result.
+  Both turns' distinct terminal-step deltas feed the original emergency monitor exactly once;
+  result restatements do not add usage. Execution usage is an observed aggregate/floor with
+  completeness unavailable. Final native usage is separately `reportedFinalTurnUsage`, never an
+  execution total. Status, fleet, audit, cost and quota preserve that distinction; no complete
+  reconciliation or full-execution price is inferred. Raw one-shot projections retain their rules.
+  This exception permits no autonomous correction, remote/Glass write or desktop injection.
 - **Phone pairing and remote *viewing* infrastructure built for a paired client.** `PairedClientsStore`
   and WebSocket broadcast (§7) are archived; the mailbox (§6) is the harness-era replacement for
   "something remote learns what happened," not a client-pairing model. The tailnet drill-down page

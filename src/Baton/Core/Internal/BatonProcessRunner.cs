@@ -34,7 +34,8 @@ internal static class BatonProcessRunner
         bool clearEnv,
         string? cwd,
         Action<BatonEventArgs> raiseEvent,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<Process>? inputOwner = null)
     {
         SafeJobObjectHandle job;
         try
@@ -122,7 +123,7 @@ internal static class BatonProcessRunner
             // as it would reading a native NUL device, and is never left connected to this process's
             // own stdin. Not a full equivalence -- a child that instead writes to stdin gets
             // ERROR_BROKEN_PIPE here, where a real NUL device would have silently accepted the write.
-            process.StandardInput.Close();
+            if (inputOwner is null) process.StandardInput.Close();
 
             // #2073: the start time is what makes the pid reusable as an identity later (see
             // BatonEventArgs.ProcessStartTimeUtc). A child that has already exited by the time this
@@ -233,6 +234,10 @@ internal static class BatonProcessRunner
                     }
                 }, CancellationToken.None);
             }
+
+            // The adapter starts stdin writing after the original kill mechanisms are armed.
+            // Core still owns the child and every descendant for the whole execution.
+            inputOwner?.Invoke(process);
 
             int exitCode = captureOutput
                 ? RunWithLiveCapture(process, job, raiseEvent)
@@ -354,6 +359,7 @@ internal static class BatonProcessRunner
             // so a future caller who does reach for .StandardOutput/.StandardError directly is not
             // silently handed the OEM code page.
             startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+            startInfo.StandardInputEncoding = new System.Text.UTF8Encoding(false);
             startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
         });
 

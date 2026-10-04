@@ -219,7 +219,13 @@ public sealed record ExecutionUsageView(
     /// </summary>
     [property: JsonPropertyName("observedBilledTokenFloor")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ExecutionUsageView.ObservedBilledTokenFloorView? ObservedBilledTokenFloor = null)
+    ExecutionUsageView.ObservedBilledTokenFloorView? ObservedBilledTokenFloor = null,
+    [property: JsonPropertyName("reportedFinalTurnUsage")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    WorkerUsage? ReportedFinalTurnUsage = null,
+    [property: JsonPropertyName("usageCompleteness")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? UsageCompleteness = null)
 {
     /// <summary>The capture is provably not the whole stream — <see cref="Dispatch.ExecutionStreamLogger.StdoutTruncationMarkerFileName"/>.</summary>
     public const string StreamTruncatedByRolloverReason = "stream-truncated-by-rollover";
@@ -246,6 +252,7 @@ public sealed record ExecutionUsageView(
     /// treat it as an incomplete capture rather than a complete one.
     /// </summary>
     public const string NoTerminalBilledFigureReason = "no-terminal-billed-figure";
+    public const string StreamingExecutionCompletenessUnavailable = "streaming-execution-completeness-unavailable";
 
     /// <summary>
     /// Every value <see cref="BilledReconciliationUnavailable"/> can carry, in one place, so a consumer
@@ -260,6 +267,7 @@ public sealed record ExecutionUsageView(
         RolloverSegmentUnreadableReason,
         NoLiveBilledFigureReason,
         NoTerminalBilledFigureReason,
+        StreamingExecutionCompletenessUnavailable,
     };
 
     /// <summary>
@@ -466,6 +474,9 @@ public static class ExecutionUsageProjector
                 .FirstOrDefault();
 
         var result = new Dictionary<string, ExecutionUsageView>(StringComparer.Ordinal);
+        var selectedExecutions = flowEvents.OfType<FlowEvent.ExecutionRequestAccepted>()
+            .Where(item => item.Request.ExactRunningTransport is not null)
+            .Select(item => item.Request.ExecutionId.Value).ToHashSet(StringComparer.Ordinal);
         foreach (var (executionId, startedAt) in startedTimestamps)
         {
             if (!exitedTimestamps.TryGetValue(executionId, out var exitedAt))
@@ -576,6 +587,20 @@ public static class ExecutionUsageProjector
                 ? new ExecutionUsageView.ObservedBilledTokenFloorView(floorTokens)
                 : null;
 
+            var selected = selectedExecutions.Contains(executionId);
+            var selectedUsage = selected && reading?.StreamingUsage?.ExecutionId == executionId ? reading.StreamingUsage : null;
+            if (selected)
+            {
+                dimensions = selectedUsage?.Observed
+                    ?? (arrestedUsageByExecutionId.TryGetValue(executionId, out var observedArrest) ? observedArrest : null);
+                reconciled = false;
+                unavailable = journalledReason ?? reading?.LiveUnavailableReason
+                    ?? ExecutionUsageView.StreamingExecutionCompletenessUnavailable;
+                observedBilledTokenFloor = journalledReason is null && reading?.LiveUnavailableReason is null
+                    && selectedUsage?.Observed?.BilledTokens is { } observedFloor && observedFloor >= 0
+                        ? new ExecutionUsageView.ObservedBilledTokenFloorView(observedFloor) : null;
+            }
+
             long? peakBilledInWindow = peakBilledInWindowByExecutionId.TryGetValue(executionId, out var recordedPeak)
                 ? recordedPeak
                 : null;
@@ -634,7 +659,9 @@ public static class ExecutionUsageProjector
                         ? graceTerminal.ArrestReason
                         : null,
                 resolvedBinding.Limits,
-                observedBilledTokenFloor);
+                observedBilledTokenFloor,
+                selectedUsage?.ReportedFinalTurn,
+                selected ? "unavailable" : null);
         }
 
         foreach (var executionId in unresolvedGraceExecutionIds)
@@ -834,7 +861,8 @@ public static class ExecutionUsageProjector
         string? LiveUnavailableReason = null,
         string? ModelEchoed = null,
         ToolStepCounts? ToolStepCounts = null,
-        long? ObservedBilledTokenFloorTokens = null);
+        long? ObservedBilledTokenFloorTokens = null,
+        ObservedStreamUsage? StreamingUsage = null);
 
     /// <summary>
     /// The memo behind <see cref="UsageReading"/>'s L3 note. Concurrent because both readers above are
@@ -1159,7 +1187,8 @@ public static class ExecutionUsageProjector
             null,
             modelEchoed,
             toolStepTally.Snapshot(),
-            observedBilledTokenFloorTokens));
+            observedBilledTokenFloorTokens,
+            replayParser is AgyUsageParser ? AgyUsageParser.ReadObservedStream?.Invoke(rolledLines.Concat(lines).ToArray()) : null));
     }
 
     /// <summary>

@@ -11,6 +11,7 @@ namespace Baton.Vendors;
 /// </summary>
 public static class WorkerAdapterRegistry
 {
+    public static void InitializeStreamReaders() => AgyHostDecoder.Initialize();
     public static IReadOnlyDictionary<string, IWorkerAdapter> Default { get; } = new Dictionary<string, IWorkerAdapter>
     {
         ["claude"] = new ClaudeWorkerAdapter(),

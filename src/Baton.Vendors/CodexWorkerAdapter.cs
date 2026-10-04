@@ -101,6 +101,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         ArgumentNullException.ThrowIfNull(invocation);
         ArgumentNullException.ThrowIfNull(contract);
 
+        if (invocation.EnableAgyCorrection) throw new InvalidOperationException("EnableAgyCorrection requires the AGY adapter.");
+
         invocation = ProjectCeilingGate.Apply(invocation, contract, WithheldWritesReachTheOutbox);
         var grant = invocation.PermissionGrant;
         if (grant is not null)

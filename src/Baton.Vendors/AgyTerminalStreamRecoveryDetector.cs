@@ -24,7 +24,7 @@ internal static class AgyTerminalStreamRecoveryDetector
         }
 
         var state = new StreamState();
-        foreach (var root in ReadObjects(stdoutTail))
+        foreach (var root in ReadObjects(AgyHostDecoder.DecodeTail(stdoutTail) ?? string.Empty))
         {
             if (state.Observe(root) is { } fact)
             {
@@ -42,7 +42,7 @@ internal static class AgyTerminalStreamRecoveryDetector
 
         public OutstandingToolAtTerminalSuccess? Observe(string line)
         {
-            foreach (var root in ReadObjects(line))
+            foreach (var root in ReadObjects(AgyHostDecoder.DecodeTail(line) ?? string.Empty))
             {
                 if (Observe(root) is { } fact)
                 {

@@ -880,6 +880,11 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
 /// </summary>
 public sealed class AgyUsageParser : IWorkerUsageParser
 {
+    // The vendor assembly supplies host framing; this class retains the original raw one-shot parser.
+    public static Func<string, string> DecodeStreamLine { get; set; } = line => line;
+    public static Func<IReadOnlyList<string>, ObservedStreamUsage>? ReadObservedStream { get; set; }
+    public static Func<string, WorkerUsage, WorkerUsage> DecorateIncrementalUsage { get; set; } = (_, sample) => sample;
+
     public bool TryParseFinalUsage(string rawLine, out WorkerUsage? usage)
     {
         usage = null;
@@ -890,7 +895,7 @@ public sealed class AgyUsageParser : IWorkerUsageParser
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(DecodeStreamLine(rawLine));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("event", out var eventProp) || eventProp.GetString() != "result"
@@ -969,7 +974,7 @@ public sealed class AgyUsageParser : IWorkerUsageParser
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(DecodeStreamLine(rawLine));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("event", out var eventProp) || eventProp.GetString() != "step_update"
@@ -991,7 +996,8 @@ public sealed class AgyUsageParser : IWorkerUsageParser
                 return false;
             }
 
-            usage = new WorkerUsage(tokensIn, tokensOut, CacheReadTokens: cacheReadTokens, ThinkingTokens: thinkingTokens);
+            usage = DecorateIncrementalUsage(rawLine,
+                new WorkerUsage(tokensIn, tokensOut, CacheReadTokens: cacheReadTokens, ThinkingTokens: thinkingTokens));
             return true;
         }
         catch (JsonException)
@@ -1013,7 +1019,7 @@ public sealed class AgyUsageParser : IWorkerUsageParser
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(DecodeStreamLine(rawLine));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("event", out var eventProp) || eventProp.GetString() != "step_update"
@@ -1053,7 +1059,7 @@ public sealed class AgyUsageParser : IWorkerUsageParser
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(DecodeStreamLine(rawLine));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("event", out var eventProp) || eventProp.GetString() != "step_update"
@@ -1189,7 +1195,7 @@ public sealed class AgyUsageParser : IWorkerUsageParser
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(DecodeStreamLine(rawLine));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("event", out var eventProp) || eventProp.GetString() != "step_update"

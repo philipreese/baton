@@ -59,6 +59,9 @@ public static class WorkerBindingConfigParser
 
             AttachmentReadInputs.ValidateNames(entry.AttachmentNames);
 
+            if (entry.EnableAgyCorrection && (entry.Adapter != "agy" || !OperatingSystem.IsWindows()))
+                throw new WorkerBindingConfigException("EnableAgyCorrection requires the Windows AGY adapter.");
+
             if (entry.Contract is null)
             {
                 throw new WorkerBindingConfigException($"Worker-binding config entry for '{workerName}'{location} is missing 'Contract'.");

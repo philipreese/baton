@@ -926,7 +926,8 @@ public static class MutationInterface
             ProducedOutputs: processBinding.Contract.ProducedOutputs,
             DeliveryGeneratedPaths: deliveryGeneratedPaths,
             DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
-            Limits: CaptureAppliedLimitEvidence(processBinding));
+            Limits: CaptureAppliedLimitEvidence(processBinding),
+            ExactRunningTransport: processBinding.Target.ExactRunningTransport);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -1330,7 +1331,11 @@ public static class MutationInterface
                             exit.StderrTail,
                             exit.TerminalSuccessObserved,
                             TerminalResultObserved: exit.TerminalResultObserved,
-                            EnginePlacedFiles: enginePlacedFiles);
+                            EnginePlacedFiles: enginePlacedFiles,
+                            ExactRunningTransport: request.ExactRunningTransport ?? exit.ExactRunningTransport,
+                            FinalExpectedTurn: request.ExactRunningTransport == exit.ExactRunningTransport
+                                && exit.FinalExpectedTurn?.ExecutionId == executionId.Value ? exit.FinalExpectedTurn : null);
+                        classificationResult = ValidateRecordedFinalTurn(request, classificationResult, graceSnapshot);
                         if (timeoutGrading is not null && graceTimeoutClaim is not null)
                         {
                             var pending = graceTimeoutClaim.ParentEvidence;
@@ -1770,6 +1775,8 @@ public static class MutationInterface
                 {
                     var request = acceptedRequestByExecutionId[executionId];
                     var processBinding = (WorkerBinding.Process)workerBindings[request.Worker];
+                    if (request.ExactRunningTransport != processBinding.Target.ExactRunningTransport)
+                        throw new InvalidRoomMutationException("Accepted exact-running transport cannot be changed during recovery.");
 
                     // #1583 (spec/baton.md §3, pulling S6 / #802 section 3.3 forward): when the resubmit's current binding differs
                     // from the request's recorded Adapter/Model, journal FlowEvent.StepRebound naming old->new
@@ -2212,7 +2219,8 @@ public static class MutationInterface
             DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
             Limits: processBindingForRequest is { } processBinding
                 ? CaptureAppliedLimitEvidence(processBinding)
-                : null);
+                : null,
+            ExactRunningTransport: processBindingForRequest?.Target.ExactRunningTransport);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -2335,6 +2343,31 @@ public static class MutationInterface
     {
         var (pid, startTime) = GetCurrentEngineIdentity();
         return new FlowEvent.ExecutionRequestAccepted(request, pid, startTime);
+    }
+
+    internal static CoreDispatchResult BindFinalTurnEvidence(ExecutionRequest request, CoreDispatchResult result) => result with
+    {
+        ExactRunningTransport = request.ExactRunningTransport ?? result.ExactRunningTransport,
+        FinalExpectedTurn = request.ExactRunningTransport == result.ExactRunningTransport
+            && result.FinalExpectedTurn?.ExecutionId == request.ExecutionId.Value ? result.FinalExpectedTurn : null,
+    };
+
+    private static CoreDispatchResult ValidateRecordedFinalTurn(ExecutionRequest request, CoreDispatchResult result, EventLogSnapshot journal)
+    {
+        if (request.ExactRunningTransport is null) return result;
+        var starts = journal.CoreEvents.OfType<CoreEvent.ExecutionStarted>().Where(item => item.ExecutionId == request.ExecutionId).ToArray();
+        var exits = journal.CoreEvents.OfType<CoreEvent.ExecutionExited>().Where(item => item.ExecutionId == request.ExecutionId).ToArray();
+        var accepts = journal.FlowEvents.OfType<FlowEvent.ExecutionRequestAccepted>().Where(item => item.Request.ExecutionId == request.ExecutionId).ToArray();
+        var completion = result.FinalExpectedTurn;
+        return !journal.HasUnterminatedTail && journal.UnknownEventCount == 0
+            && starts.Length == 1 && exits.Length == 1 && accepts.Length == 1
+            && accepts[0].Request.ExactRunningTransport == request.ExactRunningTransport
+            && accepts[0].Request.Adapter == request.Adapter
+            && exits[0].ExactRunningTransport == request.ExactRunningTransport
+            && exits[0].FinalExpectedTurn == completion
+            && completion is not null && completion.ChildPid == starts[0].Pid
+            && completion.ChildStartUtc == starts[0].ProcessStartTimeUtc
+                ? result : result with { FinalExpectedTurn = null };
     }
 
     private static async Task DispatchAndRecordOutcomeAsync(
@@ -2515,6 +2548,12 @@ public static class MutationInterface
             // into a fabricated outcome.
             var dispatchResult = await dispatcher.DispatchAsync(prepared.Request, target, effectiveCancellationToken)
                 .ConfigureAwait(false);
+            dispatchResult = BindFinalTurnEvidence(prepared.Request, dispatchResult);
+            if (prepared.Request.ExactRunningTransport is not null)
+                dispatchResult = ValidateRecordedFinalTurn(prepared.Request, dispatchResult,
+                    await eventLogReader.ReadSnapshotAsync(CancellationToken.None).ConfigureAwait(false));
+            var finalTurnComplete = prepared.Request.ExactRunningTransport is not { } selectedTransport
+                || dispatchResult.FinalExpectedTurn?.IsSuccessful(selectedTransport) == true;
 
             if (budgetMonitor is { Arrested: true })
             {
@@ -2534,7 +2573,7 @@ public static class MutationInterface
                 // delivery path. It is therefore safe only for a read-shaped role: an artifact from
                 // a role that can verify or change the workspace, or deliver a branch, is not proof
                 // that its workspace and delivery obligations are complete.
-                if (!binding.VerifiesWorkspace
+                if (finalTurnComplete && !binding.VerifiesWorkspace
                     && !binding.ChangesTree
                     && !binding.DeliversBranch
                     && ContractValidator.IsSatisfied(binding.Contract, prepared.OutputDirectory))
@@ -2561,7 +2600,7 @@ public static class MutationInterface
                 // repaired or turned into success by this path. Mutating, verifying, and delivering
                 // roles still require their normal post-dispatch obligations and therefore retain
                 // the authoritative arrest below even if changes.md is now present.
-                if (!binding.VerifiesWorkspace
+                if (finalTurnComplete && !binding.VerifiesWorkspace
                     && !binding.ChangesTree
                     && !binding.DeliversBranch
                     && ContractValidator.IsSatisfied(binding.Contract, prepared.OutputDirectory))
@@ -3449,6 +3488,8 @@ public static class MutationInterface
             }
 
             var parentRequest = acceptedParent.Request;
+            if (parentRequest.ExactRunningTransport is not null || childRequest.ExactRunningTransport is not null)
+                throw new FlowEventLogReadException("The selected exact-running transport forbids grace recovery.");
             if (childRequest.WorkflowId != parentRequest.WorkflowId
                 || childRequest.StepId != parentRequest.StepId
                 || !string.Equals(childRequest.Worker, parentRequest.Worker, StringComparison.Ordinal)
@@ -3689,6 +3730,7 @@ public static class MutationInterface
     {
         if (cancellationToken.IsCancellationRequested
             || hostCancellationToken.IsCancellationRequested
+            || prepared.Request.ExactRunningTransport is not null
             || budgetMonitor.ArrestReasonValue is not (ArrestReason.TokenBudget or ArrestReason.ToolStepCap)
             || string.IsNullOrWhiteSpace(sessionId)
             || (binding.Target.ResumeArgs is null && binding.Target.ResumeTarget is null))
@@ -3809,6 +3851,7 @@ public static class MutationInterface
         CancellationToken cancellationToken,
         TimeProvider timeProvider)
     {
+        if (prepared.Request.ExactRunningTransport is not null) return (false, null);
         if (binding.Target.PromptText is null)
         {
             // No prose prompt this adapter carries at all (CommandWorkerAdapter) -- nothing to hand the

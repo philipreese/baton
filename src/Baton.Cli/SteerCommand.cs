@@ -18,7 +18,7 @@ public sealed record SteerOptions(string Room, string ExecutionId, string Messag
 public static class SteerOptionsParser
 {
     public const string Usage = "Usage: baton steer <room-dir> --execution <id> --message-id <id> " +
-        "(--file <text-file> | --receipt)";
+        "(--file <text-file> | --receipt)\nExact-running correction boundaries: spec/baton.md §10.";
 
     public static SteerOptions Parse(string[] args)
     {
@@ -50,6 +50,8 @@ public static class SteerCommand
         CancellationToken cancellationToken = default)
     {
         var room = BatonPaths.RecordKey(options.Room);
+        if (new AgyCorrectionStore(room).Query(options.ExecutionId) is not null)
+            return await ExecuteAgyAsync(options, output, cancellationToken);
         if (new ExecutionCorrectionStore(room).Query(options.ExecutionId) is not null)
             return await ClaudeCorrectionCommand.ExecuteAsync(options, output, cancellationToken);
         if (!options.Receipt)
@@ -57,6 +59,8 @@ public static class SteerCommand
             var adapterIdentity = await InspectTargetAsync(room, options.ExecutionId, cancellationToken);
             if (string.Equals(adapterIdentity.Adapter, "claude", StringComparison.OrdinalIgnoreCase))
                 return await ClaudeCorrectionCommand.ExecuteAsync(options, output, cancellationToken);
+            if (string.Equals(adapterIdentity.Adapter, "agy", StringComparison.OrdinalIgnoreCase))
+                return await ExecuteAgyAsync(options, output, cancellationToken);
         }
         var store = new SteeringMessageStore(room);
         var endpoint = CodexSteeringEndpoint.TryRead(room, options.ExecutionId);
@@ -92,7 +96,7 @@ public static class SteerCommand
                 state = "unsupported",
                 executionId = options.ExecutionId,
                 adapter = target.Adapter,
-                reason = "Local steering supports running Codex broker turns and verified Claude executions; this adapter is unsupported."
+                reason = "Local steering supports running Codex broker turns, verified Claude executions, and opted-in AGY executions; this adapter is unsupported."
             })
                 .ConfigureAwait(false);
             return 1;
@@ -237,6 +241,30 @@ public static class SteerCommand
         var exited = journal.CoreEvents.OfType<CoreEvent.ExecutionExited>()
             .Any(e => e.ExecutionId.Value == executionId);
         return (started is not null && !exited, adapter, started?.Pid ?? 0, started?.ProcessStartTimeUtc);
+    }
+
+    private static async Task<int> ExecuteAgyAsync(SteerOptions options, TextWriter output, CancellationToken cancellationToken)
+    {
+        var room = BatonPaths.RecordKey(options.Room);
+        var journal = await new FlowEventLogReader(Path.Combine(room, BatonPaths.FlowLogFileName)).ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        var accepted = journal.FlowEvents.OfType<FlowEvent.ExecutionRequestAccepted>()
+            .Where(item => item.Request.ExecutionId.Value == options.ExecutionId).ToArray();
+        if (!OperatingSystem.IsWindows() || accepted.Length != 1 || accepted[0].Request.Adapter != "agy"
+            || accepted[0].Request.ExactRunningTransport != AgyCorrectionClient.Transport)
+        {
+            await WriteAsync(output, new
+            {
+                state = "unsupported",
+                executionId = options.ExecutionId,
+                reason = "AGY correction requires an opted-in Windows execution; see spec/baton.md §10."
+            }).ConfigureAwait(false);
+            return 1;
+        }
+        var text = options.Receipt ? null : await File.ReadAllTextAsync(options.File!, new UTF8Encoding(false, true), cancellationToken).ConfigureAwait(false);
+        var receipt = await AgyCorrectionClient.ExecuteAsync(BatonPaths.RecordKey(options.Room), options.ExecutionId,
+            options.MessageId, text, cancellationToken).ConfigureAwait(false);
+        await WriteAsync(output, receipt is null ? new { state = "notFound", messageId = options.MessageId } : receipt).ConfigureAwait(false);
+        return 1;
     }
 
     private static Task WriteAsync(TextWriter output, object value) =>

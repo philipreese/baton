@@ -10,6 +10,8 @@ using Baton.Domain;
 using Baton.Status;
 using Baton.Store;
 
+WorkerAdapterRegistry.InitializeStreamReaders();
+
 if (args.Length == 1 && args[0] == "--version")
 {
     Console.WriteLine(VersionInfo.GetVersion(Assembly.GetExecutingAssembly()));

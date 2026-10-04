@@ -70,7 +70,13 @@ public sealed record QuotaLedgerEntry(
     CoreExitReason? ExitReason = null,
     [property: JsonPropertyName("arrestReason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ArrestReason? ArrestReason = null);
+    ArrestReason? ArrestReason = null,
+    [property: JsonPropertyName("reportedFinalTurnUsage")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    WorkerUsage? ReportedFinalTurnUsage = null,
+    [property: JsonPropertyName("usageCompleteness")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? UsageCompleteness = null);
 
 /// <summary>
 /// Reads and writes <see cref="BatonPaths.QuotaLedgerFile"/> — the spec/baton.md §7 fleet-level burn
@@ -214,6 +220,8 @@ public static class QuotaLedgerStore
                 Execution: executionId,
                 Adapter: resolvedBinding.Adapter,
                 Model: resolvedBinding.Model,
+                ReportedFinalTurnUsage: usage.ReportedFinalTurnUsage,
+                UsageCompleteness: usage.UsageCompleteness,
                 TokensIn: usage.TokensIn,
                 TokensOut: usage.TokensOut,
                 CacheReadTokens: usage.CacheReadTokens,

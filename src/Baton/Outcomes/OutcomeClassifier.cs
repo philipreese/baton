@@ -254,6 +254,15 @@ public static class OutcomeClassifier
             return new OutcomeClassification(OutcomeVerdict.Cancelled);
         }
 
+        if (result.ExactRunningTransport is { } transport
+            && result.FinalExpectedTurn?.IsSuccessful(transport) != true)
+        {
+            var (classification, retryNotBefore) = ReadOrClassifyFailure(contract, outputDirectory, result, failureClassifier, timeProvider);
+            return new OutcomeClassification(OutcomeVerdict.Failed, classification, Reason:
+                (result.Reason == CoreExitReason.TimedOut ? TimeoutSentence + " " : string.Empty)
+                + "The selected transport has no validated successful final expected turn.", RetryNotBefore: retryNotBefore);
+        }
+
         if (result.OutstandingToolAtTerminalSuccess is { } outstanding)
         {
             var recoveryCause = new RecoveryCause(
