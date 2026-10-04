@@ -9,6 +9,19 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.65.0](https://github.com/philipreese/baton/compare/v0.64.0...v0.65.0) (2026-10-04)
+
+
+### Features
+
+* **models:** Refresh catalog and qualified Sol6.1 defaults ([#2610](https://github.com/philipreese/baton/issues/2610)) ([48e0402](https://github.com/philipreese/baton/commit/48e0402c6bc2f41de4e7619de9825217d3620117))
+* **retention:** Capture bounded immutable room evidence ([#2608](https://github.com/philipreese/baton/issues/2608)) ([43c0abe](https://github.com/philipreese/baton/commit/43c0abee4d904e08638b6f9fc2b8e0f0502af0f5))
+
+
+### Bug Fixes
+
+* **glass:** Show manual follow-up for unsupported requests ([#2605](https://github.com/philipreese/baton/issues/2605)) ([f5a94ad](https://github.com/philipreese/baton/commit/f5a94ad2d3fe91ffa9329b742e079e6a2fe7b497))
+
 ## [0.64.0](https://github.com/philipreese/baton/compare/v0.63.1...v0.64.0) (2026-10-04)
 
 
