@@ -466,6 +466,23 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void The_pre_provision_admission_check_refuses_an_unsafe_resolved_Codex_model_without_a_request()
+    {
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["architect"] = new WorkerBindingConfigEntry(
+                "codex", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(5),
+                ModelResolved: "gpt-6-astra"),
+        };
+
+        var ex = Assert.Throws<ConductorOnlyWorkerModelException>(
+            () => WorkerBindingResolver.RefuseConductorOnlyWorkerModels(config));
+
+        Assert.Contains("Astra", ex.Message, StringComparison.Ordinal);
+        Assert.Null(ex.TryInvocation);
+    }
+
+    [Fact]
     public void The_pre_provision_admission_check_keeps_the_Claude_specific_remedy_for_Claude()
     {
         var config = new Dictionary<string, WorkerBindingConfigEntry>

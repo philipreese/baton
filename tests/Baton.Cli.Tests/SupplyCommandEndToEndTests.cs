@@ -51,7 +51,7 @@ public class SupplyCommandEndToEndTests
     }
 
     [Fact]
-    public async Task Supplying_with_an_omitted_Codex_model_refuses_before_mutating_or_launching()
+    public async Task Supplying_with_an_explicit_Codex_conductor_model_refuses_before_mutating_or_launching()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-supply-conductor-model-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
@@ -81,7 +81,7 @@ public class SupplyCommandEndToEndTests
             {
                 ["a"] = new WorkerBindingConfigEntry(
                     "codex", new WorkerContract("a", [], [new ProducedOutput("out_a")], []),
-                    "must not launch", TimeSpan.FromSeconds(30)),
+                    "must not launch", TimeSpan.FromSeconds(30), Model: "gpt-6-astra"),
             };
             var bindingsFilePath = Path.Combine(testRoot, "bindings.json");
             await File.WriteAllTextAsync(

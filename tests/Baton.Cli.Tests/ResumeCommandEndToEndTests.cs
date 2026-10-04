@@ -110,7 +110,7 @@ public class ResumeCommandEndToEndTests : IDisposable
     }
 
     [Fact]
-    public async Task Resuming_an_omitted_Codex_model_refuses_before_any_resume_write_or_vendor_launch()
+    public async Task Resuming_with_an_explicit_Codex_conductor_model_refuses_before_any_resume_write_or_vendor_launch()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-resume-conductor-model-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
@@ -136,13 +136,13 @@ public class ResumeCommandEndToEndTests : IDisposable
             var artifactsRootPath = Path.Combine(roomDirectory, Baton.Artifacts.ArtifactManager.ArtifactsDirectoryName);
             Assert.Single(Directory.GetDirectories(artifactsRootPath, "execution_*"));
 
-            // Model is deliberately omitted: Codex's recorded default is Astra, which remains a
-            // conductor-only model even when the binding itself does not spell it out.
+            // Pin the unsafe model explicitly: Codex's measured default is now a safe worker model,
+            // while the pre-resume refusal and no-write/no-launch guarantees remain required.
             var conductorConfig = new Dictionary<string, WorkerBindingConfigEntry>
             {
                 ["observer"] = new WorkerBindingConfigEntry(
                     "codex", new WorkerContract("observer", [], [new ProducedOutput("plan.md")], []),
-                    "must not resume", TimeSpan.FromSeconds(30), SessionId: "sess-codex-astra"),
+                    "must not resume", TimeSpan.FromSeconds(30), Model: "gpt-6-astra", SessionId: "sess-codex-astra"),
             };
             await File.WriteAllTextAsync(
                 bindingsFilePath, JsonSerializer.Serialize(conductorConfig), TestContext.Current.CancellationToken);

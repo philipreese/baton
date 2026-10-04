@@ -532,8 +532,7 @@ public sealed class QueueCommandTests
     [Theory]
     [InlineData("claude", "claude-fable-5-1", "Fable")]
     [InlineData("codex", "gpt-6-astra", "Astra")]
-    [InlineData("codex", null, "Astra")]
-    public async Task Add_refuses_conductor_models_or_their_resolved_default_before_any_queue_side_effect(
+    public async Task Add_refuses_conductor_models_before_any_queue_side_effect(
         string adapter, string? model, string family)
     {
         var home = CreateTempHome();
@@ -1510,7 +1509,7 @@ public sealed class QueueCommandTests
                 output,
                 Ct);
 
-            Assert.Contains("tier: codex / gpt-5.6-sol / medium", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("tier: codex / gpt-6.1-sol / medium", output.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("role default adapter", output.ToString(), StringComparison.Ordinal);
         }
         finally

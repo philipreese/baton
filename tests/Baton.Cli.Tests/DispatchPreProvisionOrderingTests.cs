@@ -320,7 +320,7 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
     }
 
     [Fact]
-    public async Task An_unpinned_codex_dispatch_uses_its_measured_default_before_room_creation()
+    public async Task An_unpinned_codex_dispatch_uses_its_measured_default_before_provisioning()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-codex-default-{Guid.NewGuid():N}");
         try

@@ -361,7 +361,7 @@ def step9_pinned_models_exist():
       * `agy` -- every pinned name is one `agy models` lists (the original arm; everything below
         about population and scope describes it).
       * `codex` -- every `WorkerTiers.json` tier on the codex adapter names a model AND an effort the
-        recorded `model/list` answer at `src/Baton.Vendors/codex-model-list-2026-09-27.jsonl` carries
+        recorded `model/list` answer named by `CODEX_RECORDING` carries
         (#1863, the codex arm below). Added when the first codex tier pin shipped: until then the
         count of tier pins with no catalogue join was zero, and it went to one. `CodexWorkerAdapter`
         already refuses an unrecorded model, but only at DISPATCH -- after the lane has been queued

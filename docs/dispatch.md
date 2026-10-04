@@ -457,7 +457,7 @@ own weighting, which no vendor publishes.
   still spends a separate subscription pool:
   [`benchmarks/subscription-usage/2026-09-04`](../benchmarks/subscription-usage/2026-09-04/README.md)
   attributes an early weekly Claude exhaustion to fleet volume with cache re-reads as the amplifier, so
-  moving bounded implement work off claude is the point of the change as much as the score is. `advise`
+  moving bounded implement work off claude is the point of the change. `advise`
   rides this tier too, so it moves vendor with it. One consequence is settled and worth stating, because
   #1861's move in the other direction changed it: `advise` still runs **enforced against the caller's own
   directory** rather than audited in a provisioned worktree, because `RoleDispatch`'s audited-worktree
@@ -477,8 +477,8 @@ own weighting, which no vendor publishes.
   an unrecorded choice, not a cheap one.
 
 Docs-only implement dispatches are not a tier. The conductor overrides them per dispatch onto
-`--adapter codex --model gpt-6.1-sol --effort high` (visible in the launch log, the same way the
-per-PR-kind review split of 2026-09-05 is); the `gpt-6.1-sol`/`high` row is the compact point that
+`--adapter codex --model gpt-5.6-sol --effort high` (visible in the launch log, the same way the
+per-PR-kind review split of 2026-09-05 is); the `gpt-5.6-sol`/`high` row is the compact point that
 buys.
 
 The prompt each worker receives is the spec followed by the role's own output instructions, so the
