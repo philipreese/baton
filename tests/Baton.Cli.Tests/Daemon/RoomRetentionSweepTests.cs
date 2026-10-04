@@ -1430,6 +1430,7 @@ public class RoomRetentionSweepTests
 
     [Theory]
     [InlineData("unknown")]
+    [InlineData("unknown-schema")]
     [InlineData("custom-verdict")]
     [InlineData("non-review")]
     public async Task Capture_FrozenOutputContract_DeterminesVerdictExpectation(string contract)
@@ -1446,6 +1447,7 @@ public class RoomRetentionSweepTests
             ProducedOutputs = contract switch
             {
                 "unknown" => null,
+                "unknown-schema" => [new ProducedOutput("findings.json", Schema: (OutputSchema)99)],
                 "custom-verdict" => [new ProducedOutput("findings.json", Schema: OutputSchema.ReviewVerdict)],
                 _ => [new ProducedOutput("output.txt", Schema: OutputSchema.None)]
             }

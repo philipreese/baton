@@ -526,6 +526,11 @@ public static class RoomRetentionEvidenceStore
             throw new RoomRetentionEvidenceRefusalException("review expectation is unknown");
         }
 
+        // An undefined frozen schema cannot prove whether a review verdict was required.
+        if (requests.Any(request => request.Request.ProducedOutputs?.Any(output =>
+            !Enum.IsDefined(output.Schema)) == true))
+            throw new RoomRetentionEvidenceRefusalException("review expectation uses an unknown output schema");
+
         if (requests.Any(request => request.Request.ProducedOutputs?.Any(output =>
             output.Schema == OutputSchema.ReviewVerdict &&
             !string.Equals(output.Name, "verdict.json", StringComparison.OrdinalIgnoreCase)) == true))
