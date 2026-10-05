@@ -9,6 +9,18 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.66.0](https://github.com/philipreese/baton/compare/v0.65.0...v0.66.0) (2026-10-05)
+
+
+### Features
+
+* **dispatch:** Add exact-running AGY correction transport ([#2615](https://github.com/philipreese/baton/issues/2615)) ([05f649c](https://github.com/philipreese/baton/commit/05f649cb9f540d9737c9b7db4e35c19241e84113))
+
+
+### Bug Fixes
+
+* **glass:** Keep retained receipts out of active worker cards ([#2613](https://github.com/philipreese/baton/issues/2613)) ([adb4d35](https://github.com/philipreese/baton/commit/adb4d35cba0351594e22910c95b1443a33f59000))
+
 ## [0.65.0](https://github.com/philipreese/baton/compare/v0.64.0...v0.65.0) (2026-10-04)
 
 
