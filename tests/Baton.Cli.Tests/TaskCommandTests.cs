@@ -88,6 +88,92 @@ public sealed class TaskCommandTests
     }
 
     [Fact]
+    public void Parser_captures_stage_context_and_positive_global_brakes()
+    {
+        var options = TaskOptionsParser.Parse(["submit", "--issue", "42", "--project", "C:/repo",
+            "--declared-size", "small", "--size-rationale", "one cluster", "--scope", "engine",
+            "--stage", "implement", "--model", "opus", "--reason", "implementation fit",
+            "--stage", "review", "--adapter", "codex", "--reason", "review independence",
+            "--stage", "fix", "--effort", "high", "--reason", "fix findings", "--stage", "re-review", "--model", "opus",
+            "--reason", "recheck findings", "--timeout", "15", "--max-tool-steps", "20",
+            "--token-budget", "5000"]);
+
+        Assert.Equal(15, options.TimeoutMinutes);
+        Assert.Equal(20, options.MaxToolSteps);
+        Assert.Equal(5000, options.TokenBudget);
+        Assert.Null(options.Adapter);
+        Assert.Equal(
+            [WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview],
+            options.StageSelections!.Select(selection => selection.Stage));
+        var selections = options.StageSelections!;
+        Assert.Equal("opus", selections[0].Model);
+        Assert.Equal("codex", selections[1].Adapter);
+        Assert.Equal("high", selections[2].Effort);
+    }
+
+    [Fact]
+    public void Parser_refuses_empty_duplicate_conflicting_and_nonpositive_stage_input()
+    {
+        string[] baseArgs =
+            ["submit", "--issue", "42", "--project", "C:/repo", "--declared-size", "small", "--size-rationale", "one cluster"];
+
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--stage", "review", "--stage", "fix", "--model", "opus"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--stage", "review", "--model", "opus", "--model", "sonnet"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--adapter", "claude", "--stage", "implement", "--adapter", "codex"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--timeout", "0"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--max-tool-steps", "0"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--token-budget", "-1"]));
+    }
+
+    [Fact]
+    public void Stage_and_cap_digest_is_ordered_typed_and_distinguishes_presence()
+    {
+        var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one cluster");
+        var implement = new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" };
+        var review = new QueueStageSelection { Stage = WorkStage.Review, Adapter = "codex" };
+        var first = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [implement, review], 10, 20, 5000);
+        var reordered = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [review, implement], 10, 20, 5000);
+        var changedStage = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [implement with { Model = "sonnet" }, review], 10, 20, 5000);
+        var absentTimeout = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [implement, review], null, 20, 5000);
+
+        Assert.Equal(first, reordered);
+        Assert.NotEqual(first, changedStage);
+        Assert.NotEqual(first, absentTimeout);
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest(
+            "github.com/example/repo", 1, size, null, implement, null, null));
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            Encoding.UTF8.GetBytes("brief\n--stage review\0spec-marker"), null, null, null,
+            [implement, review], 10, 20, 5000));
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, null, null,
+            [implement with { Reason = "why\n--stage fix\0marker" }, review], 10, 20, 5000));
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, null, null,
+            [implement with { Model = string.Empty }, review], 10, 20, 5000));
+
+        var aliasLeft = TaskCommand.ComputeInputDigest("github.com/example/repo", 1,
+            new TaskSizeDeclaration(DeclaredTaskSize.Small, "x\nspec\npayload"), null, null,
+            "engine", null, [implement, review], 10, 20, 5000);
+        var aliasRight = TaskCommand.ComputeInputDigest("github.com/example/repo", 1,
+            new TaskSizeDeclaration(DeclaredTaskSize.Small, "x"),
+            Encoding.UTF8.GetBytes("payload\nno-spec\n"), null,
+            "engine", null, [implement, review], 10, 20, 5000);
+        Assert.NotEqual(aliasLeft, aliasRight);
+
+        var absentModel = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, "engine", null,
+            [implement with { Model = null }, review], 10, 20, 5000);
+        var emptyModel = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, "engine", null,
+            [implement with { Model = string.Empty }, review], 10, 20, 5000);
+        Assert.NotEqual(absentModel, emptyModel);
+    }
+
+    [Fact]
     public async Task Task_admission_refuses_invalid_scope_inputs_before_resolution_or_provisioning()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton-task-scope-refusal-" + Guid.NewGuid().ToString("N"));
@@ -145,6 +231,245 @@ public sealed class TaskCommandTests
                 TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
             Assert.Equal(0, resolutions);
             Assert.Equal(0, provisions);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Owned_submission_retains_each_stage_selection_and_dispatch_brake()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-stages-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2620");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "owned stage routing", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle, TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2620-lane"));
+            }
+
+            var options = new TaskOptions(TaskVerb.Submit, 2620, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one routing cluster"), spec,
+                StageSelections:
+                [
+                    new QueueStageSelection { Stage = WorkStage.Implement, Adapter = "claude", Model = "opus", Effort = "high" },
+                    new QueueStageSelection { Stage = WorkStage.Review, Adapter = "codex", Model = "gpt-6.1-sol", Effort = "high" },
+                    new QueueStageSelection { Stage = WorkStage.Fix, Adapter = "claude", Model = "opus", Effort = "high" },
+                    new QueueStageSelection { Stage = WorkStage.ReReview, Adapter = "codex", Model = "gpt-6.1-sol", Effort = "high" },
+                ],
+                TimeoutMinutes: 15, MaxToolSteps: 20, TokenBudget: 5000);
+
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(
+                options, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(15, item.TimeoutMinutes);
+            Assert.Equal(20, item.MaxToolSteps);
+            Assert.Equal(5000, item.TokenBudget);
+            Assert.Equal(
+                [WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview],
+                item.StageSelections!.Select(selection => selection.Stage));
+            var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, Ct);
+            Assert.Equal("codex", QueueTierTable.ResolveForStage(
+                item, WorkStage.Review, settings.Queue, WorkerRoleCatalog.QueueTierFor,
+                WorkerRoleCatalog.QueueTierForRole).Adapter);
+            Assert.Equal("claude", QueueTierTable.ResolveForStage(
+                item, WorkStage.Fix, settings.Queue, WorkerRoleCatalog.QueueTierFor,
+                WorkerRoleCatalog.QueueTierForRole).Adapter);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task New_domain_replay_and_all_stage_cap_conflicts_preserve_preparation_snapshot()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-new-domain-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2620");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "frozen new-domain brief\n--stage review\0marker", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "conductor-one", home, cancellationToken: Ct);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var provisions = 0;
+
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(repository);
+            async Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Interlocked.Increment(ref provisions);
+                entered.SetResult();
+                await release.Task.WaitAsync(token);
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return new(workspace, "2620-lane");
+            }
+
+            var selections = new QueueStageSelection[]
+            {
+                new()
+                {
+                    Stage = WorkStage.Implement, Adapter = "claude", Model = "opus", Effort = "high",
+                    Reason = "implementation reason",
+                },
+                new()
+                {
+                    Stage = WorkStage.Review, Adapter = "codex", Model = "gpt-5.6-sol", Effort = "high",
+                    Reason = "review reason",
+                },
+                new()
+                {
+                    Stage = WorkStage.Fix, Adapter = "claude", Model = "opus", Effort = "medium",
+                    Reason = "fix reason",
+                },
+                new()
+                {
+                    Stage = WorkStage.ReReview, Adapter = "codex", Model = "gpt-5.6-sol", Effort = "medium",
+                    Reason = "re-review reason",
+                },
+                new()
+                {
+                    Stage = WorkStage.Continue, Adapter = "codex", Model = "gpt-5.6-sol", Effort = "low",
+                    Reason = "continue reason",
+                },
+            };
+            var firstOptions = new TaskOptions(TaskVerb.Submit, 2620, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one new-domain routing cluster"), spec,
+                ScopeClass: "engine", StageSelections: selections,
+                TimeoutMinutes: 15, MaxToolSteps: 20, TokenBudget: 5000);
+
+            var first = TaskCommand.ExecuteAsync(
+                firstOptions, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
+            await entered.Task.WaitAsync(Ct);
+
+            var equivalentBareImplement = firstOptions with
+            {
+                Adapter = "claude",
+                Model = "opus",
+                Effort = "high",
+                Reason = "implementation reason",
+                StageSelections = selections.Where(selection => selection.Stage != WorkStage.Implement).ToArray(),
+            };
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(
+                equivalentBareImplement, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Equal(1, provisions);
+
+            async Task AssertRefusedWithoutAnotherProvision(TaskOptions candidate)
+            {
+                var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => TaskCommand.ExecuteAsync(
+                    candidate, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+                Assert.Contains("already retains different explicit submission input", refusal.Message,
+                    StringComparison.Ordinal);
+                Assert.Equal(1, provisions);
+            }
+
+            static IEnumerable<TaskOptions> ChangedSelections(TaskOptions original,
+                IReadOnlyList<QueueStageSelection> baseline)
+            {
+                foreach (var stage in baseline)
+                {
+                    var changedAdapter = stage.Adapter == "claude" ? "codex" : "claude";
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Adapter = changedAdapter } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Adapter = null } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Model = "gpt-6.1-sol" } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Model = null } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Effort = stage.Effort == "low" ? "medium" : "low" } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Effort = null } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Reason = item.Reason + " changed" } : item).ToArray(),
+                    };
+                    // Scope plus any explicit stage axis requires a reason, so a valid reason drop
+                    // removes that stage's whole selection rather than creating invalid input.
+                    yield return original with
+                    {
+                        StageSelections = baseline.Where(item => item.Stage != stage.Stage).ToArray(),
+                    };
+                }
+            }
+
+            foreach (var candidate in ChangedSelections(firstOptions, selections))
+                await AssertRefusedWithoutAnotherProvision(candidate);
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = 16 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = 21 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = 5001 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = null });
+
+            release.SetResult();
+            Assert.Equal(0, await first);
+            foreach (var candidate in ChangedSelections(firstOptions, selections))
+                await AssertRefusedWithoutAnotherProvision(candidate);
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = 16 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = 21 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = 5001 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = null });
+
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(TaskPreparationState.Prepared, retained.IssuePreparation!.State);
+            Assert.Equal("frozen new-domain brief\n--stage review\0marker", retained.Instructions);
+            Assert.Equal(15, retained.TimeoutMinutes);
+            Assert.Equal(20, retained.MaxToolSteps);
+            Assert.Equal(5000, retained.TokenBudget);
+            Assert.Equal(selections.Select(selection => selection.Stage),
+                retained.StageSelections!.Select(selection => selection.Stage));
+            Assert.Equal(selections.Select(selection => selection.Reason),
+                retained.StageSelections!.Select(selection => selection.Reason));
+            Assert.Equal(1, provisions);
         }
         finally
         {
