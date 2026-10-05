@@ -401,8 +401,9 @@ public static class DispatchCommand
             Console.Out.WriteLine(workspaceFact);
         }
 
-        // #1355: the least-privilege grant profile actually in force, so the invoking agent can relay
-        // it to its own permission layer honestly. Extends the same printing seam as
+        // #1355/#2616: show the requested grant alongside a preview capped by the recorded project
+        // ceiling, so the invoking agent can relay both without treating the request as authority.
+        // Extends the same printing seam as
         // workspaceFact/output-path above rather than building a second one -- one line per bound
         // worker whose adapter actually consumes a grant, which for a single-role dispatch (the common
         // case) is the one line the issue asks for.
@@ -414,17 +415,7 @@ public static class DispatchCommand
         // (e.g. a composed template's capture step, which spawns git directly) never had its grant
         // consumed, so its "no-shell"/"no-network" would be false in the only sense an invoking agent's
         // permission layer cares about. Skip it -- no placeholder line either.
-        var translatorBindings = bindings
-            .Where(pair => adapters.TryGetValue(pair.Value.Adapter, out var boundAdapter) && boundAdapter is IPermissionGrantTranslator)
-            .ToList();
-        var multipleWorkers = translatorBindings.Count > 1;
-        foreach (var (workerName, binding) in translatorBindings)
-        {
-            var label = multipleWorkers ? $"Grant ({workerName})" : "Grant";
-            Console.Out.WriteLine(
-                $"{label}: requested {DescribeGrant(binding)}; project-capped preview: "
-                + DescribeProjectCappedGrant(binding));
-        }
+        PrintGrants(bindings, adapters, Console.Out);
 
         // #1512: surface the worker's discovered skill roster so a brief that names an absent skill is
         // caught by the operator — printed after the room directory already exists (created at :75
@@ -1122,6 +1113,24 @@ public static class DispatchCommand
             Console.Error.WriteLine(
                 $"Could not copy the declared output to '{options.OutputPath}': {ex.Message}. "
                 + $"The output still exists at '{srcPath}'.");
+        }
+    }
+
+    internal static void PrintGrants(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        IReadOnlyDictionary<string, IWorkerAdapter> adapters,
+        TextWriter output)
+    {
+        var translatorBindings = bindings
+            .Where(pair => adapters.TryGetValue(pair.Value.Adapter, out var boundAdapter) && boundAdapter is IPermissionGrantTranslator)
+            .ToList();
+        var multipleWorkers = translatorBindings.Count > 1;
+        foreach (var (workerName, binding) in translatorBindings)
+        {
+            var label = multipleWorkers ? $"Grant ({workerName})" : "Grant";
+            output.WriteLine(
+                $"{label}: requested {DescribeGrant(binding)}; project-capped preview: "
+                + DescribeProjectCappedGrant(binding));
         }
     }
 
