@@ -320,9 +320,12 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   key, which is present only for an actual matching profile. A missing row preserves the role default and
   records `role-default`; the selected key, originating selection identity, each source, and effective
   values are written to `bindings.json`.
-  This is applied once to a fresh direct role dispatch, including queue-launched dispatches. A
-  continuation carries the saved binding snapshot and does not re-read mutable settings. Templates,
-  template phases, and finite fallback policy remain outside this slice and belong to #2416.
+  This is applied once to a fresh direct role dispatch, including queue-launched dispatches, and to
+  each worker phase of a fresh template using the phase's resolved adapter, model, catalog role, and
+  declared size. Template phase names remain binding identities; the role association captured during
+  materialization supplies the profile key. Deterministic capture bindings are excluded. A continuation
+  carries the saved binding snapshot and does not re-read mutable settings. Finite fallback policy
+  remains outside this slice and belongs to #2416.
 
   #2476 adds an optional positive `MaxRepeatedToolSteps` to those profile rows and the explicit
   `--max-repeated-tool-steps` dispatch, queue, and redispatch flags. It is an explicit-only axis: there
