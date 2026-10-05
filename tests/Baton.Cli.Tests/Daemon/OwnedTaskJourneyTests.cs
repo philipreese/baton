@@ -20,6 +20,7 @@ public sealed class OwnedTaskJourneyTests
     private const string Repository = "github.com/example/project";
     private const string HeadA = "0123456789abcdef0123456789abcdef01234567";
     private const string HeadB = "abcdef0123456789abcdef0123456789abcdef01";
+    private const string HeadC = "123456789abcdef0123456789abcdef012345678";
     private static readonly RepositoryIdentity Identity = RepositoryIdentity.From("https://" + Repository, null)!;
 
     public sealed record ScopeCase(
@@ -38,13 +39,22 @@ public sealed class OwnedTaskJourneyTests
         string FixEffort,
         string? SubmissionEffort,
         string? SubmissionReason,
-        bool ExplicitRouting = false);
+        bool ExplicitRouting = false,
+        bool ImplementOnlyRouting = false,
+        string? ReReviewEffort = null,
+        bool ExplicitContinue = false);
 
     public static IEnumerable<object[]> OwnedTaskScopeCases() =>
     [
         [new ScopeCase("ENGINE", "engine", "engine", "review-engine",
             "claude", "opus", "low", "codex", "gpt-5.6-sol", "high", "claude", "opus", "medium",
-            null, null, true)],
+            null, null, true, ReReviewEffort: "medium")],
+        [new ScopeCase("engine", "engine", "engine", "review-engine",
+            "codex", "gpt-6.1-sol", "low", "codex", "gpt-6.1-sol", "medium", "claude", "opus", "low",
+            null, null, ImplementOnlyRouting: true)],
+        [new ScopeCase("engine", "engine", "engine", "review-engine",
+            "codex", "gpt-6.1-sol", "low", "codex", "gpt-6.1-sol", "medium", "claude", "opus", "low",
+            null, null, ImplementOnlyRouting: true, ExplicitContinue: true)],
         [new ScopeCase("Tooling", "tooling", "tooling", "review-tooling",
             "codex", "gpt-6.1-sol", "medium", "codex", "gpt-5.6-sol", "high", "codex", "gpt-6.1-sol", "medium",
             null, null)],
@@ -152,24 +162,71 @@ public sealed class OwnedTaskJourneyTests
                     new QueueStageSelection
                     {
                         Stage = WorkStage.ReReview, Adapter = testCase.ReviewAdapter,
-                        Model = testCase.ReviewModel, Effort = testCase.ReviewEffort,
+                        Model = testCase.ReviewModel, Effort = testCase.ReReviewEffort ?? testCase.ReviewEffort,
                         Reason = "re-review route",
                     },
                 }
-                : null;
+                : testCase.ImplementOnlyRouting
+                    ? (testCase.ExplicitContinue
+                        ?
+                        [
+                            new QueueStageSelection
+                            {
+                                Stage = WorkStage.Implement, Adapter = testCase.ImplementAdapter,
+                                Model = testCase.ImplementModel, Effort = testCase.ImplementEffort,
+                                Reason = "implementation route",
+                            },
+                            new QueueStageSelection
+                            {
+                                Stage = WorkStage.Continue, Adapter = "codex", Model = "gpt-5.6-sol",
+                                Effort = "low", Reason = "continue route",
+                            },
+                        ]
+                        :
+                        [
+                            new QueueStageSelection
+                            {
+                                Stage = WorkStage.Implement, Adapter = testCase.ImplementAdapter,
+                                Model = testCase.ImplementModel, Effort = testCase.ImplementEffort,
+                                Reason = "implementation route",
+                            },
+                        ])
+                    : null;
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 44, project,
                 new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple lifecycle seams"), brief,
-                ScopeClass: testCase.RawScope, Effort: testCase.ExplicitRouting ? null : testCase.SubmissionEffort,
-                Reason: testCase.ExplicitRouting ? null : testCase.SubmissionReason,
+                ScopeClass: testCase.RawScope, Effort: testCase.ExplicitRouting || testCase.ImplementOnlyRouting
+                    ? null : testCase.SubmissionEffort,
+                Reason: testCase.ExplicitRouting || testCase.ImplementOnlyRouting ? null : testCase.SubmissionReason,
                 StageSelections: explicitSelections,
-                TimeoutMinutes: testCase.ExplicitRouting ? 17 : null,
-                MaxToolSteps: testCase.ExplicitRouting ? 23 : null,
-                TokenBudget: testCase.ExplicitRouting ? 7000 : null),
+                TimeoutMinutes: testCase.ExplicitRouting || testCase.ImplementOnlyRouting ? 17 : null,
+                MaxToolSteps: testCase.ExplicitRouting || testCase.ImplementOnlyRouting ? 23 : null,
+                TokenBudget: testCase.ExplicitRouting || testCase.ImplementOnlyRouting ? 7000 : null),
                 TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
             var accepted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Prepared, accepted.IssuePreparation!.State);
             Assert.Equal("recorded-conductor", accepted.OwnedTask!.ConductorHolder);
             Assert.Equal(testCase.Scope, accepted.ScopeClass);
+            Assert.Equal(explicitSelections ?? [], accepted.StageSelections ?? []);
+            var routingSettings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, Ct);
+            var configuredDefaults = accepted with
+            {
+                StageSelections = null,
+                Adapter = null,
+                Model = null,
+                Effort = null,
+                Reason = null,
+                LifecyclePin = false,
+            };
+            void AssertRetainedStageRoute(QueueLaunchRequest launch)
+            {
+                var stage = launch.Item.Stage!.Value;
+                var hasExplicitRoute = accepted.StageSelections?.Any(selection => selection.Stage == stage) == true;
+                var routeSource = hasExplicitRoute ? accepted : configuredDefaults;
+                var expected = QueueTierTable.ResolveForStage(routeSource, stage,
+                    routingSettings.Queue, WorkerRoleCatalog.QueueTierFor,
+                    WorkerRoleCatalog.QueueTierForRole);
+                Assert.Equal(expected, launch.Tier);
+            }
             var frozen = Assert.IsType<FrozenWorkerAssignment>(accepted.WorkerAssignment);
             Assert.Equal(testCase.ImplementAdapter, frozen.Adapter);
             Assert.Equal(testCase.ImplementModel, frozen.Model);
@@ -196,7 +253,7 @@ public sealed class OwnedTaskJourneyTests
                 if (command is ["status", ..]) return new GhCliResult(true, 0, string.Empty, "");
                 if (command is ["rev-parse", ..]) return new GhCliResult(true, 0, head, "");
                 if (command is ["ls-remote", ..]) return new GhCliResult(true, 0,
-                    $"{head}\trefs/heads/44-lane\n{HeadA}\trefs/heads/main", "");
+                    $"{forge.Head}\trefs/heads/44-lane\n{HeadA}\trefs/heads/main", "");
                 throw new InvalidOperationException("Unexpected Git call: " + string.Join(' ', args));
             }
             WorkItemAdvancer Advancer() => new(forge, (_, _) => Task.FromResult<string?>(head),
@@ -220,15 +277,17 @@ public sealed class OwnedTaskJourneyTests
                     await Scheduler().TickOnceAsync(Ct);
                 Assert.Equal(count, launches.Count);
             }
-            async Task Settle(QueueLaunchRequest launch, string? decision = null)
+            async Task Settle(QueueLaunchRequest launch, string? decision = null,
+                string outcome = WorkflowOutcome.Succeeded)
             {
                 var verdict = decision is null ? null : Path.Combine(launch.RoomDirectory, "verdict.json");
                 if (verdict is not null)
                     await File.WriteAllTextAsync(verdict,
                         $$"""{"reviewedRef":"{{head}}","completion":"complete","decision":"{{decision}}","findings":[]}""", Ct);
                 await TerminalSentinelWriter.WriteAsync(launch.RoomDirectory,
-                    new WorkflowStatusView(WorkflowOutcome.Succeeded,
-                        [new WorkflowStatusStepView(launch.Item.Role, "Succeeded", "synthetic-execution")],
+                    new WorkflowStatusView(outcome,
+                        [new WorkflowStatusStepView(launch.Item.Role,
+                            outcome == WorkflowOutcome.Succeeded ? "Succeeded" : "Failed", "synthetic-execution")],
                         verdict is null ? [] : [verdict], null), Ct);
             }
 
@@ -251,9 +310,12 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(testCase.ImplementAdapter, launches[0].Tier.Adapter);
             Assert.Equal(testCase.ImplementModel, launches[0].Tier.Model);
             Assert.Equal(testCase.ImplementEffort, launches[0].Tier.Effort);
-            Assert.Equal(testCase.ExplicitRouting || testCase.SubmissionEffort is not null,
+            AssertRetainedStageRoute(launches[0]);
+            Assert.Equal(testCase.ExplicitRouting || testCase.ImplementOnlyRouting
+                ? "implementation route" : null, launches[0].Tier.OverrideReason);
+            Assert.Equal(testCase.ExplicitRouting || testCase.ImplementOnlyRouting || testCase.SubmissionEffort is not null,
                 launches[0].Tier.IsOverride);
-            if (testCase.ExplicitRouting)
+            if (testCase.ExplicitRouting || testCase.ImplementOnlyRouting)
             {
                 AssertDispatchBinding(launches[0]);
             }
@@ -262,11 +324,22 @@ public sealed class OwnedTaskJourneyTests
             await TickUntilLaunchCount(2);
             Assert.Equal(WorkStage.Review, launches[1].Item.Stage);
             Assert.Equal(testCase.ReviewTierKey, launches[1].Tier.TierKey);
-            Assert.Equal(testCase.ReviewAdapter, launches[1].Tier.Adapter);
-            Assert.Equal(testCase.ReviewModel, launches[1].Tier.Model);
-            Assert.Equal(testCase.ReviewEffort, launches[1].Tier.Effort);
+            if (testCase.ImplementOnlyRouting)
+            {
+                Assert.NotEqual(testCase.ImplementAdapter, launches[1].Tier.Adapter);
+                Assert.NotEqual(testCase.ImplementModel, launches[1].Tier.Model);
+            }
+            else
+            {
+                Assert.Equal(testCase.ReviewAdapter, launches[1].Tier.Adapter);
+                Assert.Equal(testCase.ReviewModel, launches[1].Tier.Model);
+                Assert.Equal(testCase.ReviewEffort, launches[1].Tier.Effort);
+            }
+            AssertRetainedStageRoute(launches[1]);
             Assert.Equal(testCase.ExplicitRouting, launches[1].Tier.IsOverride);
-            if (testCase.ExplicitRouting)
+            Assert.Equal(testCase.ExplicitRouting ? "review route" : null,
+                launches[1].Tier.OverrideReason);
+            if (testCase.ExplicitRouting || testCase.ImplementOnlyRouting)
             {
                 AssertDispatchBinding(launches[1]);
             }
@@ -274,21 +347,63 @@ public sealed class OwnedTaskJourneyTests
             await TickUntilLaunchCount(3);
             Assert.Equal(WorkStage.Fix, launches[2].Item.Stage);
             Assert.Equal(testCase.ImplementTierKey, launches[2].Tier.TierKey);
-            Assert.Equal(testCase.FixAdapter, launches[2].Tier.Adapter);
-            Assert.Equal(testCase.FixModel, launches[2].Tier.Model);
-            Assert.Equal(testCase.FixEffort, launches[2].Tier.Effort);
+            if (testCase.ImplementOnlyRouting)
+            {
+                Assert.NotEqual(testCase.ImplementAdapter, launches[2].Tier.Adapter);
+                Assert.NotEqual(testCase.ImplementModel, launches[2].Tier.Model);
+            }
+            else
+            {
+                Assert.Equal(testCase.FixAdapter, launches[2].Tier.Adapter);
+                Assert.Equal(testCase.FixModel, launches[2].Tier.Model);
+                Assert.Equal(testCase.FixEffort, launches[2].Tier.Effort);
+            }
+            AssertRetainedStageRoute(launches[2]);
             Assert.Equal(testCase.ExplicitRouting, launches[2].Tier.IsOverride);
-            if (testCase.ExplicitRouting) AssertDispatchBinding(launches[2]);
+            Assert.Equal(testCase.ExplicitRouting ? "fix route" : null,
+                launches[2].Tier.OverrideReason);
+            if (testCase.ExplicitRouting || testCase.ImplementOnlyRouting)
+                AssertDispatchBinding(launches[2]);
+
+            if (testCase.ImplementOnlyRouting)
+            {
+                // The fix produced one unpushed commit. The real advancer moves this owned row to
+                // continue; the next scheduler tick must resolve its explicit selection or default.
+                head = HeadC;
+                forge.Head = HeadB;
+                await Settle(launches[2], outcome: WorkflowOutcome.Failed);
+                await TickUntilLaunchCount(4);
+                Assert.Equal(WorkStage.Continue, launches[3].Item.Stage);
+                AssertRetainedStageRoute(launches[3]);
+                Assert.Equal(testCase.ExplicitContinue, launches[3].Tier.IsOverride);
+                Assert.Equal(testCase.ExplicitContinue ? "continue route" : null,
+                    launches[3].Tier.OverrideReason);
+                if (testCase.ExplicitContinue)
+                {
+                    Assert.Equal("codex", launches[3].Tier.Adapter);
+                    Assert.Equal("gpt-5.6-sol", launches[3].Tier.Model);
+                    Assert.Equal("low", launches[3].Tier.Effort);
+                }
+                AssertDispatchBinding(launches[3]);
+                Assert.Equal(17, launches[3].Item.TimeoutMinutes);
+                Assert.Equal(23, launches[3].Item.MaxToolSteps);
+                Assert.Equal(7000, launches[3].Item.TokenBudget);
+                return;
+            }
+
             head = HeadB;
             forge.Head = HeadB;
             await Settle(launches[2]);
             await TickUntilLaunchCount(4);
             Assert.Equal(WorkStage.ReReview, launches[3].Item.Stage);
+            AssertRetainedStageRoute(launches[3]);
             Assert.Equal(testCase.ReviewTierKey, launches[3].Tier.TierKey);
             Assert.Equal(testCase.ReviewAdapter, launches[3].Tier.Adapter);
             Assert.Equal(testCase.ReviewModel, launches[3].Tier.Model);
-            Assert.Equal(testCase.ReviewEffort, launches[3].Tier.Effort);
+            Assert.Equal(testCase.ReReviewEffort ?? testCase.ReviewEffort, launches[3].Tier.Effort);
             Assert.Equal(testCase.ExplicitRouting, launches[3].Tier.IsOverride);
+            Assert.Equal(testCase.ExplicitRouting ? "re-review route" : null,
+                launches[3].Tier.OverrideReason);
             if (testCase.ExplicitRouting) AssertDispatchBinding(launches[3]);
             await Settle(launches[3], "approve");
             for (var i = 0; i < 5; i++) await Scheduler().TickOnceAsync(Ct);

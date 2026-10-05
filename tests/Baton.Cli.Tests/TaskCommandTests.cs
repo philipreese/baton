@@ -154,6 +154,23 @@ public sealed class TaskCommandTests
         Assert.NotEqual(first, TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
             null, null, null, null,
             [implement with { Model = string.Empty }, review], 10, 20, 5000));
+
+        var aliasLeft = TaskCommand.ComputeInputDigest("github.com/example/repo", 1,
+            new TaskSizeDeclaration(DeclaredTaskSize.Small, "x\nspec\npayload"), null, null,
+            "engine", null, [implement, review], 10, 20, 5000);
+        var aliasRight = TaskCommand.ComputeInputDigest("github.com/example/repo", 1,
+            new TaskSizeDeclaration(DeclaredTaskSize.Small, "x"),
+            Encoding.UTF8.GetBytes("payload\nno-spec\n"), null,
+            "engine", null, [implement, review], 10, 20, 5000);
+        Assert.NotEqual(aliasLeft, aliasRight);
+
+        var absentModel = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, "engine", null,
+            [implement with { Model = null }, review], 10, 20, 5000);
+        var emptyModel = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, "engine", null,
+            [implement with { Model = string.Empty }, review], 10, 20, 5000);
+        Assert.NotEqual(absentModel, emptyModel);
     }
 
     [Fact]
@@ -336,6 +353,11 @@ public sealed class TaskCommandTests
                     Stage = WorkStage.ReReview, Adapter = "codex", Model = "gpt-5.6-sol", Effort = "medium",
                     Reason = "re-review reason",
                 },
+                new()
+                {
+                    Stage = WorkStage.Continue, Adapter = "codex", Model = "gpt-5.6-sol", Effort = "low",
+                    Reason = "continue reason",
+                },
             };
             var firstOptions = new TaskOptions(TaskVerb.Submit, 2620, project,
                 new TaskSizeDeclaration(DeclaredTaskSize.Small, "one new-domain routing cluster"), spec,
@@ -360,48 +382,65 @@ public sealed class TaskCommandTests
 
             async Task AssertRefusedWithoutAnotherProvision(TaskOptions candidate)
             {
-                await Assert.ThrowsAsync<CliArgumentException>(() => TaskCommand.ExecuteAsync(
+                var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => TaskCommand.ExecuteAsync(
                     candidate, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+                Assert.Contains("already retains different explicit submission input", refusal.Message,
+                    StringComparison.Ordinal);
                 Assert.Equal(1, provisions);
             }
 
-            var implement = selections[0];
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            static IEnumerable<TaskOptions> ChangedSelections(TaskOptions original,
+                IReadOnlyList<QueueStageSelection> baseline)
             {
-                StageSelections = [implement with { Adapter = "codex" }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Adapter = null }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Model = "gpt-5.6-sol" }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Model = null }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Effort = "low" }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Effort = null }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Reason = "changed reason" }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Reason = null }, selections[1], selections[2], selections[3]],
-            });
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement, selections[2], selections[3]],
-            });
+                foreach (var stage in baseline)
+                {
+                    var changedAdapter = stage.Adapter == "claude" ? "codex" : "claude";
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Adapter = changedAdapter } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Adapter = null } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Model = "gpt-6.1-sol" } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Model = null } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Effort = stage.Effort == "low" ? "medium" : "low" } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Effort = null } : item).ToArray(),
+                    };
+                    yield return original with
+                    {
+                        StageSelections = baseline.Select(item => item.Stage == stage.Stage
+                            ? item with { Reason = item.Reason + " changed" } : item).ToArray(),
+                    };
+                    // Scope plus any explicit stage axis requires a reason, so a valid reason drop
+                    // removes that stage's whole selection rather than creating invalid input.
+                    yield return original with
+                    {
+                        StageSelections = baseline.Where(item => item.Stage != stage.Stage).ToArray(),
+                    };
+                }
+            }
+
+            foreach (var candidate in ChangedSelections(firstOptions, selections))
+                await AssertRefusedWithoutAnotherProvision(candidate);
             await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = 16 });
             await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = null });
             await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = 21 });
@@ -411,20 +450,26 @@ public sealed class TaskCommandTests
 
             release.SetResult();
             Assert.Equal(0, await first);
-            var prepared = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
-            Assert.Equal(TaskPreparationState.Prepared, prepared.IssuePreparation!.State);
-            Assert.Equal("frozen new-domain brief\n--stage review\0marker", prepared.Instructions);
-            Assert.Equal(15, prepared.TimeoutMinutes);
-            Assert.Equal(20, prepared.MaxToolSteps);
-            Assert.Equal(5000, prepared.TokenBudget);
-            Assert.Equal(selections.Select(selection => selection.Stage),
-                prepared.StageSelections!.Select(selection => selection.Stage));
+            foreach (var candidate in ChangedSelections(firstOptions, selections))
+                await AssertRefusedWithoutAnotherProvision(candidate);
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = 16 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = 21 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = 5001 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = null });
 
-            await AssertRefusedWithoutAnotherProvision(firstOptions with
-            {
-                StageSelections = [implement with { Reason = "changed after preparation" }, selections[1], selections[2], selections[3]],
-            });
-            Assert.Equal("frozen new-domain brief\n--stage review\0marker", prepared.Instructions);
+            var retained = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(TaskPreparationState.Prepared, retained.IssuePreparation!.State);
+            Assert.Equal("frozen new-domain brief\n--stage review\0marker", retained.Instructions);
+            Assert.Equal(15, retained.TimeoutMinutes);
+            Assert.Equal(20, retained.MaxToolSteps);
+            Assert.Equal(5000, retained.TokenBudget);
+            Assert.Equal(selections.Select(selection => selection.Stage),
+                retained.StageSelections!.Select(selection => selection.Stage));
+            Assert.Equal(selections.Select(selection => selection.Reason),
+                retained.StageSelections!.Select(selection => selection.Reason));
+            Assert.Equal(1, provisions);
         }
         finally
         {
