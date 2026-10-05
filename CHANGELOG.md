@@ -9,6 +9,23 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.67.0](https://github.com/philipreese/baton/compare/v0.66.0...v0.67.0) (2026-10-05)
+
+
+### Features
+
+* **cli:** Capture task-local lifecycle routing and dispatch limits ([#2622](https://github.com/philipreese/baton/issues/2622)) ([112ad81](https://github.com/philipreese/baton/commit/112ad811e0c0ed4677d24b24c942fa16e2c76b67))
+
+
+### Bug Fixes
+
+* **cli:** Disclose project-capped dispatch permissions ([#2617](https://github.com/philipreese/baton/issues/2617)) ([01f6785](https://github.com/philipreese/baton/commit/01f67853898c93d0eadee87af1a17f1a0a254c82))
+
+
+### Tests
+
+* **daemon:** Make hostile-reader retry regression causal ([#2621](https://github.com/philipreese/baton/issues/2621)) ([4c4362c](https://github.com/philipreese/baton/commit/4c4362cd5d52231f61ed16525de3935a53511429))
+
 ## [0.66.0](https://github.com/philipreese/baton/compare/v0.65.0...v0.66.0) (2026-10-05)
 
 
