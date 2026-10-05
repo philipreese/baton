@@ -127,10 +127,16 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
                 {
                     var roleDefaults = WorkerRoleCatalog.For(role);
                     Assert.Equal(roleDefaults.Timeout, binding.Timeout);
+                    Assert.Equal(roleDefaults.TokenBudget?.Resolve(role, binding.Adapter), binding.TokenBudget);
                     Assert.Equal(roleDefaults.MaxToolSteps, binding.MaxToolSteps);
                     Assert.Null(binding.ExecutionLimitResolution?.ChosenKey);
                     Assert.Equal($"{binding.Adapter.ToLowerInvariant()}/{(binding.ModelResolved ?? binding.Model)?.ToLowerInvariant()}/{role}/small", binding.ExecutionLimitResolution?.OriginatingSelectionKey);
                     Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution?.TimeoutSource);
+                    Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution?.TokenBudgetSource);
+                    Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution?.MaxToolStepsSource);
+                    Assert.Null(binding.MaxRepeatedToolSteps);
+                    Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolSteps);
+                    Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolStepsSource);
                     continue;
                 }
                 Assert.Equal(TimeSpan.FromMinutes(20 + index), binding.Timeout);
@@ -138,6 +144,11 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
                 Assert.Equal(40 + index, binding.MaxToolSteps);
                 Assert.Equal($"{binding.Adapter.ToLowerInvariant()}/{(binding.ModelResolved ?? binding.Model)?.ToLowerInvariant()}/{role}/small", binding.ExecutionLimitResolution?.ChosenKey);
                 Assert.Equal(ExecutionLimitSource.Profile, binding.ExecutionLimitResolution?.TimeoutSource);
+                Assert.Equal(ExecutionLimitSource.Profile, binding.ExecutionLimitResolution?.TokenBudgetSource);
+                Assert.Equal(ExecutionLimitSource.Profile, binding.ExecutionLimitResolution?.MaxToolStepsSource);
+                Assert.Null(binding.MaxRepeatedToolSteps);
+                Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolSteps);
+                Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolStepsSource);
             }
 
             var captureBinding = bindings["audit-stage-capture"];
@@ -169,9 +180,14 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
                 Assert.Equal(binding.TokenBudget, evidence.TokenBudget);
                 Assert.Equal(binding.MaxToolSteps, evidence.MaxToolSteps);
                 Assert.Equal(binding.ExecutionLimitResolution?.ChosenKey, evidence.ChosenKey);
-                Assert.Equal(binding.ExecutionLimitResolution?.TimeoutSource, evidence.TimeoutSource);
-                Assert.Equal(binding.ExecutionLimitResolution?.TokenBudgetSource, evidence.TokenBudgetSource);
-                Assert.Equal(binding.ExecutionLimitResolution?.MaxToolStepsSource, evidence.MaxToolStepsSource);
+                var expectedSource = phase == "audit-stage"
+                    ? ExecutionLimitSource.RoleDefault
+                    : ExecutionLimitSource.Profile;
+                Assert.Equal(expectedSource, evidence.TimeoutSource);
+                Assert.Equal(expectedSource, evidence.TokenBudgetSource);
+                Assert.Equal(expectedSource, evidence.MaxToolStepsSource);
+                Assert.Null(evidence.MaxRepeatedToolSteps);
+                Assert.Null(evidence.MaxRepeatedToolStepsSource);
                 Assert.Equal($"{binding.Adapter.ToLowerInvariant()}/{(binding.ModelResolved ?? binding.Model)?.ToLowerInvariant()}/{role}/small",
                     binding.ExecutionLimitResolution?.OriginatingSelectionKey);
             }
@@ -222,7 +238,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
     }
 
     [Fact]
-    public async Task Fresh_template_rejects_parserless_repeated_call_profile_before_any_worker_launch()
+    public async Task Fresh_template_rejects_later_parserless_repeated_call_profile_before_any_worker_launch()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-tmpl-repeat-cap-{Guid.NewGuid():N}");
         try
@@ -256,8 +272,6 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
 
             var workspace = Path.Combine(testRoot, "workspace");
             await InitGitWorkspaceAsync(workspace);
-            var phaseBinding = WorkflowTemplateComposer.Materialize(
-                WorkflowTemplateCatalog.For("repeat-cap-test")).Bindings["build-stage"];
             await DaemonSettingsStore.SaveAsync(
                 new DaemonSettings
                 {
@@ -266,8 +280,8 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
                         new ExecutionLimitProfile
                         {
                             Adapter = "fake",
-                            Model = phaseBinding.ModelResolved ?? phaseBinding.Model,
-                            Role = "implement",
+                            Model = "test-model",
+                            Role = "review",
                             DeclaredTaskSize = "small",
                             Timeout = TimeSpan.FromMinutes(19),
                             TokenBudget = 30000,
@@ -296,7 +310,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
                 evaluateRunway: RunwayTestGate.Admit));
 
             Assert.Contains("no tool-identity parser", ex.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.Equal(2, spy.ResolveCount);
+            Assert.Equal(0, spy.ResolveCount);
             Assert.All(launchMarkers, marker => Assert.False(File.Exists(marker.Value),
                 $"The repeated-call cap must refuse before the {marker.Key} adapter process can launch."));
         }
