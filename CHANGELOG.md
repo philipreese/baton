@@ -9,6 +9,14 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.67.1](https://github.com/philipreese/baton/compare/v0.67.0...v0.67.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* **dispatch:** Preserve template profile provenance ([#2627](https://github.com/philipreese/baton/issues/2627)) ([55344e5](https://github.com/philipreese/baton/commit/55344e51170774c89915a90e05edd86cd0c15cfd))
+* **task:** Keep conductor handoff explicit after readiness ([#2624](https://github.com/philipreese/baton/issues/2624)) ([d4bbbf7](https://github.com/philipreese/baton/commit/d4bbbf7b29668129e01ad4769e26cce1ddd94433))
+
 ## [0.67.0](https://github.com/philipreese/baton/compare/v0.66.0...v0.67.0) (2026-10-05)
 
 
