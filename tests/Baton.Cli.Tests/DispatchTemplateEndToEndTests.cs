@@ -179,6 +179,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
         {
             var workspace = Path.Combine(testRoot, "workspace");
             await InitGitWorkspaceAsync(workspace);
+            ProjectCeilingStore.Set(workspace, new ProjectCeiling(true, false, false, false), ProjectCeilingStore.DefaultPath);
 
             var verdictFixture = Path.Combine(testRoot, "verdict-fixture.json");
             await File.WriteAllTextAsync(
@@ -204,11 +205,69 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
             Assert.Contains("Grant (implement):", printed);
             Assert.Contains("Grant (janitor):", printed);
             Assert.Contains("Grant (review):", printed);
+            Assert.Equal(3, printed.Split(Environment.NewLine).Count(line => line.Contains(
+                "; project-capped preview: read, no-write, no-shell, no-network", StringComparison.Ordinal)));
             Assert.DoesNotContain("review-capture", printed);
         }
         finally
         {
             Console.SetOut(originalOut);
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Composed_grant_output_uses_each_bindings_own_distinct_source_and_ceiling()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-tmpl-distinct-grants-{Guid.NewGuid():N}");
+        try
+        {
+            var callerWorkspace = Path.Combine(testRoot, "caller");
+            var restrictedRepository = Path.Combine(testRoot, "restricted-source");
+            var permissiveWorkspace = Path.Combine(testRoot, "permissive-workspace");
+            var closedWorkspace = Path.Combine(testRoot, "closed-workspace");
+            var (_, composed) = WorkflowTemplateComposer.Materialize(
+                WorkflowTemplateCatalog.For("implement-review"), "fake", workingDirectory: callerWorkspace,
+                attachDefaultSkills: false);
+            // Stock composition supplies one workspace to all phases. Give the materialized
+            // bindings distinct sources to exercise the exact producer ExecuteAsync calls, without
+            // adding a per-phase workspace option or pretending this renderer qualifies a launch.
+            var bindings = new Dictionary<string, WorkerBindingConfigEntry>(composed)
+            {
+                ["implement"] = composed["implement"] with
+                {
+                    Worktree = new WorktreeWorkspace(restrictedRepository, "HEAD"),
+                    WorkingDirectory = permissiveWorkspace,
+                },
+                ["janitor"] = composed["janitor"] with { WorkingDirectory = permissiveWorkspace },
+                ["review"] = composed["review"] with { WorkingDirectory = closedWorkspace },
+            };
+            ProjectCeilingStore.Set(callerWorkspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Set(restrictedRepository, new ProjectCeiling(true, false, false, false), ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Set(permissiveWorkspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Set(closedWorkspace, new ProjectCeiling(false, false, false, false), ProjectCeilingStore.DefaultPath);
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["fake"] = new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true),
+                [WorkflowTemplateComposer.CaptureAdapter] = new BaseRefCapturingWorkerAdapter(),
+            };
+            using var output = new StringWriter();
+            DispatchCommand.PrintGrants(bindings, adapters, output);
+            var lines = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+            Assert.Equal(3, lines.Length);
+            Assert.EndsWith("; project-capped preview: read, no-write, no-shell, no-network, exact-file-restore",
+                Assert.Single(lines, line => line.StartsWith("Grant (implement):", StringComparison.Ordinal)));
+            Assert.EndsWith("; project-capped preview: read, write, shell, network",
+                Assert.Single(lines, line => line.StartsWith("Grant (janitor):", StringComparison.Ordinal)));
+            Assert.EndsWith("; project-capped preview: no-read, no-write, no-shell, no-network",
+                Assert.Single(lines, line => line.StartsWith("Grant (review):", StringComparison.Ordinal)));
+            Assert.DoesNotContain("review-capture", output.ToString());
+            Assert.Equal(permissiveWorkspace, bindings["implement"].WorkingDirectory);
+            Assert.Equal(restrictedRepository, bindings["implement"].Worktree!.Repository);
+            Assert.Equal(composed["implement"].PermissionGrant, bindings["implement"].PermissionGrant);
+        }
+        finally
+        {
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
     }

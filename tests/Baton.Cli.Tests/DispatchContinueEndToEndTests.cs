@@ -400,6 +400,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
     public async Task Continuing_a_room_still_carries_the_roles_grant_and_subagent_ceiling()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-continue-e2e-{Guid.NewGuid():N}");
+        var originalOut = Console.Out;
         try
         {
             var parentRoom = await DispatchTerminalParentWithSessionAsync(testRoot, "Weigh the options for X.", "sess-abc-123");
@@ -411,15 +412,32 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var options = new DispatchOptions(
                 "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
 
-            await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+            var childWorkspace = Path.Combine(testRoot, "child-workspace");
+            Directory.CreateDirectory(childWorkspace);
+            ProjectCeilingStore.Set(childWorkspace, new ProjectCeiling(false, false, false, false), ProjectCeilingStore.DefaultPath);
+            var translatorAdapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["claude"] = new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true),
+            };
+            using var output = new StringWriter();
+            Console.SetOut(output);
+            await DispatchCommand.ExecuteAsync(
+                options, translatorAdapters, TestContext.Current.CancellationToken,
+                workspaceDirectory: childWorkspace, evaluateRunway: RunwayTestGate.Admit);
+            Console.SetOut(originalOut);
+            Assert.Contains("Grant: requested read, no-write, no-shell, no-network; "
+                + "project-capped preview: no-read, no-write, no-shell, no-network", output.ToString());
 
             var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
                 Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
             Assert.Equal(parentBindings["advise"].PermissionGrant, childBindings["advise"].PermissionGrant);
             Assert.Equal(parentBindings["advise"].AllowsSubagents, childBindings["advise"].AllowsSubagents);
+            Assert.Equal(childWorkspace, childBindings["advise"].WorkingDirectory);
+            Assert.True(childBindings["advise"].ResumeSession);
         }
         finally
         {
+            Console.SetOut(originalOut);
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
     }
