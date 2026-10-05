@@ -464,6 +464,8 @@ public static class TaskCommand
         var receiptMissing = new List<string>();
         if (readiness is not null)
         {
+            if (string.IsNullOrWhiteSpace(readiness.Id)) receiptMissing.Add("id");
+            if (readiness.ReadyObservedAt == default) receiptMissing.Add("observedAt");
             if (string.IsNullOrWhiteSpace(readiness.TaskId)) receiptMissing.Add("taskId");
             else if (!string.Equals(readiness.TaskId, owner.Id, StringComparison.Ordinal)) receiptMismatches.Add("taskId");
             if (string.IsNullOrWhiteSpace(readiness.Repository)) receiptMissing.Add("repository");
@@ -689,10 +691,14 @@ public static class TaskCommand
             if (conductorHandoff is { } handoff)
                 output.WriteLine($"  conductor handoff: {handoff.holder} ({handoff.ownership}); {handoff.responsibility}; readiness is as-of evidence, not a merge grant");
             if (readiness is not null)
+            {
                 output.WriteLine($"  ready receipt{(state is "retired" or "cancelled" ? " (historical)" : "")}: "
                     + $"{readiness.Id} at {readiness.ReadyObservedAt:O}; head {readiness.HeadSha} (as-of); binding {receiptBinding!.status}"
                     + (receiptMismatches.Count == 0 ? "" : $"; mismatches: {string.Join(", ", receiptMismatches)}")
                     + (receiptMissing.Count == 0 ? "" : $"; missing: {string.Join(", ", receiptMissing)}"));
+                output.WriteLine($"    receipt subjects: task {readiness.TaskId}; repository {readiness.Repository}; "
+                    + $"issue #{readiness.Issue}; PR #{readiness.PullRequest}");
+            }
             if (item.ChecksObservedAt is not null || item.Error is not null)
                 output.WriteLine($"  latest checks{(item.Retirement is null ? "" : " (historical)")}: {item.Checks ?? "unknown"}"
                     + (item.ChecksObservedAt is { } checksAt ? $" at {checksAt:O}" : "")

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Baton.Accounting;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Cli.Daemon;
@@ -1366,6 +1367,8 @@ public sealed class TaskCommandTests
                 text, StringComparison.Ordinal);
             Assert.Contains("mismatches: taskId, issue", text, StringComparison.Ordinal);
             Assert.Contains("missing: rowPullRequest", text, StringComparison.Ordinal);
+            Assert.Contains($"receipt subjects: task {foreignId}; repository {repository}; issue #57; PR #77",
+                text, StringComparison.Ordinal);
             Assert.Contains("not a merge grant", text, StringComparison.Ordinal);
             Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
             Assert.Equal(claimBefore, await File.ReadAllBytesAsync(claimFile, Ct));
@@ -1426,6 +1429,200 @@ public sealed class TaskCommandTests
             Assert.Contains("missing: rowPullRequest, pullRequest", partialTextOutput.ToString(), StringComparison.Ordinal);
             Assert.Equal(partialQueueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
             Assert.Equal(claimBefore, await File.ReadAllBytesAsync(claimFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("complete", "ready-as-of", "complete", null)]
+    [InlineData("foreign-repository", "stale", "mismatched", "repository")]
+    [InlineData("foreign-pr", "stale", "mismatched", "pullRequest")]
+    [InlineData("null-id", "stale", "incomplete", "id")]
+    [InlineData("absent-id", "stale", "incomplete", "id")]
+    [InlineData("empty-id", "stale", "incomplete", "id")]
+    [InlineData("whitespace-id", "stale", "incomplete", "id")]
+    [InlineData("default-time", "stale", "incomplete", "observedAt")]
+    [InlineData("absent-time", "stale", "incomplete", "observedAt")]
+    [InlineData("required-evidence-wait", "stale", "complete", null)]
+    [InlineData("cancelled-history", "cancelled", "complete", null)]
+    public async Task Status_discriminates_single_receipt_defects_and_terminal_history_without_writes_or_calls(
+        string caseName, string expectedState, string expectedBinding, string? defect)
+    {
+        const string repository = "github.com/example/repo";
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-receipt-control-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var at = new DateTimeOffset(2026, 10, 3, 12, 0, 0, TimeSpan.Zero);
+            var id = TaskCommand.TaskId(repository, 51);
+            var head = new string('c', 40);
+            var identity = RepositoryIdentity.From("https://" + repository, null)!;
+            var receipt = new TaskReadyReceipt("current-ready", id, repository, 51, 77,
+                head, "review", new string('d', 64), "passing", "checks", at, at);
+            receipt = caseName switch
+            {
+                "foreign-repository" => receipt with { Repository = "github.com/foreign/repo" },
+                "foreign-pr" => receipt with { PullRequest = 78 },
+                "null-id" => receipt with { Id = null! },
+                "empty-id" => receipt with { Id = "" },
+                "whitespace-id" => receipt with { Id = " \t " },
+                "default-time" or "absent-time" => receipt with { ReadyObservedAt = default },
+                _ => receipt,
+            };
+            var room = Path.Combine(BatonPaths.Rooms, "retained-review");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id, Role = "implement", Workspace = home, SpecFile = BatonPaths.QueueSpecFile(id),
+                    Repository = repository, Issue = 51, PullRequest = 77, Stage = WorkStage.Ready,
+                    State = caseName == "cancelled-history" ? QueueItemState.Cancelled : QueueItemState.Queued,
+                    Error = null,
+                    RequiredCheckEvidenceWait = caseName == "required-evidence-wait"
+                        ? new RequiredCheckEvidenceWait(head, at, at, 1, "required checks unreadable") : null,
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 51, "digest", "recorded-owner", at, receipt),
+                }],
+                PullRequestObservations = [new QueuePullRequestObservation(repository, 77, "open", head, at, at, null)],
+            }, Ct);
+            if (caseName is "absent-id" or "absent-time" or "null-id")
+            {
+                var persisted = JsonNode.Parse(await File.ReadAllTextAsync(BatonPaths.QueueFile, Ct))!;
+                var retained = persisted["items"]![0]!["OwnedTask"]!["Ready"]!.AsObject();
+                if (caseName == "null-id") retained["Id"] = null;
+                else Assert.True(retained.Remove(caseName == "absent-id" ? "Id" : "ReadyObservedAt"));
+                await File.WriteAllTextAsync(BatonPaths.QueueFile, persisted.ToJsonString(), Ct);
+                receipt = caseName == "absent-id" ? receipt with { Id = null! } : receipt;
+            }
+            await ConductorClaimStore.ClaimAsync(identity, "recorded-owner", home, cancellationToken: Ct);
+            await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(at, id, QueueDecisionEntry.Launched,
+                null, 0, 10, 1, Tier: "engine", Adapter: "codex", Model: "retained-model", Effort: "high", Room: room),
+                null, BatonPaths.QueueDecisionLedgerFile, Ct);
+            var evidenceDirectory = Path.Combine(room, "artifacts", "execution_review");
+            Directory.CreateDirectory(evidenceDirectory);
+            await File.WriteAllTextAsync(Path.Combine(evidenceDirectory, CostLedgerStore.VerdictOutputName),
+                "{\"reviewedRef\":\"" + head + "\",\"decision\":\"approve\"}", Ct);
+            await File.WriteAllTextAsync(BatonPaths.RoomBindingsFile(room),
+                "{\"reviewer\":{\"Adapter\":\"codex\",\"Model\":\"retained-model\"}}", Ct);
+            await File.WriteAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName),
+                "{\"retainedReviewExecution\":\"review\"}\n", Ct);
+            Directory.CreateDirectory(BatonPaths.WorkerLaunchConfig);
+            await File.WriteAllTextAsync(Path.Combine(BatonPaths.WorkerLaunchConfig, "claude-settings.json"), "{}", Ct);
+            var before = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            foreach (var path in Directory.GetFiles(home, "*", SearchOption.AllDirectories))
+                before.Add(path, await File.ReadAllBytesAsync(path, Ct));
+
+            var resolveCalls = 0;
+            var provisionCalls = 0;
+            var commandCalls = 0;
+            Task<RepositoryIdentity?> Resolve(string _, CancellationToken __)
+            {
+                resolveCalls++;
+                throw new InvalidOperationException("Status must not resolve a forge repository.");
+            }
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int _, string __, string? ___, string ____, bool _____, TextWriter ______, CancellationToken _______)
+            {
+                provisionCalls++;
+                throw new InvalidOperationException("Status must not provision a worker.");
+            }
+            Task<(int ExitCode, string Output)> Run(string _, IReadOnlyList<string> __, string ___, CancellationToken ____)
+            {
+                commandCalls++;
+                throw new InvalidOperationException("Status must not invoke forge, vendor, or preparation commands.");
+            }
+            var jsonOutput = new StringWriter();
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true),
+                jsonOutput, Resolve, Provision, Ct, Run, utcNow: () => at));
+            var textOutput = new StringWriter();
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id),
+                textOutput, Resolve, Provision, Ct, Run, utcNow: () => at));
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            var status = json.RootElement;
+            var expectedTrigger = expectedState switch
+            {
+                "ready-as-of" => "conductor-handoff",
+                "stale" => "conductor-reassessment",
+                _ => "none",
+            };
+            Assert.Equal(expectedState, status.GetProperty("state").GetString());
+            Assert.Equal(expectedTrigger, status.GetProperty("nextTrigger").GetString());
+            Assert.Equal(id, status.GetProperty("taskId").GetString());
+            Assert.Equal(repository, status.GetProperty("repository").GetString());
+            Assert.Equal(51, status.GetProperty("issue").GetInt32());
+            Assert.Equal(77, status.GetProperty("pullRequest").GetInt32());
+            Assert.Equal(head, status.GetProperty("headSha").GetString());
+            Assert.Equal("recorded-owner", status.GetProperty("currentConductorHolder").GetString());
+            Assert.Equal(JsonValueKind.Null, status.GetProperty("latestChecks").GetProperty("error").ValueKind);
+            var text = textOutput.ToString();
+            Assert.Contains($"Task {id}: {expectedState}", text, StringComparison.Ordinal);
+            Assert.Contains($"next: {expectedTrigger}; PR head: {head}", text, StringComparison.Ordinal);
+            Assert.Contains("stage: ready; PR: #77", text, StringComparison.Ordinal);
+            Assert.Contains($"receipt subjects: task {receipt.TaskId}; repository {receipt.Repository}; issue #{receipt.Issue}; PR #{receipt.PullRequest}",
+                text, StringComparison.Ordinal);
+            Assert.Contains($"{receipt.Id} at {receipt.ReadyObservedAt:O}; head {head} (as-of); binding {expectedBinding}",
+                text, StringComparison.Ordinal);
+            var handoff = status.GetProperty("conductorHandoff");
+            if (expectedState == "cancelled")
+            {
+                Assert.Equal(JsonValueKind.Null, handoff.ValueKind);
+                Assert.DoesNotContain("conductor handoff:", text, StringComparison.Ordinal);
+                Assert.Contains("ready receipt (historical)", text, StringComparison.Ordinal);
+                Assert.Equal(receipt.Id, status.GetProperty("ready").GetProperty("Id").GetString());
+                Assert.Equal(head, status.GetProperty("ready").GetProperty("HeadSha").GetString());
+            }
+            else
+            {
+                Assert.Equal(id, handoff.GetProperty("taskId").GetString());
+                Assert.Equal(repository, handoff.GetProperty("repository").GetString());
+                Assert.Equal(51, handoff.GetProperty("issue").GetInt32());
+                Assert.Equal(77, handoff.GetProperty("pullRequest").GetInt32());
+                Assert.Equal("recorded-owner", handoff.GetProperty("holder").GetString());
+                Assert.Equal("recorded-owner", handoff.GetProperty("currentHolder").GetString());
+                Assert.False(handoff.GetProperty("mergeGrant").GetBoolean());
+                Assert.Equal(expectedState == "ready-as-of"
+                    ? "reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority"
+                    : "reassess-current-readiness", handoff.GetProperty("responsibility").GetString());
+                Assert.Contains("not a merge grant", text, StringComparison.Ordinal);
+                var retained = handoff.GetProperty("readiness");
+                Assert.Equal(receipt.Id, retained.GetProperty("id").GetString());
+                Assert.Equal(receipt.TaskId, retained.GetProperty("taskId").GetString());
+                Assert.Equal(receipt.Repository, retained.GetProperty("repository").GetString());
+                Assert.Equal(receipt.Issue, retained.GetProperty("issue").GetInt32());
+                Assert.Equal(receipt.PullRequest, retained.GetProperty("pullRequest").GetInt32());
+                Assert.Equal(head, retained.GetProperty("headSha").GetString());
+                Assert.Equal(receipt.ReadyObservedAt, retained.GetProperty("observedAt").GetDateTimeOffset());
+                Assert.Equal("as-of", retained.GetProperty("evidence").GetString());
+                var binding = retained.GetProperty("binding");
+                Assert.Equal(expectedBinding, binding.GetProperty("status").GetString());
+                Assert.Equal(expectedBinding == "mismatched" ? [defect] : Array.Empty<string?>(),
+                    binding.GetProperty("mismatches").EnumerateArray().Select(value => value.GetString()));
+                Assert.Equal(expectedBinding == "incomplete" ? [defect] : Array.Empty<string?>(),
+                    binding.GetProperty("missing").EnumerateArray().Select(value => value.GetString()));
+                if (defect is not null)
+                {
+                    var reason = "readiness-receipt-binding-" + (expectedBinding == "mismatched" ? "mismatch" : "incomplete");
+                    Assert.Equal(reason, status.GetProperty("reason").GetString());
+                    Assert.Contains(reason, text, StringComparison.Ordinal);
+                    Assert.Contains((expectedBinding == "mismatched" ? "mismatches: " : "missing: ") + defect,
+                        text, StringComparison.Ordinal);
+                }
+                if (caseName == "required-evidence-wait")
+                {
+                    Assert.Equal("readiness-evidence-no-longer-current", status.GetProperty("reason").GetString());
+                    Assert.Contains("stale (readiness-evidence-no-longer-current)", text, StringComparison.Ordinal);
+                }
+            }
+            Assert.Equal(0, resolveCalls);
+            Assert.Equal(0, provisionCalls);
+            Assert.Equal(0, commandCalls);
+            Assert.Equal(before.Keys.Order(StringComparer.Ordinal),
+                Directory.GetFiles(home, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal));
+            foreach (var (path, bytes) in before)
+                Assert.Equal(bytes, await File.ReadAllBytesAsync(path, Ct));
         }
         finally
         {
