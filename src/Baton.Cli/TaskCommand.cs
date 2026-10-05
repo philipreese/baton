@@ -43,8 +43,13 @@ public static class TaskCommand
         }
 
         var scopeClass = TaskSubmissionInput.NormalizeScopeClass(options.ScopeClass);
-        TaskSubmissionInput.ValidateScopeAndReason(
-            scopeClass, options.Adapter, options.Model, options.Effort, options.Reason);
+        ValidateCaps(options);
+        var stageSelections = BuildStageSelections(options);
+        if (stageSelections is not null)
+            TaskSubmissionInput.ValidateStageSelections(scopeClass, stageSelections);
+        else
+            TaskSubmissionInput.ValidateScopeAndReason(
+                scopeClass, options.Adapter, options.Model, options.Effort, options.Reason);
 
         var project = Path.GetFullPath(options.Project!);
         if (!Directory.Exists(project)) throw new CliArgumentException($"Project '{project}' does not exist.");
@@ -68,8 +73,10 @@ public static class TaskCommand
                 Reason = options.Reason,
             };
         var digest = ComputeInputDigest(
-            identity.Value, issue, options.Size!.Value, options.Spec is null ? null : specBytes, selection,
-            scopeClass, options.Reason);
+            identity.Value, issue, options.Size!.Value, options.Spec is null ? null : specBytes,
+            stageSelections is null ? selection : null, scopeClass,
+            stageSelections is null ? options.Reason : null, stageSelections,
+            options.TimeoutMinutes, options.MaxToolSteps, options.TokenBudget);
         var existing = (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
             .Items.FirstOrDefault(item => item.OwnedTask?.Id == id);
         if (existing is not null)
@@ -91,7 +98,10 @@ public static class TaskCommand
             SpecFilePath: options.Spec, Issue: issue, Lifecycle: true,
             DeclaredTaskSize: options.Size, Requirements: [],
             ScopeClass: scopeClass,
-            StageSelections: selection is null ? null : [selection]);
+            StageSelections: stageSelections ?? (selection is null ? null : [selection]),
+            TimeoutMinutes: options.TimeoutMinutes,
+            MaxToolSteps: options.MaxToolSteps,
+            TokenBudget: options.TokenBudget);
 
         // QueueCommand owns the shared locked reservation and the exact existing provisioning path.
         // Its queue-oriented prose stays internal; this front door returns the task receipt.
@@ -130,8 +140,17 @@ public static class TaskCommand
     /// </summary>
     internal static string ComputeInputDigest(
         string repository, int issue, TaskSizeDeclaration size, byte[]? specBytes, QueueStageSelection? selection,
-        string? scopeClass = null, string? reason = null)
+        string? scopeClass = null, string? reason = null,
+        IReadOnlyList<QueueStageSelection>? stageSelections = null,
+        int? timeoutMinutes = null, int? maxToolSteps = null, long? tokenBudget = null)
     {
+        if (stageSelections is not null || timeoutMinutes is not null || maxToolSteps is not null || tokenBudget is not null)
+        {
+            return ComputeNewInputDigest(
+                repository, issue, size, specBytes, selection, scopeClass, reason, stageSelections,
+                timeoutMinutes, maxToolSteps, tokenBudget);
+        }
+
         var effectiveReason = reason ?? selection?.Reason;
         if (scopeClass is null && effectiveReason is null && selection is null)
         {
@@ -183,6 +202,99 @@ public static class TaskCommand
     // New scope/reason (--reason) fields use a new domain so selected-input-v1 remains byte-for-byte stable.
     private const string ScopedInputDomain = "baton-task-scoped-input-v1";
 
+    private const string StageAndCapsInputDomain = "baton-task-stage-caps-input-v1";
+
+    private static readonly WorkStage[] DigestStages =
+    [
+        WorkStage.Implement,
+        WorkStage.Review,
+        WorkStage.Fix,
+        WorkStage.ReReview,
+        WorkStage.Continue,
+    ];
+
+    private static string ComputeNewInputDigest(
+        string repository,
+        int issue,
+        TaskSizeDeclaration size,
+        byte[]? specBytes,
+        QueueStageSelection? selection,
+        string? scopeClass,
+        string? reason,
+        IReadOnlyList<QueueStageSelection>? stageSelections,
+        int? timeoutMinutes,
+        int? maxToolSteps,
+        long? tokenBudget)
+    {
+        var stages = new Dictionary<WorkStage, QueueStageSelection>();
+        if (stageSelections is not null)
+        {
+            foreach (var stage in stageSelections)
+            {
+                if (!DigestStages.Contains(stage.Stage))
+                    throw new ArgumentOutOfRangeException(nameof(stageSelections), stage.Stage, "Unknown dispatch stage.");
+                if (!stages.TryAdd(stage.Stage, stage))
+                    throw new ArgumentException($"Stage '{WorkStages.Token(stage.Stage)}' was supplied more than once.", nameof(stageSelections));
+            }
+        }
+
+        if (selection is not null)
+        {
+            if (stages.TryGetValue(WorkStage.Implement, out var named))
+            {
+                stages[WorkStage.Implement] = named with
+                {
+                    Adapter = MergeDigestAxis(named.Adapter, selection.Adapter, "adapter"),
+                    Model = MergeDigestAxis(named.Model, selection.Model, "model"),
+                    Effort = MergeDigestAxis(named.Effort, selection.Effort, "effort"),
+                    Reason = MergeDigestAxis(named.Reason, selection.Reason, "reason"),
+                };
+            }
+            else
+            {
+                stages.Add(WorkStage.Implement, selection);
+            }
+        }
+
+        var buffer = new List<byte>();
+        AppendField(buffer, Encoding.UTF8.GetBytes(StageAndCapsInputDomain));
+        AppendField(buffer, Encoding.UTF8.GetBytes(repository));
+        AppendInt32Field(buffer, issue);
+        AppendField(buffer, Encoding.UTF8.GetBytes(size.Size.ToString()));
+        AppendOptionalField(buffer, size.Rationale is null ? null : Encoding.UTF8.GetBytes(size.Rationale));
+        AppendOptionalField(buffer, specBytes);
+        AppendOptionalField(buffer, scopeClass is null ? null : Encoding.UTF8.GetBytes(scopeClass));
+        AppendOptionalField(buffer, reason is null ? null : Encoding.UTF8.GetBytes(reason));
+
+        foreach (var stage in DigestStages)
+        {
+            if (!stages.TryGetValue(stage, out var value))
+            {
+                AppendOptionalField(buffer, null);
+                continue;
+            }
+
+            var stageBuffer = new List<byte>();
+            AppendOptionalField(stageBuffer, value.Adapter is null ? null : Encoding.UTF8.GetBytes(value.Adapter));
+            AppendOptionalField(stageBuffer, value.Model is null ? null : Encoding.UTF8.GetBytes(value.Model));
+            AppendOptionalField(stageBuffer, value.Effort is null ? null : Encoding.UTF8.GetBytes(value.Effort));
+            AppendOptionalField(stageBuffer, value.Reason is null ? null : Encoding.UTF8.GetBytes(value.Reason));
+            AppendOptionalField(buffer, stageBuffer.ToArray());
+        }
+
+        AppendOptionalInt32Field(buffer, timeoutMinutes);
+        AppendOptionalInt32Field(buffer, maxToolSteps);
+        AppendOptionalInt64Field(buffer, tokenBudget);
+        return Convert.ToHexString(SHA256.HashData(buffer.ToArray())).ToLowerInvariant();
+    }
+
+    private static string? MergeDigestAxis(string? first, string? second, string axis)
+    {
+        if (first is not null && second is not null && !string.Equals(first, second, StringComparison.Ordinal))
+            throw new ArgumentException($"Implement-stage {axis} values conflict.");
+        return first ?? second;
+    }
+
     /// <summary>A present, always-required field: a 1-byte present tag, a 4-byte big-endian length,
     /// then the bytes. The length prefix is what makes two fields' boundary unambiguous regardless of
     /// what bytes either one contains.</summary>
@@ -207,6 +319,89 @@ public static class TaskCommand
         }
 
         AppendField(buffer, value);
+    }
+
+    private static void AppendInt32Field(List<byte> buffer, int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(bytes, value);
+        AppendField(buffer, bytes.ToArray());
+    }
+
+    private static void AppendOptionalInt32Field(List<byte> buffer, int? value) =>
+        AppendOptionalField(buffer, value is { } number ? Int32Bytes(number) : null);
+
+    private static void AppendOptionalInt64Field(List<byte> buffer, long? value) =>
+        AppendOptionalField(buffer, value is { } number ? Int64Bytes(number) : null);
+
+    private static byte[] Int32Bytes(int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(bytes, value);
+        return bytes.ToArray();
+    }
+
+    private static byte[] Int64Bytes(long value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64BigEndian(bytes, value);
+        return bytes.ToArray();
+    }
+
+    private static void ValidateCaps(TaskOptions options)
+    {
+        if (options.TimeoutMinutes is <= 0)
+            throw new CliArgumentException("'--timeout' must be positive.");
+        if (options.MaxToolSteps is <= 0)
+            throw new CliArgumentException("'--max-tool-steps' must be positive.");
+        if (options.TokenBudget is <= 0)
+            throw new CliArgumentException("'--token-budget' must be positive.");
+    }
+
+    private static IReadOnlyList<QueueStageSelection>? BuildStageSelections(TaskOptions options)
+    {
+        var hasNewFields = options.StageSelections is not null
+            || options.TimeoutMinutes is not null
+            || options.MaxToolSteps is not null
+            || options.TokenBudget is not null;
+        if (!hasNewFields)
+            return null;
+
+        var stages = new Dictionary<WorkStage, QueueStageSelection>();
+        foreach (var selection in options.StageSelections ?? [])
+        {
+            if (!stages.TryAdd(selection.Stage, selection))
+                throw new CliArgumentException($"Stage '{WorkStages.Token(selection.Stage)}' was selected more than once.");
+        }
+
+        if (options.Adapter is not null || options.Model is not null || options.Effort is not null || options.Reason is not null)
+        {
+            stages.TryGetValue(WorkStage.Implement, out var existing);
+            stages[WorkStage.Implement] = MergeStageSelection(
+                existing, options.Adapter, options.Model, options.Effort, options.Reason);
+        }
+
+        return stages.Values.OrderBy(selection => selection.Stage).ToList();
+    }
+
+    private static QueueStageSelection MergeStageSelection(
+        QueueStageSelection? existing, string? adapter, string? model, string? effort, string? reason)
+    {
+        existing ??= new QueueStageSelection { Stage = WorkStage.Implement };
+        return existing with
+        {
+            Adapter = MergeTaskAxis(existing.Adapter, adapter, "adapter"),
+            Model = MergeTaskAxis(existing.Model, model, "model"),
+            Effort = MergeTaskAxis(existing.Effort, effort, "effort"),
+            Reason = MergeTaskAxis(existing.Reason, reason, "reason"),
+        };
+    }
+
+    private static string? MergeTaskAxis(string? first, string? second, string axis)
+    {
+        if (first is not null && second is not null && !string.Equals(first, second, StringComparison.Ordinal))
+            throw new CliArgumentException($"Implement-stage {axis} values conflict between bare and named input.");
+        return first ?? second;
     }
 
     private static bool HasRetainedBlockedPreparation(string id)

@@ -8133,7 +8133,8 @@ departed from. Nothing in the queue substitutes a model.
 
 `baton task submit --issue <n> --project <dir> --declared-size small|medium|large|unknown
 --size-rationale <why> [--spec <file>] [--scope engine|tooling|docs] [--adapter <name>] [--model <name>]
-[--effort <name>] [--reason <why>]` is the
+[--effort <name>] [--reason <why>] [--stage implement|review|fix|re-review|continue]
+[--timeout <minutes>] [--max-tool-steps <n>] [--token-budget <n>]` is the
 ordinary project-work entry point. It accepts exactly one canonical remote repository and issue under
 an existing conductor claim and returns a stable `task-` ID. `unknown` is an explicit size declaration
 requiring a rationale, not an omitted field.
@@ -8186,7 +8187,7 @@ An identical submission returns that same row at any stage; a differing declarat
 worker selection is a conflict. Import cannot erase task-owned rows or a matching issue lifecycle.
 These checks protect the pre-provisioning window as well as the later queue lifecycle.
 
-**Task-local scope and initial worker selection (#2600).** `--scope` is optional, case-insensitive input
+**Task-local scope and initial worker selection (#2600; no-stage form).** `--scope` is optional, case-insensitive input
 normalized to one of `engine`, `tooling`, or `docs`, then retained on the queue item so the existing
 scope tier table resolves the implement and later review stages. No scope is inferred and an absent
 scope keeps the role's previous defaults. `--reason` is accepted only with a scope and at least one
@@ -8219,6 +8220,26 @@ a new typed, length-delimited domain that includes both new fields' presence and
 the complete prior explicit input; this keeps scope, reason (`--reason`), newline, delimiter, and spec bytes
 distinct while leaving legacy and selected-input-v1 preimages byte-for-byte unchanged when both new
 fields are absent.
+
+**Task-local routing and brakes (#2620).** `--scope` remains global to the lifecycle. With no
+`--stage`, adapter/model/effort/reason flags select implement only. A stage marker sets the context
+for subsequent axes until the next marker; each explicit stage must contain an axis and has its own
+reason rules. A reason requires a scope and an axis, and a scope plus an axis requires a nonblank
+reason. Reasons are never borrowed from another stage. Bare and named implement axes are merged
+before adapter inference; conflicting values and duplicate axes/reasons within a stage refuse. The
+stage map is forwarded through the existing queue launcher and advancement seams, so later stages
+retain their own selection and never receive an implement pin implicitly. `--timeout`,
+`--max-tool-steps`, and `--token-budget` are positive, global per-dispatch item brakes, not
+lifecycle or per-stage caps. Queue's legacy zero-cap behavior is unchanged.
+
+When any `--stage` or item brake is present, the task uses a separate versioned, typed,
+length-delimited stage-and-caps domain. It records the complete prior explicit input, the presence
+and raw adapter/model/effort/reason values for every dispatchable stage in stable stage order, and
+the presence/value of each brake. Absent and explicitly present values remain distinct, and changing
+or dropping a stage, axis, reason, or brake conflicts during preparation as well as after it.
+Equivalent bare/named implement maps have one digest in this domain; an old-domain submission is
+never silently migrated. Existing reservation, frozen brief, permission/runway admission,
+one-fix/re-review bound, and readiness/advance rules remain the authority.
 
 The existing daemon drives implement → PR → review → one allowed fix → re-review → ready without
 another operator prompt. Readiness requires the existing exact-current-head approval and passing

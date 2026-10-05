@@ -88,6 +88,66 @@ public sealed class TaskCommandTests
     }
 
     [Fact]
+    public void Parser_captures_stage_context_and_positive_global_brakes()
+    {
+        var options = TaskOptionsParser.Parse(["submit", "--issue", "42", "--project", "C:/repo",
+            "--declared-size", "small", "--size-rationale", "one cluster", "--scope", "engine",
+            "--stage", "implement", "--model", "opus", "--reason", "implementation fit",
+            "--stage", "review", "--adapter", "codex", "--reason", "review independence",
+            "--stage", "fix", "--effort", "high", "--reason", "fix findings", "--stage", "re-review", "--model", "opus",
+            "--reason", "recheck findings", "--timeout", "15", "--max-tool-steps", "20",
+            "--token-budget", "5000"]);
+
+        Assert.Equal(15, options.TimeoutMinutes);
+        Assert.Equal(20, options.MaxToolSteps);
+        Assert.Equal(5000, options.TokenBudget);
+        Assert.Null(options.Adapter);
+        Assert.Equal(
+            [WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview],
+            options.StageSelections!.Select(selection => selection.Stage));
+        var selections = options.StageSelections!;
+        Assert.Equal("opus", selections[0].Model);
+        Assert.Equal("codex", selections[1].Adapter);
+        Assert.Equal("high", selections[2].Effort);
+    }
+
+    [Fact]
+    public void Parser_refuses_empty_duplicate_conflicting_and_nonpositive_stage_input()
+    {
+        string[] baseArgs =
+            ["submit", "--issue", "42", "--project", "C:/repo", "--declared-size", "small", "--size-rationale", "one cluster"];
+
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--stage", "review", "--stage", "fix", "--model", "opus"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--stage", "review", "--model", "opus", "--model", "sonnet"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--adapter", "claude", "--stage", "implement", "--adapter", "codex"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--timeout", "0"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--max-tool-steps", "0"]));
+        Assert.Throws<CliArgumentException>(() => TaskOptionsParser.Parse([.. baseArgs, "--token-budget", "-1"]));
+    }
+
+    [Fact]
+    public void Stage_and_cap_digest_is_ordered_typed_and_distinguishes_presence()
+    {
+        var size = new TaskSizeDeclaration(DeclaredTaskSize.Small, "one cluster");
+        var implement = new QueueStageSelection { Stage = WorkStage.Implement, Model = "opus" };
+        var review = new QueueStageSelection { Stage = WorkStage.Review, Adapter = "codex" };
+        var first = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [implement, review], 10, 20, 5000);
+        var reordered = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [review, implement], 10, 20, 5000);
+        var changedStage = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [implement with { Model = "sonnet" }, review], 10, 20, 5000);
+        var absentTimeout = TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size, null, null,
+            null, null, [implement, review], null, 20, 5000);
+
+        Assert.Equal(first, reordered);
+        Assert.NotEqual(first, changedStage);
+        Assert.NotEqual(first, absentTimeout);
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest(
+            "github.com/example/repo", 1, size, null, implement, null, null));
+    }
+
+    [Fact]
     public async Task Task_admission_refuses_invalid_scope_inputs_before_resolution_or_provisioning()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton-task-scope-refusal-" + Guid.NewGuid().ToString("N"));
@@ -145,6 +205,66 @@ public sealed class TaskCommandTests
                 TaskCommand.ExecuteAsync(invalid, TextWriter.Null, Resolve, Provision, Ct));
             Assert.Equal(0, resolutions);
             Assert.Equal(0, provisions);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Owned_submission_retains_each_stage_selection_and_dispatch_brake()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-stages-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2620");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "owned stage routing", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "owner", home, cancellationToken: Ct);
+
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) => Task.FromResult<RepositoryIdentity?>(repository);
+            Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle, TextWriter writer, CancellationToken token)
+            {
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2620-lane"));
+            }
+
+            var options = new TaskOptions(TaskVerb.Submit, 2620, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one routing cluster"), spec,
+                StageSelections:
+                [
+                    new QueueStageSelection { Stage = WorkStage.Implement, Adapter = "claude", Model = "opus", Effort = "high" },
+                    new QueueStageSelection { Stage = WorkStage.Review, Adapter = "codex", Model = "gpt-6.1-sol", Effort = "high" },
+                    new QueueStageSelection { Stage = WorkStage.Fix, Adapter = "claude", Model = "opus", Effort = "high" },
+                    new QueueStageSelection { Stage = WorkStage.ReReview, Adapter = "codex", Model = "gpt-6.1-sol", Effort = "high" },
+                ],
+                TimeoutMinutes: 15, MaxToolSteps: 20, TokenBudget: 5000);
+
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(
+                options, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(15, item.TimeoutMinutes);
+            Assert.Equal(20, item.MaxToolSteps);
+            Assert.Equal(5000, item.TokenBudget);
+            Assert.Equal(
+                [WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview],
+                item.StageSelections!.Select(selection => selection.Stage));
+            var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, Ct);
+            Assert.Equal("codex", QueueTierTable.ResolveForStage(
+                item, WorkStage.Review, settings.Queue, WorkerRoleCatalog.QueueTierFor,
+                WorkerRoleCatalog.QueueTierForRole).Adapter);
+            Assert.Equal("claude", QueueTierTable.ResolveForStage(
+                item, WorkStage.Fix, settings.Queue, WorkerRoleCatalog.QueueTierFor,
+                WorkerRoleCatalog.QueueTierForRole).Adapter);
         }
         finally
         {
