@@ -421,7 +421,9 @@ public static class DispatchCommand
         foreach (var (workerName, binding) in translatorBindings)
         {
             var label = multipleWorkers ? $"Grant ({workerName})" : "Grant";
-            Console.Out.WriteLine($"{label}: {DescribeGrant(binding)}");
+            Console.Out.WriteLine(
+                $"{label}: requested {DescribeGrant(binding)}; project-capped preview: "
+                + DescribeProjectCappedGrant(binding));
         }
 
         // #1512: surface the worker's discovered skill roster so a brief that names an absent skill is
@@ -1139,8 +1141,60 @@ public static class DispatchCommand
     /// beyond naming them (record-once); the citations above are the source, this line is the gloss.
     /// </remarks>
     internal static string DescribeGrant(WorkerBindingConfigEntry binding)
+        => DescribeGrant(binding, binding.PermissionGrant, includeOriginatingPullRequest: true);
+
+    internal static string DescribeProjectCappedGrant(WorkerBindingConfigEntry binding)
     {
-        var grant = binding.PermissionGrant;
+        var projectKey = binding.Worktree?.Repository ?? binding.WorkingDirectory;
+        if (string.IsNullOrWhiteSpace(projectKey))
+        {
+            return "no project ceiling applies";
+        }
+
+        ProjectCeiling? ceiling;
+        try
+        {
+            ceiling = ProjectCeilingStore.TryGetRecord(projectKey, ProjectCeilingStore.DefaultPath);
+        }
+        catch (ProjectCeilingStoreException)
+        {
+            return "unverified (project-ceiling evidence is malformed or unreadable)";
+        }
+        catch (IOException)
+        {
+            return "unverified (project-ceiling evidence is unreadable)";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "unverified (project-ceiling evidence is unreadable)";
+        }
+
+        if (ceiling is null)
+        {
+            return "unverified (no recorded project ceiling; launch will refuse)";
+        }
+
+        if (ceiling.IsRevoked)
+        {
+            return "unverified (project ceiling is revoked; launch will refuse)";
+        }
+
+        if (binding.PermissionGrant is not { } grant)
+        {
+            return ceiling.IsUnrestricted
+                ? DescribeGrant(binding, null, includeOriginatingPullRequest: false)
+                : "unverified (raw PermissionScope; structured grant is unavailable)";
+        }
+
+        var cappedGrant = ceiling.Cap(grant);
+        return DescribeGrant(binding, cappedGrant, includeOriginatingPullRequest: false);
+    }
+
+    private static string DescribeGrant(
+        WorkerBindingConfigEntry binding,
+        PermissionGrant? grant,
+        bool includeOriginatingPullRequest)
+    {
         if (grant is null)
         {
             return "unset (falls back to the adapter's raw PermissionScope)";
@@ -1168,7 +1222,7 @@ public static class DispatchCommand
             shell,
             grant.NetworkAccess ? "network" : "no-network")
             + (grant.ExactFileRestore ? ", exact-file-restore" : string.Empty)
-            + (binding.OriginatingPullRequestOwnership is { } origin
+            + (includeOriginatingPullRequest && binding.OriginatingPullRequestOwnership is { } origin
                 ? $", originating-pr {origin.Repository}#{origin.Number} "
                     + $"(conductor-verified: {origin.HeadBranch}@{origin.LaunchHead})"
                 : string.Empty);

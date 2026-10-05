@@ -142,15 +142,16 @@ reporting (`worktree <outcome> at <path>`, printed to stderr) is what surfaces i
 
 ### The printed grant line
 
-Every dispatch also prints the least-privilege grant profile actually in force, one line per bound
-worker (just one line for an ordinary single-role dispatch), before the run starts (#1355 — least
-privilege default grants per role):
+Every dispatch prints the requested least-privilege grant and a clearly labelled project-capped
+preview, one line per bound worker (just one line for an ordinary single-role dispatch), before the
+run starts (#1355 — least-privilege default grants per role):
 
 ```
-Grant: read, no-write, no-shell, no-network
+Grant: requested read, no-write, no-shell, no-network; project-capped preview: read, no-write, no-shell, no-network
 ```
 
-Read left to right: `ReadFiles`, then `WriteFiles` (an `AuditedNotEnforced` write — the shape
+The `requested` segment is the binding's structured grant. Read its categories left to right:
+`ReadFiles`, then `WriteFiles` (an `AuditedNotEnforced` write — the shape
 `--workspace`'s row above describes — prints as `write (workspace-wide inside an isolated worktree;
 audited against declared outputs after the run)` rather than a bare `write`: the grant is NOT scoped to
 the declared outputs while the worker runs — the vendor hook cannot path-scope it, only confine writes
@@ -164,6 +165,16 @@ Only printed for a bound worker whose adapter actually consumes a structured gra
 `IPermissionGrantTranslator`, `src/Baton.Vendors/WorkerBindingResolver.cs`'s own rule for which
 adapters a grant governs). A composed template's capture step, say, spawns `git` directly and never
 reads a grant at all — its phase gets no line printed, never a placeholder one.
+
+The `project-capped preview` reuses the recorded project ceiling's `ProjectCeiling.Cap` operation and
+the same pre-provision lookup key as the launch gate: `Worktree.Repository` when present, otherwise
+`WorkingDirectory`. It is a display preview, not launch qualification. A missing project key says
+that no project ceiling applies; missing or revoked evidence says the launch will refuse; malformed or
+unreadable evidence is labelled unverified. An unset/raw grant is also unverified as structured
+permissions. Requested permissions remain visible so the preview can be compared with the binding,
+but removed permissions are not presented as effective. Scoped patterns and originating-PR metadata
+remain on the requested segment; audited-write wording appears in the preview only when a write
+survives the ceiling.
 
 **Read-shaped roles** (`review`, `fact-check` — both `write_files: false`) default to `claude`, whose
 withheld writes still reach the outbox through AER's own hook rather than the `AuditedNotEnforced`

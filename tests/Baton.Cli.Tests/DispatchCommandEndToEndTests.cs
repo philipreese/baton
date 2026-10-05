@@ -1312,7 +1312,7 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
                 // arm is for: the line reports the ALLOW patterns only, as it always has -- neither
                 // `denied_shell_command_patterns` nor #1683's `denied_shell_option_tokens` appears here,
                 // so it is a ceiling, not the full grant.
-                "Grant: read, no-write, shell (scoped: git diff*, git log*, git show*, git blame*, "
+                "Grant: requested read, no-write, shell (scoped: git diff*, git log*, git show*, git blame*, "
                 + "git status*, git rev-parse*, git merge-base*, git ls-files*, "
                 + "git branch --list*, gh pr view*, gh pr diff*, gh pr checks*, gh issue view*), no-network",
                 consoleOutput.ToString());
@@ -1373,11 +1373,178 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
             await DispatchCommand.ExecuteAsync(options, adapters, TestContext.Current.CancellationToken, workspaceDirectory: workspace);
             Console.SetOut(originalOut);
 
-            Assert.Contains("Grant: read, write, shell, network", consoleOutput.ToString());
+            Assert.Contains("Grant: requested read, write, shell, network", consoleOutput.ToString());
         }
         finally
         {
             Console.SetOut(originalOut);
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Dispatching_prints_requested_and_project_capped_grants_without_mutating_the_binding()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-grant-preview-{Guid.NewGuid():N}");
+        var originalOut = Console.Out;
+        try
+        {
+            var workspace = Path.Combine(testRoot, "workspace");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(
+                Path.Combine(workspace, "pixi.toml"),
+                """
+                [workspace]
+                name = "grant-preview-fixture"
+                version = "0.1.0"
+                channels = []
+                platforms = ["win-64"]
+
+                [tasks]
+                gates-quiet = { cmd = "cmd /c exit 0" }
+                """,
+                TestContext.Current.CancellationToken);
+            await InitPushedGitWorkspaceAsync(workspace);
+
+            ProjectCeilingStore.Set(
+                workspace,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false),
+                ProjectCeilingStore.DefaultPath);
+
+            var specPath = await WriteSpecAsync(testRoot, "Make the bounded change.");
+            var roomDirectory = Path.Combine(testRoot, "restricted");
+            var options = new DispatchOptions("implement", specPath, roomDirectory, Adapter: "fake");
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["fake"] = new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true),
+            };
+
+            using var restrictedOutput = new StringWriter();
+            Console.SetOut(restrictedOutput);
+            await DispatchCommand.ExecuteAsync(
+                options, adapters, TestContext.Current.CancellationToken, workspaceDirectory: workspace);
+            Console.SetOut(originalOut);
+
+            var restrictedText = restrictedOutput.ToString();
+            Assert.Contains("Grant: requested read, write, shell, network", restrictedText);
+            Assert.Contains(
+                "project-capped preview: read, no-write, no-shell, no-network",
+                restrictedText);
+
+            var restrictedBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(roomDirectory, "bindings.json"), TestContext.Current.CancellationToken);
+            var requested = restrictedBindings["implement"].PermissionGrant;
+            Assert.NotNull(requested);
+            Assert.True(requested.ReadFiles);
+            Assert.True(requested.WriteFiles);
+            Assert.True(requested.RunShellCommands);
+            Assert.True(requested.NetworkAccess);
+
+            ProjectCeilingStore.Set(
+                workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+            var unrestrictedRoom = Path.Combine(testRoot, "unrestricted");
+            using var unrestrictedOutput = new StringWriter();
+            Console.SetOut(unrestrictedOutput);
+            await DispatchCommand.ExecuteAsync(
+                options with { RoomDirectoryPath = unrestrictedRoom },
+                adapters,
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace);
+            Console.SetOut(originalOut);
+
+            Assert.Contains(
+                "project-capped preview: read, write, shell, network",
+                unrestrictedOutput.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Project_capped_preview_uses_the_worktree_repository_and_keeps_patterns_and_metadata_truthful()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-grant-preview-shapes-{Guid.NewGuid():N}");
+        try
+        {
+            var repository = Path.Combine(testRoot, "repository");
+            var workingDirectory = Path.Combine(testRoot, "working");
+            Directory.CreateDirectory(repository);
+            Directory.CreateDirectory(workingDirectory);
+            var ownership = new OriginatingPullRequestOwnership(
+                "aer-works/baton", 2616, "2616-lane", new string('a', 40));
+            var binding = new WorkerBindingConfigEntry(
+                "fake",
+                new WorkerContract("implement", [], [], []),
+                "Implement the bounded change.",
+                TimeSpan.FromMinutes(5),
+                PermissionGrant: new PermissionGrant(
+                    ReadFiles: true,
+                    WriteFiles: true,
+                    RunShellCommands: true,
+                    ShellCommandPatterns: ["git:*"],
+                    NetworkAccess: true),
+                WorkingDirectory: workingDirectory,
+                Worktree: new WorktreeWorkspace(repository, "HEAD"),
+                OriginatingPullRequestOwnership: ownership);
+
+            ProjectCeilingStore.Set(
+                repository,
+                new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false),
+                ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Set(workingDirectory, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+
+            var requested = DispatchCommand.DescribeGrant(binding);
+            var preview = DispatchCommand.DescribeProjectCappedGrant(binding);
+
+            Assert.Contains("shell (scoped: git:*)", requested, StringComparison.Ordinal);
+            Assert.Contains("originating-pr aer-works/baton#2616", requested, StringComparison.Ordinal);
+            Assert.Contains("no-write, no-shell, no-network", preview, StringComparison.Ordinal);
+            Assert.DoesNotContain("shell (scoped: git:*)", preview, StringComparison.Ordinal);
+            Assert.DoesNotContain("originating-pr", preview, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void Project_capped_preview_never_claims_verified_permissions_for_missing_revoked_malformed_or_raw_evidence()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-grant-preview-evidence-{Guid.NewGuid():N}");
+        var storePath = ProjectCeilingStore.DefaultPath;
+        try
+        {
+            var missing = Path.Combine(testRoot, "missing");
+            var binding = new WorkerBindingConfigEntry(
+                "fake", new WorkerContract("implement", [], [], []), "Implement.", TimeSpan.FromMinutes(5),
+                PermissionGrant: new PermissionGrant(ReadFiles: true, RunShellCommands: true),
+                WorkingDirectory: missing);
+
+            Assert.Contains("launch will refuse", DispatchCommand.DescribeProjectCappedGrant(binding));
+
+            ProjectCeilingStore.Set(missing, ProjectCeiling.Unrestricted, storePath);
+            ProjectCeilingStore.Revoke(missing, storePath, DateTimeOffset.UtcNow);
+            Assert.Contains("revoked", DispatchCommand.DescribeProjectCappedGrant(binding));
+
+            File.WriteAllText(storePath, "{ malformed");
+            Assert.Contains("unverified", DispatchCommand.DescribeProjectCappedGrant(binding));
+
+            ProjectCeilingStore.Save(
+                new Dictionary<string, ProjectCeiling>(BatonPaths.RecordKeyComparer)
+                {
+                    [ProjectCeilingStore.CanonicalKey(missing)] = ProjectCeiling.Unrestricted,
+                },
+                storePath);
+            var rawBinding = binding with { PermissionGrant = null };
+            Assert.Contains("unset", DispatchCommand.DescribeProjectCappedGrant(rawBinding));
+        }
+        finally
+        {
+            FileCleanup.EnsureDeleted(storePath);
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
     }
