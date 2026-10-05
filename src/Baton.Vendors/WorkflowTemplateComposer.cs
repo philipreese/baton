@@ -71,10 +71,20 @@ public static class WorkflowTemplateComposer
         WorkflowTemplate template, string? adapterOverride = null, string? workingDirectory = null,
         bool attachDefaultSkills = true)
     {
+        var materialized = MaterializeWithResolvedRoles(template, adapterOverride, workingDirectory, attachDefaultSkills);
+        return (materialized.Definition, materialized.Bindings);
+    }
+
+    /// <summary>Materialize while retaining the exact catalog role resolved for each phase binding.</summary>
+    public static WorkflowTemplateMaterialization MaterializeWithResolvedRoles(
+        WorkflowTemplate template, string? adapterOverride = null, string? workingDirectory = null,
+        bool attachDefaultSkills = true)
+    {
         ArgumentNullException.ThrowIfNull(template);
 
         var steps = new List<WorkflowStepDefinition>();
         var bindings = new Dictionary<string, WorkerBindingConfigEntry>(StringComparer.Ordinal);
+        var phaseRoles = new Dictionary<string, WorkerRole>(StringComparer.Ordinal);
 
         // A capture step's id is the declaring phase's name + "-capture". Guard against a phase literally
         // named that: without this the capture binding would silently overwrite the real phase's binding
@@ -141,6 +151,7 @@ public static class WorkflowTemplateComposer
                 role, phase.Instruction, adapterOverride, workerName: phase.Name, workingDirectory: workingDirectory,
                 requiredInputs: blockerOutputs, autoProvisionWorktree: false,
                 attachDefaultSkills: attachDefaultSkills);
+            phaseRoles.Add(phase.Name, role);
 
             blockerId = stepId;
             blockerOutputs = outputs;
@@ -150,7 +161,7 @@ public static class WorkflowTemplateComposer
             WorkflowTemplateId: new WorkflowTemplateId(template.Id),
             WorkflowTemplateVersion: 1,
             Steps: steps);
-        return (definition, bindings);
+        return new WorkflowTemplateMaterialization(definition, bindings, phaseRoles);
     }
 
     // The capture step's binding: the engine-run capture adapter, a contract that produces just the
@@ -170,3 +181,8 @@ public static class WorkflowTemplateComposer
             Timeout: TimeSpan.FromMinutes(2),
             PermissionGrant: new PermissionGrant());
 }
+
+public sealed record WorkflowTemplateMaterialization(
+    WorkflowDefinition Definition,
+    IReadOnlyDictionary<string, WorkerBindingConfigEntry> Bindings,
+    IReadOnlyDictionary<string, WorkerRole> PhaseRoles);

@@ -229,6 +229,26 @@ public class RedispatchBindingTests
     }
 
     [Fact]
+    public void Redispatch_preserves_profile_role_when_single_phase_name_differs_from_role()
+    {
+        var parent = ParentEntry() with
+        {
+            Contract = new WorkerContract("build-stage", [], [new ProducedOutput("advice.md")], []),
+            DeclaredTaskSize = new TaskSizeDeclaration(DeclaredTaskSize.Small, "template phase"),
+            ExecutionLimitResolution = new ExecutionLimitResolution(
+                "claude/opus/advise/small", ExecutionLimitSource.Profile, ExecutionLimitSource.Profile,
+                ExecutionLimitSource.Profile, TimeSpan.FromMinutes(30), 1000, 10,
+                "claude/opus/advise/small", SelectionRole: "advise"),
+        };
+
+        var child = RedispatchCommand.InheritBinding(parent, new RedispatchOptions("parent-room", "new-room"));
+
+        Assert.Equal("build-stage", child.Contract.WorkerName);
+        Assert.Equal("advise", child.ExecutionLimitResolution?.SelectionRole);
+        Assert.Equal("claude/opus/advise/small", child.ExecutionLimitResolution?.ChosenKey);
+    }
+
+    [Fact]
     public void Legacy_parent_with_an_explicit_limit_override_records_no_profile_selection()
     {
         var child = RedispatchCommand.InheritBinding(

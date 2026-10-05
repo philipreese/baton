@@ -26,7 +26,8 @@ public sealed record ExecutionLimitResolution(
     int? MaxToolSteps,
     string? OriginatingSelectionKey = null,
     string? MaxRepeatedToolStepsSource = null,
-    int? MaxRepeatedToolSteps = null);
+    int? MaxRepeatedToolSteps = null,
+    string? SelectionRole = null);
 
 public static class ExecutionLimitSource
 {
@@ -80,7 +81,8 @@ public static class ExecutionLimitProfileResolver
             originatingSelectionKey,
             maxRepeatedToolStepsOverride is not null ? ExecutionLimitSource.DispatchOverride
                 : profile?.MaxRepeatedToolSteps is not null ? ExecutionLimitSource.Profile : null,
-            maxRepeatedToolStepsOverride ?? profile?.MaxRepeatedToolSteps);
+            maxRepeatedToolStepsOverride ?? profile?.MaxRepeatedToolSteps,
+            role);
     }
 
     /// <summary>Check a recorded selection against the exact normalized key this resolver produces.</summary>

@@ -328,7 +328,9 @@ public static class WorkerBindingResolver
         WorkerBindingConfigEntry entry, ExecutionLimitResolution resolution)
     {
         var resolvedModel = entry.ModelResolved ?? entry.Model;
-        var role = entry.Contract.WorkerName;
+        // Template binding names identify phases, not catalog roles. The profile resolver records the
+        // role it actually selected so accepted-request evidence validates the same materialized identity.
+        var role = resolution.SelectionRole ?? entry.Contract.WorkerName;
         var size = entry.DeclaredTaskSize?.Size ?? DeclaredTaskSize.Unknown;
         // A fresh known selection always records OriginatingSelectionKey; ChosenKey alone means a
         // profile actually matched. OriginatingSelectionKey is also the independent identity for a

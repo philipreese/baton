@@ -1,8 +1,12 @@
 using System.Diagnostics;
+using Baton.Cli.Daemon;
+using Baton.Dispatch;
+using Baton.Mutation;
 using Baton.Vendors;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
 using Baton.Status;
+using Baton.Store;
 
 namespace Baton.Cli.Tests;
 
@@ -40,6 +44,280 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
     {
         _catalogScope.Dispose();
         _batonHome.Dispose();
+    }
+
+    [Fact]
+    public async Task Fresh_template_applies_exact_execution_limit_profiles_by_resolved_role()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-tmpl-profiles-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(testRoot);
+            var templatePath = Path.Combine(testRoot, "templates.json");
+            await File.WriteAllTextAsync(templatePath, """
+            [
+              { "id": "profile-test", "phases": [
+                { "name": "build-stage", "role_id": "advise", "instruction": "Advise.", "ask_first": false, "inputs": [] },
+                { "name": "prepare-stage", "role_id": "fact-check", "instruction": "Check facts.", "ask_first": false, "inputs": [] },
+                { "name": "audit-stage", "role_id": "review", "instruction": "Review.", "ask_first": false, "inputs": ["diff-of-work-so-far"] }
+              ] }
+            ]
+            """, TestContext.Current.CancellationToken);
+            using var templateScope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Current with
+            {
+                WorkflowTemplatesPathOverride = templatePath,
+            });
+
+            var roles = new[] { (Phase: "build-stage", Role: "advise"), (Phase: "prepare-stage", Role: "fact-check"), (Phase: "audit-stage", Role: "review") };
+            var template = WorkflowTemplateCatalog.For("profile-test");
+            var phaseBindings = WorkflowTemplateComposer.Materialize(template).Bindings;
+            var profiles = roles.Take(2).Select((item, index) =>
+            {
+                var role = WorkerRoleCatalog.For(item.Role);
+                var phaseBinding = phaseBindings[item.Phase];
+                return new ExecutionLimitProfile
+                {
+                    Adapter = phaseBinding.Adapter,
+                    Model = phaseBinding.ModelResolved ?? phaseBinding.Model,
+                    Role = item.Role,
+                    DeclaredTaskSize = "small",
+                    Timeout = TimeSpan.FromMinutes(20 + index),
+                    TokenBudget = 20000 + index,
+                    MaxToolSteps = 40 + index,
+                };
+            }).ToArray();
+            await DaemonSettingsStore.SaveAsync(new DaemonSettings { ExecutionLimitProfiles = profiles }, BatonPaths.SettingsFile, TestContext.Current.CancellationToken);
+
+            var workspace = Path.Combine(testRoot, "workspace");
+            await InitGitWorkspaceAsync(workspace);
+            var roomDirectory = Path.Combine(testRoot, "room");
+            var verdictFixture = Path.Combine(testRoot, "verdict-fixture.json");
+            await File.WriteAllTextAsync(
+                verdictFixture, """{"reviewedRef":"HEAD","decision":"approve","findings":[]}""",
+                TestContext.Current.CancellationToken);
+            var adapters = roles.Select(item => WorkerRoleCatalog.For(item.Role).Adapter).Distinct(StringComparer.Ordinal)
+                .ToDictionary(adapter => adapter, _ => (IWorkerAdapter)new ContractOutputWorkerAdapter(
+                    satisfyOutputs: true,
+                    outputFixtures: new Dictionary<string, string> { ["verdict.json"] = verdictFixture }), StringComparer.Ordinal);
+            adapters[WorkflowTemplateComposer.CaptureAdapter] = new BaseRefCapturingWorkerAdapter();
+            var result = await DispatchCommand.ExecuteAsync(
+                new DispatchOptions("profile-test", SpecFilePath: null, roomDirectory,
+                    DeclaredTaskSize: TaskSizeDeclaration.Parse("small", "template profile regression")),
+                adapters,
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit);
+
+            Assert.Equal(WorkflowStatus.Terminal, result.State.Status);
+            Assert.All(result.State.Steps, step => Assert.True(
+                step.Status == StepStatus.Succeeded,
+                $"{step.StepId} ended {step.Status}: {step.LatestFailureReason ?? "no failure reason recorded"}"));
+            var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(roomDirectory, "bindings.json"), TestContext.Current.CancellationToken);
+            Assert.NotEqual(bindings["build-stage"].ModelResolved ?? bindings["build-stage"].Model,
+                bindings["prepare-stage"].ModelResolved ?? bindings["prepare-stage"].Model);
+            Assert.NotEqual(bindings["build-stage"].ExecutionLimitResolution?.ChosenKey,
+                bindings["prepare-stage"].ExecutionLimitResolution?.ChosenKey);
+            for (var index = 0; index < roles.Length; index++)
+            {
+                var (phase, role) = roles[index];
+                var binding = bindings[phase];
+                Assert.Equal(role, binding.ExecutionLimitResolution?.SelectionRole);
+                if (index == 2)
+                {
+                    var roleDefaults = WorkerRoleCatalog.For(role);
+                    Assert.Equal(roleDefaults.Timeout, binding.Timeout);
+                    Assert.Equal(roleDefaults.TokenBudget?.Resolve(role, binding.Adapter), binding.TokenBudget);
+                    Assert.Equal(roleDefaults.MaxToolSteps, binding.MaxToolSteps);
+                    Assert.Null(binding.ExecutionLimitResolution?.ChosenKey);
+                    Assert.Equal($"{binding.Adapter.ToLowerInvariant()}/{(binding.ModelResolved ?? binding.Model)?.ToLowerInvariant()}/{role}/small", binding.ExecutionLimitResolution?.OriginatingSelectionKey);
+                    Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution?.TimeoutSource);
+                    Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution?.TokenBudgetSource);
+                    Assert.Equal(ExecutionLimitSource.RoleDefault, binding.ExecutionLimitResolution?.MaxToolStepsSource);
+                    Assert.Null(binding.MaxRepeatedToolSteps);
+                    Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolSteps);
+                    Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolStepsSource);
+                    continue;
+                }
+                Assert.Equal(TimeSpan.FromMinutes(20 + index), binding.Timeout);
+                Assert.Equal(20000 + index, binding.TokenBudget);
+                Assert.Equal(40 + index, binding.MaxToolSteps);
+                Assert.Equal($"{binding.Adapter.ToLowerInvariant()}/{(binding.ModelResolved ?? binding.Model)?.ToLowerInvariant()}/{role}/small", binding.ExecutionLimitResolution?.ChosenKey);
+                Assert.Equal(ExecutionLimitSource.Profile, binding.ExecutionLimitResolution?.TimeoutSource);
+                Assert.Equal(ExecutionLimitSource.Profile, binding.ExecutionLimitResolution?.TokenBudgetSource);
+                Assert.Equal(ExecutionLimitSource.Profile, binding.ExecutionLimitResolution?.MaxToolStepsSource);
+                Assert.Null(binding.MaxRepeatedToolSteps);
+                Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolSteps);
+                Assert.Null(binding.ExecutionLimitResolution?.MaxRepeatedToolStepsSource);
+            }
+
+            var captureBinding = bindings["audit-stage-capture"];
+            Assert.Equal(WorkflowTemplateComposer.CaptureAdapter, captureBinding.Adapter);
+            Assert.Equal(TimeSpan.FromMinutes(2), captureBinding.Timeout);
+            Assert.Null(captureBinding.TokenBudget);
+            Assert.Null(captureBinding.MaxToolSteps);
+            Assert.Null(captureBinding.ExecutionLimitResolution);
+
+            var entries = await new FlowEventLogReader(
+                Path.Combine(roomDirectory, BatonPaths.FlowLogFileName)).ReadAllEntriesWithTimestampsAsync(
+                    TestContext.Current.CancellationToken);
+            var accepted = entries.OfType<LogEntry.FlowLogEntry>()
+                .Select(entry => entry.Event)
+                .OfType<FlowEvent.ExecutionRequestAccepted>()
+                .ToDictionary(request => request.Request.Worker, request => request.Request, StringComparer.Ordinal);
+            Assert.True(accepted.Count == roles.Length + 1,
+                $"Expected one accepted request for each template phase and capture; got [{string.Join(", ", accepted.Keys)}], "
+                + $"steps [{string.Join(", ", result.State.Steps.Select(step => $"{step.StepId}:{step.Status}"))}].");
+            foreach (var (phase, role) in roles)
+            {
+                var binding = bindings[phase];
+                var request = accepted[phase];
+                Assert.Equal(phase, request.Worker);
+                Assert.Equal(binding.Adapter, request.Adapter);
+                Assert.Equal(binding.ModelResolved ?? binding.Model, request.Model);
+                var evidence = Assert.IsType<ExecutionLimitEvidence>(request.Limits);
+                Assert.Equal(binding.Timeout, evidence.Timeout);
+                Assert.Equal(binding.TokenBudget, evidence.TokenBudget);
+                Assert.Equal(binding.MaxToolSteps, evidence.MaxToolSteps);
+                Assert.Equal(binding.ExecutionLimitResolution?.ChosenKey, evidence.ChosenKey);
+                var expectedSource = phase == "audit-stage"
+                    ? ExecutionLimitSource.RoleDefault
+                    : ExecutionLimitSource.Profile;
+                Assert.Equal(expectedSource, evidence.TimeoutSource);
+                Assert.Equal(expectedSource, evidence.TokenBudgetSource);
+                Assert.Equal(expectedSource, evidence.MaxToolStepsSource);
+                Assert.Null(evidence.MaxRepeatedToolSteps);
+                Assert.Null(evidence.MaxRepeatedToolStepsSource);
+                Assert.Equal($"{binding.Adapter.ToLowerInvariant()}/{(binding.ModelResolved ?? binding.Model)?.ToLowerInvariant()}/{role}/small",
+                    binding.ExecutionLimitResolution?.OriginatingSelectionKey);
+            }
+            var captureEvidence = Assert.IsType<ExecutionLimitEvidence>(accepted["audit-stage-capture"].Limits);
+            Assert.Equal(TimeSpan.FromMinutes(2), captureEvidence.Timeout);
+            Assert.False(captureEvidence.MonitorInputsKnown);
+            Assert.Null(captureEvidence.ChosenKey);
+            Assert.Null(captureEvidence.TimeoutSource);
+            Assert.Null(captureEvidence.TokenBudgetSource);
+            Assert.Null(captureEvidence.MaxToolStepsSource);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Fresh_template_rejects_duplicate_profile_rows_before_room_or_adapter_creation()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-tmpl-profile-invalid-{Guid.NewGuid():N}");
+        try
+        {
+            const string row = "{\"adapter\":\"claude\",\"model\":\"fixture-model\",\"role\":\"implement\",\"declaredTaskSize\":\"small\",\"timeout\":\"00:01:00\",\"tokenBudget\":100,\"maxToolSteps\":10}";
+            await File.WriteAllTextAsync(
+                BatonPaths.SettingsFile,
+                "{\"executionLimitProfiles\":[" + row + "," + row + "]}",
+                TestContext.Current.CancellationToken);
+
+            var roomDirectory = Path.Combine(testRoot, "room");
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["fake"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+                [WorkflowTemplateComposer.CaptureAdapter] = new BaseRefCapturingWorkerAdapter(),
+            };
+            var ex = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                new DispatchOptions("implement-review", SpecFilePath: null, roomDirectory, Adapter: "fake"),
+                adapters,
+                TestContext.Current.CancellationToken));
+
+            Assert.Contains("duplicate normalized key", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(Directory.Exists(roomDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Fresh_template_rejects_later_parserless_repeated_call_profile_before_any_worker_launch()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-tmpl-repeat-cap-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(testRoot);
+            var templatePath = Path.Combine(testRoot, "templates.json");
+            var tiersPath = Path.Combine(testRoot, "worker-tiers.json");
+            await File.WriteAllTextAsync(tiersPath, """
+            {
+              "frontier": { "adapter": "fake", "model": "test-model", "effort": null },
+              "standard": { "adapter": "fake", "model": "test-model", "effort": null },
+              "cheap": { "adapter": "fake", "model": "test-model", "effort": null },
+              "janitor": { "adapter": "fake", "model": "test-model", "effort": null },
+              "minimal": { "adapter": "fake", "model": "test-model", "effort": null },
+              "orchestrator": { "adapter": "fake", "model": "test-model", "effort": null }
+            }
+            """, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(templatePath, """
+            [
+              { "id": "repeat-cap-test", "phases": [
+                { "name": "build-stage", "role_id": "implement", "instruction": "Build.", "ask_first": false, "inputs": [] },
+                { "name": "review-stage", "role_id": "review", "instruction": "Review.", "ask_first": false, "inputs": [] }
+              ] }
+            ]
+            """, TestContext.Current.CancellationToken);
+            using var templateScope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Current with
+            {
+                WorkflowTemplatesPathOverride = templatePath,
+                WorkerTiersPathOverride = tiersPath,
+            });
+
+            var workspace = Path.Combine(testRoot, "workspace");
+            await InitGitWorkspaceAsync(workspace);
+            await DaemonSettingsStore.SaveAsync(
+                new DaemonSettings
+                {
+                    ExecutionLimitProfiles =
+                    [
+                        new ExecutionLimitProfile
+                        {
+                            Adapter = "fake",
+                            Model = "test-model",
+                            Role = "review",
+                            DeclaredTaskSize = "small",
+                            Timeout = TimeSpan.FromMinutes(19),
+                            TokenBudget = 30000,
+                            MaxToolSteps = 50,
+                            MaxRepeatedToolSteps = 4,
+                        },
+                    ],
+                },
+                BatonPaths.SettingsFile, TestContext.Current.CancellationToken);
+
+            var launchMarkers = new[] { "build-stage", "review-stage" }
+                .ToDictionary(phase => phase, phase => Path.Combine(testRoot, $"{phase}-launched.txt"), StringComparer.Ordinal);
+            var spy = new LaunchSpyWorkerAdapter(launchMarkers);
+            var adapters = new Dictionary<string, IWorkerAdapter>(StringComparer.Ordinal)
+            {
+                ["fake"] = spy,
+            };
+            var roomDirectory = Path.Combine(testRoot, "room");
+
+            var ex = await Assert.ThrowsAsync<InvalidRoomMutationException>(() => DispatchCommand.ExecuteAsync(
+                new DispatchOptions("repeat-cap-test", SpecFilePath: null, roomDirectory, Adapter: "fake",
+                    DeclaredTaskSize: TaskSizeDeclaration.Parse("small", "parserless cap refusal")),
+                adapters,
+                TestContext.Current.CancellationToken,
+                workspaceDirectory: workspace,
+                evaluateRunway: RunwayTestGate.Admit));
+
+            Assert.Contains("no tool-identity parser", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, spy.ResolveCount);
+            Assert.All(launchMarkers, marker => Assert.False(File.Exists(marker.Value),
+                $"The repeated-call cap must refuse before the {marker.Key} adapter process can launch."));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
     }
 
     [Fact]
@@ -543,6 +821,18 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
         await RunGitAsync(directory, "remote", "add", "origin", origin);
         await RunGitAsync(directory, "push", "-q", "-u", "origin", "HEAD");
         return await RunGitAsync(directory, "rev-parse", "HEAD");
+    }
+
+    private sealed class LaunchSpyWorkerAdapter(IReadOnlyDictionary<string, string> markerPaths) : IWorkerAdapter
+    {
+        public int ResolveCount { get; private set; }
+
+        public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
+        {
+            ResolveCount++;
+            var markerPath = markerPaths[contract.WorkerName];
+            return new CoreDispatchTarget("cmd", ["/c", $"echo launched > {markerPath}"], invocation.WorkingDirectory);
+        }
     }
 
     private static void InstallHermeticGh(string destination)

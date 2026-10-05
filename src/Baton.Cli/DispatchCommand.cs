@@ -2,6 +2,7 @@ using System.Text.Json;
 using Baton.Accounting;
 using Baton.Vendors;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Runway;
 using Baton.Queue;
 using Baton.Status;
@@ -207,7 +208,8 @@ public static class DispatchCommand
 
             bindings = bindings.ToDictionary(
                 pair => pair.Key,
-                pair => ApplyExecutionLimits(pair.Value, options, declaredSize, settings.ExecutionLimitProfiles),
+                pair => ApplyExecutionLimits(pair.Value, options, declaredSize, settings.ExecutionLimitProfiles,
+                    WorkerRoleCatalog.For(options.Name)),
                 StringComparer.Ordinal);
         }
 
@@ -1431,11 +1433,44 @@ public static class DispatchCommand
         var template = WorkflowTemplateCatalog.For(options.Name);
         // #1083: hand every phase the workspace too, so a role run as a template phase can read the repo
         // exactly as a directly-dispatched role now can.
-        var (definition, bindings) = WorkflowTemplateComposer.Materialize(
+        var materialized = WorkflowTemplateComposer.MaterializeWithResolvedRoles(
             template, options.Adapter, workingDirectory: workspaceDirectory,
             // #2110: forwarded per phase -- WorkflowTemplateComposer.Materialize's own parameter doc
             // says what a phase gets. --skill stays refused above: a single flag names no phase.
             attachDefaultSkills: !options.NoDefaultSkills);
+        var definition = materialized.Definition;
+        var bindings = materialized.Bindings;
+        DaemonSettings settings;
+        try
+        {
+            settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ExecutionLimitProfileConfigurationException ex)
+        {
+            throw new CliArgumentException(
+                ex.Message,
+                "fix or remove the malformed ExecutionLimitProfiles rows before dispatching a worker.");
+        }
+
+        var declaredSize = options.DeclaredTaskSize ?? TaskSizeDeclaration.Unknown;
+        bindings = bindings.ToDictionary(
+            pair => pair.Key,
+            pair => materialized.PhaseRoles.TryGetValue(pair.Key, out var role)
+                ? ApplyExecutionLimits(pair.Value, options, declaredSize, settings.ExecutionLimitProfiles, role)
+                : pair.Value,
+            StringComparer.Ordinal);
+        foreach (var (workerName, binding) in bindings)
+        {
+            if (binding.MaxRepeatedToolSteps is not null
+                && StandardWorkerUsageParsers.Default.GetValueOrDefault(binding.Adapter) is null)
+            {
+                throw new InvalidRoomMutationException(
+                    $"Worker adapter '{binding.Adapter}' has no tool-identity parser; "
+                    + "an explicit repeated-call cap cannot be enforced.");
+            }
+        }
+
         bindings = await InjectCaptureBaseRefAsync(bindings, workspaceDirectory, cancellationToken).ConfigureAwait(false);
         return (definition, bindings);
     }
@@ -1541,9 +1576,9 @@ public static class DispatchCommand
         WorkerBindingConfigEntry binding,
         DispatchOptions options,
         TaskSizeDeclaration declaredSize,
-        IReadOnlyList<ExecutionLimitProfile>? profiles)
+        IReadOnlyList<ExecutionLimitProfile>? profiles,
+        WorkerRole role)
     {
-        var role = WorkerRoleCatalog.For(options.Name);
         var resolution = ExecutionLimitProfileResolver.Resolve(
             profiles, binding.Adapter, binding.ModelResolved ?? binding.Model, role.Id, declaredSize.Size,
             role.Timeout,
