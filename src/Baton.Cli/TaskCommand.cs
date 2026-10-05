@@ -460,6 +460,43 @@ public static class TaskCommand
         var currentPr = snapshot.PullRequestObservations?.LastOrDefault(o =>
             o.Repository == owner.Repository && o.PullRequest == item.PullRequest);
         var readiness = owner.Ready;
+        var receiptMismatches = new List<string>();
+        var receiptMissing = new List<string>();
+        if (readiness is not null)
+        {
+            if (string.IsNullOrWhiteSpace(readiness.Id)) receiptMissing.Add("id");
+            if (readiness.ReadyObservedAt == default) receiptMissing.Add("observedAt");
+            if (string.IsNullOrWhiteSpace(readiness.TaskId)) receiptMissing.Add("taskId");
+            else if (!string.Equals(readiness.TaskId, owner.Id, StringComparison.Ordinal)) receiptMismatches.Add("taskId");
+            if (string.IsNullOrWhiteSpace(readiness.Repository)) receiptMissing.Add("repository");
+            else if (!string.Equals(readiness.Repository, owner.Repository, StringComparison.Ordinal)) receiptMismatches.Add("repository");
+            if (readiness.Issue <= 0) receiptMissing.Add("issue");
+            else if (readiness.Issue != owner.Issue) receiptMismatches.Add("issue");
+            if (item.PullRequest is null || item.PullRequest <= 0) receiptMissing.Add("rowPullRequest");
+            if (readiness.PullRequest <= 0) receiptMissing.Add("pullRequest");
+            else if (item.PullRequest is { } rowPullRequest && readiness.PullRequest != rowPullRequest)
+                receiptMismatches.Add("pullRequest");
+            if (string.IsNullOrWhiteSpace(readiness.HeadSha)) receiptMissing.Add("headSha");
+        }
+        var receiptBinding = readiness is null ? null : new
+        {
+            status = receiptMismatches.Count > 0 ? "mismatched"
+                : receiptMissing.Count > 0 ? "incomplete" : "complete",
+            mismatches = receiptMismatches,
+            missing = receiptMissing,
+        };
+        var readinessProjection = readiness is null ? null : new
+        {
+            id = readiness.Id,
+            taskId = readiness.TaskId,
+            repository = readiness.Repository,
+            issue = readiness.Issue,
+            pullRequest = readiness.PullRequest,
+            headSha = readiness.HeadSha,
+            observedAt = readiness.ReadyObservedAt,
+            evidence = "as-of",
+            binding = receiptBinding,
+        };
         var headChanged = readiness is not null && currentPr?.HeadSha is { } observedHead
             && !string.Equals(observedHead, readiness.HeadSha, StringComparison.Ordinal);
         // Checks is the aggregate display word, not required-check policy. An optional failure
@@ -475,6 +512,7 @@ public static class TaskCommand
                 || item.State == QueueItemState.Failed ? "blocked"
             : item.State == QueueItemState.Launched ? "running"
             : readiness is not null ? item.Stage == WorkStage.Ready && !headChanged && !readinessRegressed
+                && receiptBinding?.status == "complete"
                 ? "ready-as-of" : "stale"
             : "queued";
         // Failed rows are not scheduler candidates. Report retained failure evidence without
@@ -483,7 +521,9 @@ public static class TaskCommand
             && item.IssuePreparation?.State is not (TaskPreparationState.Preparing or TaskPreparationState.Blocked))
             reason = string.IsNullOrWhiteSpace(item.Error) ? "task-failed" : item.Error;
         if (state == "stale")
-            reason = item.Error ?? (headChanged ? "observed-pr-head-changed" : "readiness-evidence-no-longer-current");
+            reason = item.Error ?? (receiptBinding?.status == "mismatched" ? "readiness-receipt-binding-mismatch"
+                : receiptBinding?.status == "incomplete" ? "readiness-receipt-binding-incomplete"
+                : headChanged ? "observed-pr-head-changed" : "readiness-evidence-no-longer-current");
         // Retirement is the current disposition; an older attempt error remains history, not its
         // reason. Legacy records with no reason say so without inventing delivery or recovery.
         if (item.Retirement is { } retirement)
@@ -495,7 +535,51 @@ public static class TaskCommand
             "queued" or "running" => "daemon-tick",
             "blocked" => "conductor-judgment",
             "stale" => "conductor-reassessment",
+            "ready-as-of" => "conductor-handoff",
             _ => "none",
+        };
+        var conductorHandoff = state switch
+        {
+            "ready-as-of" => new
+            {
+                taskId = owner.Id,
+                repository = owner.Repository,
+                issue = owner.Issue,
+                pullRequest = item.PullRequest,
+                holder = owner.ConductorHolder,
+                currentHolder = currentClaim?.Holder,
+                ownership,
+                readiness = readinessProjection,
+                responsibility = "reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+                mergeGrant = false,
+            },
+            "stale" => new
+            {
+                taskId = owner.Id,
+                repository = owner.Repository,
+                issue = owner.Issue,
+                pullRequest = item.PullRequest,
+                holder = owner.ConductorHolder,
+                currentHolder = currentClaim?.Holder,
+                ownership,
+                readiness = readinessProjection,
+                responsibility = "reassess-current-readiness",
+                mergeGrant = false,
+            },
+            "blocked" => new
+            {
+                taskId = owner.Id,
+                repository = owner.Repository,
+                issue = owner.Issue,
+                pullRequest = item.PullRequest,
+                holder = owner.ConductorHolder,
+                currentHolder = currentClaim?.Holder,
+                ownership,
+                readiness = readinessProjection,
+                responsibility = "judge-retained-blocker",
+                mergeGrant = false,
+            },
+            _ => null,
         };
         var currentStoppedWork = state == "blocked"
             && owner.Blocked?.ObligationKey is { } currentKey
@@ -551,6 +635,7 @@ public static class TaskCommand
             reason,
             retirement = item.Retirement,
             nextTrigger,
+            conductorHandoff,
             stage = item.Stage is { } stage ? WorkStages.Token(stage) : null,
             attemptId = item.AttemptId?.Value,
             pullRequest = item.PullRequest,
@@ -603,6 +688,17 @@ public static class TaskCommand
                 output.WriteLine($"  retirement: {recordedRetirement.Kind} at {recordedRetirement.At:O}; reason: {reason}");
             output.WriteLine($"  stage: {status.stage ?? "preparation"}; PR: {(item.PullRequest is null ? "none" : $"#{item.PullRequest}")}");
             output.WriteLine($"  next: {nextTrigger}; PR head: {status.headSha ?? "not observed"}");
+            if (conductorHandoff is { } handoff)
+                output.WriteLine($"  conductor handoff: {handoff.holder} ({handoff.ownership}); {handoff.responsibility}; readiness is as-of evidence, not a merge grant");
+            if (readiness is not null)
+            {
+                output.WriteLine($"  ready receipt{(state is "retired" or "cancelled" ? " (historical)" : "")}: "
+                    + $"{readiness.Id} at {readiness.ReadyObservedAt:O}; head {readiness.HeadSha} (as-of); binding {receiptBinding!.status}"
+                    + (receiptMismatches.Count == 0 ? "" : $"; mismatches: {string.Join(", ", receiptMismatches)}")
+                    + (receiptMissing.Count == 0 ? "" : $"; missing: {string.Join(", ", receiptMissing)}"));
+                output.WriteLine($"    receipt subjects: task {readiness.TaskId}; repository {readiness.Repository}; "
+                    + $"issue #{readiness.Issue}; PR #{readiness.PullRequest}");
+            }
             if (item.ChecksObservedAt is not null || item.Error is not null)
                 output.WriteLine($"  latest checks{(item.Retirement is null ? "" : " (historical)")}: {item.Checks ?? "unknown"}"
                     + (item.ChecksObservedAt is { } checksAt ? $" at {checksAt:O}" : "")
@@ -614,7 +710,6 @@ public static class TaskCommand
                         ? $" (recorded heartbeat time {lastObserved:O}; liveness not verified)"
                         : $" (last observed {lastObserved:O})"
                     : " (no observation)"));
-            if (readiness is not null) output.WriteLine($"  ready receipt: {readiness.Id} at {readiness.ReadyObservedAt:O}");
             if (initialWorkerSelection is { } selected)
                 output.WriteLine("  initial implement selection (retained plan): "
                     + $"adapter={selected.adapter ?? "none"}; model={selected.model ?? "none"}; effort={selected.effort ?? "none"}");

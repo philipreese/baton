@@ -8168,6 +8168,17 @@ not the latest or complete history, and never grants action authority or changes
 The text view labels a retained `OwnedTask.Blocked` disposition as current only for a derived
 `blocked` task; outside that state it is retained historical evidence, and a linked stopped-work
 pair has its own current-blocker label.
+For nonterminal `ready-as-of`, `stale`, and `blocked` tasks, the additive nullable
+`conductorHandoff` names the recorded holder, current holder and ownership status, task/repository/
+issue/PR identity, retained readiness id/head/time when present, and typed responsibility. Ready
+status changes `nextTrigger` to `conductor-handoff`: the conductor reconciles exact review evidence
+and fresh forge gates, then merges only under existing authority. Stale asks the conductor to
+reassess; blocked asks the conductor to judge the retained blocker. Missing or changed claims remain
+explicit ownership conditions and never reassign the task. A receipt is as-of evidence, not fresh
+qualification, merge authority, transport acknowledgement or consumption proof; legacy partial
+receipts remain incomplete. Retired and cancelled tasks expose no actionable handoff, and stopped-work
+history alone never creates one. This projection is read-only, does not wake a desktop conductor, and
+does not close #2091.
 The additive nullable `initialWorkerSelection` field projects only the retained implement-stage
 entry of `QueueItem.StageSelections` (adapter, model, effort); a row with no such entry reports
 null rather than an inferred ambient default. The additive nullable `retainedWorkerAssignment`
@@ -9052,6 +9063,22 @@ lifecycle policy still determines fix, re-review and readiness. A lifecycle verd
 stricter proof may advance normally but leaves the action unresolved. Reconciliation acknowledges
 the stopped-work obligation only from the durable proof; queued state, a receipt, launch and process
 exit alone cannot do so. Failed, stale and uncertain outcomes retain an owner and next trigger.
+
+### Owned-task status handoff (#2623)
+
+`baton task status <task-id>` reads only the retained queue row, repository claim, ready receipt,
+and existing stopped-work identity. For nonterminal `ready-as-of`, `stale`, and `blocked` tasks,
+text and JSON expose the task's recorded holder, current holder and ownership state, row task/repository/
+issue/PR identities, retained receipt subjects and timestamp, and the typed conductor responsibility.
+Ready changes `nextTrigger` to `conductor-handoff`: reconcile exact review evidence and fresh forge
+gates, then merge only under existing authority. A missing or changed claim is an ownership condition;
+status never reassigns the task. The receipt's task, repository, issue and PR must bind to the row before
+it can be `ready-as-of`; mismatch or missing legacy fields are reported and make the task stale.
+The retained receipt head is printed beside its identity as as-of evidence, separately from any current
+PR observation. A receipt is not fresh forge qualification, merge authority, transport acknowledgement,
+or consumption proof. Retired and cancelled rows retain `nextTrigger: none` and have no actionable
+handoff, even when old ready evidence remains in history. Status does not enumerate another obligation
+store, fetch forge state, or write queue, claim, evidence, or launch records.
 
 ---
 
