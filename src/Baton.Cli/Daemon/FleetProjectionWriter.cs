@@ -1133,7 +1133,9 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// would be wrong about this contract -- which is what <c>FleetProjectionWriterTests</c>' own race
     /// arm was doing when #2012 was filed.
     /// </para></summary>
-    internal static void WriteAtomic(string path, string content)
+    internal static void WriteAtomic(string path, string content) => WriteAtomic(path, content, null);
+
+    internal static void WriteAtomic(string path, string content, Action<int>? retryObserver)
     {
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
@@ -1167,6 +1169,7 @@ public sealed class FleetProjectionWriter : BackgroundService
                     return;
                 }
 
+                retryObserver?.Invoke(attempt);
                 Thread.Sleep(TimeSpan.FromMilliseconds(backoffMs));
                 backoffMs = Math.Min(backoffMs * 2, 200);
             }
