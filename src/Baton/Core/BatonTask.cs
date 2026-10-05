@@ -33,6 +33,7 @@ public sealed class BatonTask : IDisposable
     private bool captureOutput;
     private bool clearEnv;
     private string? cwd;
+    private Action<System.Diagnostics.Process>? inputOwner;
     private int hasRunFlag;
     private int disposedFlag;
 
@@ -108,6 +109,13 @@ public sealed class BatonTask : IDisposable
     {
         ThrowIfDisposed();
         captureOutput = capture;
+        return this;
+    }
+
+    public BatonTask WithInputOwner(Action<System.Diagnostics.Process> owner)
+    {
+        ThrowIfDisposed();
+        inputOwner = owner;
         return this;
     }
 
@@ -213,7 +221,7 @@ public sealed class BatonTask : IDisposable
             throw new InvalidOperationException("BatonTask.Run/RunAsync may only be called once per instance.");
         }
 
-        BatonProcessRunner.Run(program, args, timeout, timeoutBudget, captureOutput, envVars, clearEnv, cwd, RaiseEvent, cancellationToken);
+        BatonProcessRunner.Run(program, args, timeout, timeoutBudget, captureOutput, envVars, clearEnv, cwd, RaiseEvent, cancellationToken, inputOwner);
     }
 
     private void RaiseEvent(BatonEventArgs args) => EventRaised?.Invoke(this, args);

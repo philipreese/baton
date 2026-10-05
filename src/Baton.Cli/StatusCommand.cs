@@ -791,6 +791,7 @@ public static class StatusCommand
         }
 
         AppendTokenPart(parts, usageByExecutionId, u => u.BilledTokens, "billed tokens");
+        AppendTokenPart(parts, usageByExecutionId, u => u.ObservedBilledTokenFloor?.Tokens, "observed billed token floor");
         AppendTokenPart(parts, usageByExecutionId, u => u.TokensIn, "tokens in");
         AppendTokenPart(parts, usageByExecutionId, u => u.TokensOut, "tokens out");
         AppendTokenPart(parts, usageByExecutionId, u => u.CacheReadTokens, "cache read tokens");
@@ -819,7 +820,10 @@ public static class StatusCommand
         }
 
         var total = reporting.Sum(u => selector(u)!.Value);
-        parts.Add($"{total} {label} ({reporting.Count}/{usageByExecutionId.Count} reporting)");
+        var incomplete = reporting.Count(usage => usage.UsageCompleteness is not null and not "complete");
+        var qualification = incomplete == 0 ? string.Empty
+            : $"; {incomplete} observed incomplete contribution(s); execution totals unavailable";
+        parts.Add($"{total} {label} ({reporting.Count}/{usageByExecutionId.Count} reporting{qualification})");
     }
 
     public static string FormatStepStatus(StepState step, IReadOnlyList<FlowEvent> events)

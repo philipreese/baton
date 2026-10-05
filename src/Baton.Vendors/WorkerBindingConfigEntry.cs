@@ -229,6 +229,7 @@ namespace Baton.Vendors;
 /// binding capability and the tool's ancestry checks.
 /// </param>
 /// <param name="AttachmentNames">Ordered current-room harness input basenames; see spec/baton.md §2. Null grants none.</param>
+/// <param name="EnableAgyCorrection">Explicit transport selection; see spec/baton.md §10.</param>
 public sealed record WorkerBindingConfigEntry(
     string Adapter,
     WorkerContract Contract,
@@ -302,7 +303,8 @@ public sealed record WorkerBindingConfigEntry(
     string? ExactFileRestoreBaseSha = null,
     ExecutionLimitResolution? ExecutionLimitResolution = null,
     int? MaxRepeatedToolSteps = null,
-    IReadOnlyList<string>? AttachmentNames = null);
+    IReadOnlyList<string>? AttachmentNames = null,
+    bool EnableAgyCorrection = false);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

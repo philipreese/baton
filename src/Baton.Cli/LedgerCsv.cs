@@ -60,6 +60,7 @@ public static class LedgerCsv
         "reviewedRef", "reviewedPr", "reviewedHead", "findingsHigh", "findingsMedium", "findingsLow",
         "resolution", "resolutionReason", "label", "commits", "reviewCount", "identitySource",
         "predecessorExecution", "exitReason", "arrestReason", "limits",
+        "reportedFinalTurnUsage", "usageCompleteness",
     ];
 
     /// <summary>

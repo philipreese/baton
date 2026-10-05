@@ -88,6 +88,7 @@ namespace Baton.Vendors;
 /// </summary>
 public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantTranslator
 {
+    static AgyWorkerAdapter() => AgyHostDecoder.Initialize();
     private readonly IAgyHookLivenessProbe _hookLivenessProbe;
 
     public AgyWorkerAdapter(IAgyHookLivenessProbe? hookLivenessProbe = null)
@@ -495,6 +496,10 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         ArgumentNullException.ThrowIfNull(invocation);
         ArgumentNullException.ThrowIfNull(contract);
 
+        if (invocation.EnableAgyCorrection && (!OperatingSystem.IsWindows() || !invocation.StreamJson
+            || invocation.ResumeSession || invocation.SessionId is not null))
+            throw new InvalidOperationException("AGY correction requires a fresh Windows stream-json execution. See spec/baton.md §10.");
+
         // #1166 -- see ClaudeWorkerAdapter.Resolve's identical seam (ProjectCeilingGate's own doc has
         // the rule) for why this runs first on that adapter; the same ordering holds here for the same
         // reason, applied to this vendor's own downstream readers: ResolvePermissionScope, the
@@ -536,7 +541,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             }
         }
 
-        List<string> args = ["-p", prompt];
+        List<string> args = invocation.EnableAgyCorrection ? ["--input-format", "stream-json"] : ["-p", prompt];
 
         if (permissionScope == "--dangerously-skip-permissions")
         {
@@ -792,7 +797,9 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
                 : null,
             // #1741: see ExecutionRequest.HookVerdictLedgerFileName's own doc for why this travels
             // alongside CountHookVerdicts above.
-            HookVerdictLedgerFileName: requiresHookAsSoleNarrowing ? VerdictLedgerFileName : null);
+            HookVerdictLedgerFileName: requiresHookAsSoleNarrowing ? VerdictLedgerFileName : null,
+            ExactRunningTransport: invocation.EnableAgyCorrection ? AgyStreamingHost.Transport : null,
+            CreateProcessTransport: invocation.EnableAgyCorrection ? context => new AgyStreamingHost(context) : null);
     }
 
     /// <summary>
@@ -810,7 +817,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(AgyHostDecoder.Decode(rawLine));
             var root = doc.RootElement;
             return root.ValueKind == JsonValueKind.Object
                 && root.TryGetProperty("event", out var eventProp) && eventProp.GetString() == "result"
@@ -841,7 +848,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(AgyHostDecoder.Decode(rawLine));
             var root = doc.RootElement;
             return root.ValueKind == JsonValueKind.Object
                 && root.TryGetProperty("event", out var eventProp) && eventProp.GetString() == "result"
@@ -1403,6 +1410,19 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// <see cref="JsonException"/> and is treated as "not a progress event", exactly as the claude parser
     /// does; the daemon's line assembler delivers whole lines in practice.
     /// </summary>
+    public bool TryParseSessionId(string rawLine, out string? sessionId)
+    {
+        sessionId = null;
+        if (AgyHostDecoder.ReadEnvelope(rawLine) is not { Kind: "native" }) return false;
+        using var document = JsonDocument.Parse(AgyHostDecoder.Decode(rawLine));
+        var native = document.RootElement;
+        if (!native.TryGetProperty("event", out var kind) || kind.ValueKind != JsonValueKind.String || kind.GetString() != "init"
+            || !native.TryGetProperty("conversation_id", out var conversation) || conversation.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(conversation.GetString())) return false;
+        sessionId = conversation.GetString();
+        return true;
+    }
+
     public bool TryParseProgressEvent(string rawLine, out WorkerProgressEvent? progressEvent)
     {
         progressEvent = null;
@@ -1413,7 +1433,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(AgyHostDecoder.Decode(rawLine));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("event", out var eventProp))
             {
@@ -1529,7 +1549,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
 
         try
         {
-            using var doc = JsonDocument.Parse(rawLine);
+            using var doc = JsonDocument.Parse(AgyHostDecoder.Decode(rawLine));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("event", out var eventProp)
@@ -1732,6 +1752,8 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             return true;
         }
 
+        if (stdoutTail?.Contains("\"Version\"", StringComparison.Ordinal) == true)
+            return TryClassifyQuotaExhaustionFromResultEnvelope(stdoutTail, timeProvider, out classification, out retryNotBefore);
         return TryClassifyQuotaExhaustion(stdoutTail, timeProvider, out classification, out retryNotBefore);
     }
 
@@ -1777,7 +1799,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         FailureClassification? matchedClassification = null;
         DateTimeOffset? matchedRetryNotBefore = null;
 
-        var matched = StreamJsonTailScanner.AnyObject(stdoutTail, root =>
+        var matched = StreamJsonTailScanner.AnyObject(AgyHostDecoder.DecodeTail(stdoutTail), root =>
         {
             if (!root.TryGetProperty("event", out var eventProp)
                 || eventProp.ValueKind != JsonValueKind.String

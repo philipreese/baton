@@ -108,6 +108,7 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
             var completeByteCount = Encoding.UTF8.GetByteCount(completeText);
             var lines = completeText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
+            ValidateSelectedAuthorities(lines);
             var flowEvents = new List<FlowEvent>(lines.Length);
             var coreEvents = new List<CoreEvent>(lines.Length);
             var unknownCount = 0;
@@ -191,6 +192,7 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
         var lines = completeText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
         var result = new List<LogEntry>(lines.Length);
+        ValidateSelectedAuthorities(lines);
         var unknownCount = 0;
         string? firstUnknownKind = null;
         foreach (var line in lines)
@@ -279,6 +281,7 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
         var lines = completeText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
         var flowEvents = new List<FlowEvent>(lines.Length);
+        ValidateSelectedAuthorities(lines);
         var coreEvents = new List<CoreEvent>(lines.Length);
         var unknownCount = 0;
         string? firstUnknownKind = null;
@@ -318,6 +321,12 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
         return new EventLogSnapshot(
             flowEvents, coreEvents, completeByteCount, IsFallbackToFull: true,
             HasUnterminatedTail: hasUnterminatedTail, UnknownEventCount: unknownCount);
+    }
+
+    private static void ValidateSelectedAuthorities(IReadOnlyList<string> lines)
+    {
+        try { FlowEventLogJson.ValidateSelectedAuthorities(lines); }
+        catch (JsonException ex) { throw new FlowEventLogReadException("Malformed completion authority in the ledger.", ex); }
     }
 
     private static FileStream OpenReadStream(string logFilePath)

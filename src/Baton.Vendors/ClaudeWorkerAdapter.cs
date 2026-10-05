@@ -112,6 +112,8 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         ArgumentNullException.ThrowIfNull(invocation);
         ArgumentNullException.ThrowIfNull(contract);
 
+        if (invocation.EnableAgyCorrection) throw new InvalidOperationException("EnableAgyCorrection requires the AGY adapter.");
+
         // #1166: decision 0004's project ceiling (ProjectCeilingGate's own doc has the rule). Applied
         // first so every channel below derived from invocation.PermissionGrant (--allowedTools,
         // --disallowedTools, the hook-denied-tools env var, the shell-pattern env vars) reflects the

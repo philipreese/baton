@@ -240,6 +240,30 @@ public sealed class LedgerViewCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Csv_preserves_selected_final_usage_in_one_cell_and_legacy_empty_cells()
+    {
+        var path = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "selected-usage.jsonl");
+        var final = new WorkerUsage(TokensIn: 999, TokensOut: 888);
+        await CostLedgerStore.AppendAsync(
+            [new CostLedgerEntry(CostSourceKind.BatonExecution, Room: _roomA, Execution: "selected",
+                EndedAt: Sep4, ReportedFinalTurnUsage: final, UsageCompleteness: "unavailable"),
+             new CostLedgerEntry(CostSourceKind.BatonExecution, Room: _roomA, Execution: "legacy", EndedAt: Sep4.AddHours(1))],
+            path, TestContext.Current.CancellationToken);
+        var lines = (await RunOverAsync(path, "--format", "csv")).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var selected = ParseCsvLine(lines[1]);
+        var legacy = ParseCsvLine(lines[2]);
+        var usageColumn = LedgerCsv.Columns.ToList().IndexOf("reportedFinalTurnUsage");
+        var completenessColumn = LedgerCsv.Columns.ToList().IndexOf("usageCompleteness");
+        Assert.True(usageColumn >= 0);
+        Assert.True(completenessColumn >= 0);
+        Assert.Equal(LedgerCsv.Columns.Count, selected.Count);
+        Assert.Equal(final, JsonSerializer.Deserialize<WorkerUsage>(selected[usageColumn]));
+        Assert.Equal("unavailable", selected[completenessColumn]);
+        Assert.Equal(string.Empty, legacy[usageColumn]);
+        Assert.Equal(string.Empty, legacy[completenessColumn]);
+    }
+
+    [Fact]
     public async Task Csv_serializes_populated_limits_as_one_quoted_cell_and_leaves_legacy_limits_empty()
     {
         var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "limits.jsonl");

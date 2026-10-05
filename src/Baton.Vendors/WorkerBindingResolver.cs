@@ -190,6 +190,7 @@ public static class WorkerBindingResolver
             // undeclared/chained failover out permanently (operator ruling, 2026-09-01); a single
             // declared hop is the whole feature.
             FallbackOnExhaustion = null,
+            EnableAgyCorrection = false,
         };
 
         if (string.Equals(fallback.Adapter.Trim(), entry.Adapter.Trim(), StringComparison.OrdinalIgnoreCase))
@@ -301,7 +302,8 @@ public static class WorkerBindingResolver
             MemoryAddGrant: entry.MemoryAddGrant,
             EnableExactFileRestoreTool: capturedRestoreBase is not null,
             ExactFileRestoreBaseSha: capturedRestoreBase,
-            AttachmentPaths: AttachmentReadInputs.Resolve(entry.AttachmentNames, roomDirectory ?? bindingsFileDirectory));
+            AttachmentPaths: AttachmentReadInputs.Resolve(entry.AttachmentNames, roomDirectory ?? bindingsFileDirectory),
+            EnableAgyCorrection: entry.EnableAgyCorrection);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)

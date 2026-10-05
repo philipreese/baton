@@ -50,7 +50,8 @@ namespace Baton.Domain;
 /// measured against real captures to repeat across several consecutive lines with the SAME
 /// <c>message.usage</c> object (a single API response split across content-block chunks), which would
 /// double-count <paramref name="BilledTokens"/> if summed per line rather than per message. Null on
-/// every reading agy produces (that vendor's shape has no analogous id).
+/// raw one-shot agy readings (that stream has no analogous id). The opted-in AGY host supplies
+/// <c>conversation:step</c> on terminal-step deltas, deduplicated before emission.
 /// <see cref="Mutation.TokenBudgetMonitor"/> is the sole consumer — it dedupes its own running Σ by
 /// this field rather than exposing it as a general-purpose identity.
 /// <para>
@@ -72,8 +73,9 @@ namespace Baton.Domain;
 /// Set by <c>ClaudeUsageParser.TryParseIncrementalUsage</c> on every mid-stream reading it produces
 /// (that method's own doc has the measurement) and carried forward, sticky, onto
 /// <see cref="Mutation.TokenBudgetMonitor"/>'s snapshot: once ANY line on a stream was a floor, the
-/// running Σ is a floor. False on agy's incremental reading and on both vendors' terminal reading,
-/// which are measurements. Never inverts a comparison — a floor crossing a budget is still a real
+/// running Σ is a floor. False on raw one-shot agy's incremental reading and on raw terminal
+/// readings, which are measurements. The opted-in AGY host sets it true for observed step deltas;
+/// its final native report is separate from the execution aggregate. Never inverts a comparison — a floor crossing a budget is still a real
 /// crossing; what it cannot do is prove a budget was NOT crossed, which is exactly what the arrest
 /// text and the glass now say rather than leaving to inference.
 /// </param>

@@ -2,6 +2,16 @@ namespace Baton.Vendors.Tests;
 
 public class WorkerBindingConfigParserTests
 {
+    [Fact]
+    public void Agy_correction_is_explicit_and_cannot_be_selected_for_other_adapters()
+    {
+        Assert.False(WorkerBindingConfigParser.Parse(ValidJson)["architect"].EnableAgyCorrection);
+        var opted = ValidJson.Replace("\"Adapter\": \"echo\"", "\"Adapter\": \"agy\", \"EnableAgyCorrection\": true, \"StreamJson\": true", StringComparison.Ordinal);
+        Assert.True(WorkerBindingConfigParser.Parse(opted)["architect"].EnableAgyCorrection);
+        foreach (var adapter in new[] { "echo", "claude", "codex" })
+            Assert.Throws<WorkerBindingConfigException>(() => WorkerBindingConfigParser.Parse(opted.Replace("\"Adapter\": \"agy\"", $"\"Adapter\": \"{adapter}\"", StringComparison.Ordinal)));
+    }
+
     private const string ValidJson = """
         {
           "architect": {

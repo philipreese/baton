@@ -117,6 +117,7 @@ public static class FlowEventLogJson
     {
         using var document = JsonDocument.Parse(line);
         var root = document.RootElement;
+        RejectAmbiguousSelectedAuthority(root);
         var owner = ReadDiscriminator(root, "owner");
 
         if (!KnownOwners.Contains(owner))
@@ -155,6 +156,61 @@ public static class FlowEventLogJson
         return JsonSerializer.Deserialize<LogEntry>(root.GetRawText(), Options)
             ?? throw new JsonException($"Line in the ledger deserialized to null: {line}");
     }
+
+    // Selected completion authority must have exactly one interpretation. Neither identical
+    // duplicates nor property order may let first-turn artifacts turn ambiguity into success.
+    internal static void ValidateSelectedAuthorities(IReadOnlyList<string> lines)
+    {
+        var authorities = new List<JsonElement>();
+        var selected = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in lines)
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (!IsCompletionAuthority(root)) continue;
+            authorities.Add(root.Clone());
+            if (Descendants(root, "ExactRunningTransport").Any(value => value.ValueKind == JsonValueKind.String))
+                foreach (var id in Descendants(root, "ExecutionId").Where(value => value.ValueKind == JsonValueKind.String))
+                    selected.Add(id.GetString()!);
+        }
+        foreach (var root in authorities)
+            if (Descendants(root, "ExecutionId").Any(value => value.ValueKind == JsonValueKind.String && selected.Contains(value.GetString()!))
+                && !UniqueProperties(root))
+                throw new JsonException("Ambiguous selected transport accepted/start/exit completion authority.");
+    }
+
+    private static void RejectAmbiguousSelectedAuthority(JsonElement root)
+    {
+        if (IsCompletionAuthority(root)
+            && Descendants(root, "ExactRunningTransport").Any(value => value.ValueKind == JsonValueKind.String)
+            && !UniqueProperties(root))
+            throw new JsonException("Ambiguous selected transport accepted/start/exit completion authority.");
+    }
+
+    private static bool IsCompletionAuthority(JsonElement root) => Descendants(root, "eventType")
+        .Any(value => value.ValueKind == JsonValueKind.String
+            && value.GetString() is "executionRequestAccepted" or "executionStarted" or "executionExited");
+
+    private static IEnumerable<JsonElement> Descendants(JsonElement node, string name)
+    {
+        if (node.ValueKind == JsonValueKind.Object)
+            foreach (var property in node.EnumerateObject())
+            {
+                if (property.Name == name) yield return property.Value;
+                foreach (var value in Descendants(property.Value, name)) yield return value;
+            }
+        else if (node.ValueKind == JsonValueKind.Array)
+            foreach (var item in node.EnumerateArray())
+                foreach (var value in Descendants(item, name)) yield return value;
+    }
+
+    private static bool UniqueProperties(JsonElement node) => node.ValueKind switch
+    {
+        JsonValueKind.Object => node.EnumerateObject().Select(property => property.Name).Distinct(StringComparer.Ordinal).Count()
+            == node.EnumerateObject().Count() && node.EnumerateObject().All(property => UniqueProperties(property.Value)),
+        JsonValueKind.Array => node.EnumerateArray().All(UniqueProperties),
+        _ => true,
+    };
 
     private static string ReadDiscriminator(JsonElement element, string discriminatorPropertyName)
     {

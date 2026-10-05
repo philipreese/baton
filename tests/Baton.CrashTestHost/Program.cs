@@ -9,6 +9,9 @@ using Baton.Status;
 using Baton.Steering;
 using Baton.Store;
 
+if (args.Length is 4 or 5 && args[0] == "agy-stream-fixture")
+    return await AgyStreamProcessMode.RunAsync(args[1], args[2], args[3], args.Length == 5 ? args[4] : null);
+
 if (Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "claude-advice-helper")
     return await ClaudeAdviceProcessMode.RunAsync(args);
 

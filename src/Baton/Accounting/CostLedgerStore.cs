@@ -275,6 +275,14 @@ public static partial class CostLedgerStore
 
             var unavailableReason = usage.BilledReconciliationUnavailable;
             var completeness = ResolveCompleteness(unavailableReason, usage.BilledTokens);
+            if (usage.UsageCompleteness is not null)
+            {
+                apiUsd = null;
+                planUsd = null;
+                apiStatus = EstimateStatus.Unpriced;
+                planStatus = EstimateStatus.Unpriced;
+                estimateReason = ExecutionUsageView.StreamingExecutionCompletenessUnavailable;
+            }
 
             // #1901 C1 item 1/3: the workspace facts the settle site resolved for THIS row's worker.
             // Keyed on the worker name for the same reason the runway override is: bindings are
@@ -313,6 +321,8 @@ public static partial class CostLedgerStore
                 PullRequest: delivery?.PullRequest,
                 StartedAt: startedAt,
                 EndedAt: endedAt,
+                ReportedFinalTurnUsage: usage.ReportedFinalTurnUsage,
+                UsageCompleteness: usage.UsageCompleteness,
                 TokensIn: usage.TokensIn,
                 TokensOut: usage.TokensOut,
                 CacheReadTokens: usage.CacheReadTokens,

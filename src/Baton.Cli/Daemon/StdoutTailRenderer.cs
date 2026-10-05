@@ -734,7 +734,7 @@ internal static class StdoutTailRenderer
         JsonDocument doc;
         try
         {
-            doc = JsonDocument.Parse(stripped);
+            doc = JsonDocument.Parse(Baton.Vendors.AgyHostDecoder.Decode(stripped));
         }
         catch (JsonException)
         {

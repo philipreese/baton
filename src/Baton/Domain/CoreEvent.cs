@@ -44,7 +44,9 @@ public abstract record CoreEvent
         CoreExitReason Reason,
         string? StderrTail = null,
         bool TerminalSuccessObserved = false,
-        bool TerminalResultObserved = false) : CoreEvent;
+        bool TerminalResultObserved = false,
+        string? ExactRunningTransport = null,
+        Baton.Dispatch.FinalExpectedTurnCompletion? FinalExpectedTurn = null) : CoreEvent;
 }
 
 /// <summary>

@@ -15,6 +15,27 @@ public sealed class ArtifactCheckpointEndToEndTests
         """{"type":"turn.usage","usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":1,"round_trip":1}}""";
 
     [Fact]
+    public async Task Selected_transport_cannot_salvage_first_turn_artifacts_at_a_cap_arrest()
+    {
+        var room = Path.Combine(Path.GetTempPath(), "agy-cap-final-" + Guid.NewGuid().ToString("N"));
+        var workspace = Path.Combine(room, "workspace");
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var state = await RunBoundaryExecutionAsync(room, workspace, Path.Combine(room, "artifacts"), Path.Combine(room, "flow.jsonl"),
+                [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)],
+                output => File.WriteAllText(Path.Combine(output, "report.md"), "first turn complete"), selectedTransport: true);
+            var events = await new FlowEventLogReader(Path.Combine(room, "flow.jsonl")).ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+            Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+            Assert.Empty(events.OfType<FlowEvent.GraceTurnClaimed>());
+        }
+        finally { DirectoryCleanup.DeleteRecursively(room); }
+    }
+
+    [Fact]
     public async Task A_cap_arrest_with_valid_artifacts_from_a_mutating_delivering_role_continues_through_workspace_safety()
     {
         var room = Path.Combine(Path.GetTempPath(), "baton-artifact-boundary-mutating-" + Guid.NewGuid().ToString("N"));
@@ -402,7 +423,8 @@ public sealed class ArtifactCheckpointEndToEndTests
         string role = "review",
         bool changesTree = false,
         bool verifiesWorkspace = false,
-        bool deliversBranch = false)
+        bool deliversBranch = false,
+        bool selectedTransport = false)
     {
         var stepId = new StepId(role);
         var snapshot = new WorkflowDefinitionSnapshot(
@@ -410,9 +432,11 @@ public sealed class ArtifactCheckpointEndToEndTests
             [new WorkflowStepDefinition(stepId, role, [], outputs.Select(output => output.Name).ToArray(), DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
         var binding = new WorkerBinding.Process(
             new WorkerContract(role, [], outputs, []),
-            CheckpointTarget(workspace), TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100,
+            CheckpointTarget(workspace) with { ExactRunningTransport = selectedTransport ? "agy-stream-v1" : null },
+            TimeSpan.FromSeconds(30), Adapter: selectedTransport ? "agy" : "codex", TokenBudget: 100,
             ChangesTree: changesTree, VerifiesWorkspace: verifiesWorkspace, DeliversBranch: deliversBranch);
-        var dispatcher = new CheckpointDispatcher(artifacts, writeAtCap: writeArtifacts, finishAtCap: true);
+        var dispatcher = new CheckpointDispatcher(artifacts, writeAtCap: writeArtifacts, finishAtCap: true,
+            selectedTransport: selectedTransport);
         await using var writer = new FlowEventLogWriter(log);
         var reader = new FlowEventLogReader(log);
         return await MutationInterface.StartWorkflowAsync(
@@ -453,7 +477,8 @@ public sealed class ArtifactCheckpointEndToEndTests
         Action<string>? writeAtCheckpoint = null,
         bool finishAtCap = false,
         Func<ExecutionRequest, Task>? beforeCheckpointDispatch = null,
-        string? checkpointStdoutLine = null) : ICoreDispatcher
+        string? checkpointStdoutLine = null,
+        bool selectedTransport = false) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
         public List<ExecutionRequest> Requests { get; } = [];
@@ -468,7 +493,9 @@ public sealed class ArtifactCheckpointEndToEndTests
             if (CallCount == 1)
             {
                 target.OnStdoutLine?.Invoke("""{"type":"thread.started","thread_id":"checkpoint-session"}""");
-                target.OnStdoutLine?.Invoke(ArrestingUsage);
+                target.OnStdoutLine?.Invoke(selectedTransport
+                    ? """{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","usage":{"input_tokens":500,"output_tokens":1}}}"""
+                    : ArrestingUsage);
                 var primaryOutputDirectory = request.Environment
                     .OfType<EnvironmentVariable.BatonComputed>()
                     .Single(variable => variable.Name == "BATON_OUTPUT_DIR")

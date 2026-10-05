@@ -659,4 +659,10 @@ public sealed record CostLedgerEntry(
     // StepRebound. Null remains explicit unknown evidence for legacy/supplementary rows.
     [property: JsonPropertyName("limits")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ExecutionLimitEvidence? Limits = null);
+    ExecutionLimitEvidence? Limits = null,
+    [property: JsonPropertyName("reportedFinalTurnUsage")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    WorkerUsage? ReportedFinalTurnUsage = null,
+    [property: JsonPropertyName("usageCompleteness")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? UsageCompleteness = null);

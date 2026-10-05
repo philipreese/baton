@@ -103,7 +103,9 @@ public sealed record CoreDispatchTarget(
     // unbounded stream; the adapter owns its bounded structured state.
     Func<string, OutstandingToolAtTerminalSuccess?>? DetectsOutstandingToolAtTerminalSuccess = null,
     // Adapter-owned observation of process stdout, scoped to an execution, not a mutable artifact.
-    Func<string, Action<string>>? CreateExecutionStdoutObserver = null)
+    Func<string, Action<string>>? CreateExecutionStdoutObserver = null,
+    string? ExactRunningTransport = null,
+    Func<WorkerProcessTransportContext, IWorkerProcessTransport>? CreateProcessTransport = null)
 {
     /// <summary>Returns a target whose broker is restricted to the named declared-output tools.</summary>
     public CoreDispatchTarget WithArtifactOnlyOutputs(IReadOnlyList<string> outputNames)
@@ -123,6 +125,8 @@ public sealed record CoreDispatchTarget(
     /// <summary>Returns a target for the same vendor conversation with a replacement turn prompt.</summary>
     public CoreDispatchTarget WithResumedSession(string sessionId, string prompt)
     {
+        if (ExactRunningTransport is not null)
+            throw new InvalidOperationException("The selected exact-running transport cannot launch a continuation.");
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         if (ResumeTarget is not null)
@@ -169,6 +173,8 @@ public sealed record CoreDispatchTarget(
             return this;
         }
 
+        if (CreateProcessTransport is not null) return this with { PromptText = preamble + promptText };
+
         var args = Args.ToList();
         var promptArgIndex = args.IndexOf(promptText);
         if (promptArgIndex < 0)
@@ -205,6 +211,8 @@ public sealed record CoreDispatchTarget(
             // Same no-op reading WithPromptPreamble takes for an adapter with no prose prompt at all.
             return this;
         }
+
+        if (CreateProcessTransport is not null) return this with { PromptText = newPrompt };
 
         var args = Args.ToList();
         var promptArgIndex = args.IndexOf(promptText);
@@ -324,7 +332,9 @@ public sealed record CoreDispatchResult(
     // which counts the paths.
     IReadOnlyList<EnginePlacedFile>? EnginePlacedFiles = null,
     // #2002: vendor-derived structured evidence; null on vendors/paths without this capability.
-    OutstandingToolAtTerminalSuccess? OutstandingToolAtTerminalSuccess = null);
+    OutstandingToolAtTerminalSuccess? OutstandingToolAtTerminalSuccess = null,
+    string? ExactRunningTransport = null,
+    FinalExpectedTurnCompletion? FinalExpectedTurn = null);
 
 /// <summary>
 /// A vendor-neutral fact that a terminal success arrived while one named tool step had no observed
@@ -851,6 +861,12 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
 
         var childEnvironment = AssembleChildEnvironment(request, target);
 
+        if (request.ExactRunningTransport != target.ExactRunningTransport)
+            throw new InvalidOperationException("Accepted transport differs from the dispatch target.");
+        if ((target.ExactRunningTransport is not null) != (target.CreateProcessTransport is not null))
+            throw new InvalidOperationException("An exact-running transport requires its adapter-owned host.");
+        var transportPrompt = target.PromptText is { } transportText ? ExpandVariables(transportText, pathVariables) : null;
+
         // Issue #292: durably capture the resolved prompt a step's worker was actually invoked with
         // (docs/agents/developing-baton.md Architecture Rule 1: archival capture for UI display, never read back to make a
         // routing decision). Written before BatonTask ever spawns (below), so it is present even if
@@ -983,7 +999,10 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
 
         // Only ever invoked for a WorkerBinding.Process dispatch (MutationInterface never calls a
         // dispatcher for a NonProcess execution) — Timeout is therefore always set.
+        using var transport = target.CreateProcessTransport?.Invoke(new WorkerProcessTransportContext(
+            request, pathVariables["BATON_ROOM_DIRECTORY"], transportPrompt ?? throw new InvalidOperationException("Transport prompt missing.")));
         using var task = new BatonTask(target.Program, [.. expandedArgs]).WithTimeout(request.Timeout!.Value);
+        if (transport is not null) task.WithInputOwner(transport.Start);
 
         // #2019: the lane's own recorded build-lock queueing, credited back to its box.
         // BuildLockWaitCredit is the register for what that means and what it is capped at; the one
@@ -1158,6 +1177,28 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
             using var created = new FileStream(stdoutArtifactPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
         }
 
+        void CaptureStdout(byte[] data)
+        {
+            if (data.Length == 0) return;
+            try { streamLogger?.AppendStdout(data); }
+            catch (Exception ex) { Console.Error.WriteLine($"Warning: Failed to append stdout stream log: {ex.Message}."); }
+            if (stdoutArtifactPath is not null)
+            {
+                lock (stdoutArtifactLock)
+                {
+                    Directory.CreateDirectory(outputDir!);
+                    using var fs = new FileStream(stdoutArtifactPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                    fs.Write(data);
+                    fs.Flush();
+                }
+            }
+            lock (stdoutLock)
+            {
+                stdoutTail.Append(data);
+                if (stdoutLineSink is not null) stdoutLines.Append(data, stdoutLineSink);
+            }
+        }
+
         task.EventRaised += (_, e) =>
         {
             switch (e.Kind)
@@ -1173,6 +1214,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                     {
                         pendingLogWrites.Add(coreEventLogWriter.AppendAsync(
                             new CoreEvent.ExecutionStarted(request.ExecutionId, e.Pid, e.ProcessStartTimeUtc), CancellationToken.None));
+                        if (transport is not null) pendingLogWrites[^1].GetAwaiter().GetResult();
                     }
 
                     break;
@@ -1180,47 +1222,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                 case BatonTaskEventKind.StdoutChunk:
                     if (e.Data is { Length: > 0 })
                     {
-                        try
-                        {
-                            // #1525 F5: ExecutionStreamLogger.AppendChunk already absorbs every
-                            // ordinary IO failure internally (per-stream, per-chunk, never latching
-                            // permanently since the F4 fix) -- the only exception shape that can still
-                            // reach here is InvalidOperationException on a post-terminal append, which
-                            // BatonProcessRunner's drain-before-Exited ordering makes unreachable in
-                            // practice. This try/catch stays as defense against that invariant ever
-                            // breaking, but no longer nulls streamLogger out: doing so on a STDOUT
-                            // failure used to blind STDERR too (and vice versa below), duplicating the
-                            // same cross-stream coupling F4 removed one layer down.
-                            streamLogger?.AppendStdout(e.Data);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.Error.WriteLine($"Warning: Failed to append stdout stream log: {ex.Message}.");
-                        }
-
-                        if (stdoutArtifactPath is not null)
-                        {
-                            lock (stdoutArtifactLock)
-                            {
-                                Directory.CreateDirectory(outputDir!);
-                                using var fs = new FileStream(stdoutArtifactPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-                                fs.Write(e.Data, 0, e.Data.Length);
-                                fs.Flush();
-                            }
-                        }
-                        lock (stdoutLock)
-                        {
-                            stdoutTail.Append(e.Data);
-                            if (stdoutLineSink is not null)
-                            {
-                                // The decode is inside the lock, unlike the stateless GetString it replaces:
-                                // the buffer now carries decoder state between chunks, so two callbacks
-                                // decoding concurrently would interleave into one another's partial
-                                // sequences. The lock was already here for the line buffer; the decode joins
-                                // it rather than sitting beside it.
-                                stdoutLines.Append(e.Data, stdoutLineSink);
-                            }
-                        }
+                        CaptureStdout(transport?.Capture(e.Data) ?? e.Data);
                     }
                     break;
 
@@ -1245,6 +1247,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                     break;
 
                 case BatonTaskEventKind.Exited:
+                    if (transport is not null) CaptureStdout(transport.Finish());
                     try
                     {
                         streamLogger?.MarkTerminal();
@@ -1275,7 +1278,9 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                                 reason,
                                 capturedStderrTail,
                                 terminalSuccessObserved,
-                                terminalResultObserved),
+                                terminalResultObserved,
+                                request.ExactRunningTransport,
+                                transport?.Completion),
                             CancellationToken.None));
                     }
 
@@ -1341,7 +1346,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
 
         return new CoreDispatchResult(
             exitCode, reason, capturedStderr, terminalSuccessLatched, capturedStdoutTail, terminalResultLatched,
-            enginePlacedFiles, outstandingToolAtTerminalSuccess);
+            enginePlacedFiles, outstandingToolAtTerminalSuccess, request.ExactRunningTransport, transport?.Completion);
 
     }
 
