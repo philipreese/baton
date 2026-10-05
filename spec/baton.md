@@ -324,7 +324,8 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   each worker phase of a fresh template using the phase's resolved adapter, model, catalog role, and
   declared size. Template phase names remain binding identities; the role association captured during
   materialization supplies the profile key and is retained in the binding's resolution so accepted-request
-  evidence validates provenance against that catalog role. Deterministic capture bindings are excluded. A continuation
+  evidence validates provenance against that catalog role. A redispatch preserves that recorded role
+  while adapter and resolved model still identify the same selection. Deterministic capture bindings are excluded. A continuation
   carries the saved binding snapshot and does not re-read mutable settings. Finite fallback policy
   remains outside this slice and belongs to #2416.
 
@@ -332,7 +333,8 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   `--max-repeated-tool-steps` dispatch, queue, and redispatch flags. It is an explicit-only axis: there
   is no role default or fallback. The override wins over a matching profile, and the selected value and
   `profile`/`dispatch-override` source are retained in the applied binding/evidence. An explicit value
-  requires a supported usage parser and refuses before worker launch otherwise.
+  requires a supported usage parser and refuses before worker launch otherwise; a fresh template checks
+  every materialized capped phase before resolving or launching any adapter, including later phases.
 
   **Ordinary execution limit evidence (#2449).** Before an ordinary process spawn, the accepted
   request records the timeout and, when the dispatch monitor is actually available, its token,

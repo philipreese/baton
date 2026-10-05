@@ -471,7 +471,8 @@ public static class RedispatchCommand
             options.MaxRepeatedToolSteps is not null
                 ? ExecutionLimitSource.DispatchOverride
                 : InheritedSource(parentResolution?.MaxRepeatedToolStepsSource, inherited.MaxRepeatedToolSteps, parentResolution?.MaxRepeatedToolSteps),
-            inherited.MaxRepeatedToolSteps);
+            inherited.MaxRepeatedToolSteps,
+            selectionStillDescribesChild ? parentResolution?.SelectionRole : null);
     }
 
     /// <summary>

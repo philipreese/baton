@@ -2,6 +2,7 @@ using System.Text.Json;
 using Baton.Accounting;
 using Baton.Vendors;
 using Baton.Domain;
+using Baton.Mutation;
 using Baton.Runway;
 using Baton.Queue;
 using Baton.Status;
@@ -1459,6 +1460,17 @@ public static class DispatchCommand
                 ? ApplyExecutionLimits(pair.Value, options, declaredSize, settings.ExecutionLimitProfiles, role)
                 : pair.Value,
             StringComparer.Ordinal);
+        foreach (var (workerName, binding) in bindings)
+        {
+            if (binding.MaxRepeatedToolSteps is not null
+                && StandardWorkerUsageParsers.Default.GetValueOrDefault(binding.Adapter) is null)
+            {
+                throw new InvalidRoomMutationException(
+                    $"Worker adapter '{binding.Adapter}' has no tool-identity parser; "
+                    + "an explicit repeated-call cap cannot be enforced.");
+            }
+        }
+
         bindings = await InjectCaptureBaseRefAsync(bindings, workspaceDirectory, cancellationToken).ConfigureAwait(false);
         return (definition, bindings);
     }
