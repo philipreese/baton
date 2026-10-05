@@ -9064,6 +9064,22 @@ stricter proof may advance normally but leaves the action unresolved. Reconcilia
 the stopped-work obligation only from the durable proof; queued state, a receipt, launch and process
 exit alone cannot do so. Failed, stale and uncertain outcomes retain an owner and next trigger.
 
+### Owned-task status handoff (#2623)
+
+`baton task status <task-id>` reads only the retained queue row, repository claim, ready receipt,
+and existing stopped-work identity. For nonterminal `ready-as-of`, `stale`, and `blocked` tasks,
+text and JSON expose the task's recorded holder, current holder and ownership state, row task/repository/
+issue/PR identities, retained receipt subjects and timestamp, and the typed conductor responsibility.
+Ready changes `nextTrigger` to `conductor-handoff`: reconcile exact review evidence and fresh forge
+gates, then merge only under existing authority. A missing or changed claim is an ownership condition;
+status never reassigns the task. The receipt's task, repository, issue and PR must bind to the row before
+it can be `ready-as-of`; mismatch or missing legacy fields are reported and make the task stale.
+The retained receipt head is printed beside its identity as as-of evidence, separately from any current
+PR observation. A receipt is not fresh forge qualification, merge authority, transport acknowledgement,
+or consumption proof. Retired and cancelled rows retain `nextTrigger: none` and have no actionable
+handoff, even when old ready evidence remains in history. Status does not enumerate another obligation
+store, fetch forge state, or write queue, claim, evidence, or launch records.
+
 ---
 
 ## Appendix: full subsystem ruling table

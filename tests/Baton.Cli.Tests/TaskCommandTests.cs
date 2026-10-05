@@ -1094,6 +1094,7 @@ public sealed class TaskCommandTests
     [InlineData(QueueItemState.Failed, " ", false, false, "blocked", "conductor-judgment")]
     [InlineData(QueueItemState.Failed, "ownership refused", false, true, "blocked", "conductor-judgment")]
     [InlineData(QueueItemState.Failed, "ownership refused", true, false, "retired", "none")]
+    [InlineData(QueueItemState.Failed, "older failure", true, true, "retired", "none")]
     [InlineData(QueueItemState.Cancelled, "cancelled", false, false, "cancelled", "none")]
     [InlineData(QueueItemState.Queued, null, false, false, "queued", "daemon-tick")]
     [InlineData(QueueItemState.Launched, null, false, false, "running", "daemon-tick")]
@@ -1126,6 +1127,7 @@ public sealed class TaskCommandTests
                     State = queueState,
                     Halted = false,
                     Error = error,
+                    PullRequest = oldReady ? 50 : null,
                     Retirement = retired ? new QueueRetirement(QueueRetirement.Operator, now, "retained") : null,
                     OwnedTask = new OwnedTaskSubmission(id, repository, 49, "digest", "recorded-owner", now, receipt),
                 }],
@@ -1165,7 +1167,17 @@ public sealed class TaskCommandTests
                 var readiness = handoff.GetProperty("readiness");
                 Assert.Equal(oldReady ? JsonValueKind.Object : JsonValueKind.Null, readiness.ValueKind);
                 if (readiness.ValueKind == JsonValueKind.Object)
+                {
+                    Assert.Equal("ready", readiness.GetProperty("id").GetString());
+                    Assert.Equal(id, readiness.GetProperty("taskId").GetString());
+                    Assert.Equal("github.com/example/repo", readiness.GetProperty("repository").GetString());
+                    Assert.Equal(49, readiness.GetProperty("issue").GetInt32());
+                    Assert.Equal(50, readiness.GetProperty("pullRequest").GetInt32());
+                    Assert.Equal(new string('a', 40), readiness.GetProperty("headSha").GetString());
+                    Assert.Equal(now, readiness.GetProperty("observedAt").GetDateTimeOffset());
                     Assert.Equal("as-of", readiness.GetProperty("evidence").GetString());
+                    Assert.Equal("complete", readiness.GetProperty("binding").GetProperty("status").GetString());
+                }
             }
             Assert.Equal("unknown", json.RootElement.GetProperty("daemon").GetProperty("availability").GetString());
             Assert.Equal("recorded-owner", json.RootElement.GetProperty("conductorHolder").GetString());
@@ -1183,6 +1195,21 @@ public sealed class TaskCommandTests
             {
                 Assert.Contains("conductor handoff: recorded-owner", text.ToString(), StringComparison.Ordinal);
                 Assert.Contains("not a merge grant", text.ToString(), StringComparison.Ordinal);
+            }
+            if (oldReady)
+            {
+                if (expectedState == "ready-as-of")
+                    Assert.Equal(50, handoff.GetProperty("pullRequest").GetInt32());
+                Assert.Contains($"ready receipt{(retired ? " (historical)" : "")}: ready at {now:O}; head {new string('a', 40)} (as-of); binding complete",
+                    text.ToString(), StringComparison.Ordinal);
+                if (retired)
+                {
+                    Assert.Equal(JsonValueKind.Null, handoff.ValueKind);
+                    Assert.Equal(JsonValueKind.Object, json.RootElement.GetProperty("ready").ValueKind);
+                }
+                Assert.Contains("PR head: not observed", text.ToString(), StringComparison.Ordinal);
+                Assert.Equal("unclaimed", json.RootElement.GetProperty("ownership").GetString());
+                Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("currentConductorHolder").ValueKind);
             }
             if (retired)
                 Assert.Equal("retained", json.RootElement.GetProperty("reason").GetString());
@@ -1270,6 +1297,143 @@ public sealed class TaskCommandTests
     }
 
     [Fact]
+    public async Task Status_binds_retained_receipt_subjects_and_reports_missing_row_binding_in_text_and_json()
+    {
+        const string repository = "github.com/example/repo";
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-receipt-binding-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var observedAt = new DateTimeOffset(2026, 10, 3, 12, 0, 0, TimeSpan.Zero);
+            var id = TaskCommand.TaskId(repository, 51);
+            var foreignId = TaskCommand.TaskId(repository, 57);
+            var repositoryIdentity = RepositoryIdentity.From("https://" + repository, null)!;
+            var receipt = new TaskReadyReceipt("foreign-ready", foreignId, repository, 57, 77,
+                new string('c', 40), "review", new string('d', 64), "passing", "checks", observedAt, observedAt);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = id, Role = "implement", Workspace = home, SpecFile = BatonPaths.QueueSpecFile(id),
+                    Repository = repository, Issue = 51, PullRequest = null, Stage = WorkStage.Ready,
+                    State = QueueItemState.Queued,
+                    OwnedTask = new OwnedTaskSubmission(id, repository, 51, "digest", "recorded-owner", observedAt, receipt),
+                }],
+            }, Ct);
+            await ConductorClaimStore.ClaimAsync(repositoryIdentity, "current-owner", home, cancellationToken: Ct);
+            var queueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var claimFile = BatonPaths.ConductorClaimFile(repositoryIdentity.FileSlug);
+            var claimBefore = await File.ReadAllBytesAsync(claimFile, Ct);
+
+            var jsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), jsonOutput, Ct);
+            using var json = JsonDocument.Parse(jsonOutput.ToString());
+            var status = json.RootElement;
+            Assert.Equal("stale", status.GetProperty("state").GetString());
+            Assert.Equal("readiness-receipt-binding-mismatch", status.GetProperty("reason").GetString());
+            Assert.Equal("holder-changed", status.GetProperty("ownership").GetString());
+            Assert.Equal("current-owner", status.GetProperty("currentConductorHolder").GetString());
+            var handoff = status.GetProperty("conductorHandoff");
+            Assert.Equal(id, handoff.GetProperty("taskId").GetString());
+            Assert.Equal(repository, handoff.GetProperty("repository").GetString());
+            Assert.Equal(51, handoff.GetProperty("issue").GetInt32());
+            Assert.Equal(JsonValueKind.Null, handoff.GetProperty("pullRequest").ValueKind);
+            Assert.Equal("recorded-owner", handoff.GetProperty("holder").GetString());
+            Assert.Equal("current-owner", handoff.GetProperty("currentHolder").GetString());
+            Assert.Equal("reassess-current-readiness", handoff.GetProperty("responsibility").GetString());
+            var retained = handoff.GetProperty("readiness");
+            Assert.Equal("foreign-ready", retained.GetProperty("id").GetString());
+            Assert.Equal(foreignId, retained.GetProperty("taskId").GetString());
+            Assert.Equal(repository, retained.GetProperty("repository").GetString());
+            Assert.Equal(57, retained.GetProperty("issue").GetInt32());
+            Assert.Equal(77, retained.GetProperty("pullRequest").GetInt32());
+            Assert.Equal(new string('c', 40), retained.GetProperty("headSha").GetString());
+            Assert.Equal(observedAt, retained.GetProperty("observedAt").GetDateTimeOffset());
+            Assert.Equal("mismatched", retained.GetProperty("binding").GetProperty("status").GetString());
+            Assert.Contains("taskId", retained.GetProperty("binding").GetProperty("mismatches").EnumerateArray()
+                .Select(value => value.GetString()));
+            Assert.Contains("issue", retained.GetProperty("binding").GetProperty("mismatches").EnumerateArray()
+                .Select(value => value.GetString()));
+            Assert.Contains("rowPullRequest", retained.GetProperty("binding").GetProperty("missing").EnumerateArray()
+                .Select(value => value.GetString()));
+
+            var textOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), textOutput, Ct);
+            var text = textOutput.ToString();
+            Assert.Contains("conductor handoff: recorded-owner (holder-changed)", text, StringComparison.Ordinal);
+            Assert.Contains($"ready receipt: foreign-ready at {observedAt:O}; head {new string('c', 40)} (as-of); binding mismatched",
+                text, StringComparison.Ordinal);
+            Assert.Contains("mismatches: taskId, issue", text, StringComparison.Ordinal);
+            Assert.Contains("missing: rowPullRequest", text, StringComparison.Ordinal);
+            Assert.Contains("not a merge grant", text, StringComparison.Ordinal);
+            Assert.Equal(queueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(claimBefore, await File.ReadAllBytesAsync(claimFile, Ct));
+
+            var exactReceipt = receipt with { Id = "current-ready", TaskId = id, Issue = 51, PullRequest = 77 };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [snapshot.Items[0] with
+                {
+                    PullRequest = 77,
+                    OwnedTask = snapshot.Items[0].OwnedTask! with { Ready = exactReceipt },
+                    RequiredCheckEvidenceWait = new RequiredCheckEvidenceWait(
+                        exactReceipt.HeadSha, observedAt, observedAt, 1, "required checks unreadable"),
+                }],
+                PullRequestObservations = [new QueuePullRequestObservation(
+                    repository, 77, "open", exactReceipt.HeadSha, observedAt, observedAt, null)],
+            }, Ct);
+            var evidenceWaitQueueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var evidenceWaitText = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), evidenceWaitText, Ct);
+            Assert.Contains("Task " + id + ": stale (readiness-evidence-no-longer-current)",
+                evidenceWaitText.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"ready receipt: current-ready at {observedAt:O}; head {exactReceipt.HeadSha} (as-of); binding complete",
+                evidenceWaitText.ToString(), StringComparison.Ordinal);
+            Assert.Equal(evidenceWaitQueueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(claimBefore, await File.ReadAllBytesAsync(claimFile, Ct));
+
+            var partialReceipt = exactReceipt with { Id = "legacy-partial", PullRequest = 0 };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [snapshot.Items[0] with
+                {
+                    PullRequest = null,
+                    OwnedTask = snapshot.Items[0].OwnedTask! with { Ready = partialReceipt },
+                    RequiredCheckEvidenceWait = null,
+                }],
+                PullRequestObservations = null,
+            }, Ct);
+            var partialQueueBefore = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+            var partialJsonOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id, Json: true), partialJsonOutput, Ct);
+            using var partialJson = JsonDocument.Parse(partialJsonOutput.ToString());
+            Assert.Equal("stale", partialJson.RootElement.GetProperty("state").GetString());
+            Assert.Equal("readiness-receipt-binding-incomplete", partialJson.RootElement.GetProperty("reason").GetString());
+            var partialHandoff = partialJson.RootElement.GetProperty("conductorHandoff");
+            Assert.Equal(id, partialHandoff.GetProperty("taskId").GetString());
+            Assert.Equal("legacy-partial", partialHandoff.GetProperty("readiness").GetProperty("id").GetString());
+            Assert.Equal("incomplete", partialHandoff.GetProperty("readiness").GetProperty("binding")
+                .GetProperty("status").GetString());
+            Assert.Contains("pullRequest", partialHandoff.GetProperty("readiness").GetProperty("binding")
+                .GetProperty("missing").EnumerateArray().Select(value => value.GetString()));
+            Assert.Contains("rowPullRequest", partialHandoff.GetProperty("readiness").GetProperty("binding")
+                .GetProperty("missing").EnumerateArray().Select(value => value.GetString()));
+            var partialTextOutput = new StringWriter();
+            await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Status, Id: id), partialTextOutput, Ct);
+            Assert.Contains($"ready receipt: legacy-partial at {observedAt:O}; head {partialReceipt.HeadSha} (as-of); binding incomplete",
+                partialTextOutput.ToString(), StringComparison.Ordinal);
+            Assert.Contains("missing: rowPullRequest, pullRequest", partialTextOutput.ToString(), StringComparison.Ordinal);
+            Assert.Equal(partialQueueBefore, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            Assert.Equal(claimBefore, await File.ReadAllBytesAsync(claimFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Status_separates_current_blocker_from_whitelisted_stopped_work_history()
     {
         var observedAt = new DateTimeOffset(2026, 9, 30, 17, 0, 0, TimeSpan.Zero);
@@ -1308,7 +1472,7 @@ public sealed class TaskCommandTests
                 ExpectedState: "cancelled", ExpectedTrigger: "none", ExpectedCurrent: false,
                 HasHistory: true),
             (Name: "stale", State: QueueItemState.Queued, Stage: WorkStage.Ready,
-                Halted: false, Retirement: (QueueRetirement?)null, Ready: ReadyReceipt(repository, 57),
+                Halted: false, Retirement: (QueueRetirement?)null, Ready: ReadyReceipt(repository, 51),
                 HasBlocked: true, BlockedKey: (string?)historyKey, RetainedKey: (string?)historyKey,
                 ExpectedState: "stale", ExpectedTrigger: "conductor-reassessment", ExpectedCurrent: false,
                 HasHistory: true),
@@ -1404,12 +1568,13 @@ public sealed class TaskCommandTests
                         Tag = id, Role = "implement", Workspace = home,
                         SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = 51,
                         Stage = testCase.Stage, State = testCase.State, Halted = testCase.Halted,
-                        Error = testCase.ExpectedState == "stale" ? "old checks" : null,
+                        Error = null,
+                        PullRequest = testCase.ExpectedState is "stale" or "ready-as-of" ? 77 : null,
                         Retirement = testCase.Retirement, OwnedTask = owned,
                         StoppedWorkJudgment = judgment,
                     }],
                     PullRequestObservations = testCase.ExpectedState == "stale"
-                        ? [new QueuePullRequestObservation(repository, 57, "open", "new-head",
+                        ? [new QueuePullRequestObservation(repository, 77, "open", "new-head",
                             observedAt, observedAt, null)]
                         : null,
                 }, Ct);
@@ -1421,6 +1586,20 @@ public sealed class TaskCommandTests
                 using var json = JsonDocument.Parse(jsonOutput.ToString());
                 var status = json.RootElement;
                 Assert.Equal(testCase.ExpectedState, status.GetProperty("state").GetString());
+                if (testCase.ExpectedState == "stale")
+                {
+                    var handoff = status.GetProperty("conductorHandoff");
+                    Assert.Equal(id, handoff.GetProperty("taskId").GetString());
+                    Assert.Equal(77, handoff.GetProperty("pullRequest").GetInt32());
+                    var readiness = handoff.GetProperty("readiness");
+                    Assert.Equal(id, readiness.GetProperty("taskId").GetString());
+                    Assert.Equal("github.com/example/repo", readiness.GetProperty("repository").GetString());
+                    Assert.Equal(51, readiness.GetProperty("issue").GetInt32());
+                    Assert.Equal(77, readiness.GetProperty("pullRequest").GetInt32());
+                    Assert.Equal(new string('a', 40), readiness.GetProperty("headSha").GetString());
+                    Assert.Equal("complete", readiness.GetProperty("binding").GetProperty("status").GetString());
+                    Assert.Equal("observed-pr-head-changed", status.GetProperty("reason").GetString());
+                }
                 var haltCause = status.GetProperty("haltCause");
                 var obligationKey = status.GetProperty("obligationKey");
                 if (testCase.ExpectedCurrent)
@@ -2359,6 +2538,7 @@ public sealed class TaskCommandTests
                 {
                     Tag = id, Role = "implement", Workspace = home,
                     SpecFile = BatonPaths.QueueSpecFile(id), Repository = repository, Issue = issue,
+                    PullRequest = 100,
                     Stage = WorkStage.Ready, State = QueueItemState.Queued,
                     WorkerAssignment = assignment,
                     OwnedTask = new OwnedTaskSubmission(id, repository, issue, "digest", "recorded-owner", now, ready),
