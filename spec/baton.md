@@ -323,7 +323,8 @@ one-shot boundary and keep their distinct lifetime and output contracts.
   This is applied once to a fresh direct role dispatch, including queue-launched dispatches, and to
   each worker phase of a fresh template using the phase's resolved adapter, model, catalog role, and
   declared size. Template phase names remain binding identities; the role association captured during
-  materialization supplies the profile key. Deterministic capture bindings are excluded. A continuation
+  materialization supplies the profile key and is retained in the binding's resolution so accepted-request
+  evidence validates provenance against that catalog role. Deterministic capture bindings are excluded. A continuation
   carries the saved binding snapshot and does not re-read mutable settings. Finite fallback policy
   remains outside this slice and belongs to #2416.
 
