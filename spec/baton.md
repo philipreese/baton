@@ -8168,6 +8168,17 @@ not the latest or complete history, and never grants action authority or changes
 The text view labels a retained `OwnedTask.Blocked` disposition as current only for a derived
 `blocked` task; outside that state it is retained historical evidence, and a linked stopped-work
 pair has its own current-blocker label.
+For nonterminal `ready-as-of`, `stale`, and `blocked` tasks, the additive nullable
+`conductorHandoff` names the recorded holder, current holder and ownership status, task/repository/
+issue/PR identity, retained readiness id/head/time when present, and typed responsibility. Ready
+status changes `nextTrigger` to `conductor-handoff`: the conductor reconciles exact review evidence
+and fresh forge gates, then merges only under existing authority. Stale asks the conductor to
+reassess; blocked asks the conductor to judge the retained blocker. Missing or changed claims remain
+explicit ownership conditions and never reassign the task. A receipt is as-of evidence, not fresh
+qualification, merge authority, transport acknowledgement or consumption proof; legacy partial
+receipts remain incomplete. Retired and cancelled tasks expose no actionable handoff, and stopped-work
+history alone never creates one. This projection is read-only, does not wake a desktop conductor, and
+does not close #2091.
 The additive nullable `initialWorkerSelection` field projects only the retained implement-stage
 entry of `QueueItem.StageSelections` (adapter, model, effort); a row with no such entry reports
 null rather than an inferred ambient default. The additive nullable `retainedWorkerAssignment`

@@ -495,7 +495,69 @@ public static class TaskCommand
             "queued" or "running" => "daemon-tick",
             "blocked" => "conductor-judgment",
             "stale" => "conductor-reassessment",
+            "ready-as-of" => "conductor-handoff",
             _ => "none",
+        };
+        var conductorHandoff = state switch
+        {
+            "ready-as-of" => new
+            {
+                taskId = owner.Id,
+                repository = owner.Repository,
+                issue = owner.Issue,
+                pullRequest = item.PullRequest,
+                holder = owner.ConductorHolder,
+                currentHolder = currentClaim?.Holder,
+                ownership,
+                readiness = readiness is null ? null : new
+                {
+                    id = readiness.Id,
+                    headSha = readiness.HeadSha,
+                    observedAt = readiness.ReadyObservedAt,
+                    evidence = "as-of",
+                },
+                responsibility = "reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+                mergeGrant = false,
+            },
+            "stale" => new
+            {
+                taskId = owner.Id,
+                repository = owner.Repository,
+                issue = owner.Issue,
+                pullRequest = item.PullRequest,
+                holder = owner.ConductorHolder,
+                currentHolder = currentClaim?.Holder,
+                ownership,
+                readiness = readiness is null ? null : new
+                {
+                    id = readiness.Id,
+                    headSha = readiness.HeadSha,
+                    observedAt = readiness.ReadyObservedAt,
+                    evidence = "as-of",
+                },
+                responsibility = "reassess-current-readiness",
+                mergeGrant = false,
+            },
+            "blocked" => new
+            {
+                taskId = owner.Id,
+                repository = owner.Repository,
+                issue = owner.Issue,
+                pullRequest = item.PullRequest,
+                holder = owner.ConductorHolder,
+                currentHolder = currentClaim?.Holder,
+                ownership,
+                readiness = readiness is null ? null : new
+                {
+                    id = readiness.Id,
+                    headSha = readiness.HeadSha,
+                    observedAt = readiness.ReadyObservedAt,
+                    evidence = "as-of",
+                },
+                responsibility = "judge-retained-blocker",
+                mergeGrant = false,
+            },
+            _ => null,
         };
         var currentStoppedWork = state == "blocked"
             && owner.Blocked?.ObligationKey is { } currentKey
@@ -551,6 +613,7 @@ public static class TaskCommand
             reason,
             retirement = item.Retirement,
             nextTrigger,
+            conductorHandoff,
             stage = item.Stage is { } stage ? WorkStages.Token(stage) : null,
             attemptId = item.AttemptId?.Value,
             pullRequest = item.PullRequest,
@@ -603,6 +666,8 @@ public static class TaskCommand
                 output.WriteLine($"  retirement: {recordedRetirement.Kind} at {recordedRetirement.At:O}; reason: {reason}");
             output.WriteLine($"  stage: {status.stage ?? "preparation"}; PR: {(item.PullRequest is null ? "none" : $"#{item.PullRequest}")}");
             output.WriteLine($"  next: {nextTrigger}; PR head: {status.headSha ?? "not observed"}");
+            if (conductorHandoff is { } handoff)
+                output.WriteLine($"  conductor handoff: {handoff.holder} ({handoff.ownership}); {handoff.responsibility}; readiness is as-of evidence, not a merge grant");
             if (item.ChecksObservedAt is not null || item.Error is not null)
                 output.WriteLine($"  latest checks{(item.Retirement is null ? "" : " (historical)")}: {item.Checks ?? "unknown"}"
                     + (item.ChecksObservedAt is { } checksAt ? $" at {checksAt:O}" : "")

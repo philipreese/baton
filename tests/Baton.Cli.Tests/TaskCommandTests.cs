@@ -1097,7 +1097,7 @@ public sealed class TaskCommandTests
     [InlineData(QueueItemState.Cancelled, "cancelled", false, false, "cancelled", "none")]
     [InlineData(QueueItemState.Queued, null, false, false, "queued", "daemon-tick")]
     [InlineData(QueueItemState.Launched, null, false, false, "running", "daemon-tick")]
-    [InlineData(QueueItemState.Queued, null, false, true, "ready-as-of", "none")]
+    [InlineData(QueueItemState.Queued, null, false, true, "ready-as-of", "conductor-handoff")]
     public async Task Status_distinguishes_failed_launches_without_mutating_retained_evidence(
         QueueItemState queueState, string? error, bool retired, bool oldReady,
         string expectedState, string expectedTrigger)
@@ -1146,6 +1146,27 @@ public sealed class TaskCommandTests
             using var json = JsonDocument.Parse(output.ToString());
             Assert.Equal(expectedState, json.RootElement.GetProperty("state").GetString());
             Assert.Equal(expectedTrigger, json.RootElement.GetProperty("nextTrigger").GetString());
+            var handoff = json.RootElement.GetProperty("conductorHandoff");
+            Assert.Equal(expectedState is "ready-as-of" or "stale" or "blocked"
+                ? JsonValueKind.Object : JsonValueKind.Null, handoff.ValueKind);
+            if (handoff.ValueKind == JsonValueKind.Object)
+            {
+                Assert.Equal(id, handoff.GetProperty("taskId").GetString());
+                Assert.Equal(repository, handoff.GetProperty("repository").GetString());
+                Assert.Equal(49, handoff.GetProperty("issue").GetInt32());
+                Assert.Equal("recorded-owner", handoff.GetProperty("holder").GetString());
+                Assert.False(handoff.GetProperty("mergeGrant").GetBoolean());
+                Assert.Equal(expectedState switch
+                {
+                    "ready-as-of" => "reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+                    "stale" => "reassess-current-readiness",
+                    _ => "judge-retained-blocker",
+                }, handoff.GetProperty("responsibility").GetString());
+                var readiness = handoff.GetProperty("readiness");
+                Assert.Equal(oldReady ? JsonValueKind.Object : JsonValueKind.Null, readiness.ValueKind);
+                if (readiness.ValueKind == JsonValueKind.Object)
+                    Assert.Equal("as-of", readiness.GetProperty("evidence").GetString());
+            }
             Assert.Equal("unknown", json.RootElement.GetProperty("daemon").GetProperty("availability").GetString());
             Assert.Equal("recorded-owner", json.RootElement.GetProperty("conductorHolder").GetString());
             Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("blocked").ValueKind);
@@ -1158,6 +1179,11 @@ public sealed class TaskCommandTests
                 processStartTimeAccessor: DeniedProcessStart, utcNow: () => now);
             Assert.Contains(expectedState, text.ToString(), StringComparison.Ordinal);
             Assert.Contains($"next: {expectedTrigger}", text.ToString(), StringComparison.Ordinal);
+            if (expectedState is "ready-as-of" or "stale" or "blocked")
+            {
+                Assert.Contains("conductor handoff: recorded-owner", text.ToString(), StringComparison.Ordinal);
+                Assert.Contains("not a merge grant", text.ToString(), StringComparison.Ordinal);
+            }
             if (retired)
                 Assert.Equal("retained", json.RootElement.GetProperty("reason").GetString());
             else
@@ -1264,7 +1290,7 @@ public sealed class TaskCommandTests
             (Name: "ready", State: QueueItemState.Queued, Stage: WorkStage.Ready,
                 Halted: false, Retirement: (QueueRetirement?)null, Ready: ReadyReceipt(repository, 51),
                 HasBlocked: true, BlockedKey: (string?)historyKey, RetainedKey: (string?)historyKey,
-                ExpectedState: "ready-as-of", ExpectedTrigger: "none", ExpectedCurrent: false,
+                ExpectedState: "ready-as-of", ExpectedTrigger: "conductor-handoff", ExpectedCurrent: false,
                 HasHistory: true),
             (Name: "retired-operator", State: QueueItemState.Failed, Stage: WorkStage.Continue,
                 Halted: true, Retirement: new QueueRetirement(QueueRetirement.Operator, observedAt, "handled"),
