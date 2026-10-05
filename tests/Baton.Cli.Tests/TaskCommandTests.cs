@@ -145,6 +145,15 @@ public sealed class TaskCommandTests
         Assert.NotEqual(first, absentTimeout);
         Assert.NotEqual(first, TaskCommand.ComputeInputDigest(
             "github.com/example/repo", 1, size, null, implement, null, null));
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            Encoding.UTF8.GetBytes("brief\n--stage review\0spec-marker"), null, null, null,
+            [implement, review], 10, 20, 5000));
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, null, null,
+            [implement with { Reason = "why\n--stage fix\0marker" }, review], 10, 20, 5000));
+        Assert.NotEqual(first, TaskCommand.ComputeInputDigest("github.com/example/repo", 1, size,
+            null, null, null, null,
+            [implement with { Model = string.Empty }, review], 10, 20, 5000));
     }
 
     [Fact]
@@ -265,6 +274,157 @@ public sealed class TaskCommandTests
             Assert.Equal("claude", QueueTierTable.ResolveForStage(
                 item, WorkStage.Fix, settings.Queue, WorkerRoleCatalog.QueueTierFor,
                 WorkerRoleCatalog.QueueTierForRole).Adapter);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task New_domain_replay_and_all_stage_cap_conflicts_preserve_preparation_snapshot()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton-task-new-domain-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var project = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2620");
+            var spec = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(project);
+            await File.WriteAllTextAsync(spec, "frozen new-domain brief\n--stage review\0marker", Ct);
+            var repository = RepositoryIdentity.From("https://github.com/example/repo", null)!;
+            await ConductorClaimStore.ClaimAsync(repository, "conductor-one", home, cancellationToken: Ct);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var provisions = 0;
+
+            Task<RepositoryIdentity?> Resolve(string path, CancellationToken token) =>
+                Task.FromResult<RepositoryIdentity?>(repository);
+            async Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree> Provision(
+                int issue, string source, string? root, string repo, bool lifecycle,
+                TextWriter writer, CancellationToken token)
+            {
+                Interlocked.Increment(ref provisions);
+                entered.SetResult();
+                await release.Task.WaitAsync(token);
+                Directory.CreateDirectory(workspace);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+                return new(workspace, "2620-lane");
+            }
+
+            var selections = new QueueStageSelection[]
+            {
+                new()
+                {
+                    Stage = WorkStage.Implement, Adapter = "claude", Model = "opus", Effort = "high",
+                    Reason = "implementation reason",
+                },
+                new()
+                {
+                    Stage = WorkStage.Review, Adapter = "codex", Model = "gpt-5.6-sol", Effort = "high",
+                    Reason = "review reason",
+                },
+                new()
+                {
+                    Stage = WorkStage.Fix, Adapter = "claude", Model = "opus", Effort = "medium",
+                    Reason = "fix reason",
+                },
+                new()
+                {
+                    Stage = WorkStage.ReReview, Adapter = "codex", Model = "gpt-5.6-sol", Effort = "medium",
+                    Reason = "re-review reason",
+                },
+            };
+            var firstOptions = new TaskOptions(TaskVerb.Submit, 2620, project,
+                new TaskSizeDeclaration(DeclaredTaskSize.Small, "one new-domain routing cluster"), spec,
+                ScopeClass: "engine", StageSelections: selections,
+                TimeoutMinutes: 15, MaxToolSteps: 20, TokenBudget: 5000);
+
+            var first = TaskCommand.ExecuteAsync(
+                firstOptions, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
+            await entered.Task.WaitAsync(Ct);
+
+            var equivalentBareImplement = firstOptions with
+            {
+                Adapter = "claude",
+                Model = "opus",
+                Effort = "high",
+                Reason = "implementation reason",
+                StageSelections = selections.Where(selection => selection.Stage != WorkStage.Implement).ToArray(),
+            };
+            Assert.Equal(0, await TaskCommand.ExecuteAsync(
+                equivalentBareImplement, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+            Assert.Equal(1, provisions);
+
+            async Task AssertRefusedWithoutAnotherProvision(TaskOptions candidate)
+            {
+                await Assert.ThrowsAsync<CliArgumentException>(() => TaskCommand.ExecuteAsync(
+                    candidate, TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions));
+                Assert.Equal(1, provisions);
+            }
+
+            var implement = selections[0];
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Adapter = "codex" }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Adapter = null }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Model = "gpt-5.6-sol" }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Model = null }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Effort = "low" }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Effort = null }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Reason = "changed reason" }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Reason = null }, selections[1], selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement, selections[2], selections[3]],
+            });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = 16 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TimeoutMinutes = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = 21 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { MaxToolSteps = null });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = 5001 });
+            await AssertRefusedWithoutAnotherProvision(firstOptions with { TokenBudget = null });
+
+            release.SetResult();
+            Assert.Equal(0, await first);
+            var prepared = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(TaskPreparationState.Prepared, prepared.IssuePreparation!.State);
+            Assert.Equal("frozen new-domain brief\n--stage review\0marker", prepared.Instructions);
+            Assert.Equal(15, prepared.TimeoutMinutes);
+            Assert.Equal(20, prepared.MaxToolSteps);
+            Assert.Equal(5000, prepared.TokenBudget);
+            Assert.Equal(selections.Select(selection => selection.Stage),
+                prepared.StageSelections!.Select(selection => selection.Stage));
+
+            await AssertRefusedWithoutAnotherProvision(firstOptions with
+            {
+                StageSelections = [implement with { Reason = "changed after preparation" }, selections[1], selections[2], selections[3]],
+            });
+            Assert.Equal("frozen new-domain brief\n--stage review\0marker", prepared.Instructions);
         }
         finally
         {

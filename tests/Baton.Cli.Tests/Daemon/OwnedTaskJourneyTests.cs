@@ -37,13 +37,14 @@ public sealed class OwnedTaskJourneyTests
         string FixModel,
         string FixEffort,
         string? SubmissionEffort,
-        string? SubmissionReason);
+        string? SubmissionReason,
+        bool ExplicitRouting = false);
 
     public static IEnumerable<object[]> OwnedTaskScopeCases() =>
     [
         [new ScopeCase("ENGINE", "engine", "engine", "review-engine",
-            "claude", "opus", "low", "claude", "opus", "high", "claude", "opus", "high",
-            "low", "explicit implement effort")],
+            "claude", "opus", "low", "codex", "gpt-5.6-sol", "high", "claude", "opus", "medium",
+            null, null, true)],
         [new ScopeCase("Tooling", "tooling", "tooling", "review-tooling",
             "codex", "gpt-6.1-sol", "medium", "codex", "gpt-5.6-sol", "high", "codex", "gpt-6.1-sol", "medium",
             null, null)],
@@ -127,9 +128,43 @@ public sealed class OwnedTaskJourneyTests
                 return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "44-lane"));
             }
 
+            var explicitSelections = testCase.ExplicitRouting
+                ? new[]
+                {
+                    new QueueStageSelection
+                    {
+                        Stage = WorkStage.Implement, Adapter = testCase.ImplementAdapter,
+                        Model = testCase.ImplementModel, Effort = testCase.ImplementEffort,
+                        Reason = "implementation route",
+                    },
+                    new QueueStageSelection
+                    {
+                        Stage = WorkStage.Review, Adapter = testCase.ReviewAdapter,
+                        Model = testCase.ReviewModel, Effort = testCase.ReviewEffort,
+                        Reason = "review route",
+                    },
+                    new QueueStageSelection
+                    {
+                        Stage = WorkStage.Fix, Adapter = testCase.FixAdapter,
+                        Model = testCase.FixModel, Effort = testCase.FixEffort,
+                        Reason = "fix route",
+                    },
+                    new QueueStageSelection
+                    {
+                        Stage = WorkStage.ReReview, Adapter = testCase.ReviewAdapter,
+                        Model = testCase.ReviewModel, Effort = testCase.ReviewEffort,
+                        Reason = "re-review route",
+                    },
+                }
+                : null;
             await TaskCommand.ExecuteAsync(new TaskOptions(TaskVerb.Submit, 44, project,
                 new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple lifecycle seams"), brief,
-                ScopeClass: testCase.RawScope, Effort: testCase.SubmissionEffort, Reason: testCase.SubmissionReason),
+                ScopeClass: testCase.RawScope, Effort: testCase.ExplicitRouting ? null : testCase.SubmissionEffort,
+                Reason: testCase.ExplicitRouting ? null : testCase.SubmissionReason,
+                StageSelections: explicitSelections,
+                TimeoutMinutes: testCase.ExplicitRouting ? 17 : null,
+                MaxToolSteps: testCase.ExplicitRouting ? 23 : null,
+                TokenBudget: testCase.ExplicitRouting ? 7000 : null),
                 TextWriter.Null, Resolve, Provision, Ct, IssuePreparationRunner.NoCollisions);
             var accepted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(TaskPreparationState.Prepared, accepted.IssuePreparation!.State);
@@ -197,13 +232,31 @@ public sealed class OwnedTaskJourneyTests
                         verdict is null ? [] : [verdict], null), Ct);
             }
 
+            void AssertDispatchBinding(QueueLaunchRequest launch)
+            {
+                var options = QueueLauncher.BuildOptions(launch);
+                var parsed = DispatchOptionsParser.Parse(
+                    QueueLauncher.BuildArguments(options).Skip(1).ToList());
+                Assert.Equal(launch.Tier.Adapter, parsed.Adapter);
+                Assert.Equal(launch.Tier.Model, parsed.Model);
+                Assert.Equal(launch.Tier.Effort, parsed.Effort);
+                Assert.Equal(TimeSpan.FromMinutes(17), parsed.Timeout);
+                Assert.Equal(23, parsed.MaxToolSteps);
+                Assert.Equal(7000, parsed.TokenBudget);
+            }
+
             await TickUntilLaunchCount(1);
             Assert.Equal(WorkStage.Implement, launches[0].Item.Stage);
             Assert.Equal(testCase.ImplementTierKey, launches[0].Tier.TierKey);
             Assert.Equal(testCase.ImplementAdapter, launches[0].Tier.Adapter);
             Assert.Equal(testCase.ImplementModel, launches[0].Tier.Model);
             Assert.Equal(testCase.ImplementEffort, launches[0].Tier.Effort);
-            Assert.Equal(testCase.SubmissionEffort is not null, launches[0].Tier.IsOverride);
+            Assert.Equal(testCase.ExplicitRouting || testCase.SubmissionEffort is not null,
+                launches[0].Tier.IsOverride);
+            if (testCase.ExplicitRouting)
+            {
+                AssertDispatchBinding(launches[0]);
+            }
             forge.HasPullRequest = true; // worker-created PR, no draft-create opt-in
             await Settle(launches[0]);
             await TickUntilLaunchCount(2);
@@ -212,7 +265,11 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(testCase.ReviewAdapter, launches[1].Tier.Adapter);
             Assert.Equal(testCase.ReviewModel, launches[1].Tier.Model);
             Assert.Equal(testCase.ReviewEffort, launches[1].Tier.Effort);
-            Assert.False(launches[1].Tier.IsOverride);
+            Assert.Equal(testCase.ExplicitRouting, launches[1].Tier.IsOverride);
+            if (testCase.ExplicitRouting)
+            {
+                AssertDispatchBinding(launches[1]);
+            }
             await Settle(launches[1], "block");
             await TickUntilLaunchCount(3);
             Assert.Equal(WorkStage.Fix, launches[2].Item.Stage);
@@ -220,7 +277,8 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(testCase.FixAdapter, launches[2].Tier.Adapter);
             Assert.Equal(testCase.FixModel, launches[2].Tier.Model);
             Assert.Equal(testCase.FixEffort, launches[2].Tier.Effort);
-            Assert.False(launches[2].Tier.IsOverride);
+            Assert.Equal(testCase.ExplicitRouting, launches[2].Tier.IsOverride);
+            if (testCase.ExplicitRouting) AssertDispatchBinding(launches[2]);
             head = HeadB;
             forge.Head = HeadB;
             await Settle(launches[2]);
@@ -230,7 +288,8 @@ public sealed class OwnedTaskJourneyTests
             Assert.Equal(testCase.ReviewAdapter, launches[3].Tier.Adapter);
             Assert.Equal(testCase.ReviewModel, launches[3].Tier.Model);
             Assert.Equal(testCase.ReviewEffort, launches[3].Tier.Effort);
-            Assert.False(launches[3].Tier.IsOverride);
+            Assert.Equal(testCase.ExplicitRouting, launches[3].Tier.IsOverride);
+            if (testCase.ExplicitRouting) AssertDispatchBinding(launches[3]);
             await Settle(launches[3], "approve");
             for (var i = 0; i < 5; i++) await Scheduler().TickOnceAsync(Ct);
 
