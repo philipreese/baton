@@ -10,6 +10,26 @@ namespace Baton.Cli.Tests;
 /// </summary>
 public class StatusCommandUsageSummaryTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Observed_stream_contributions_are_qualified_in_selected_and_mixed_text(bool mixed)
+    {
+        var usages = new Dictionary<string, ExecutionUsageView>
+        {
+            ["stream"] = new(TokensIn: 30, TokensOut: 5, UsageCompleteness: "unavailable",
+                ObservedBilledTokenFloor: new(35)),
+        };
+        if (mixed) usages["legacy"] = new(TokensIn: 100, TokensOut: 50);
+        var text = StatusCommand.FormatUsageSummary(usages);
+        Assert.Contains(mixed ? "130 tokens in" : "30 tokens in", text);
+        Assert.Contains(mixed ? "55 tokens out" : "5 tokens out", text);
+        Assert.Contains("1 observed incomplete contribution(s)", text);
+        Assert.Contains("execution totals unavailable", text);
+        Assert.Contains("35 observed billed token floor", text);
+        Assert.DoesNotContain("35 billed tokens", text);
+    }
+
     [Fact]
     public void Line_unchanged_from_before_1581_when_only_the_original_three_fields_are_reported()
     {

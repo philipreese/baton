@@ -390,7 +390,7 @@ public sealed class TokenBudgetMonitor
     /// <see cref="WorkerUsage.BilledTokens"/> is the quantity actually compared to the
     /// budget, and <see cref="WorkerUsage.BilledIsFloor"/> (#1706) says whether that quantity is a
     /// measurement of this execution's billed tokens or only a lower bound on them — true for every
-    /// claude stream, false for every agy one, per the two parsers' own measured shapes.
+    /// claude stream and opted-in AGY host stream; raw one-shot AGY readings remain measurements.
     /// </summary>
     public WorkerUsage SnapshotUsage()
     {

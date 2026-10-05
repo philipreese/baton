@@ -28,6 +28,7 @@ public static class AgyHostDecoder
         if (!line.Contains("\"Version\"", StringComparison.Ordinal)) return line;
         var envelope = ReadEnvelope(line);
         if (envelope is null || envelope.Native is not { ValueKind: JsonValueKind.Object } native) return "{}";
+        if (!AgyHostUsage.TryRead(native, out _, out _)) return "{}";
         if (envelope.Kind == "native")
             return native.TryGetProperty("event", out var eventName) && eventName.GetString() == "result" ? "{}" : native.GetRawText();
         return IsValidCompletion(envelope)
@@ -85,6 +86,7 @@ public static class AgyHostDecoder
     {
         var monitor = new TokenBudgetMonitor(null, null, null, new AgyUsageParser());
         var samples = new List<WorkerUsage>();
+        var usageValidator = new AgyHostUsage();
         var seen = new Dictionary<string, string>(StringComparer.Ordinal);
         string? execution = null, incarnation = null;
         string? conversationId = null;
@@ -138,6 +140,7 @@ public static class AgyHostDecoder
                         if (dimension.Value.ValueKind != JsonValueKind.Number || !dimension.Value.TryGetInt64(out var count) || count < 0) valid = false;
                 }
             }
+            if (!usageValidator.Admit(native)) { valid = false; continue; }
             monitor.OnStdoutLine(line);
             if (new AgyUsageParser().TryParseIncrementalUsage(line, out var sample) && sample is not null) samples.Add(sample);
             if (monitor.SnapshotUsage().BilledTokens is < 0) valid = false;

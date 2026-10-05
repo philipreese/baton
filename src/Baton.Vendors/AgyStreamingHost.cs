@@ -20,6 +20,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
     private readonly CancellationTokenSource _lifetime = new();
     private readonly AgyCorrectionStore _store = new(context.Room);
     private readonly Dictionary<string, string> _steps = new(StringComparer.Ordinal);
+    private readonly AgyHostUsage _usage = new();
     private readonly string _incarnation = Guid.NewGuid().ToString("N");
     private Process? _child;
     private StreamWriter? _input;
@@ -148,6 +149,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
                     }
                 }
             }
+            if (!_usage.Admit(native)) { _valid = false; return; }
             if (kind == "result")
             {
                 ReconcileClaim();

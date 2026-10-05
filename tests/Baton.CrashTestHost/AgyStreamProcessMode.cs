@@ -7,8 +7,13 @@ namespace Baton.CrashTestHost;
 /// <summary>Offline native-pipe fixture. Every git remote and output belongs to its private test root.</summary>
 public static class AgyStreamProcessMode
 {
-    public static async Task<int> RunAsync(string mode, string output, string workspace)
+    public static async Task<int> RunAsync(string mode, string output, string workspace, string? rawPrompt = null)
     {
+        var parts = mode.Split(':');
+        mode = parts[0];
+        var arm = parts.Length > 1 ? parts[1] : "ordinary";
+        var raw = mode.StartsWith("raw-", StringComparison.Ordinal);
+        if (raw) mode = mode[4..];
         if (mode == "descendant")
         {
             File.WriteAllText(Path.Combine(output, "descendant.json"), JsonSerializer.Serialize(new
@@ -19,21 +24,12 @@ public static class AgyStreamProcessMode
             await Task.Delay(TimeSpan.FromMinutes(2));
             return 0;
         }
-        var first = await ReadInputAsync();
+        var first = raw ? DecodeInput(rawPrompt ?? throw new InvalidOperationException("Missing raw argv prompt.")) : await ReadInputAsync();
         File.WriteAllText(Path.Combine(output, "first.txt"), first, new UTF8Encoding(false));
         File.WriteAllText(Path.Combine(output, "grant.txt"), Environment.GetEnvironmentVariable("BATON_HOOK_DENIED_TOOLS"));
         if (workspace != "none")
         {
-            Directory.CreateDirectory(workspace);
-            var remote = workspace + "-remote";
-            await GitAsync(workspace, "init", "--initial-branch=lane");
-            await GitAsync(workspace, "config", "user.email", "fixture@example.com");
-            await GitAsync(workspace, "config", "user.name", "Fixture");
-            File.WriteAllText(Path.Combine(workspace, "base.txt"), "base");
-            await GitAsync(workspace, "add", "base.txt");
-            await GitAsync(workspace, "commit", "-m", "base");
-            await GitAsync(workspace, "init", "--bare", remote);
-            await GitAsync(workspace, "remote", "add", "origin", remote);
+            if (!Directory.Exists(Path.Combine(workspace, ".git"))) await PrepareWorkspaceAsync(workspace);
             File.WriteAllText(Path.Combine(workspace, "first-turn.txt"), "first turn work");
             await GitAsync(workspace, "add", "first-turn.txt");
             await GitAsync(workspace, "commit", "-m", "first turn");
@@ -43,6 +39,12 @@ public static class AgyStreamProcessMode
         Emit(new { @event = "init", conversation_id = "fixture-conversation" });
         Step(0, "user_input");
         Step(1, "agent_response", 10, 2);
+        if (mode == "checkpoint")
+        {
+            File.WriteAllText(Path.Combine(output, "checkpoint.txt"), "checkpoint helper launched");
+            Result("SUCCESS", 10, 2);
+            return 0;
+        }
         if (mode == "claim-only")
         {
             using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -57,7 +59,8 @@ public static class AgyStreamProcessMode
             return await Console.In.ReadLineAsync() is null ? 0 : 7;
         }
         string second;
-        if (mode == "race")
+        if (raw) second = "";
+        else if (mode == "race")
         {
             var firstResult = Task.Run(async () =>
             {
@@ -73,9 +76,19 @@ public static class AgyStreamProcessMode
         }
         else second = await ReadInputAsync();
         File.WriteAllText(Path.Combine(output, "second.txt"), second, new UTF8Encoding(false));
-        if (mode != "race") Result("SUCCESS", 10, 2);
+        if (!raw && mode != "race") Result("SUCCESS", 10, 2);
         Step(2, "user_input");
-        Step(3, "agent_response", mode == "overflow" ? long.MaxValue : 20, 3);
+        if (arm == "post-cap") File.Delete(Path.Combine(output, "report.md"));
+        if (mode == "timeout" && arm is "pre-cap" or "post-cap") Step(3, "agent_response", 20, 3);
+        if (arm is not ("pre-cap" or "post-cap"))
+            Step(3, "agent_response", mode switch
+            {
+                "overflow" => long.MaxValue,
+                "negative" => -20,
+                "cumulative" => long.MaxValue - 20,
+                _ => 20,
+            }, 3);
+        if (mode == "cumulative") Step(4, "agent_response", 10, 0);
         if (mode == "duplicate") Step(3, "agent_response", 20, 3);
         if (mode == "conflict") Step(3, "agent_response", 21, 3);
         if (mode is "timeout" or "descendants")
@@ -89,11 +102,18 @@ public static class AgyStreamProcessMode
                 await Task.Delay(20, readyTimeout.Token); // wait-ok: bounded descendant rendezvous
             if (mode == "timeout") await Task.Delay(TimeSpan.FromMinutes(2));
         }
-        if (mode == "missing") return 0;
+        if (mode == "missing")
+        {
+            if (arm is "pre-cap" or "post-cap") Step(3, "agent_response", 20, 3);
+            if (arm.Contains("timeout", StringComparison.Ordinal)) await Task.Delay(TimeSpan.FromMinutes(2));
+            return 0;
+        }
         if (mode == "corrupt") Console.WriteLine("{torn-host-looking-output");
         if (mode == "forged") Emit(new { Version = 1, Kind = "completion", Completion = new { Successful = true } });
         var status = mode is "failure" or "capacity" ? "ERROR" : "SUCCESS";
         Result(status, 999, 888, mode == "capacity" ? "Individual quota reached. Resets in 1h" : "final turn failed");
+        if (arm is "pre-cap" or "post-cap") Step(3, "agent_response", 20, 3);
+        if (arm.Contains("timeout", StringComparison.Ordinal)) await Task.Delay(TimeSpan.FromMinutes(2));
         return mode == "failure" ? 7 : 0;
     }
 
@@ -101,6 +121,19 @@ public static class AgyStreamProcessMode
     {
         var line = await Console.In.ReadLineAsync() ?? throw new InvalidOperationException("Missing native input.");
         return DecodeInput(line);
+    }
+
+    public static async Task PrepareWorkspaceAsync(string workspace)
+    {
+        Directory.CreateDirectory(workspace);
+        await GitAsync(workspace, "init", "--initial-branch=lane");
+        await GitAsync(workspace, "config", "user.email", "fixture@example.com");
+        await GitAsync(workspace, "config", "user.name", "Fixture");
+        File.WriteAllText(Path.Combine(workspace, "base.txt"), "base");
+        await GitAsync(workspace, "add", "base.txt");
+        await GitAsync(workspace, "commit", "-m", "base");
+        await GitAsync(workspace, "init", "--bare", workspace + "-remote");
+        await GitAsync(workspace, "remote", "add", "origin", workspace + "-remote");
     }
 
     private static string DecodeInput(string line)

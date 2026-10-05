@@ -19,6 +19,224 @@ namespace Baton.Cli.Tests;
 public sealed class AgyExactRunningTests
 {
     [Fact]
+    public Task Capacity_wait_is_observed_and_bounded_at_live_and_restart_seams() =>
+        Actual_live_and_restart_success_arms_require_the_final_turn("terminal-timeout", "capacity");
+
+    [Theory]
+    [InlineData("ordinary", "missing")]
+    [InlineData("late-failure", "capacity")]
+    [InlineData("terminal-timeout", "missing")]
+    [InlineData("finished-timeout", "missing")]
+    [InlineData("pre-cap", "failure")]
+    public Task Success_gate_wiring_controls(string arm, string mode) =>
+        Actual_live_and_restart_success_arms_require_the_final_turn(arm, mode);
+
+    [Fact]
+    public Task Selected_post_cap_checkpoint_exclusion_is_reachable() =>
+        Actual_live_and_restart_success_arms_require_the_final_turn("post-cap", "success");
+
+    [Theory]
+    [InlineData("ordinary", "success")]
+    [InlineData("late-failure", "capacity")]
+    [InlineData("terminal-timeout", "success")]
+    [InlineData("finished-timeout", "success")]
+    public async Task Actual_one_shot_success_arms_have_positive_launch_controls(string arm, string mode)
+    {
+        await using var fixture = await Fixture.CreateAsync(mode, git: true, live: true, arm: arm, selected: false);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        await fixture.WaitSettlementAsync();
+        var events = await new FlowEventLogReader(fixture.Log).ReadAllAsync(TestContext.Current.CancellationToken);
+        Assert.True(events.OfType<FlowEvent.ExecutionSucceeded>().Any() || events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>().Any(),
+            $"Core result: {result.Reason}/{result.ExitCode}, stderr: {result.StderrTail}; journal: {fixture.ReadJournal()}");
+        if (arm == "late-failure") Assert.Single(events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>());
+        if (arm.Contains("timeout", StringComparison.Ordinal)) Assert.Equal(CoreExitReason.TimedOut, result.Reason);
+        Assert.Equal(arm == "terminal-timeout", result.Reason == CoreExitReason.TimedOut && result.TerminalSuccessObserved);
+        Assert.Equal(fixture.Prompt, File.ReadAllText(Path.Combine(fixture.Output, "first.txt")));
+        // Raw quota evidence is stdout-only and Core's immutable exit does not persist it.
+        // Live late-failure salvage is reachable; Core-only restart cannot reconstruct that hint.
+        Assert.Equal(arm != "late-failure", await fixture.ReconstructAsync());
+        if (arm == "late-failure")
+        {
+            var restarted = await new FlowEventLogReader(Path.Combine(fixture.Room, "restart", BatonPaths.FlowLogFileName))
+                .ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Single(restarted.OfType<FlowEvent.ExecutionFailed>());
+            Assert.Empty(restarted.OfType<FlowEvent.ExecutionSucceededWithLateFailure>());
+        }
+    }
+
+    public static TheoryData<string, string> RawAuthorityCases
+    {
+        get
+        {
+            var data = new TheoryData<string, string>();
+            foreach (var authority in new[] { "accept", "start", "exit" })
+                foreach (var variant in new[] { "conflict", "reordered", "identical", "valid-reordered" }) data.Add(authority, variant);
+            return data;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RawAuthorityCases))]
+    public async Task Raw_completion_authority_is_unambiguous_at_live_and_restart_settlement(string authority, string variant)
+    {
+        await using var fixture = await Fixture.CreateAsync("success", live: true, beforeSettlement: f =>
+        {
+            var lines = f.ReadJournal().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var kind = authority switch { "accept" => "executionRequestAccepted", "start" => "executionStarted", _ => "executionExited" };
+            var index = Array.FindIndex(lines, line => line.Contains("\"eventType\":\"" + kind + "\"", StringComparison.Ordinal));
+            Assert.True(index >= 0);
+            var property = authority switch { "accept" => "ExactRunningTransport", "start" => "Pid", _ => "Successful" };
+            var pattern = "\"" + property + "\":(?<value>\"[^\"]*\"|true|[0-9]+)";
+            lines[index] = System.Text.RegularExpressions.Regex.Replace(lines[index], pattern, match =>
+            {
+                var value = match.Groups["value"].Value;
+                if (variant == "valid-reordered") return match.Value;
+                var other = variant == "identical" ? value : authority switch { "accept" => "null", "start" => "0", _ => "false" };
+                return variant == "reordered"
+                    ? $"\"{property}\":{value},\"{property}\":{other}"
+                    : $"\"{property}\":{other},\"{property}\":{value}";
+            });
+            if (variant == "valid-reordered")
+            {
+                using var document = JsonDocument.Parse(lines[index]);
+                // Keep polymorphic metadata first; reverse the other root properties.
+                lines[index] = "{" + string.Join(",", document.RootElement.EnumerateObject()
+                    .OrderBy(p => p.Name == "owner" ? 0 : 1).ThenByDescending(p => p.Name)
+                    .Select(p => JsonSerializer.Serialize(p.Name) + ":" + p.Value.GetRawText())) + "}";
+            }
+            using var stream = new FileStream(f.Log, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+            using var writer = new StreamWriter(stream);
+            writer.Write(string.Join("\n", lines) + "\n");
+            writer.Flush();
+            f.AlignJournalWriter();
+        });
+        var identity = await fixture.WaitEndpointAsync();
+        await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "raw", "second", TestContext.Current.CancellationToken);
+        await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        Assert.True(File.Exists(Path.Combine(fixture.Output, "report.md")));
+        if (variant == "valid-reordered")
+        {
+            await fixture.WaitSettlementAsync();
+            Assert.Single((await new FlowEventLogReader(fixture.Log).ReadAllAsync(TestContext.Current.CancellationToken)).OfType<FlowEvent.ExecutionSucceeded>());
+            Assert.True(await fixture.ReconstructAsync());
+        }
+        else
+        {
+            var live = await Record.ExceptionAsync(async () => { await fixture.WaitSettlementAsync(); });
+            var restart = await Record.ExceptionAsync(async () => { await fixture.ReconstructAsync(); });
+            Assert.Multiple(
+                () => Assert.IsType<FlowEventLogReadException>(live),
+                () => Assert.IsType<FlowEventLogReadException>(restart));
+        }
+    }
+
+    [Theory]
+    [InlineData("success", false)]
+    [InlineData("success", true)]
+    [InlineData("negative", false)]
+    [InlineData("negative", true)]
+    [InlineData("overflow", false)]
+    [InlineData("overflow", true)]
+    [InlineData("cumulative", false)]
+    [InlineData("cumulative", true)]
+    public async Task Live_positive_token_and_rate_caps_never_subtract_or_wrap_usage(string mode, bool rate)
+    {
+        var cap = mode == "cumulative" ? long.MaxValue : 20L;
+        await using var fixture = await Fixture.CreateAsync(mode, live: true, budget: rate ? null : cap, rate: rate ? cap : null);
+        var identity = await fixture.WaitEndpointAsync();
+        await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "limit", "second", TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        await fixture.WaitSettlementAsync();
+        var events = await new FlowEventLogReader(fixture.Log).ReadAllAsync(TestContext.Current.CancellationToken);
+        if (mode == "success")
+        {
+            var arrest = Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Equal(rate ? ArrestReason.BilledRate : ArrestReason.TokenBudget, arrest.Reason);
+            Assert.Equal(35, arrest.Usage?.BilledTokens);
+            // A fully recorded successful final may finish the read-shaped contract during
+            // cap teardown. Preserve that salvage while retaining the truthful arrest account.
+            Assert.Equal(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport) == true,
+                events.OfType<FlowEvent.ExecutionSucceeded>().Any());
+        }
+        else
+        {
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+            Assert.False(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
+            var failure = Assert.Single(events.OfType<FlowEvent.ExecutionFailed>());
+            Assert.Equal(mode == "cumulative" ? long.MaxValue - 5 : 12, failure.PeakBilledInWindow);
+        }
+        Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+        Assert.Empty(events.OfType<FlowEvent.GraceTurnClaimed>());
+    }
+
+    public static TheoryData<string, string> SuccessArmCases
+    {
+        get
+        {
+            var data = new TheoryData<string, string>();
+            foreach (var arm in new[] { "ordinary", "late-failure", "terminal-timeout", "finished-timeout", "pre-cap", "post-cap" })
+                foreach (var mode in new[] { "failure", "capacity", "missing", "timeout", "success" }) data.Add(arm, mode);
+            return data;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(SuccessArmCases))]
+    public async Task Actual_live_and_restart_success_arms_require_the_final_turn(string arm, string mode)
+    {
+        var capArm = arm is "pre-cap" or "post-cap";
+        await using var fixture = await Fixture.CreateAsync(mode, git: !capArm, live: true, budget: capArm ? 20 : null, arm: arm);
+        var identity = await fixture.WaitEndpointAsync();
+        await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "matrix", "second", TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        var state = await fixture.WaitSettlementAsync();
+        var events = await new FlowEventLogReader(fixture.Log).ReadAllAsync(TestContext.Current.CancellationToken);
+        var succeeds = mode == "success" && arm != "post-cap";
+        // Before Flow's arrest append, restart has only Core's immutable exit. A natural
+        // valid final can settle ordinarily; a cancellation never invents a cap success.
+        var reconstructed = await fixture.ReconstructAsync();
+        Assert.Multiple(
+            () => Assert.Equal(succeeds, events.OfType<FlowEvent.ExecutionSucceeded>().Any()
+                || events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>().Any()),
+            () => Assert.Equal(succeeds ? StepStatus.Succeeded : StepStatus.Failed, Assert.Single(state.Steps).Status),
+            () => Assert.Equal(succeeds && result.Reason != CoreExitReason.CancelRequested, reconstructed));
+        if (mode == "capacity" && !capArm)
+        {
+            // Observe the actual quota wait before stopping this fixture's pump.
+            Assert.NotNull(fixture.LiveQuotaRetryNotBefore);
+            Assert.Equal(WorkflowStatus.Running, state.Status);
+            Assert.True(Assert.Single(state.Steps).RetryNotBefore > DateTimeOffset.UtcNow);
+            var failure = Assert.Single(events.OfType<FlowEvent.ExecutionFailed>());
+            Assert.Equal(FailureClassification.ExhaustedUntil, failure.FailureClassification);
+            Assert.True(failure.RetryNotBefore > DateTimeOffset.UtcNow);
+            Assert.Single(events.OfType<FlowEvent.StepRetryScheduled>());
+        }
+        Assert.Empty(events.OfType<FlowEvent.GraceTurnClaimed>());
+        Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+        Assert.Single((await new FlowEventLogReader(fixture.Log).ReadSnapshotAsync(TestContext.Current.CancellationToken))
+            .CoreEvents.OfType<CoreEvent.ExecutionStarted>());
+        Assert.False(File.Exists(Path.Combine(fixture.Output, "checkpoint.txt")));
+        Assert.Equal("agy:write_to_file", File.ReadAllText(Path.Combine(fixture.Output, "grant.txt")));
+        Assert.Equal(fixture.Prompt, File.ReadAllText(Path.Combine(fixture.Output, "first.txt")));
+        Assert.Equal("second", File.ReadAllText(Path.Combine(fixture.Output, "second.txt")));
+        if (!capArm) Assert.True(WorktreeProvisioner.Audit(fixture.Workspace).IsClean);
+        if (arm.Contains("timeout", StringComparison.Ordinal)) Assert.Equal(CoreExitReason.TimedOut, result.Reason);
+        if (arm == "terminal-timeout") Assert.Equal(mode == "success", result.TerminalSuccessObserved);
+        if (arm == "finished-timeout") Assert.False(result.TerminalSuccessObserved);
+        if (arm == "post-cap") Assert.False(File.Exists(Path.Combine(fixture.Output, "report.md")));
+        if (capArm) Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+        if (mode == "capacity" && !capArm)
+        {
+            // Core's immutable exit does not persist StdoutTail, so that checkpoint fails
+            // closed without reconstructing the stdout-only quota reset. Once Flow records
+            // ExhaustedUntil and its retry, restart must preserve and observe the real wait.
+            Assert.Null(fixture.RestartQuotaRetryNotBefore);
+            Assert.False(await fixture.ReconstructAsync(quotaWait: true));
+            Assert.NotNull(fixture.RestartQuotaRetryNotBefore);
+        }
+    }
+
+    [Fact]
     public async Task Durable_claim_without_send_requires_the_second_turn_at_exit_and_restart()
     {
         await using var fixture = await Fixture.CreateAsync("claim-only");
@@ -177,6 +395,10 @@ public sealed class AgyExactRunningTests
         Assert.Equal(5, usage.TokensOut);
         Assert.Equal(35, usage.ObservedBilledTokenFloor?.Tokens);
         Assert.Equal("incomplete", usage.ObservedBilledTokenFloor?.Completeness);
+        var summary = StatusCommand.FormatUsageSummary(new Dictionary<string, ExecutionUsageView> { ["selected"] = usage });
+        Assert.Contains("35 observed billed token floor", summary);
+        Assert.Contains("observed incomplete contribution(s)", summary);
+        Assert.Contains("execution totals unavailable", summary);
         Assert.Equal(999, usage.ReportedFinalTurnUsage?.TokensIn);
         Assert.Equal(888, usage.ReportedFinalTurnUsage?.TokensOut);
         Assert.Null(usage.BilledTokens);
@@ -402,6 +624,16 @@ public sealed class AgyExactRunningTests
         if (receipt is not null) Assert.Equal("outcomeUnknown", receipt.State);
     }
 
+    private sealed class ObservingDispatcher(ICoreDispatcher inner, Action<CoreDispatchResult> returned) : ICoreDispatcher
+    {
+        public async Task<CoreDispatchResult> DispatchAsync(ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
+        {
+            var result = await inner.DispatchAsync(request, target, cancellationToken);
+            returned(result);
+            return result;
+        }
+    }
+
     private sealed class NoLaunchDispatcher : ICoreDispatcher
     {
         public Task<CoreDispatchResult> DispatchAsync(ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
@@ -415,46 +647,145 @@ public sealed class AgyExactRunningTests
         public string Log => Path.Combine(Room, BatonPaths.FlowLogFileName);
         public string Output => ArtifactManager.ResolveOutputDirectory(Artifacts, Request.ExecutionId);
         public string Workspace => Path.Combine(Room, "workspace");
-        public string Prompt => "resolved first prompt " + Output + "\n" + new string('p', 33000);
+        private bool _selected = true;
+        public string Prompt => "resolved first prompt " + Output + "\n" + new string('p', _selected ? 33000 : 100);
         public WorkerContract Contract { get; } = new("worker", [], [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText)], []);
         public ExecutionRequest Request { get; private set; } = null!;
         public FlowEventLogWriter Writer { get; private set; } = null!;
+        private FileStream _journalStream = null!;
         public Task<CoreDispatchResult> Dispatch { get; private set; } = null!;
+        public Task<FlowState>? Settlement { get; private set; }
+        private string? _coreExitJournal;
+        private string _caseName = "";
+        public DateTimeOffset? LiveQuotaRetryNotBefore { get; private set; }
+        public DateTimeOffset? RestartQuotaRetryNotBefore { get; private set; }
         public WorkflowDefinitionSnapshot Snapshot { get; private set; } = null!;
         public Dictionary<string, WorkerBinding> Bindings { get; private set; } = null!;
-        private readonly CancellationTokenSource _stop = new();
+        private readonly CancellationTokenSource _stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         public void Cancel() => _stop.Cancel();
 
-        public static async Task<Fixture> CreateAsync(string mode, bool git = false)
+        public static async Task<Fixture> CreateAsync(string mode, bool git = false, bool live = false,
+            long? budget = null, long? rate = null, string arm = "ordinary", Action<Fixture>? beforeSettlement = null, bool selected = true)
         {
             WorkerAdapterRegistry.InitializeStreamReaders();
             var f = new Fixture();
+            f._selected = selected;
+            f._caseName = arm + "/" + mode;
             Directory.CreateDirectory(f.Room);
+            if (git && live) await Baton.CrashTestHost.AgyStreamProcessMode.PrepareWorkspaceAsync(f.Workspace);
             var execution = new ExecutionId("fixture-execution");
             ArtifactManager.AllocateOutputDirectory(f.Artifacts, execution);
             f.Request = new(execution, new WorkflowId("fixture-workflow"), new StepId("work"), "worker", [], ["report.md"],
-                TimeSpan.FromSeconds(mode == "timeout" ? 10 : 20), ArtifactManager.BuildEnvironment([], ArtifactManager.ResolveOutputDirectory(f.Artifacts, execution), f.Artifacts),
+                TimeSpan.FromSeconds(mode == "timeout" || arm.Contains("timeout", StringComparison.Ordinal) ? 10 : 20), ArtifactManager.BuildEnvironment([], ArtifactManager.ResolveOutputDirectory(f.Artifacts, execution), f.Artifacts),
                 new Dictionary<StepId, ExecutionId>(), Adapter: "agy", Model: "gemini-3-flash", ProducedOutputs: f.Contract.ProducedOutputs,
-                ExactRunningTransport: AgyStreamingHost.Transport);
-            f.Writer = new(f.Log);
+                ExactRunningTransport: selected ? AgyStreamingHost.Transport : null);
+            f._journalStream = new(f.Log, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 1, useAsync: true);
+            f.Writer = new(f._journalStream);
             using var host = Process.GetCurrentProcess();
             await f.Writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(f.Request, host.Id, new DateTimeOffset(host.StartTime).ToUniversalTime()));
             var target = new CoreDispatchTarget("dotnet", ["exec", typeof(Baton.CrashTestHost.AgyStreamProcessMode).Assembly.Location,
-                "agy-stream-fixture", mode, f.Output, git ? f.Workspace : "none"], WorkingDirectory: git ? null : f.Room,
-                PromptText: f.Prompt.Replace(f.Output, "%BATON_OUTPUT_DIR%", StringComparison.Ordinal),
+                "agy-stream-fixture", (selected ? "" : "raw-") + mode + ":" + arm, f.Output, git ? f.Workspace : "none"], WorkingDirectory: git ? null : f.Room,
+                PromptText: selected ? f.Prompt.Replace(f.Output, "%BATON_OUTPUT_DIR%", StringComparison.Ordinal)
+                    : JsonSerializer.Serialize(new { @event = "user", message = new { content = f.Prompt } }),
                 Environment: [("BATON_HOOK_DENIED_TOOLS", "agy:write_to_file")],
-                ExactRunningTransport: AgyStreamingHost.Transport, CreateProcessTransport: context => new AgyStreamingHost(context),
-                DetectsTerminalSuccess: AgyWorkerAdapter.IsTerminalSuccessLine, DetectsTerminalResult: AgyWorkerAdapter.IsTerminalResultLine);
+                ExactRunningTransport: selected ? AgyStreamingHost.Transport : null,
+                CreateProcessTransport: selected ? context => new AgyStreamingHost(context) : null,
+                TryGetSessionId: selected ? line => new AgyWorkerAdapter().TryParseSessionId(line, out var session) ? session : null : null,
+                ResumeArgs: selected && (arm is "pre-cap" or "post-cap") ? (_, _) =>
+                    ["exec", typeof(Baton.CrashTestHost.AgyStreamProcessMode).Assembly.Location,
+                     "agy-stream-fixture", "checkpoint", f.Output, "none"] : null,
+                DetectsTerminalSuccess: arm == "finished-timeout" ? null : AgyWorkerAdapter.IsTerminalSuccessLine,
+                DetectsTerminalResult: arm == "finished-timeout" ? null : AgyWorkerAdapter.IsTerminalResultLine);
+            if (!selected) target = target with { Args = [.. target.Args, target.PromptText!] };
             target = target.WithReplacedPrompt(target.PromptText!);
             f.Snapshot = new(new WorkflowDefinitionSnapshotId("fixture-snapshot"), new WorkflowTemplateId("fixture"), 1,
                 [new WorkflowStepDefinition(new StepId("work"), "worker", [], ["report.md"], [], new RetryPolicy(1))]);
             f.Bindings = new()
             {
-                ["worker"] = new WorkerBinding.Process(f.Contract, target, f.Request.Timeout!.Value,
-                    Adapter: "agy", ChangesTree: git, VerifiesWorkspace: false)
+                ["worker"] = new WorkerBinding.Process(f.Contract, target with { WorkingDirectory = git ? f.Workspace : f.Room }, f.Request.Timeout!.Value,
+                    Adapter: "agy", Model: "gemini-3-flash", ChangesTree: git, VerifiesWorkspace: false, TokenBudget: budget, BilledRateLimit: rate,
+                    FailureClassifier: new AgyWorkerAdapter())
             };
-            f.Dispatch = new CoreDispatcher(f.Writer, f.Writer).DispatchAsync(f.Request, target, f._stop.Token);
+            if (live)
+            {
+                f._stop.CancelAfter(TimeSpan.FromSeconds(45));
+                var completion = new TaskCompletionSource<CoreDispatchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                f.Dispatch = completion.Task;
+                var dispatcher = new ObservingDispatcher(new CoreDispatcher(f.Writer, f.Writer), result =>
+                {
+                    beforeSettlement?.Invoke(f);
+                    f._coreExitJournal = f.ReadJournal();
+                    completion.TrySetResult(result);
+                });
+                f.Settlement = MutationInterface.StartWorkflowAsync(f.Request.WorkflowId, f.Room, f.Snapshot,
+                    f.Bindings, f.Artifacts, new FlowEventLogReader(f.Log), f.Writer, dispatcher, cancellationToken: f._stop.Token,
+                    onVendorQuotaPark: reset => { f.LiveQuotaRetryNotBefore = reset; f._stop.Cancel(); });
+            }
+            else f.Dispatch = new CoreDispatcher(f.Writer, f.Writer).DispatchAsync(f.Request, target, f._stop.Token);
             return f;
+        }
+
+        public async Task<FlowState> WaitSettlementAsync()
+        {
+            try { return await Settlement!.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken); }
+            catch (TimeoutException ex)
+            {
+                _stop.Cancel();
+                throw new TimeoutException($"Live settlement case '{_caseName}' exceeded its fixture bound. Journal: {ReadJournal()}", ex);
+            }
+        }
+
+        public string ReadJournal()
+        {
+            using var stream = new FileStream(Log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
+
+        public void AlignJournalWriter() => _journalStream.Position = _journalStream.Length;
+
+        public async Task<bool> ReconstructAsync(bool quotaWait = false)
+        {
+            var room = Path.Combine(Room, quotaWait ? "restart-quota" : "restart");
+            Directory.CreateDirectory(room);
+            var path = Path.Combine(room, BatonPaths.FlowLogFileName);
+            File.WriteAllText(path, quotaWait ? ReadJournal() : _coreExitJournal!);
+            await using var writer = new FlowEventLogWriter(path);
+            var reader = new FlowEventLogReader(path);
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            stop.CancelAfter(TimeSpan.FromSeconds(45));
+            var reconstruction = MutationInterface.StartWorkflowAsync(Request.WorkflowId, room, Snapshot, Bindings, Artifacts,
+                reader, writer, new NoLaunchDispatcher(), cancellationToken: stop.Token,
+                onVendorQuotaPark: reset => { RestartQuotaRetryNotBefore = reset; stop.Cancel(); });
+            FlowState state;
+            try { state = await reconstruction.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken); }
+            catch (TimeoutException ex)
+            {
+                stop.Cancel();
+                throw new TimeoutException($"Restart settlement case '{_caseName}' exceeded its fixture bound.", ex);
+            }
+            var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+            if (RestartQuotaRetryNotBefore is not null)
+            {
+                Assert.Equal(WorkflowStatus.Running, state.Status);
+                Assert.True(Assert.Single(state.Steps).RetryNotBefore > DateTimeOffset.UtcNow);
+                // The new pump renews the existing engine stamp without moving its deadline.
+                var scheduled = events.OfType<FlowEvent.StepRetryScheduled>().ToArray();
+                Assert.Equal(quotaWait ? 2 : 1, scheduled.Length);
+                Assert.All(scheduled, retry => Assert.Equal(Assert.Single(state.Steps).RetryNotBefore, retry.RetryNotBefore));
+                var failure = Assert.Single(events.OfType<FlowEvent.ExecutionFailed>());
+                Assert.Equal(FailureClassification.ExhaustedUntil, failure.FailureClassification);
+                Assert.True(failure.RetryNotBefore > DateTimeOffset.UtcNow);
+                Assert.Empty(events.OfType<FlowEvent.CancellationRequested>());
+            }
+            else if (LiveQuotaRetryNotBefore is not null && !quotaWait)
+            {
+                var failure = Assert.Single(events.OfType<FlowEvent.ExecutionFailed>());
+                Assert.Null(failure.FailureClassification);
+                Assert.Null(failure.RetryNotBefore);
+                Assert.Empty(events.OfType<FlowEvent.StepRetryScheduled>());
+            }
+            return events.OfType<FlowEvent.ExecutionSucceeded>().Any() || events.OfType<FlowEvent.ExecutionSucceededWithLateFailure>().Any();
         }
 
         public async Task<AgyExecutionIdentity> WaitEndpointAsync()
@@ -464,6 +795,11 @@ public sealed class AgyExactRunningTests
             {
                 var endpoint = AgyStreamingHost.ReadEndpoint(Room, Request.ExecutionId.Value);
                 if (endpoint is not null) return endpoint;
+                if (Settlement is { IsCompleted: true })
+                {
+                    await Settlement;
+                    throw new InvalidOperationException("Fixture settlement finished before endpoint publication.");
+                }
                 if (Dispatch.IsCompleted) throw new InvalidOperationException("Fixture exited before endpoint: " + (await Dispatch).StderrTail);
                 await Task.Delay(20, TestContext.Current.CancellationToken); // wait-ok: bounded fixture rendezvous
             }
@@ -473,9 +809,18 @@ public sealed class AgyExactRunningTests
         public async ValueTask DisposeAsync()
         {
             _stop.Cancel();
-            try { if (Dispatch is not null) await Dispatch.WaitAsync(TimeSpan.FromSeconds(60)); }
+            try
+            {
+                if (Dispatch is not null && !(Settlement is { IsCompleted: true } && !Dispatch.IsCompleted))
+                    await Dispatch.WaitAsync(TimeSpan.FromSeconds(60));
+            }
             finally
             {
+                if (Settlement is not null)
+                {
+                    try { await Settlement.WaitAsync(TimeSpan.FromSeconds(60)); }
+                    catch (FlowEventLogReadException) { /* expected raw-evidence refusal */ }
+                }
                 if (Writer is not null) await Writer.DisposeAsync();
                 _stop.Dispose();
                 DirectoryCleanup.DeleteRecursively(Room);

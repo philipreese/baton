@@ -175,6 +175,22 @@ public sealed class LedgerCsvRedactionTests
             LedgerCsv.SchemaVersion);
     }
 
+    [Fact]
+    public void Selected_final_usage_nested_cells_keep_the_fail_closed_export_guard()
+    {
+        var selected = Row with
+        {
+            ReportedFinalTurnUsage = new Baton.Domain.WorkerUsage(TokensIn: 999, MessageId: "conversation:3"),
+            UsageCompleteness = "unavailable",
+        };
+        Assert.Contains("conversation:3", Write(selected, "nobody"), StringComparison.Ordinal);
+        var refusal = Assert.Throws<LedgerCsvRedactionException>(() => Write(selected with
+        {
+            ReportedFinalTurnUsage = selected.ReportedFinalTurnUsage! with { MessageId = @"C:\Users\alice\private" },
+        }, "nobody"));
+        Assert.Equal("reportedFinalTurnUsage", refusal.Column);
+    }
+
     private static string Write(CostLedgerEntry row, string accountName)
     {
         var output = new StringWriter { NewLine = "\n" };

@@ -2359,6 +2359,8 @@ public static class MutationInterface
         var exits = journal.CoreEvents.OfType<CoreEvent.ExecutionExited>().Where(item => item.ExecutionId == request.ExecutionId).ToArray();
         var accepts = journal.FlowEvents.OfType<FlowEvent.ExecutionRequestAccepted>().Where(item => item.Request.ExecutionId == request.ExecutionId).ToArray();
         var completion = result.FinalExpectedTurn;
+        // Raw selected authority is rejected by the journal reader before this parsed view.
+        // First-turn work never rescues ambiguous, missing or inconsistent final completion.
         return !journal.HasUnterminatedTail && journal.UnknownEventCount == 0
             && starts.Length == 1 && exits.Length == 1 && accepts.Length == 1
             && accepts[0].Request.ExactRunningTransport == request.ExactRunningTransport
