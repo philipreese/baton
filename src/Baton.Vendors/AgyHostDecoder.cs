@@ -91,64 +91,107 @@ public static class AgyHostDecoder
         string? execution = null, incarnation = null;
         string? conversationId = null;
         var valid = true;
+        var malformedTerminalIdentity = false;
+        var otherInvalidEvidence = false;
         var footerSeen = false;
         WorkerUsage? reported = null;
         foreach (var line in lines)
         {
             var envelope = ReadEnvelope(line);
-            if (envelope is null || footerSeen) { valid = false; continue; }
+            if (envelope is null || footerSeen) { valid = false; otherInvalidEvidence = true; continue; }
             execution ??= envelope.ExecutionId;
             incarnation ??= envelope.Incarnation;
-            if (execution != envelope.ExecutionId || incarnation != envelope.Incarnation) valid = false;
+            if (execution != envelope.ExecutionId || incarnation != envelope.Incarnation)
+            {
+                valid = false;
+                otherInvalidEvidence = true;
+            }
             if (envelope.Kind == "completion")
             {
                 footerSeen = true;
                 if (!IsValidCompletion(envelope) && !(IsBoundCompletion(envelope)
-                    && envelope.Completion is { EvidenceValid: false, CaptureIntegrityValid: true })) valid = false;
+                    && envelope.Completion is { EvidenceValid: false, CaptureIntegrityValid: true }))
+                {
+                    valid = false;
+                    otherInvalidEvidence = true;
+                }
                 new AgyUsageParser().TryParseFinalUsage(line, out reported);
                 continue;
             }
-            if (envelope.Native is not { ValueKind: JsonValueKind.Object } native) { valid = false; continue; }
-            if (!native.TryGetProperty("event", out var eventName) || eventName.ValueKind != JsonValueKind.String) { valid = false; continue; }
+            if (envelope.Native is not { ValueKind: JsonValueKind.Object } native) { valid = false; otherInvalidEvidence = true; continue; }
+            if (!native.TryGetProperty("event", out var eventName) || eventName.ValueKind != JsonValueKind.String)
+            {
+                valid = false;
+                otherInvalidEvidence = true;
+                continue;
+            }
             if (eventName.GetString() == "init")
             {
                 if (conversationId is not null || !native.TryGetProperty("conversation_id", out var initConversation)
-                    || initConversation.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(initConversation.GetString())) valid = false;
+                    || initConversation.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(initConversation.GetString()))
+                {
+                    valid = false;
+                    otherInvalidEvidence = true;
+                }
                 else conversationId = initConversation.GetString();
             }
-            if (conversationId is null) valid = false;
-            if (native.TryGetProperty("step_update", out var step) && step.ValueKind == JsonValueKind.Object
-                && step.TryGetProperty("state", out var state) && state.GetString() is "DONE" or "ERROR")
+            if (conversationId is null)
             {
+                valid = false;
+                otherInvalidEvidence = true;
+            }
+            if (!AgyHostUsage.TryReadTerminalStepIdentity(native, out var terminalStepIdentity))
+            {
+                valid = false;
+                malformedTerminalIdentity = true;
+                continue;
+            }
+            if (terminalStepIdentity is not null)
+            {
+                var step = native.GetProperty("step_update");
                 if (!step.TryGetProperty("conversation_id", out var stepConversation) || stepConversation.ValueKind != JsonValueKind.String
-                    || stepConversation.GetString() != conversationId) valid = false;
-                if (!step.TryGetProperty("step_index", out var index)
-                    || index.ValueKind is not (JsonValueKind.Number or JsonValueKind.String)) { valid = false; continue; }
-                var key = index.ToString();
+                    || stepConversation.GetString() != conversationId)
+                {
+                    valid = false;
+                    otherInvalidEvidence = true;
+                }
+                var key = terminalStepIdentity;
                 var hash = AgyCorrectionStore.Digest(step.GetRawText());
                 if (seen.TryGetValue(key, out var prior))
                 {
-                    if (prior != hash) valid = false;
+                    if (prior != hash)
+                    {
+                        valid = false;
+                        otherInvalidEvidence = true;
+                    }
                     continue;
                 }
                 seen.Add(key, hash);
                 if (step.TryGetProperty("step_type", out var stepType) && stepType.GetString() == "agent_response"
                     && step.TryGetProperty("usage", out var usage))
                 {
-                    if (usage.ValueKind != JsonValueKind.Object) valid = false;
+                    if (usage.ValueKind != JsonValueKind.Object)
+                    {
+                        valid = false;
+                        otherInvalidEvidence = true;
+                    }
                     else foreach (var dimension in usage.EnumerateObject())
-                        if (dimension.Value.ValueKind != JsonValueKind.Number || !dimension.Value.TryGetInt64(out var count) || count < 0) valid = false;
+                        if (dimension.Value.ValueKind != JsonValueKind.Number || !dimension.Value.TryGetInt64(out var count) || count < 0)
+                        {
+                            valid = false;
+                            otherInvalidEvidence = true;
+                        }
                 }
             }
-            if (!usageValidator.Admit(native)) { valid = false; continue; }
+            if (!usageValidator.Admit(native)) { valid = false; otherInvalidEvidence = true; continue; }
             monitor.OnStdoutLine(line);
             if (new AgyUsageParser().TryParseIncrementalUsage(line, out var sample) && sample is not null) samples.Add(sample);
-            if (monitor.SnapshotUsage().BilledTokens is < 0) valid = false;
+            if (monitor.SnapshotUsage().BilledTokens is < 0) { valid = false; otherInvalidEvidence = true; }
         }
         WorkerUsage? observed = null;
         try
         {
-            if (valid) observed = monitor.SnapshotUsage() with
+            if (valid || (malformedTerminalIdentity && !otherInvalidEvidence)) observed = monitor.SnapshotUsage() with
             {
                 TokensIn = Sum(samples, sample => sample.TokensIn),
                 TokensOut = Sum(samples, sample => sample.TokensOut),
@@ -158,7 +201,7 @@ public static class AgyHostDecoder
                 BilledIsFloor = true,
             };
         }
-        catch (OverflowException) { valid = false; }
+        catch (OverflowException) { valid = false; otherInvalidEvidence = true; }
         return new(observed, reported, valid ? null : "invalid-or-conflicting-host-usage-evidence", execution);
     }
 

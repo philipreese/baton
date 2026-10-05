@@ -12,6 +12,7 @@ internal sealed class AgyHostUsage
     {
         dimensions = null;
         billed = 0;
+        if (!TryReadTerminalStepIdentity(native, out _)) return false;
         if (!native.TryGetProperty("event", out var kind) || kind.ValueKind != JsonValueKind.String) return false;
         var name = kind.GetString() == "result" ? "result" : "step_update";
         if (!native.TryGetProperty(name, out var node) || node.ValueKind != JsonValueKind.Object) return true;
@@ -33,6 +34,20 @@ internal sealed class AgyHostUsage
             return true;
         }
         catch (OverflowException) { return false; }
+    }
+
+    internal static bool TryReadTerminalStepIdentity(JsonElement native, out string? identity)
+    {
+        identity = null;
+        if (!native.TryGetProperty("event", out var kind) || kind.ValueKind != JsonValueKind.String
+            || kind.GetString() != "step_update") return true;
+        if (!native.TryGetProperty("step_update", out var step) || step.ValueKind != JsonValueKind.Object) return true;
+        if (!step.TryGetProperty("state", out var state) || state.ValueKind != JsonValueKind.String
+            || state.GetString() is not ("DONE" or "ERROR")) return true;
+        if (!step.TryGetProperty("step_index", out var index)
+            || index.ValueKind is not (JsonValueKind.Number or JsonValueKind.String)) return false;
+        identity = index.ToString();
+        return true;
     }
 
     internal bool Admit(JsonElement native)

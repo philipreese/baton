@@ -33,6 +33,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
     private int _results;
     private int _userInputs;
     private bool _valid = true;
+    private bool _captureIntegrityValid = true;
     private bool _closed;
     private bool _finished;
     private JsonElement? _finalResult;
@@ -50,7 +51,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
             {
                 try { Send(context.Prompt); }
                 catch (Exception ex) when (ex is IOException or InvalidOperationException)
-                { _valid = false; Console.Error.WriteLine($"AGY first input failed: {ex.Message}"); }
+                { Invalidate(); Console.Error.WriteLine($"AGY first input failed: {ex.Message}"); }
             }
         });
     }
@@ -78,10 +79,10 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
                         _line.Clear();
                     }
                     else if (_line.Length < MaxLine) _line.Append(c);
-                    else _valid = false;
+                    else { _valid = false; _captureIntegrityValid = false; }
                 }
             }
-            catch (DecoderFallbackException) { _valid = false; }
+            catch (DecoderFallbackException) { _valid = false; _captureIntegrityValid = false; }
             return Encoding.UTF8.GetBytes(output.ToString());
         }
     }
@@ -94,13 +95,13 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
             using var document = JsonDocument.Parse(line);
             native = document.RootElement.Clone();
             if (native.ValueKind != JsonValueKind.Object || !AgyHostDecoder.UniqueProperties(native) || !native.TryGetProperty("event", out var eventName)
-                || eventName.ValueKind != JsonValueKind.String) { _valid = false; return; }
+                || eventName.ValueKind != JsonValueKind.String) { Invalidate(); return; }
             var kind = eventName.GetString();
             if (kind == "init")
             {
                 if (_identity is not null || !native.TryGetProperty("conversation_id", out var conversation)
                     || conversation.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(conversation.GetString()))
-                { _valid = false; return; }
+                { Invalidate(); return; }
                 using var host = Process.GetCurrentProcess();
                 _identity = new(Baton.Status.BatonPaths.RecordKey(context.Room), context.Request.ExecutionId.Value, "agy",
                     AgyCorrectionStore.Digest(JsonSerializer.Serialize(context.Request)), host.Id, host.StartTime.ToUniversalTime(),
@@ -111,13 +112,19 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
                 Publish(_identity);
                 _acceptTask = AcceptAsync(_listener);
             }
-            else if (_identity is null) _valid = false;
+            else if (_identity is null) Invalidate();
 
             foreach (var node in new[] { native, Property(native, "step_update"), Property(native, "result") })
             {
                 if (node.ValueKind == JsonValueKind.Object && node.TryGetProperty("conversation_id", out var conversation)
                     && (conversation.ValueKind != JsonValueKind.String || conversation.GetString() != _identity?.ConversationId))
-                    _valid = false;
+                    Invalidate();
+            }
+
+            if (!AgyHostUsage.TryReadTerminalStepIdentity(native, out _))
+            {
+                _valid = false;
+                return;
             }
 
             var step = Property(native, "step_update");
@@ -127,29 +134,25 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
                 var type = StringProperty(step, "step_type");
                 if (state is "DONE" or "ERROR")
                 {
-                    if (!step.TryGetProperty("step_index", out var index)
-                        || index.ValueKind is not (JsonValueKind.Number or JsonValueKind.String)) _valid = false;
-                    else
+                    var index = step.GetProperty("step_index");
+                    var key = _identity?.ConversationId + ":" + index;
+                    var hash = AgyCorrectionStore.Digest(step.GetRawText());
+                    if (_steps.TryGetValue(key, out var prior))
                     {
-                        var key = _identity?.ConversationId + ":" + index;
-                        var hash = AgyCorrectionStore.Digest(step.GetRawText());
-                        if (_steps.TryGetValue(key, out var prior))
-                        {
-                            if (prior != hash) _valid = false;
-                            return; // identical terminal restatements feed neither monitor nor tally again
-                        }
-                        _steps.Add(key, hash);
+                        if (prior != hash) Invalidate();
+                        return; // identical terminal restatements feed neither monitor nor tally again
                     }
+                    _steps.Add(key, hash);
                     if (type == "user_input" && state == "DONE")
                     {
                         _userInputs++;
-                        if (_userInputs > _expected) _valid = false;
+                        if (_userInputs > _expected) Invalidate();
                         if (_userInputs == 2 && _correction is not null)
                             _store.RecordEvidence(_correction, "consumption", "native DONE user_input in the bound conversation; payload not acknowledged");
                     }
                 }
             }
-            if (!_usage.Admit(native)) { _valid = false; return; }
+            if (!_usage.Admit(native)) { Invalidate(); return; }
             if (kind == "result")
             {
                 ReconcileClaim();
@@ -157,7 +160,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
                 var result = Property(native, "result");
                 if (_results > _expected || result.ValueKind != JsonValueKind.Object
                     || StringProperty(result, "conversation_id") != _identity?.ConversationId
-                    || StringProperty(result, "status") is null) _valid = false;
+                    || StringProperty(result, "status") is null) Invalidate();
                 if (_results == _expected)
                 {
                     _finalResult = native;
@@ -169,7 +172,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
         }
         catch (Exception ex) when (ex is JsonException or IOException or InvalidOperationException
             or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
-        { _valid = false; Console.Error.WriteLine($"AGY host evidence unavailable: {ex.Message}"); }
+        { _valid = false; _captureIntegrityValid = false; Console.Error.WriteLine($"AGY host evidence unavailable: {ex.Message}"); }
     }
 
     public byte[] Finish()
@@ -183,15 +186,15 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
             try
             {
                 var remainder = new char[4];
-                if (_decoder.GetChars([], remainder, true) != 0) _valid = false;
+                if (_decoder.GetChars([], remainder, true) != 0) Invalidate();
             }
-            catch (DecoderFallbackException) { _valid = false; }
+            catch (DecoderFallbackException) { _valid = false; _captureIntegrityValid = false; }
             if (_line.Length > 0) Observe(_line.ToString().TrimEnd('\r'), output);
             if (_identity is { } identity)
                 Completion = new(identity.ExecutionId, Transport, identity.Incarnation, identity.ChildPid,
                     identity.ChildStartUtc, identity.ConversationId, _expected, _results,
                     _finalResult is { } final && StringProperty(Property(final, "result"), "status") == "SUCCESS",
-                    _valid && _results == _expected && _userInputs == _expected, CaptureIntegrityValid: _valid);
+                    _valid && _results == _expected && _userInputs == _expected, CaptureIntegrityValid: _captureIntegrityValid);
             CloseInput();
             output.AppendLine(JsonSerializer.Serialize(new AgyHostEnvelope(1, "completion", context.Request.ExecutionId.Value,
                 _incarnation, _expected, _finalResult, Completion)));
@@ -273,7 +276,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
             {
                 if (!_store.TryClaim(request)) return _store.Query(wire.Identity.ExecutionId)!;
             }
-            catch { _valid = false; throw; }
+            catch { Invalidate(); throw; }
             if (ReadEndpoint(context.Room, wire.Identity.ExecutionId) != wire.Identity
                 || !wire.Identity.MatchesJournalAsync(true, cancellationToken).GetAwaiter().GetResult())
                 throw new InvalidOperationException("AGY identity changed before send.");
@@ -284,7 +287,7 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
                     Send(wire.Text);
                     _store.RecordEvidence(request, "input", "native user message written and flushed; payload not acknowledged");
                 }
-                catch (IOException) { _valid = false; }
+                catch (IOException) { Invalidate(); }
             }
             return _store.Query(wire.Identity.ExecutionId)!;
         }
@@ -296,12 +299,12 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
         {
             if (_store.Query(context.Request.ExecutionId.Value) is not { } retained) return;
             _expected = 2;
-            if (retained.Request.Identity != _identity) { _valid = false; return; }
+            if (retained.Request.Identity != _identity) { Invalidate(); return; }
             _correction = retained.Request;
-            if (!retained.SendStarted) _valid = false;
+            if (!retained.SendStarted) Invalidate();
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or UnauthorizedAccessException)
-        { _expected = 2; _valid = false; }
+        { _expected = 2; Invalidate(); }
     }
 
     private void CloseInput()
@@ -362,6 +365,12 @@ internal sealed class AgyStreamingHost(WorkerProcessTransportContext context) : 
         && node.TryGetProperty(name, out var value) ? value : default;
     private static string? StringProperty(JsonElement node, string name) => Property(node, name) is { ValueKind: JsonValueKind.String } value
         ? value.GetString() : null;
+
+    private void Invalidate()
+    {
+        _valid = false;
+        _captureIntegrityValid = false;
+    }
 
     public void Dispose()
     {

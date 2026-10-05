@@ -169,6 +169,52 @@ public sealed class AgyExactRunningTests
         Assert.Empty(events.OfType<FlowEvent.GraceTurnClaimed>());
     }
 
+    [Theory]
+    [InlineData("malformed-missing", false)]
+    [InlineData("malformed-missing", true)]
+    [InlineData("malformed-null", false)]
+    [InlineData("malformed-null", true)]
+    [InlineData("malformed-bool", false)]
+    [InlineData("malformed-bool", true)]
+    [InlineData("malformed-object", false)]
+    [InlineData("malformed-object", true)]
+    [InlineData("malformed-array", false)]
+    [InlineData("malformed-array", true)]
+    [InlineData("valid-string", false)]
+    [InlineData("valid-string", true)]
+    public async Task Terminal_step_identity_is_selected_before_live_usage_admission(string mode, bool rate)
+    {
+        var malformed = mode.StartsWith("malformed-", StringComparison.Ordinal);
+        var cap = malformed ? 20L : 100L;
+        await using var fixture = await Fixture.CreateAsync(mode, live: true, budget: rate ? null : cap, rate: rate ? cap : null);
+        var identity = await fixture.WaitEndpointAsync();
+        await AgyCorrectionClient.ExecuteAsync(fixture.Room, identity.ExecutionId, "identity", "second", TestContext.Current.CancellationToken);
+        var result = await fixture.Dispatch.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        await fixture.WaitSettlementAsync();
+        var events = await new FlowEventLogReader(fixture.Log).ReadAllAsync(TestContext.Current.CancellationToken);
+        var entries = await new FlowEventLogReader(fixture.Log).ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+        var usage = Assert.Single(ExecutionUsageProjector.BuildByExecutionId(entries, fixture.Artifacts)).Value;
+
+        if (malformed)
+        {
+            Assert.False(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
+            Assert.Empty(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Empty(events.OfType<FlowEvent.GraceTurnClaimed>());
+            Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+            Assert.Equal(10, usage.TokensIn);
+            Assert.Equal(2, usage.TokensOut);
+            Assert.Equal(12, usage.ObservedBilledTokenFloor?.Tokens);
+            Assert.NotNull(usage.BilledReconciliationUnavailable);
+            Assert.Single(events.OfType<FlowEvent.ExecutionFailed>());
+        }
+        else
+        {
+            Assert.True(result.FinalExpectedTurn?.IsSuccessful(AgyStreamingHost.Transport));
+            Assert.Equal(35, usage.ObservedBilledTokenFloor?.Tokens);
+            Assert.Equal(35, usage.TokensIn.GetValueOrDefault() + usage.TokensOut.GetValueOrDefault());
+        }
+    }
+
     public static TheoryData<string, string> SuccessArmCases
     {
         get

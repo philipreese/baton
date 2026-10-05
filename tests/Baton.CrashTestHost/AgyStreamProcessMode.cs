@@ -78,10 +78,11 @@ public static class AgyStreamProcessMode
         File.WriteAllText(Path.Combine(output, "second.txt"), second, new UTF8Encoding(false));
         if (!raw && mode != "race") Result("SUCCESS", 10, 2);
         Step(2, "user_input");
-        if (arm == "post-cap") File.Delete(Path.Combine(output, "report.md"));
+        if (arm == "post-cap") Baton.Tests.Shared.FileCleanup.EnsureDeleted(Path.Combine(output, "report.md"));
         if (mode == "timeout" && arm is "pre-cap" or "post-cap") Step(3, "agent_response", 20, 3);
-        if (arm is not ("pre-cap" or "post-cap"))
-            Step(3, "agent_response", mode switch
+        if (mode.StartsWith("malformed-", StringComparison.Ordinal)) MalformedSteps(mode, 20, 3);
+        if (arm is not ("pre-cap" or "post-cap") && !mode.StartsWith("malformed-", StringComparison.Ordinal))
+            Step(mode == "valid-string" ? "3" : 3, "agent_response", mode switch
             {
                 "overflow" => long.MaxValue,
                 "negative" => -20,
@@ -143,7 +144,32 @@ public static class AgyStreamProcessMode
         return document.RootElement.GetProperty("message").GetProperty("content").GetString()!;
     }
 
-    private static void Step(int index, string type, long? input = null, long? output = null) => Emit(new
+    private static void MalformedSteps(string mode, long input, long output)
+    {
+        var step = new Dictionary<string, object?>
+        {
+            ["conversation_id"] = "fixture-conversation",
+            ["state"] = "DONE",
+            ["step_type"] = "agent_response",
+            ["usage"] = new { input_tokens = input, output_tokens = output },
+        };
+        if (mode != "malformed-missing")
+        {
+            object? index = mode switch
+            {
+                "malformed-null" => null,
+                "malformed-bool" => false,
+                "malformed-object" => new Dictionary<string, int> { ["value"] = 3 },
+                "malformed-array" => new[] { 3 },
+                _ => null,
+            };
+            step["step_index"] = index;
+        }
+        Emit(new { @event = "step_update", step_update = step });
+        Emit(new { @event = "step_update", step_update = step });
+    }
+
+    private static void Step(object index, string type, long? input = null, long? output = null) => Emit(new
     {
         @event = "step_update",
         step_update = new
