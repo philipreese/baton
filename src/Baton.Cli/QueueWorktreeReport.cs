@@ -26,7 +26,7 @@ internal sealed record QueueWorktreeReport(string? WorktreeRoot, IReadOnlyList<Q
         var resolvedRoot = TryFullPath(root);
         var activeReferences = await QueueWorktreeReferenceIndex.CreateAsync(items, cancellationToken, livenessProbe)
             .ConfigureAwait(false);
-        var groups = items.GroupBy(item => TryFullPath(item.Workspace) ?? item.Workspace, PathComparer)
+        var groups = items.GroupBy(item => TryWorkspacePath(item.Workspace) ?? item.Workspace, PathComparer)
             .OrderBy(group => group.Key, PathComparer)
             .Select((group, index) => (Index: index, Path: group.Key, Rows: (IReadOnlyList<QueueItem>)group.ToList()))
             .ToList();
@@ -72,6 +72,19 @@ internal sealed record QueueWorktreeReport(string? WorktreeRoot, IReadOnlyList<Q
         if (string.IsNullOrWhiteSpace(path)) return null;
         try { return Path.GetFullPath(path); }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
+    }
+
+    internal static string? TryWorkspacePath(string? path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return null;
+            return Path.GetFullPath(path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
     }
 
     internal static readonly StringComparer PathComparer = OperatingSystem.IsWindows()
@@ -135,11 +148,41 @@ internal sealed record QueueWorktreeEntry(
             .Distinct(StringComparer.Ordinal).OrderBy(origin => origin, StringComparer.Ordinal).ToList();
         var repositories = rows.Select(row => row.Repository).Distinct(StringComparer.Ordinal).ToList();
         var branches = rows.Select(row => row.Branch).Distinct(StringComparer.Ordinal).ToList();
+        var referenceObservation = DescribeReferences(path, rows, activeReferenceIndex);
+        if (QueueWorktreeReport.TryWorkspacePath(path) is null)
+        {
+            var invalidReasons = new List<string> { "invalid-workspace-evidence" };
+            if (!referenceObservation.Complete) invalidReasons.Add("active-reference-observation-unavailable");
+            var expectedRepository = repositories.Count == 1 ? repositories[0] : null;
+            var expectedBranch = branches.Count == 1 ? branches[0] : null;
+            return new QueueWorktreeEntry(
+                path,
+                string.Join(",", origins),
+                false,
+                "unknown",
+                new QueueWorktreeGit(
+                    "unavailable", null, expectedRepository, expectedBranch, null, false, "unknown", null,
+                    ["invalid-workspace-evidence"]),
+                null,
+                "invalid-workspace-evidence",
+                string.Join(",", referenceObservation.References.DefaultIfEmpty("none-known")),
+                referenceObservation.Complete,
+                "unknown",
+                invalidReasons,
+                rows.Select(row => new QueueWorktreeRow(
+                    row.Tag,
+                    row.State.ToString().ToLowerInvariant(),
+                    row.Stage is { } stage ? WorkStages.Token(stage) : null,
+                    row.WorkspaceOrigin ?? WorkspaceOrigins.Unknown,
+                    row.Repository,
+                    row.Branch,
+                    row.Retirement is not null)).ToList());
+        }
+
         var reasons = new List<string>();
         var beneath = root is not null && IsStrictlyBeneath(path, root);
         var exists = System.IO.Directory.Exists(path);
         var eligibleRows = rows.All(IsDurablyInactive);
-        var referenceObservation = DescribeReferences(path, rows, activeReferenceIndex);
         var references = string.Join(",", referenceObservation.References.DefaultIfEmpty("none-known"));
 
         if (origins.Count != 1 || origins[0] != WorkspaceOrigins.IssueProvisioned) reasons.Add("origin-not-owned");
@@ -168,6 +211,7 @@ internal sealed record QueueWorktreeEntry(
         if (git.SubstantiveCleanliness == "dirty") reasons.Add("substantive-uncommitted-content");
         if (size is null) reasons.Add("size-observation-unavailable");
 
+        // Invalid, conflicting, unavailable, or active evidence never qualifies removal.
         var candidate = reasons.Count == 0;
         var publicationEvidenceUnavailable = git.ReasonCodes.Contains(
             UpstreamPublicationEvidenceUnavailableReason, StringComparer.Ordinal);
@@ -380,7 +424,7 @@ internal sealed record QueueWorktreeEntry(
             {
                 if (path is not null && QueueWorktreeReport.PathComparer.Equals(path, expectedPath)) return head is not null;
                 var reportedPath = line["worktree ".Length..];
-                path = QueueWorktreeReport.TryFullPath(reportedPath) ?? reportedPath;
+                path = QueueWorktreeReport.TryWorkspacePath(reportedPath) ?? reportedPath;
                 head = null;
                 branch = null;
             }
@@ -541,7 +585,7 @@ internal sealed record QueueWorktreeReferenceIndex(
         QueueWorktreeLivenessProbe? probe = null)
     {
         probe ??= QueueWorktreeLivenessProbe.Default;
-        var workspaces = items.Select(item => QueueWorktreeReport.TryFullPath(item.Workspace))
+        var workspaces = items.Select(item => QueueWorktreeReport.TryWorkspacePath(item.Workspace))
             .Where(path => path is not null)
             .Cast<string>()
             .Distinct(QueueWorktreeReport.PathComparer)
@@ -596,9 +640,19 @@ internal sealed record QueueWorktreeReferenceIndex(
                     continue;
                 }
 
-                var paths = bindings.Values.Select(binding => QueueWorktreeReport.TryFullPath(binding.WorkingDirectory))
-                    .Where(path => path is not null)
-                    .Cast<string>()
+                var paths = new List<string>();
+                foreach (var binding in bindings.Values)
+                {
+                    var path = QueueWorktreeReport.TryWorkspacePath(binding.WorkingDirectory);
+                    if (path is null)
+                    {
+                        complete = false;
+                        continue;
+                    }
+
+                    paths.Add(path);
+                }
+                paths = paths
                     .Distinct(QueueWorktreeReport.PathComparer)
                     .ToList();
                 if (paths.Count == 0)
@@ -747,7 +801,7 @@ internal sealed record QueueWorktreeReferenceIndex(
             var live = await RunBoundedAsync(
                 () => probe.IsLiveProcess(info.Pid), cancellationToken).ConfigureAwait(false);
             if (!live) return false;
-            var cwd = QueueWorktreeReport.TryFullPath(info.Cwd);
+            var cwd = QueueWorktreeReport.TryWorkspacePath(info.Cwd);
             if (cwd is null)
             {
                 return false;
