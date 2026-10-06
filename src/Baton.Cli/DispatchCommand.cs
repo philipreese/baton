@@ -6,6 +6,7 @@ using Baton.Mutation;
 using Baton.Runway;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
 using Baton.Templates;
 using Baton.Workspaces;
 
@@ -248,6 +249,13 @@ public static class DispatchCommand
         {
             await ValidateOwnedTaskIdentityAsync(options.RoomDirectoryPath, ownedTaskIdentity, cancellationToken)
                 .ConfigureAwait(false);
+            if (bindings.Values.Any(binding => binding.OwnedTaskIdentity is { } declared
+                && !SameOwnedTask(declared, ownedTaskIdentity)))
+            {
+                throw new CliArgumentException(
+                    "The queue owned-task transport conflicts with a binding-owned task identity; no execution was admitted.");
+            }
+
             bindings = bindings.ToDictionary(
                 pair => pair.Key,
                 pair => pair.Value with { OwnedTaskIdentity = ownedTaskIdentity },
@@ -1873,7 +1881,30 @@ public static class DispatchCommand
         return (resumedEntry, provenance);
     }
 
-    private static async Task ValidateOwnedTaskIdentityAsync(
+    internal static async Task ValidateOwnedTaskBindingsAsync(
+        string roomDirectory,
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        CancellationToken cancellationToken)
+    {
+        OwnedTaskExecutionIdentity? declaredIdentity = null;
+        foreach (var binding in bindings.Values)
+        {
+            if (binding.OwnedTaskIdentity is { } identity)
+            {
+                if (declaredIdentity is not null && declaredIdentity != identity)
+                {
+                    throw new CliArgumentException(
+                        "The bindings file contains conflicting owned-task identities; no execution was admitted.");
+                }
+
+                declaredIdentity = identity;
+                await ValidateOwnedTaskIdentityAsync(roomDirectory, identity, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
+    internal static async Task ValidateOwnedTaskIdentityAsync(
         string roomDirectory,
         OwnedTaskExecutionIdentity identity,
         CancellationToken cancellationToken)
@@ -1901,14 +1932,46 @@ public static class DispatchCommand
             && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(recordedRoom), BatonPaths.RecordKey(roomDirectory))
             && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(identity.RoomDirectory!), BatonPaths.RecordKey(roomDirectory)));
 
-        if (match?.OwnedTask is not { } acceptedOwner || !identity.HasExpectedTaskId()
-            || !string.Equals(acceptedOwner.Repository, match.Repository, StringComparison.Ordinal)
-            || acceptedOwner.Issue != match.Issue)
+        if (match is not null
+            && (match.OwnedTask is not { } acceptedOwner || !identity.HasExpectedTaskId()
+                || !string.Equals(acceptedOwner.Repository, match.Repository, StringComparison.Ordinal)
+                || acceptedOwner.Issue != match.Issue))
         {
             throw new CliArgumentException(
                 "The queue owned-task transport does not match one exact admitted queue attempt; no execution was admitted.");
         }
+
+        if (match is not null)
+        {
+            return;
+        }
+
+        var logPath = Path.Combine(roomDirectory, BatonPaths.FlowLogFileName);
+        if (!File.Exists(logPath))
+        {
+            throw new CliArgumentException(
+                "The owned-task binding has no durable queue admission or accepted predecessor; no execution was admitted.");
+        }
+
+        var accepted = await new FlowEventLogReader(logPath).ReadAllAsync(cancellationToken).ConfigureAwait(false);
+        if (accepted.OfType<FlowEvent.ExecutionRequestAccepted>().Any(entry =>
+                entry.Request.OwnedTaskIdentity is { } predecessor
+                && predecessor.ExecutionId is { Length: > 0 } predecessorExecution
+                && identity with { ExecutionId = predecessorExecution } == predecessor))
+        {
+            return;
+        }
+
+        throw new CliArgumentException(
+            "The owned-task binding does not preserve one exact admitted predecessor; no execution was admitted.");
     }
+
+    private static bool SameOwnedTask(
+        OwnedTaskExecutionIdentity left,
+        OwnedTaskExecutionIdentity right) =>
+        string.Equals(left.TaskId, right.TaskId, StringComparison.Ordinal)
+        && string.Equals(left.Repository, right.Repository, StringComparison.Ordinal)
+        && left.Issue == right.Issue;
 
     private static bool SupportsDispatchContinuation(string adapter) =>
         string.Equals(adapter, "claude", StringComparison.OrdinalIgnoreCase)

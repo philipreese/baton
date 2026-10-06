@@ -276,11 +276,12 @@ public sealed record CostLedgerEntry(
     /// execution. The workspace branch remains the compatibility source only when that context is
     /// absent; a present invalid context remains unknown.
     /// (<see cref="LedgerQuery"/> normalizes both spellings on the filter side, so the writer picks one).
-    /// For legacy direct/template executions this is derived at settle from the leading <c>&lt;n&gt;-</c>
-    /// of the workspace's checked-out branch; owned-task executions do not use branch inference.
-    /// The legacy branch observation is the compatibility source when no producer-owned task identity
-    /// exists. <b>Absent means "this branch does not name an issue", never "no issue"</b>; a room
-    /// whose workspace directory is gone by settle time has nothing left to read.
+    /// For legacy direct/template executions this is copied from the immutable workspace-delivery
+    /// observation when one is supplied; fresh terminal settlement supplies PR identity from its
+    /// recorded delivery event, while backfill may supply the branch-derived issue observation.
+    /// Owned-task executions do not use that observation. <b>Absent means "no authoritative issue
+    /// observation was available", never "no issue"</b>; a room whose workspace directory is gone by
+    /// settle time has nothing left to read.
     /// </summary>
     [property: JsonPropertyName("issue")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

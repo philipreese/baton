@@ -117,6 +117,11 @@ public static class ResumeCommand
                 "pass --worker naming a key present in the bindings file.");
         }
 
+        await DispatchCommand.ValidateOwnedTaskBindingsAsync(
+            options.RoomDirectoryPath,
+            new Dictionary<string, WorkerBindingConfigEntry> { [options.Worker] = entry },
+            cancellationToken).ConfigureAwait(false);
+
         // A resume mints and dispatches a fresh worker execution. Refuse conductor-only models
         // before reusing a workspace, resolving the adapter, or opening the resume writer.
         WorkerBindingResolver.RefuseConductorOnlyWorkerModels(
