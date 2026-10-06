@@ -52,6 +52,15 @@ internal sealed record ConductorFollowEventIdentity(
     [property: JsonRequired] string SourceCapability,
     [property: JsonRequired] string ContextSha256);
 
+internal sealed record ConductorFollowRetainedSource(
+    [property: JsonRequired] string ObligationId,
+    [property: JsonRequired] string IdempotencyKey,
+    [property: JsonRequired] string Owner,
+    [property: JsonRequired] string Adapter,
+    [property: JsonRequired] string AdapterCapability,
+    [property: JsonRequired] ConductorObligationStatus Status,
+    [property: JsonRequired] StoppedWorkAdviceContext Context);
+
 internal sealed record ConductorFollowLaunch(
     [property: JsonRequired] int SchemaVersion,
     [property: JsonRequired] string ObligationKey,
@@ -307,16 +316,8 @@ internal sealed partial class ConductorFollowSession
             var identityPath = Path.Combine(evidence, "identity.json");
             Write(identityPath, identityEvidence);
             var sourcePath = Path.Combine(evidence, "source.json");
-            Write(sourcePath, new
-            {
-                obligation.ObligationId,
-                obligation.IdempotencyKey,
-                obligation.Owner,
-                obligation.Adapter,
-                obligation.AdapterCapability,
-                obligation.Status,
-                context
-            });
+            Write(sourcePath, new ConductorFollowRetainedSource(obligation.ObligationId, obligation.IdempotencyKey,
+                obligation.Owner, obligation.Adapter, obligation.AdapterCapability, obligation.Status, context));
             if (new FileInfo(sourcePath).Length > 64 * 1024) throw new CliArgumentException("Source exceeds bounded input.");
             // Re-read authority immediately before the irreversible launch marker, after source I/O.
             claim = await ConductorClaimStore.GetClaimAsync(_identity, _root, cancellationToken).ConfigureAwait(false);
@@ -479,6 +480,7 @@ internal sealed partial class ConductorFollowSession
             var responsePath = Path.Combine(directory, "response.json");
             var markerFree = !File.Exists(launchPath) && !File.Exists(responsePath)
                 && !journal.ContainsKey(identity.ObligationId);
+            ValidateRetainedSource(directory, identity, state);
             if (markerFree && identity.SessionId is null) continue;
             if (identity.SessionId != state.SessionId) throw new IOException("Incomplete event identity.");
             var launch = Read<ConductorFollowLaunch>(launchPath);
@@ -497,6 +499,29 @@ internal sealed partial class ConductorFollowSession
             else AppendJournal(entry);
         }
         if (journal.Keys.Any(id => !retained.Contains(id))) throw new IOException("Missing journal response.");
+    }
+
+    private static void ValidateRetainedSource(string directory, ConductorFollowEventIdentity identity,
+        ConductorFollowState state)
+    {
+        // Old prelaunch refusals need their own immutable source, not today's queue or authority.
+        var source = Read<ConductorFollowRetainedSource>(Path.Combine(directory, "source.json"), 64 * 1024);
+        if (identity.ObligationKey is not { Length: > 0 and <= 1024 } key || key.Any(char.IsControl)
+            || !StoppedWorkJudgmentKey.TryParse(key, out var repository, out var tag, out var attempt, out var stage)
+            || repository != state.Repository
+            || key != StoppedWorkJudgmentKey.For(repository, tag, attempt, stage)
+            || source.ObligationId != identity.ObligationId || source.IdempotencyKey != key
+            || source.Owner != state.Holder || source.Adapter != identity.SourceAdapter
+            || source.Adapter is not (StoppedWorkJudgmentKey.Adapter or StoppedWorkJudgmentKey.ProviderRoute
+                or "claude-subscription-cli")
+            || source.AdapterCapability != identity.SourceCapability
+            || source.AdapterCapability != StoppedWorkJudgmentKey.Capability
+            || !Enum.IsDefined(source.Status)
+            || source.Context is not { } context || context.Repository != repository
+            || context.Tag != tag || context.AttemptId != attempt || context.Stage != stage
+            || !Enum.IsDefined(context.HaltCause) || !Enum.IsDefined(context.State)
+            || StoppedWorkAdviceEvidence.Hash(context) != identity.ContextSha256)
+            throw new IOException("Retained event source identity drifted.");
     }
 
     private static ConductorFollowResponse ReadResponse(string path, ConductorFollowEventIdentity identity, ConductorFollowState state)

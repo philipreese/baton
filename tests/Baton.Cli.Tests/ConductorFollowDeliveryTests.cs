@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Baton.Accounting;
 using Baton.Cli.Daemon;
 using Baton.Cli.Tests.Daemon;
@@ -134,6 +135,13 @@ public sealed class ConductorFollowDeliveryTests
         Assert.True(File.Exists(fixture.EventEvidencePath("never-launched", "identity.json")));
         Assert.False(File.Exists(fixture.EventEvidencePath("never-launched", "launch.json")));
 
+        // A retained refusal remains coherent even after its live source is obsolete.
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = snapshot.Items.Select(item => item.Tag == "never-launched"
+                ? item with { Halted = false, State = QueueItemState.Done, StoppedWorkJudgment = null }
+                : item).ToList(),
+        }, Ct);
         ProjectCeilingStore.Set(fixture.Workspace, ProjectCeiling.Unrestricted, fixture.CeilingPath);
         var delivered = await fixture.FollowAsync("real-delivery");
         var replay = await fixture.FollowAsync("real-delivery");
@@ -143,6 +151,78 @@ public sealed class ConductorFollowDeliveryTests
         Assert.Equal(delivered.GetProperty("receipt").GetString(), replay.GetProperty("receipt").GetString());
         Assert.Single(fixture.Calls);
         Assert.NotNull(await fixture.Store.ReadAsync(fixture.Key("real-delivery"), Ct));
+    }
+
+    [Theory]
+    [InlineData("foreign-key", false)]
+    [InlineData("foreign-key", true)]
+    [InlineData("null-adapter", false)]
+    [InlineData("null-adapter", true)]
+    [InlineData("foreign-adapter", false)]
+    [InlineData("foreign-adapter", true)]
+    [InlineData("mismatched-adapter", false)]
+    [InlineData("mismatched-key", false)]
+    [InlineData("source-key", false)]
+    [InlineData("source-tag", false)]
+    [InlineData("source-attempt", false)]
+    [InlineData("source-stage", false)]
+    [InlineData("source-context", false)]
+    [InlineData("source-capability", false)]
+    public async Task Corrupt_marker_free_original_identity_freezes_delivery_and_replay(string change, bool replay)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        await fixture.HaltAsync("never-launched", notify: false);
+        await fixture.HaltAsync("real-delivery", notify: false);
+        await fixture.Scheduler().ReconcileStoppedWorkAdviceAsync(Ct);
+        var refused = await fixture.FollowWithAdmissionAsync("never-launched", (_, _) =>
+        {
+            ProjectCeilingStore.Revoke(fixture.Workspace, fixture.CeilingPath);
+            return Task.CompletedTask;
+        });
+        Assert.Equal("refused", refused.Status);
+        var identityPath = fixture.EventEvidencePath("never-launched", "identity.json");
+        var sourcePath = fixture.EventEvidencePath("never-launched", "source.json");
+        var originalSource = File.ReadAllText(sourcePath);
+        Assert.Null(JsonNode.Parse(File.ReadAllText(identityPath))!["sessionId"]);
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(identityPath)!, "launch.json")));
+        ProjectCeilingStore.Set(fixture.Workspace, ProjectCeiling.Unrestricted, fixture.CeilingPath);
+        if (replay)
+            Assert.Equal("delivered", (await fixture.FollowAsync("real-delivery")).GetProperty("status").GetString());
+
+        var identity = JsonNode.Parse(File.ReadAllText(identityPath))!;
+        var source = JsonNode.Parse(originalSource)!;
+        switch (change)
+        {
+            case "foreign-key":
+                identity["obligationKey"] = StoppedWorkJudgmentKey.For("github.com/foreign/repository",
+                    "never-launched", new FleetAttemptId("attempt-never-launched"), WorkStage.Review);
+                break;
+            case "null-adapter": identity["sourceAdapter"] = null; break;
+            case "foreign-adapter": identity["sourceAdapter"] = "foreign-adapter"; break;
+            case "mismatched-adapter": identity["sourceAdapter"] = "claude-subscription-cli"; break;
+            case "mismatched-key": identity["obligationKey"] = fixture.Key("different"); break;
+            case "source-key": source["idempotencyKey"] = fixture.Key("different"); break;
+            case "source-tag": source["context"]!["tag"] = "different"; break;
+            case "source-attempt": source["context"]!["attemptId"] = JsonSerializer.SerializeToNode(new FleetAttemptId("different")); break;
+            case "source-stage": source["context"]!["stage"] = (int)WorkStage.Implement; break;
+            case "source-context": source["context"]!["terminalOutcome"] = "different"; break;
+            case "source-capability": source["adapterCapability"] = "foreign-capability"; break;
+            default: throw new InvalidOperationException(change);
+        }
+        File.WriteAllText(identityPath, identity.ToJsonString());
+        File.WriteAllText(sourcePath, source.ToJsonString());
+        if (!change.StartsWith("source-", StringComparison.Ordinal))
+        {
+            File.WriteAllText(sourcePath, originalSource);
+            Assert.Equal(originalSource, File.ReadAllText(sourcePath));
+        }
+
+        var result = await fixture.FollowAsync("real-delivery");
+        Assert.Equal("uncertain", result.GetProperty("status").GetString());
+        Assert.Equal(replay ? 1 : 0, fixture.Calls.Count);
+        Assert.Equal("uncertain", (await fixture.FollowAsync("real-delivery")).GetProperty("status").GetString());
+        Assert.Equal(replay ? 1 : 0, fixture.Calls.Count);
     }
 
     [Theory]
