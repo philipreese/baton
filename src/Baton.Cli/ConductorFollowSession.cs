@@ -672,6 +672,8 @@ internal sealed partial class ConductorFollowSession
         var complete = false;
         foreach (var line in lines)
         {
+            if (complete && !string.IsNullOrWhiteSpace(line) && !parser.IsPostResponseTerminalLine(line))
+                return false;
             if (parser.TryParseSessionId(line, out var parsedSession))
             {
                 if (thread || parsedSession != sessionId) return false;
@@ -685,13 +687,16 @@ internal sealed partial class ConductorFollowSession
                     if (!thread || turn) return false;
                     turn = true;
                 }
-                else if (progress?.Kind == "result" && progress.Text != "success") return false;
+                else if (progress?.Kind == "result")
+                {
+                    if (progress.Text != "success" || !turn || complete) return false;
+                    complete = true;
+                }
             }
 
             if (parser.IsPostResponseTerminalLine(line))
             {
-                if (!turn || complete) return false;
-                complete = true;
+                if (!turn) return false;
             }
         }
         return thread && turn && complete;

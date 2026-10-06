@@ -59,11 +59,12 @@ public sealed partial class WorkItemAdvancer
     }
 
     internal async Task ValidateReplacementReviewHeadAsync(
-        QueueItem source, QueueReplacementReviewAction action, CancellationToken cancellationToken)
+        QueueItem source, QueueReplacementReviewAction action, CancellationToken cancellationToken,
+        bool requireCurrentStage = true)
     {
         if (source.Repository != action.Repository || source.Workspace != action.Workspace
             || source.Branch != action.Branch || source.PullRequest != action.PullRequest
-            || source.Stage != action.SourceStage || source.Retirement is not null
+            || requireCurrentStage && source.Stage != action.SourceStage || source.Retirement is not null
             || source.CancelledAt is not null)
             throw new ConductorObligationStoreException("Replacement review queue or workspace identity changed.");
         if (!Directory.Exists(source.Workspace))
@@ -88,6 +89,23 @@ public sealed partial class WorkItemAdvancer
         && verdict.ReviewedRef is { Length: 40 } reviewed
         && reviewed.All(Uri.IsHexDigit)
         && string.Equals(reviewed, head, StringComparison.OrdinalIgnoreCase);
+
+    internal async Task ValidateReplacementReviewCompletionAsync(
+        QueueItem item, QueueReplacementReviewAction action, CancellationToken cancellationToken)
+    {
+        if (action.ReplacementAttemptId is null || action.ReplacementRoomDirectory is null
+            || string.IsNullOrEmpty(action.CompletionProof))
+            throw new ConductorObligationStoreException("Replacement completion identity is missing.");
+        var sentinel = await TerminalSentinelWriter.TryReadAsync(action.ReplacementRoomDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        var path = sentinel is null ? null : FindVerdict(sentinel);
+        var verdict = path is null ? null : TryReadVerdict(path);
+        if (verdict is null || !IsExactHeadVerdict(verdict, action.HeadSha)
+            || CompletionProof(action, File.ReadAllBytes(path!), verdict) != action.CompletionProof)
+            throw new ConductorObligationStoreException("Replacement completion proof no longer matches the exact-head verdict.");
+        await ValidateReplacementReviewHeadAsync(item, action, cancellationToken, requireCurrentStage: false)
+            .ConfigureAwait(false);
+    }
 
     internal static string RenderReplacementReviewBrief(QueueItem item, QueueReplacementReviewAction action)
     {
@@ -134,14 +152,7 @@ public sealed partial class WorkItemAdvancer
             return item;
         }
 
-        var verdictDigest = Convert.ToHexString(SHA256.HashData(verdictBytes)).ToLowerInvariant();
-        var evidenceDigest = action.EvidenceDigest ?? action.AdviceDigest ?? string.Empty;
-        var proofPayload = string.Join('|', ReplacementReviewEvidenceProvenance.For(action),
-            action.ObligationKey, evidenceDigest,
-            action.ReplacementAttemptId.Value.Value, action.ReplacementRoomDirectory,
-            action.HeadSha, verdictDigest, verdict.Decision);
-        var proof = "replacement-review-sha256:"
-            + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(proofPayload))).ToLowerInvariant();
+        var proof = CompletionProof(action, verdictBytes, verdict);
         var updatedAction = action with { CompletionProof = proof };
         var changed = await TryMarkAsync(item, current => current with
         {
@@ -149,5 +160,17 @@ public sealed partial class WorkItemAdvancer
         }).ConfigureAwait(false);
         if (changed) ReplacementReviewAfterProofPersisted?.Invoke();
         return changed ? item with { ReplacementReviewAction = updatedAction } : null;
+    }
+
+    private static string CompletionProof(QueueReplacementReviewAction action, byte[] verdictBytes, ReviewVerdict verdict)
+    {
+        var verdictDigest = Convert.ToHexString(SHA256.HashData(verdictBytes)).ToLowerInvariant();
+        var evidenceDigest = action.EvidenceDigest ?? action.AdviceDigest ?? string.Empty;
+        var proofPayload = string.Join('|', ReplacementReviewEvidenceProvenance.For(action),
+            action.ObligationKey, evidenceDigest,
+            action.ReplacementAttemptId!.Value.Value, action.ReplacementRoomDirectory,
+            action.HeadSha, verdictDigest, verdict.Decision);
+        return "replacement-review-sha256:"
+            + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(proofPayload))).ToLowerInvariant();
     }
 }

@@ -15,8 +15,13 @@ internal static class ReplacementReviewEvidenceProvenance
     internal const string LegacyAdvice = "legacy-advice";
     internal const string CompletedFollow = "completed-follow";
 
-    internal static string For(QueueReplacementReviewAction action) =>
-        action.EvidenceProvenance ?? LegacyAdvice;
+    internal static string For(QueueReplacementReviewAction action) => action.EvidenceProvenance switch
+    {
+        null or LegacyAdvice when action.EvidenceDigest is null && action.EvidenceDirectory is null => LegacyAdvice,
+        CompletedFollow when action.AdviceDigest == string.Empty
+            && action.EvidenceDigest is { Length: > 0 } && action.EvidenceDirectory is { Length: > 0 } => CompletedFollow,
+        _ => throw new ConductorObligationStoreException("Replacement review evidence provenance is missing or conflicting."),
+    };
 }
 
 internal sealed record ReplacementReviewEvidenceInput(
@@ -35,6 +40,11 @@ internal static class ReplacementReviewEvidenceValidator
     internal static void ValidateCompletedFollow(
         ConductorObligation obligation, QueueItem source, ReplacementReviewEvidenceInput evidence,
         string holder, string expectedHead, string? claimGeneration = null)
+        => ValidateCompletedFollowCore(obligation, source, evidence, holder, expectedHead, claimGeneration, null);
+
+    private static void ValidateCompletedFollowCore(
+        ConductorObligation obligation, QueueItem source, ReplacementReviewEvidenceInput evidence,
+        string holder, string expectedHead, string? claimGeneration, string? completionProof)
     {
         if (evidence.Provenance != ReplacementReviewEvidenceProvenance.CompletedFollow
             || evidence.Digest.Length == 0 || evidence.Decision.Decision != "ReplaceReview"
@@ -51,6 +61,8 @@ internal static class ReplacementReviewEvidenceValidator
             || evidence.Decision.ConfigurationSha256.Length != 64
             || evidence.Digest != evidence.Decision.ResponseSha256
             || obligation.Status is not (ConductorObligationStatus.Pending or ConductorObligationStatus.Submitted)
+                && (obligation.Status != ConductorObligationStatus.ActionObserved
+                    || string.IsNullOrEmpty(completionProof) || obligation.ActionProof != completionProof)
             || obligation.TransportReceipt is not null)
             throw new ConductorObligationStoreException("Completed follow evidence is not an authentic replacement decision.");
 
@@ -58,7 +70,7 @@ internal static class ReplacementReviewEvidenceValidator
         var retained = ConductorFollowSession.ReadDecisionEvidence(directory);
         if (retained != evidence.Decision)
             throw new ConductorObligationStoreException("Completed follow decision evidence changed.");
-        ValidateFiles(directory, evidence.Decision, obligation, holder);
+        ValidateFiles(directory, evidence.Decision, obligation, source, holder);
     }
 
     internal static void ValidateCompletedFollowAction(
@@ -70,15 +82,15 @@ internal static class ReplacementReviewEvidenceValidator
             throw new ConductorObligationStoreException("Replacement review follow provenance is incomplete.");
         var decision = ConductorFollowSession.ReadDecisionEvidence(action.EvidenceDirectory)
             ?? throw new ConductorObligationStoreException("Completed follow decision evidence is missing.");
-        ValidateCompletedFollow(obligation, source,
+        ValidateCompletedFollowCore(obligation, source,
             new ReplacementReviewEvidenceInput(ReplacementReviewEvidenceProvenance.CompletedFollow,
                 action.EvidenceDigest, action.EvidenceDirectory, decision), action.Holder, action.HeadSha,
-            claimGeneration);
+            claimGeneration, action.CompletionProof);
     }
 
     private static void ValidateFiles(
         string directory, ConductorFollowDecisionEvidence decision,
-        ConductorObligation obligation, string holder)
+        ConductorObligation obligation, QueueItem queueSource, string holder)
     {
         try
         {
@@ -97,7 +109,15 @@ internal static class ReplacementReviewEvidenceValidator
             var sourceDigest = DigestFile(source);
             var receipt = File.ReadAllText(Path.Combine(directory, "receipt.txt"));
             var requestDigest = DigestFile(Path.Combine(directory, "..", "..", "request.json"));
+            var registration = JsonSerializer.Deserialize<ConductorFollowAttachment>(File.ReadAllText(
+                Path.Combine(directory, "..", "..", "..", "registration.json")), Json)
+                ?? throw new IOException("Missing follow attachment.");
             if (identity.ObligationKey != decision.ObligationKey || identity.ObligationId != decision.ObligationId
+                || !registration.Attached || registration.Id != queueSource.StoppedWorkJudgment?.FollowAttachmentId
+                || registration.Repository != decision.SourceRepository || registration.Holder != holder
+                || registration.ClaimGeneration != decision.ClaimGeneration
+                || registration.RequestSha256 != decision.RequestSha256
+                || Path.GetFullPath(registration.SessionDirectory) != Path.GetFullPath(Path.Combine(directory, "..", ".."))
                 || identity.Repository != decision.SourceRepository
                 || identity.ContextSha256 != decision.SourceContextSha256
                 || identity.ClaimGeneration != decision.ClaimGeneration

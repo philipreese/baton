@@ -146,12 +146,8 @@ internal static class ReplacementReviewConductorCommand
         // Automatic admission is the one narrow exception to advice-only routing: a retained
         // typed MissingVerdict source plus Recommend may consume this existing action slot, but
         // neither explanation text nor any other halt or choice is authority.
-        if (evidence is null && automatic
-            && (intent.HaltCause != StoppedWorkHaltCause.MissingVerdict
-                || intent.Stage is not (WorkStage.Review or WorkStage.ReReview)
-                || !intent.AutomaticMissingVerdictReplacementReviewEligible
-                || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository)
-                || view!.Response!.Decision.Choice != StoppedWorkAdviceChoice.Recommend))
+        if (automatic) ValidateAutomaticAuthority(source, repository);
+        if (automatic && evidence is null && view!.Response!.Decision.Choice != StoppedWorkAdviceChoice.Recommend)
             throw new ConductorObligationStoreException(
                 "Automatic replacement review requires an opted-in MissingVerdict source and a retained Recommend advice choice.");
 
@@ -216,10 +212,16 @@ internal static class ReplacementReviewConductorCommand
                 throw new ConductorObligationStoreException("Replacement review source or queue hold changed before admission.");
             // Revocation observed after asynchronous source validation must refuse new automatic
             // admission before writing a brief, retaining a slot or consuming the next round.
-            if (automatic
-                && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository))
-                throw new ConductorObligationStoreException(
-                    "Automatic replacement review opt-in was revoked before admission.");
+            if (automatic) ValidateAutomaticAuthority(current, repository);
+            if (evidence is not null)
+            {
+                var currentClaim = ConductorClaimStore.GetClaimAsync(identity, batonRoot, cancellationToken)
+                    .GetAwaiter().GetResult();
+                if (currentClaim?.Holder != holder)
+                    throw new ConductorObligationStoreException("Conductor ownership changed before admission.");
+                ReplacementReviewEvidenceValidator.ValidateCompletedFollow(obligation, current, evidence,
+                    holder, expectedHead, ConductorClaimStore.GetClaimGeneration(currentClaim));
+            }
             var brief = WorkItemAdvancer.RenderReplacementReviewBrief(current, action);
             Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
             QueueCommand.WriteSpecFileAtomically(current.SpecFile, brief);
@@ -285,6 +287,17 @@ internal static class ReplacementReviewConductorCommand
                 || action.EvidenceDirectory != evidence.EvidenceDirectory))
             throw new ConductorObligationConflictException(obligation.IdempotencyKey,
                 "completed follow evidence differs from the retained action slot");
+    }
+
+    internal static void ValidateAutomaticAuthority(QueueItem source, string repository)
+    {
+        if (source.Repository != repository || source.StoppedWorkJudgment is not { } intent
+            || intent.HaltCause != StoppedWorkHaltCause.MissingVerdict
+            || intent.Stage is not (WorkStage.Review or WorkStage.ReReview)
+            || !intent.AutomaticMissingVerdictReplacementReviewEligible
+            || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository))
+            throw new ConductorObligationStoreException(
+                "Automatic replacement review requires an opted-in eligible MissingVerdict source.");
     }
 
     private static void RequireSameSource(QueueReplacementReviewAction action, QueueItem source)

@@ -50,6 +50,10 @@ public sealed partial class QueueSchedulerService
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (claim?.Holder != action.Holder)
             throw new ConductorObligationStoreException("Conductor ownership changed.");
+        if (snapshot.Held)
+            throw new ConductorObligationStoreException("The queue is held.");
+        if (action.Origin == QueueReplacementReviewOrigin.Automatic)
+            ReplacementReviewConductorCommand.ValidateAutomaticAuthority(current, action.Repository);
         if (ReplacementReviewEvidenceProvenance.For(action)
             == ReplacementReviewEvidenceProvenance.CompletedFollow)
             ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
@@ -107,6 +111,9 @@ public sealed partial class QueueSchedulerService
         foreach (var item in snapshot.Items.Where(item => item.ReplacementReviewAction is not null))
         {
             var action = item.ReplacementReviewAction!;
+            string provenance;
+            try { provenance = ReplacementReviewEvidenceProvenance.For(action); }
+            catch (ConductorObligationStoreException) { continue; }
             if (action.Origin == QueueReplacementReviewOrigin.Automatic
                 && action.ReplacementAttemptId is null && item.State == QueueItemState.Queued)
             {
@@ -138,27 +145,36 @@ public sealed partial class QueueSchedulerService
                 var authentic = false;
                 if (obligation is not null && obligation.Owner == action.Holder)
                 {
-                    if (ReplacementReviewEvidenceProvenance.For(action)
-                        == ReplacementReviewEvidenceProvenance.CompletedFollow)
+                    try
                     {
-                        try
+                        if (snapshot.Held) continue;
+                        if (action.Origin == QueueReplacementReviewOrigin.Automatic)
+                            ReplacementReviewConductorCommand.ValidateAutomaticAuthority(item, action.Repository);
+                        var identity = RepositoryIdentity.From("https://" + action.Repository, null);
+                        var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                        if (claim?.Holder != action.Holder) continue;
+                        await _advancer.ValidateReplacementReviewCompletionAsync(item, action, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow)
                         {
                             ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
-                                obligation, item, action);
+                                obligation, item, action, ConductorClaimStore.GetClaimGeneration(claim));
                             authentic = obligation.Status is ConductorObligationStatus.Pending
                                 or ConductorObligationStatus.Submitted
                                 or ConductorObligationStatus.ActionObserved;
                         }
-                        catch (ConductorObligationStoreException)
+                        else
                         {
-                            authentic = false;
+                            authentic = obligation.TransportReceipt == action.AdviceDigest
+                                && obligation.Status is ConductorObligationStatus.TransportAcknowledged
+                                    or ConductorObligationStatus.ActionObserved;
                         }
                     }
-                    else
+                    catch (Exception ex) when (ex is ConductorObligationStoreException or IOException
+                        or UnauthorizedAccessException)
                     {
-                        authentic = obligation.TransportReceipt == action.AdviceDigest
-                            && obligation.Status is ConductorObligationStatus.TransportAcknowledged
-                                or ConductorObligationStatus.ActionObserved;
+                        authentic = false;
                     }
                 }
                 if (authentic)
