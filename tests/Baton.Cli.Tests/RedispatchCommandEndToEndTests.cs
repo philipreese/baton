@@ -1704,6 +1704,65 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Redispatch_children_clear_an_opted_in_parents_correction_transport()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-agy-correction-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Weigh the options for X.");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = new Dictionary<string, WorkerBindingConfigEntry>(
+                await WorkerBindingConfigParser.LoadFromFileAsync(
+                    parentBindingsPath, TestContext.Current.CancellationToken));
+            parentBindings["advise"] = parentBindings["advise"] with
+            {
+                Adapter = "agy",
+                StreamJson = true,
+                EnableAgyCorrection = true,
+            };
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                parentBindings, parentBindingsPath, TestContext.Current.CancellationToken);
+
+            var adapters = new Dictionary<string, IWorkerAdapter>(Adapters)
+            {
+                ["agy"] = Adapters["fake"],
+                ["claude"] = Adapters["fake"],
+            };
+
+            var bareRoom = Path.Combine(testRoot, "bare-child");
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, bareRoom), adapters, TestContext.Current.CancellationToken);
+
+            var swappedRoom = Path.Combine(testRoot, "swapped-child");
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, swappedRoom, Adapter: "claude"),
+                adapters, TestContext.Current.CancellationToken);
+
+            var amendedSpecPath = await WriteSpecAsync(testRoot, "Reconsider the options for X.");
+            var amendedRoom = Path.Combine(testRoot, "amended-child");
+            await RedispatchCommand.ExecuteAsync(
+                new RedispatchOptions(parentRoom, amendedRoom, SpecFilePath: amendedSpecPath),
+                adapters, TestContext.Current.CancellationToken);
+
+            foreach (var childRoom in new[] { bareRoom, swappedRoom, amendedRoom })
+            {
+                var childBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                    Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+                Assert.False(childBindings["advise"].EnableAgyCorrection);
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static async Task<string> DispatchTerminalParentAsync(
         string testRoot, string spec, string adapter = "fake", TimeSpan? timeout = null, string? label = null,
         string? workstream = null, IReadOnlyList<string>? skills = null, string? model = null,

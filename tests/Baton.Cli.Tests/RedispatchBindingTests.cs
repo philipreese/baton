@@ -63,6 +63,20 @@ public class RedispatchBindingTests
     }
 
     [Fact]
+    public void Redispatch_does_not_inherit_the_per_execution_agy_correction_opt_in()
+    {
+        var parent = ParentEntry(adapter: "agy") with { EnableAgyCorrection = true };
+
+        var bare = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "bare-child"));
+        var swapped = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "swapped-child", Adapter: "codex"));
+
+        Assert.False(bare.EnableAgyCorrection);
+        Assert.False(swapped.EnableAgyCorrection);
+    }
+
+    [Fact]
     public void A_fresh_binding_never_inherits_the_parents_resumed_session_state()
     {
         var parent = ParentEntry();

@@ -405,6 +405,8 @@ public static class RedispatchCommand
             // A redispatch is a fresh worker turn, never a continuation of the parent's own session.
             SessionId = null,
             ResumeSession = false,
+            // Per-execution transport opt-ins do not cross the fresh redispatch boundary.
+            EnableAgyCorrection = false,
         };
 
         var stamped = WithResolvedStamps(inherited, parentEntry, options);
