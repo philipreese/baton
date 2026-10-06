@@ -59,6 +59,7 @@ public sealed partial class WorkItemAdvancer
     private readonly QueueFleetEventOutbox _fleetOutbox;
     private readonly ConductorObligationStore _conductorObligations;
     private readonly Func<DateTimeOffset> _requiredCheckClock;
+    internal Func<QueueItem, CancellationToken, Task>? OwnedHaltCommitted { get; set; }
 
     public WorkItemAdvancer()
         : this(
@@ -957,7 +958,8 @@ public sealed partial class WorkItemAdvancer
             OriginatingPullRequestRecoveryProofDigest = null,
             Halted = true,
             ReadinessMutationClaim = null,
-            StoppedWorkJudgment = stoppedJudgment ?? existing.StoppedWorkJudgment,
+            StoppedWorkJudgment = stoppedJudgment is null ? existing.StoppedWorkJudgment
+                : stoppedJudgment with { FollowAttachmentId = ConductorFollowSession.AttachmentAtHalt(existing) },
             OwnedTask = existing.OwnedTask is null ? null : existing.OwnedTask with
             {
                 Blocked = new TaskBlockedDisposition(
@@ -966,6 +968,13 @@ public sealed partial class WorkItemAdvancer
             },
         }).ConfigureAwait(false);
 
+        if (failed && stoppedJudgment?.Key is not null
+            && OwnedHaltCommitted is not null)
+        {
+            var committed = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var source = committed.Items.Single(row => row.Tag == item.Tag);
+            await OwnedHaltCommitted(source, cancellationToken).ConfigureAwait(false);
+        }
         return failed ? new QueueDecisionEntry(
             now, item.Tag, QueueDecisionEntry.Failed, transition.Reason,
             LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room) : null;

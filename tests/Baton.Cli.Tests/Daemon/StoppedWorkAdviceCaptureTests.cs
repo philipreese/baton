@@ -25,11 +25,18 @@ public sealed class StoppedWorkAdviceCaptureTests
         public List<string[]> Calls { get; } = [];
         public int? FailFromCall { get; set; }
         public Func<bool>? RefuseWhen { get; set; }
+        public Func<CancellationToken, Task>? BeforeRunAsync { get; set; }
         public string PullRequestState { get; set; } = "OPEN";
         private bool _draft = true;
 
-        public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args,
+        public async Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args,
             CancellationToken cancellationToken)
+        {
+            if (BeforeRunAsync is not null) await BeforeRunAsync(cancellationToken);
+            return await RunCoreAsync(args);
+        }
+
+        private Task<GhCliResult> RunCoreAsync(IReadOnlyList<string> args)
         {
             Calls.Add(args.ToArray());
             if (FailFromCall is { } failFromCall && Calls.Count >= failFromCall
@@ -146,7 +153,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     entered.TrySetResult(true);
                     return Task.FromResult(Response(obligation, request));
                 });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(judgment.Key!, Ct))?.Status
@@ -214,17 +221,17 @@ public sealed class StoppedWorkAdviceCaptureTests
                     return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
                 });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () => (await ReadBackAsync()).ReplacementReviewAction is not null);
             Assert.Equal(1, adviceCalls);
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(1, launches);
             Assert.Equal(QueueItemState.Launched, (await ReadBackAsync()).State);
 
             await WaitForAsync(async () =>
             {
-                await scheduler.TickOnceAsync(Ct);
+                await NotifyAndTickAsync(scheduler);
                 return (await ReadBackAsync()).Stage == WorkStage.Ready;
             });
             var recovered = await ReadBackAsync();
@@ -239,7 +246,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Action = recovered.ReplacementReviewAction
                 }));
             Assert.NotNull(recovered.ReplacementReviewAction?.CompletionProof);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(ConductorObligationStatus.ActionObserved,
                 (await store.ReadAsync(intent.Key!, Ct))?.Status);
         }
@@ -290,7 +297,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Interlocked.Increment(ref adviceCalls);
                     return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
                 });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
             {
                 var obligation = await store.ReadAsync(intent.Key!, Ct);
@@ -311,7 +318,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                         ObligationKey: intent.Key, Action: "replace-review", ExpectedHead: Head),
                     TextWriter.Null, home, advancer, store, Ct, automatic: true));
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await scheduler.DrainStoppedWorkAdviceAsync();
             Assert.Equal(1, adviceCalls);
             Assert.Equal(0, launches);
@@ -354,7 +361,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
@@ -395,37 +402,55 @@ public sealed class StoppedWorkAdviceCaptureTests
             var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
             var store = Store();
             var adviceCalls = 0;
-            var scheduler = Scheduler(store, advancer, (obligation, request, _, _, _) =>
+            var providerBarrier = new OperationBarrier();
+            var scheduler = Scheduler(store, advancer, async (obligation, request, _, _, token) =>
             {
                 Interlocked.Increment(ref adviceCalls);
-                return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+                await providerBarrier.HoldAsync(token);
+                return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
             });
 
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = true }, Ct);
-            await scheduler.TickOnceAsync(Ct);
+            await CaptureReleaseAndJoinAsync(scheduler, providerBarrier);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
-            await scheduler.DrainStoppedWorkAdviceAsync();
             Assert.Equal(1, adviceCalls);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
 
             // Replay must not stale already checked advice on a new forge read. After the fix,
             // this same first failing operation belongs to automatic action admission instead.
-            gh.FailFromCall = gh.Calls.Count + 1;
+            var resumeBarrier = new OperationBarrier();
+            gh.BeforeRunAsync = resumeBarrier.HoldAsync;
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = false }, Ct);
-            await scheduler.TickOnceAsync(Ct);
+            Task resumed;
+            try
+            {
+                await NotifyAsync(scheduler);
+                await resumeBarrier.Entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                resumed = CaptureStoppedWorkAdviceTask(scheduler);
+                Assert.False(resumed.IsCompleted);
+                // No provider runs on replay: refuse the forge operation only after capturing it.
+                gh.FailFromCall = gh.Calls.Count + 1;
+            }
+            finally { resumeBarrier.Release.TrySetResult(); }
             var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
             await WaitForAsync(() => Task.FromResult(
                 File.Exists(Path.Combine(evidenceDirectory, "source-stale"))
                 || File.Exists(Path.Combine(evidenceDirectory, "automatic-admission-refused"))));
-            await scheduler.DrainStoppedWorkAdviceAsync();
+            await JoinStoppedWorkAdviceAsync(resumed);
+            gh.BeforeRunAsync = null;
 
             Assert.Equal(StoppedWorkJudgmentState.Available,
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
             Assert.True(File.Exists(Path.Combine(
                 store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!), "automatic-admission-refused")));
+            Assert.Equal(1, adviceCalls);
+            var callsAfterRefusal = gh.Calls.Count;
+            await NotifyAndTickAsync(scheduler);
+            Assert.Equal(callsAfterRefusal, gh.Calls.Count);
+            await scheduler.DrainStoppedWorkAdviceAsync();
         }
         finally
         {
@@ -452,21 +477,22 @@ public sealed class StoppedWorkAdviceCaptureTests
             var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
             var store = Store();
             var adviceCalls = 0;
-            var scheduler = Scheduler(store, advancer, (obligation, request, _, _, _) =>
+            var providerBarrier = new OperationBarrier();
+            var scheduler = Scheduler(store, advancer, async (obligation, request, _, _, token) =>
             {
                 Interlocked.Increment(ref adviceCalls);
+                await providerBarrier.HoldAsync(token);
                 // The marker is written only after advice's source check completes. A failure
                 // triggered by it reaches the real action-admission branch, not that source check.
                 gh.RefuseWhen = () => File.Exists(Path.Combine(
                     store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!), "source-checked"));
-                return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+                return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await CaptureReleaseAndJoinAsync(scheduler, providerBarrier);
             var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
             await WaitForAsync(() => Task.FromResult(File.Exists(
                 Path.Combine(evidenceDirectory, "automatic-admission-refused"))));
-            await scheduler.DrainStoppedWorkAdviceAsync();
             var refused = await ReadBackAsync();
             Assert.Null(refused.ReplacementReviewAction);
             Assert.Equal(1, adviceCalls);
@@ -474,8 +500,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
 
             var callsAfterRefusal = gh.Calls.Count;
-            await scheduler.TickOnceAsync(Ct);
-            await scheduler.DrainStoppedWorkAdviceAsync();
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(callsAfterRefusal, gh.Calls.Count);
             Assert.Equal(1, adviceCalls);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
@@ -492,6 +517,7 @@ public sealed class StoppedWorkAdviceCaptureTests
             Assert.InRange(nextTrigger!.Length, 1, 4096);
             Assert.Contains("manual", nextTrigger, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("head", nextTrigger, StringComparison.OrdinalIgnoreCase);
+            await scheduler.DrainStoppedWorkAdviceAsync();
         }
         finally
         {
@@ -517,16 +543,28 @@ public sealed class StoppedWorkAdviceCaptureTests
             var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
             var store = Store();
             var adviceCalls = 0;
+            var providerBarrier = new OperationBarrier();
             var first = Scheduler(store, advancer, async (obligation, request, _, _, _) =>
             {
                 Interlocked.Increment(ref adviceCalls);
+                await providerBarrier.HoldAsync(Ct);
                 await EnableStoppedWorkAdviceAsync();
                 return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
             });
-            await first.TickOnceAsync(Ct);
+            // The provider rewrites settings using File.Create. A concurrent tick's async settings
+            // reader can deny that write on Windows, leaving a launch without a response.
+            await CaptureReleaseAndJoinAsync(first, providerBarrier);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
+            await first.TickOnceAsync(Ct);
+            var directory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
+            Assert.True(File.Exists(Path.Combine(directory, "source-checked")));
+            Assert.False(File.Exists(Path.Combine(directory, "source-stale")));
+            Assert.True(File.Exists(Path.Combine(directory, "response.json")));
+            Assert.True(File.Exists(Path.Combine(directory, "legacy-notification-handled.json")));
+            Assert.True(StoppedWorkAdviceSettings.IsEnabled(Repository));
+            Assert.False(StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(Repository));
             await first.DrainStoppedWorkAdviceAsync();
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
 
@@ -536,7 +574,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 Interlocked.Increment(ref adviceCalls);
                 throw new InvalidOperationException("Retained advice must be replayed without another model call.");
             });
-            await restarted.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(restarted);
             await WaitForAsync(async () => (await ReadBackAsync()).ReplacementReviewAction is not null);
             Assert.Equal(1, adviceCalls);
             Assert.Equal(QueueReplacementReviewOrigin.Automatic,
@@ -547,6 +585,67 @@ public sealed class StoppedWorkAdviceCaptureTests
         {
             DirectoryCleanup.DeleteRecursively(home);
         }
+    }
+
+    [Fact]
+    public async Task Restart_fixture_settings_reader_overlap_leaves_first_advice_uncertain()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await EnableAutomaticReplacementReviewAsync();
+            await ConductorClaimStore.ClaimAsync(Identity, "conductor-fixture", cancellationToken: Ct);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room, new FleetAttemptId("restart-settings-overlap"));
+            await MakeReplacementEligibleAsync();
+            var advancer = new WorkItemAdvancer(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
+            await advancer.AdvanceAsync(Now, Ct);
+            var intent = Assert.IsType<StoppedWorkJudgment>((await ReadBackAsync()).StoppedWorkJudgment);
+            var store = Store();
+            var barrier = new OperationBarrier();
+            Exception? settingsFailure = null;
+            var calls = 0;
+            using var scheduler = Scheduler(store, advancer, async (obligation, request, _, _, token) =>
+            {
+                calls++;
+                await barrier.HoldAsync(token);
+                try { await EnableStoppedWorkAdviceAsync(); }
+                catch (IOException ex) { settingsFailure = ex; throw; }
+                return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
+            });
+            Task pending;
+            try
+            {
+                await NotifyAsync(scheduler);
+                await barrier.Entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                pending = CaptureStoppedWorkAdviceTask(scheduler);
+                Assert.False(pending.IsCompleted);
+                // File.ReadAllTextAsync in TickOnceAsync uses this read-sharing mode. Hold its
+                // actual Windows sharing condition through the provider's settings write.
+                using var reader = new FileStream(BatonPaths.SettingsFile,
+                    FileMode.Open, FileAccess.Read, FileShare.Read);
+                barrier.Release.TrySetResult();
+                await JoinStoppedWorkAdviceAsync(pending);
+            }
+            finally { barrier.Release.TrySetResult(); }
+            Assert.IsAssignableFrom<IOException>(settingsFailure);
+            Assert.Equal(unchecked((int)0x80070020), settingsFailure!.HResult);
+            Assert.Equal(1, calls);
+            var directory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
+            Assert.True(File.Exists(Path.Combine(directory, "launch.json")));
+            Assert.Equal(intent, (await ReadBackAsync()).StoppedWorkJudgment);
+            Assert.True(File.Exists(Path.Combine(directory, "legacy-notification.json")));
+            Assert.False(File.Exists(Path.Combine(directory, "response.json")));
+            Assert.False(File.Exists(Path.Combine(directory, "source-checked")));
+            Assert.Equal(StoppedWorkJudgmentState.Uncertain,
+                (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
+            Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+            Assert.True(StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(Repository));
+            await scheduler.DrainStoppedWorkAdviceAsync();
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
     }
 
     [Fact]
@@ -573,11 +672,11 @@ public sealed class StoppedWorkAdviceCaptureTests
                 return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Hold));
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(1, calls);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
             await scheduler.DrainStoppedWorkAdviceAsync();
@@ -651,8 +750,8 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Interlocked.Increment(ref adviceCalls);
                     throw new InvalidOperationException("Advice is disabled for this repository.");
                 });
-            await scheduler.TickOnceAsync(Ct);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
+            await NotifyAndTickAsync(scheduler);
             var obligation = await store.ReadAsync(intent.Key!, Ct);
             Assert.Equal(ConductorObligationStatus.Pending, obligation?.Status);
             Assert.Equal("recorded-owner", obligation?.Owner);
@@ -712,7 +811,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Interlocked.Increment(ref calls);
                     return Task.FromResult(Response(obligation, request));
                 });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () => (await store.ReadAsync(intent.Key!, Ct))?.Status is
                 ConductorObligationStatus.Blocked or ConductorObligationStatus.TransportAcknowledged);
             await scheduler.DrainStoppedWorkAdviceAsync();
@@ -900,6 +999,19 @@ public sealed class StoppedWorkAdviceCaptureTests
         BatonPaths.ConductorObligationsFile,
         () => Now);
 
+    private static async Task NotifyAndTickAsync(QueueSchedulerService scheduler)
+    {
+        await NotifyAsync(scheduler);
+        await scheduler.TickOnceAsync(Ct);
+    }
+
+    private static async Task NotifyAsync(QueueSchedulerService scheduler)
+    {
+        var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+        foreach (var source in queue.Items.Where(item => item.Halted && item.StoppedWorkJudgment?.Key is not null))
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+    }
+
     private static QueueSchedulerService Scheduler(
         ConductorObligationStore store,
         WorkItemAdvancer advancer,
@@ -943,6 +1055,42 @@ public sealed class StoppedWorkAdviceCaptureTests
         }
 
         Assert.Fail("Timed out waiting for durable stopped-work advice state.");
+    }
+
+    private sealed class OperationBarrier
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task HoldAsync(CancellationToken token)
+        {
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(token);
+        }
+    }
+
+    private static async Task CaptureReleaseAndJoinAsync(QueueSchedulerService scheduler, OperationBarrier barrier)
+    {
+        Task pending;
+        try
+        {
+            await NotifyAsync(scheduler);
+            await barrier.Entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            pending = CaptureStoppedWorkAdviceTask(scheduler);
+            Assert.False(pending.IsCompleted);
+        }
+        finally { barrier.Release.TrySetResult(); }
+        await JoinStoppedWorkAdviceAsync(pending);
+    }
+
+    private static Task CaptureStoppedWorkAdviceTask(QueueSchedulerService scheduler) =>
+        Assert.IsAssignableFrom<Task>(typeof(QueueSchedulerService)
+            .GetField("_stoppedWorkTask", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(scheduler));
+
+    private static async Task JoinStoppedWorkAdviceAsync(Task pending)
+    {
+        await pending.WaitAsync(TimeSpan.FromSeconds(60), Ct);
     }
 
 }

@@ -54,6 +54,9 @@ public static class ConductorCommand
             ConductorVerb.Follow => ConductorFollowCommand.ExecuteAsync(
                 options.FollowRequestFile!, stdout, root, resolver, stdin ?? Console.In,
                 cancellationToken: cancellationToken, broker: broker),
+            ConductorVerb.Attach or ConductorVerb.Detach => ConductorFollowSession.SetAttachmentAsync(
+                options.FollowRequestFile!, options.Verb == ConductorVerb.Attach, stdout, root, resolver,
+                cancellationToken, broker),
             _ => throw new ArgumentOutOfRangeException(nameof(options)),
         };
     }

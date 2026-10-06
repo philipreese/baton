@@ -91,4 +91,7 @@ public sealed record StoppedWorkJudgment(
     [property: JsonPropertyName("automaticMissingVerdictReplacementReviewEligible")]
     bool AutomaticMissingVerdictReplacementReviewEligible = false,
     [property: JsonPropertyName("adviceEligibleAtHalt")]
-    bool AdviceEligibleAtHalt = false);
+    bool AdviceEligibleAtHalt = false,
+    [property: JsonPropertyName("followAttachmentId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? FollowAttachmentId = null);

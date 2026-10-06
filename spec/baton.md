@@ -8898,8 +8898,9 @@ This section defines the first bounded slice: a durable, auditable repository-cl
 ### Continuing conductor follow (#2628)
 
 `baton conductor follow --request <file>` is the explicitly invoked, repository-scoped front door
-for a continuing conductor; daemon event delivery and supported action consumption are subsequent
-work. Its strict JSON request requires `schemaVersion: 1`, canonical `repository`, absolute
+for a continuing conductor. `attach --request <file>` registers owned-halt delivery (#2632), and
+`detach --request <file>` revokes new launches while retaining evidence. Supported action consumption
+remains subsequent work. The strict JSON request requires `schemaVersion: 1`, canonical `repository`, absolute
 `workspace`, claim `holder`, `adapter: "codex"`, explicit `model` and `effort` from the recorded
 Codex capability catalog, `timeoutSeconds` (1–300), `initialInstructions` (at most 16 Ki characters),
 and `permissionGrant`. The grant must be exactly file reads only: `readFiles: true`, other authority
@@ -8917,7 +8918,9 @@ Only real claim-holder-owned halted-task `StoppedWorkJudgmentKey` handoffs in th
 `ConductorObligationStore` and matching `QueueStore` row are admitted. Ownership, attempt, stage,
 head, halt, and `StoppedWorkAdviceEvidence.Context/Hash` bind bounded as-of untrusted source data.
 Original adapter, capability, and status are preserved, including `TransportAcknowledged`: prior
-advice receipt proves neither action completion nor follow delivery. Follow never calls original
+advice receipt proves neither action completion nor follow delivery. A complete legacy response is
+reused as `legacyResponse` without a follow turn; an unresolved legacy launch freezes the session.
+Follow never calls original
 `SubmitAsync` or `ObserveActionAsync`; trusted action observers remain authoritative.
 
 The host derives one session directory below the Baton root from the canonical repository slug and
@@ -8945,6 +8948,37 @@ malformed retained state fails closed. Broker input
 and output paths are explicit for every event, ambient `BATON_INPUT_*`/`BATON_OUTPUT_DIR` values
 cannot redirect them, and the process environment is never mutated. Per-event timeout and stream
 bounds are emergency safeguards only and are not vendor token or billing guarantees.
+
+Attachment retains a canonical copy of the accepted request in the existing session directory and
+one repository registration binding that request digest, session directory, holder and acquisition
+generation. Registration commits its cutover under the queue lock before enabling delivery. Each
+subsequent owned-halt CAS retains the active attachment ID on its source row; existing halted rows,
+including rows whose obligations have not yet been enqueued, receive no ID retroactively. Detach
+preserves the registration, native ID, journal and original evidence; reattachment gets a new cutover
+ID and excludes prior detached-period events. Repeated attachment while already attached keeps its
+cutover. A retained registration suppresses automatic legacy fallback for owned halts even when
+detached or unreadable; a malformed registration never prevents retaining the halt itself. Attachment
+never discovers a request, reconstructs instructions, or replaces a claim or conversation.
+
+A successful owned-halt commit enqueues its original obligation durably, then notifies the session
+outside queue locks through the same single-event delivery entry as manual follow. One daemon
+startup pass recovers attachment-stamped commit/enqueue/notification gaps from the existing queue;
+repeated starts and notifications replay complete receipts without new turns. Historical rows never
+cross automatic admission. Timer reconciliation may enqueue obligations and reconcile complete
+legacy evidence, but cannot launch a model turn. New legacy advice is triggered by a committed halt
+notification retained with its obligation ID and context digest; provider completion and startup
+drain accepted notifications without spending on unnotified backlog. Legacy and follow use the
+obligation store's existing cross-process per-key admission serialization and persist one
+per-obligation delivery owner before either launch marker. Follow ownership suppresses legacy
+transport without changing the original obligation; historical legacy markers retain legacy
+ownership. No receipt becomes `ActionObserved` or authorizes reply consumption.
+
+Daemon delivery checks current attachment, queue source, claim and recorded trust before launch.
+Its narrow required prelaunch hook uses persisted vendor snapshots, existing runway thresholds,
+reservation policy and admission ledger. Missing, stale, unreadable or refused required admission
+means no launch marker and no call. It never harvests a vendor on notification or idle ticks, and
+does not add a quota framework. Explicit manual follow retains its existing budget behavior;
+detached registered sessions refuse new turns while complete evidence remains replayable.
 
 ### One-shot owned readiness advice (#2484)
 

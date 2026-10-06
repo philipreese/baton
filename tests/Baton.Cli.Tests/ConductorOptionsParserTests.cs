@@ -45,6 +45,16 @@ public sealed class ConductorOptionsParserTests
             ConductorOptionsParser.Parse(["follow", "--request", "follow.json", "extra"]));
     }
 
+    [Theory]
+    [InlineData("attach", ConductorVerb.Attach)]
+    [InlineData("detach", ConductorVerb.Detach)]
+    public void Parse_Attachment_requires_only_an_explicit_request(string verb, ConductorVerb expected)
+    {
+        Assert.Equal(expected, ConductorOptionsParser.Parse([verb, "--request", "follow.json"]).Verb);
+        Assert.Throws<CliArgumentException>(() => ConductorOptionsParser.Parse([verb]));
+        Assert.Throws<CliArgumentException>(() => ConductorOptionsParser.Parse([verb, "--request", "follow.json", "--workspace", "other"]));
+    }
+
     [Fact]
     public void Parse_Claim_ValidArgs()
     {
