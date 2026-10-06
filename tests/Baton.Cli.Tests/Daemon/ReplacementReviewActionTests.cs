@@ -20,6 +20,37 @@ public sealed class ReplacementReviewActionTests
     private const string OtherHead = "ffffffffffffffffffffffffffffffffffffffff";
     private const string Holder = "conductor-one";
 
+    [Fact]
+    public async Task Populated_old_action_json_remains_unambiguously_legacy_and_replays_the_same_slot()
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, _) = await SeedAsync(home);
+            await ReplacementReviewConductorCommand.ExecuteAsync(Options(source), TextWriter.Null, home, advancer, store, Ct);
+            var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            var json = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(row.ReplacementReviewAction))!.AsObject();
+            json.Remove("EvidenceProvenance");
+            json.Remove("EvidenceDigest");
+            json.Remove("EvidenceDirectory");
+            var legacy = JsonSerializer.Deserialize<QueueReplacementReviewAction>(json.ToJsonString())!;
+            Assert.NotEmpty(legacy.AdviceDigest);
+            Assert.Equal(ReplacementReviewEvidenceProvenance.LegacyAdvice, ReplacementReviewEvidenceProvenance.For(legacy));
+            Assert.Throws<ConductorObligationStoreException>(() => ReplacementReviewEvidenceProvenance.For(
+                legacy with { EvidenceDigest = "foreign-follow-digest" }));
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [row with { ReplacementReviewAction = legacy }],
+            }, Ct);
+            await ReplacementReviewConductorCommand.ExecuteAsync(Options(source), TextWriter.Null, home, advancer, store, Ct);
+            Assert.Equal(legacy, Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).ReplacementReviewAction);
+            Assert.Equal(2, Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Round);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
     [Theory]
     [InlineData("identical")]
     [InlineData("changed-head")]
@@ -588,7 +619,7 @@ public sealed class ReplacementReviewActionTests
             BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            var (source, store, advancer, _) = await SeedAsync(home);
+            var (source, store, advancer, _) = await SeedAsync(home, automaticEligible: true);
             await ReplacementReviewConductorCommand.ExecuteAsync(
                 Options(source), TextWriter.Null, home, advancer, store, Ct);
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with

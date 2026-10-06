@@ -29,7 +29,8 @@ def verify_coverage(event: str, changes: str, dotnet: str, test: str, gates: str
             errors.append(f"path filtering must succeed on a pull request, got {changes!r}")
         if dotnet not in {"true", "false"}:
             errors.append(f"path filtering returned unknown dotnet value {dotnet!r}")
-        shards_required = dotnet == "true"
+        page_only_route = changes == "success" and page_only == "true" and dotnet == "false"
+        shards_required = not page_only_route
     else:
         if page_only:
             errors.append("push must not have page-only evidence")
@@ -37,9 +38,7 @@ def verify_coverage(event: str, changes: str, dotnet: str, test: str, gates: str
             errors.append(f"the pull-request-only changes job must be skipped on push, got {changes!r}")
         shards_required = True
 
-    expected_mode = "test-shard-complement" if shards_required else "full"
-    if event == "pull_request" and page_only == "true" and dotnet == "false":
-        expected_mode = "page-only"
+    expected_mode = "test-shard-complement" if shards_required else "page-only"
     expected_test = "success" if shards_required else "skipped"
     if mode != expected_mode:
         errors.append(f"coverage mode must be {expected_mode!r}, got {mode!r}")

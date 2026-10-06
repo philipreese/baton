@@ -26,8 +26,14 @@ def field(block, name):
     return values[0]
 
 
-def condition(expression, event, results=None, dotnet='true', cancelled=False):
-    values = {'github.event_name': event, 'needs.changes.outputs.dotnet': dotnet}
+def condition(expression, event, results=None, dotnet='true', cancelled=False,
+              changes='success', page_only='false'):
+    values = {
+        'github.event_name': event,
+        'needs.changes.result': changes,
+        'needs.changes.outputs.dotnet': dotnet,
+        'needs.changes.outputs.page-only': page_only,
+    }
     values.update({'needs.'+key+'.result': value for key,value in (results or {}).items()})
     expression=expression.removeprefix('${{').removesuffix('}}').strip()
     for key,value in values.items():
@@ -101,9 +107,20 @@ def check_workflow(text):
         assert condition(field(jobs['ci'],'if'),event)==(event!='workflow_dispatch')
         assert condition(field(jobs['recovery_ci'],'if'),event)==(event=='workflow_dispatch')
         for target in ('success','skipped','failure','cancelled',''):
-            for dotnet in ('true','false'):
-                eligible=event!='workflow_dispatch' or target=='success'
-                assert condition(field(jobs['test'],'if'),event,{'recovery_target':target},dotnet)==(eligible and (event!='pull_request' or dotnet=='true'))
+            for changes in ('success','failure','cancelled','skipped',''):
+                for page_only in ('true','false','unknown',''):
+                    for dotnet in ('true','false','unknown',''):
+                        eligible=event!='workflow_dispatch' or target=='success'
+                        page_only_route = (
+                            event == 'pull_request' and changes == 'success' and
+                            page_only == 'true' and dotnet == 'false'
+                        )
+                        expected = eligible and not page_only_route
+                        assert condition(
+                            field(jobs['test'],'if'), event,
+                            {'recovery_target':target}, dotnet,
+                            changes=changes, page_only=page_only,
+                        ) == expected
             assert condition(field(jobs['gates'],'if'),event,{'recovery_target':target})==eligible
         for test in ('success','failure','skipped','cancelled',''):
             assert condition(field(jobs['pack'],'if'),event,{'test':test})==(event!='pull_request' and test=='success')

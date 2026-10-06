@@ -133,6 +133,75 @@ public sealed class QueueWorktreeReportTests
     }
 
     [Fact]
+    public async Task Malformed_workspace_evidence_is_reported_without_normalizing_or_probing()
+    {
+        var sandbox = Temp("malformed-workspace-evidence");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        var relativeFixture = Path.Combine(
+            Directory.GetCurrentDirectory(), $"queue-worktrees-relative-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(relativeFixture);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var valid = await RepoAsync(root, "valid");
+            var relative = Path.GetRelativePath(Directory.GetCurrentDirectory(), relativeFixture);
+            var empty = "";
+            var whitespace = "  \t";
+            var invalid = Path.Combine(root, "invalid\0workspace");
+            var items = new List<QueueItem>
+            {
+                Item(valid, "valid"),
+                ItemWithWorkspace(empty, "empty", sandbox),
+                ItemWithWorkspace(whitespace, "whitespace", sandbox),
+                ItemWithWorkspace(invalid, "invalid", sandbox),
+                ItemWithWorkspace(relative, "relative", sandbox),
+            };
+            var resolverCalls = new List<string>();
+            var probeCalls = new List<string>();
+            var report = await QueueWorktreeReport.CreateAsync(
+                items,
+                root,
+                Ct,
+                (path, _) =>
+                {
+                    resolverCalls.Add(path);
+                    Assert.True(QueueWorktreeReport.PathComparer.Equals(path, valid.Path));
+                    return Task.FromResult<Baton.Accounting.RepositoryIdentity?>(null);
+                },
+                IsolatedProbe(sandbox) with
+                {
+                    ReadBranchAsync = (path, _) =>
+                    {
+                        probeCalls.Add(path);
+                        return Task.FromResult<string?>(null);
+                    },
+                });
+
+            Assert.Equal(5, report.Workspaces.Count);
+            foreach (var raw in new[] { empty, whitespace, invalid, relative })
+            {
+                var entry = Assert.Single(report.Workspaces, candidate => candidate.Path == raw);
+                Assert.Equal("unknown", entry.Classification);
+                Assert.Contains("invalid-workspace-evidence", entry.ReasonCodes);
+                Assert.Equal("unknown", entry.Directory);
+            }
+
+            var validEntry = Find(report, "valid");
+            Assert.Equal("present", validEntry.Directory);
+            Assert.DoesNotContain("invalid-workspace-evidence", validEntry.ReasonCodes);
+            Assert.Equal([valid.Path], resolverCalls);
+            Assert.DoesNotContain(relativeFixture, probeCalls, QueueWorktreeReport.PathComparer);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(relativeFixture);
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
     public async Task Unavailable_repository_probe_stays_unknown()
     {
         var sandbox = Temp("repository-probe-unavailable");
@@ -392,6 +461,73 @@ public sealed class QueueWorktreeReportTests
                 [Item(repo, "referenced")], root, Ct, livenessProbe: IsolatedProbe(sandbox)), "referenced");
             Assert.Equal("none-known", released.ActiveReferences);
             Assert.Equal("candidate", released.Classification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(sandbox);
+        }
+    }
+
+    [Fact]
+    public async Task Held_room_with_malformed_binding_keeps_reference_observation_incomplete()
+    {
+        var sandbox = Temp("malformed-held-binding");
+        var home = Path.Combine(sandbox, "home");
+        var root = Path.Combine(sandbox, "worktrees");
+        Directory.CreateDirectory(root);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var candidate = await RepoAsync(root, "candidate");
+            await GitAsync(candidate.Path, "branch", "published");
+            var room = Path.Combine(BatonPaths.Rooms, "malformed-binding-room");
+            Directory.CreateDirectory(room);
+            var validBinding = new WorkerBindingConfigEntry(
+                "shell", new WorkerContract("implement", [], [], []),
+                PromptTemplate: "echo fixture", Timeout: TimeSpan.FromMinutes(1),
+                WorkingDirectory: candidate.Path);
+            var malformedBinding = validBinding with { WorkingDirectory = "relative-binding" };
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = validBinding,
+                    ["review"] = malformedBinding,
+                },
+                BatonPaths.RoomBindingsFile(room),
+                Ct);
+
+            var observedPaths = new List<string>();
+            var probe = IsolatedProbe(sandbox) with
+            {
+                ReadBranchAsync = (path, _) =>
+                {
+                    observedPaths.Add(path);
+                    return Task.FromResult<string?>(candidate.Branch);
+                },
+            };
+
+            using (ConcurrencyGuard.Acquire(room, "malformed binding fixture"))
+            {
+                var report = await QueueWorktreeReport.CreateAsync(
+                    [Item(candidate, "candidate")], root, Ct, livenessProbe: probe);
+                var blocked = Find(report, "candidate");
+                Assert.Equal("unknown", blocked.Classification);
+                Assert.Contains("active-reference-observation-unavailable", blocked.ReasonCodes);
+                Assert.Contains("room:malformed-binding-room", blocked.ActiveReferences, StringComparison.Ordinal);
+                Assert.Equal([candidate.Path], observedPaths);
+
+                observedPaths.Clear();
+                await WorkerBindingConfigWriter.SaveToFileAsync(
+                    new Dictionary<string, WorkerBindingConfigEntry> { ["implement"] = validBinding },
+                    BatonPaths.RoomBindingsFile(room),
+                    Ct);
+                var complete = await QueueWorktreeReferenceIndex.CreateAsync(
+                    [Item(candidate, "candidate")], Ct, probe);
+
+                Assert.True(complete.Complete);
+                Assert.Contains("room:malformed-binding-room", complete.For(candidate.Path));
+                Assert.Equal([candidate.Path], observedPaths);
+            }
         }
         finally
         {
@@ -886,6 +1022,19 @@ public sealed class QueueWorktreeReportTests
 
     private static QueueRetirement Retired() =>
         new(QueueRetirement.Operator, DateTimeOffset.Parse("2026-09-16T00:00:00Z"), "fixture retired");
+
+    private static QueueItem ItemWithWorkspace(string workspace, string tag, string sandbox) => new()
+    {
+        Tag = tag,
+        Role = "implement",
+        Workspace = workspace,
+        SpecFile = Path.Combine(sandbox, tag + ".md"),
+        WorkspaceOrigin = WorkspaceOrigins.IssueProvisioned,
+        Repository = Repository,
+        Branch = tag,
+        State = QueueItemState.Queued,
+        Retirement = Retired(),
+    };
 
     private static QueueWorktreeEntry Find(QueueWorktreeReport report, string directoryName) =>
         Assert.Single(report.Workspaces, entry => Path.GetFileName(entry.Path) == directoryName);

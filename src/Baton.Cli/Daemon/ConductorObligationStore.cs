@@ -92,7 +92,7 @@ public sealed class ConductorObligationConflictException : BatonFlowException
 }
 
 /// <summary>A retained obligation fact or projection could not be safely interpreted.</summary>
-public sealed class ConductorObligationStoreException : BatonFlowException
+public class ConductorObligationStoreException : BatonFlowException
 {
     public ConductorObligationStoreException(string message)
         : base(message)

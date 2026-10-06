@@ -9,6 +9,20 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.68.0](https://github.com/philipreese/baton/compare/v0.67.1...v0.68.0) (2026-10-06)
+
+
+### Features
+
+* **conductor:** Consume typed follow replacement decisions ([#2638](https://github.com/philipreese/baton/issues/2638)) ([301ed81](https://github.com/philipreese/baton/commit/301ed81febee004ec3bcb92586c55451c7159ecd))
+* **conductor:** Deliver owned halts to attached retained sessions ([#2634](https://github.com/philipreese/baton/issues/2634)) ([40190dd](https://github.com/philipreese/baton/commit/40190dde99949ec8c57dcbee1ecd44f675600841))
+* **conductor:** Retain claim-bound sessions for stopped-work events ([#2629](https://github.com/philipreese/baton/issues/2629)) ([6b58994](https://github.com/philipreese/baton/commit/6b58994b0711344552caafb7b52cfe9252dfc48b))
+
+
+### Bug Fixes
+
+* **queue:** Retain malformed worktree evidence ([#2640](https://github.com/philipreese/baton/issues/2640)) ([58ae3a3](https://github.com/philipreese/baton/commit/58ae3a3cdcb2873106a4d77205eb0784fe196910))
+
 ## [0.67.1](https://github.com/philipreese/baton/compare/v0.67.0...v0.67.1) (2026-10-05)
 
 

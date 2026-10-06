@@ -25,6 +25,9 @@ internal sealed record StoppedWorkAdviceView(
     RetainedStoppedWorkAdviceResponse? Response = null,
     bool AutomaticAdmissionRefused = false);
 
+internal sealed class StoppedWorkDeliverySuppressedException()
+    : ConductorObligationStoreException("Stopped-work legacy delivery is suppressed by retained follow authority.");
+
 public sealed partial class ConductorObligationStore
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ActiveStoppedWorkAdvice =
@@ -34,6 +37,125 @@ public sealed partial class ConductorObligationStore
         ActiveStoppedWorkAdvice.ContainsKey(StoppedWorkAdviceDirectory(key));
 
     internal Action<StoppedWorkAdviceDurabilityPoint>? StoppedWorkAdviceDurabilityObserver { get; set; }
+
+    // Both transports use the existing cross-process per-obligation admission serialization.
+    internal Task<T> WithStoppedWorkDeliveryExclusiveAsync<T>(string key, Func<Task<T>> action,
+        CancellationToken token) => WithReadinessExclusiveAsync(key, action, token);
+
+    internal string SelectStoppedWorkDeliveryOwner(ConductorObligation obligation, string requestedOwner)
+    {
+        var directory = StoppedWorkAdviceDirectory(obligation.IdempotencyKey);
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "delivery-owner.json");
+        if (File.Exists(path))
+        {
+            var retained = JsonSerializer.Deserialize<StoppedWorkDeliveryOwner>(ReadBounded(path, 4096), ReadinessJson)
+                ?? throw new ConductorObligationStoreException("Missing stopped-work delivery owner.");
+            if (retained.ObligationId != obligation.ObligationId || retained.ContextSha256 != obligation.ContextSha256
+                || string.IsNullOrWhiteSpace(retained.Owner))
+                throw new ConductorObligationStoreException("Stopped-work delivery owner drifted.");
+            if (retained.Owner != "legacy" && File.Exists(Path.Combine(directory, "launch.json")))
+                throw new ConductorObligationStoreException("Conflicting stopped-work delivery launch evidence.");
+            return retained.Owner;
+        }
+        var owner = File.Exists(Path.Combine(directory, "launch.json")) ? "legacy" : requestedOwner;
+        WriteNewDurable(path, JsonSerializer.Serialize(
+            new StoppedWorkDeliveryOwner(obligation.ObligationId, obligation.ContextSha256!, owner), ReadinessJson));
+        return owner;
+    }
+
+    internal (RetainedStoppedWorkAdviceResponse Response, string Receipt) ReadCompleteLegacyDelivery(ConductorObligation obligation)
+    {
+        var directory = StoppedWorkAdviceDirectory(obligation.IdempotencyKey);
+        var provider = ValidateStoppedWorkMarker(Path.Combine(directory, "launch.json"), obligation);
+        var response = JsonSerializer.Deserialize<RetainedStoppedWorkAdviceResponse>(
+            ReadBounded(Path.Combine(directory, "response.json"), 64 * 1024), ReadinessJson)
+            ?? throw new ConductorObligationStoreException("Missing retained legacy response.");
+        ValidateStoppedWorkAdviceResponse(obligation, response, provider);
+        return (response, EnsureStoppedWorkAdviceReceipt(directory, obligation.IdempotencyKey));
+    }
+
+    private static string EnsureStoppedWorkAdviceReceipt(string directory, string key)
+    {
+        var receipt = "stopped-work-advice-sha256:" + Convert.ToHexString(SHA256.HashData(
+            ReadBounded(Path.Combine(directory, "response.json"), 64 * 1024))).ToLowerInvariant();
+        var path = Path.Combine(directory, "receipt.json");
+        if (File.Exists(path))
+        {
+            if (Encoding.UTF8.GetString(ReadBounded(path, 256)).Trim() != receipt)
+                throw new ConductorObligationStoreException(
+                    $"Stopped-work advice receipt for '{key}' conflicts with retained response; operator recovery required.");
+        }
+        else WriteNewDurable(path, receipt + "\n");
+        return receipt;
+    }
+
+    private sealed record StoppedWorkDeliveryOwner(string ObligationId, string ContextSha256, string Owner);
+
+    // These are transport receipts for real post-enqueue notifications, not a new work queue.
+    // The projection mutex protects their short file operations without waiting on a paid owner.
+    private sealed record LegacyHaltNotification(string ObligationId, string ContextSha256);
+
+    internal Task RecordLegacyHaltNotificationAsync(ConductorObligation obligation, CancellationToken token) =>
+        WithLegacyHaltNotificationAsync(obligation, directory =>
+        {
+            EnsureLegacyHaltNotification(Path.Combine(directory, "legacy-notification.json"), obligation);
+            return true;
+        }, token);
+
+    internal Task<bool> HasPendingLegacyHaltNotificationAsync(ConductorObligation obligation, CancellationToken token) =>
+        WithLegacyHaltNotificationAsync(obligation, directory =>
+        {
+            var accepted = Path.Combine(directory, "legacy-notification.json");
+            if (!File.Exists(accepted)) return false;
+            EnsureLegacyHaltNotification(accepted, obligation);
+            var handled = Path.Combine(directory, "legacy-notification-handled.json");
+            if (!File.Exists(handled)) return true;
+            EnsureLegacyHaltNotification(handled, obligation);
+            return false;
+        }, token);
+
+    internal Task CompleteLegacyHaltNotificationAsync(ConductorObligation obligation, CancellationToken token) =>
+        WithLegacyHaltNotificationAsync(obligation, directory =>
+        {
+            var accepted = Path.Combine(directory, "legacy-notification.json");
+            if (File.Exists(accepted))
+            {
+                EnsureLegacyHaltNotification(accepted, obligation);
+                EnsureLegacyHaltNotification(Path.Combine(directory, "legacy-notification-handled.json"), obligation);
+            }
+            return true;
+        }, token);
+
+    private Task<T> WithLegacyHaltNotificationAsync<T>(ConductorObligation obligation,
+        Func<string, T> action, CancellationToken token) => Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+            _snapshotPath, LockNamePrefix, LockTimeout, () =>
+            {
+                token.ThrowIfCancellationRequested();
+                var directory = StoppedWorkAdviceDirectory(obligation.IdempotencyKey);
+                Directory.CreateDirectory(directory);
+                return action(directory);
+            }), token);
+
+    private static void EnsureLegacyHaltNotification(string path, ConductorObligation obligation)
+    {
+        var expected = new LegacyHaltNotification(obligation.ObligationId, obligation.ContextSha256!);
+        if (!File.Exists(path))
+        {
+            WriteNewDurable(path, JsonSerializer.Serialize(expected, ReadinessJson));
+            return;
+        }
+        var retained = JsonSerializer.Deserialize<LegacyHaltNotification>(ReadBounded(path, 4096), ReadinessJson);
+        if (retained != expected)
+            throw new ConductorObligationStoreException("Legacy halt notification source identity drifted.");
+    }
+
+    private void RequireLegacyDeliveryOwner(ConductorObligation obligation)
+    {
+        var path = Path.Combine(StoppedWorkAdviceDirectory(obligation.IdempotencyKey), "delivery-owner.json");
+        if (File.Exists(path) && SelectStoppedWorkDeliveryOwner(obligation, "legacy") != "legacy")
+            throw new StoppedWorkDeliverySuppressedException();
+    }
 
     /// <summary>
     /// Runs one stopped-work advice call under a distinct durable protocol. It never accepts a
@@ -109,6 +231,7 @@ public sealed partial class ConductorObligationStore
 
         if (obligation.Status == ConductorObligationStatus.Pending)
         {
+            RequireLegacyDeliveryOwner(obligation);
             obligation = await SubmitAsync(key,
                 (_, _) => Task.FromResult(new ConductorTransportResult(false)), cancellationToken)
                 .ConfigureAwait(false);
@@ -121,6 +244,7 @@ public sealed partial class ConductorObligationStore
         }
 
         var directory = StoppedWorkAdviceDirectory(key);
+        RequireLegacyDeliveryOwner(obligation);
         var marker = Path.Combine(directory, "launch.json");
         var responsePath = Path.Combine(directory, "response.json");
         var receiptPath = Path.Combine(directory, "receipt.json");
@@ -147,10 +271,12 @@ public sealed partial class ConductorObligationStore
                 throw new ConductorObligationStoreException("Stopped-work obligation is no longer eligible for launch.");
             cancellationToken.ThrowIfCancellationRequested();
             StoppedWorkAdviceDurabilityObserver?.Invoke(StoppedWorkAdviceDurabilityPoint.BeforeLaunchMarker);
+            _ = SelectStoppedWorkDeliveryOwner(obligation, "legacy");
             WriteNewDurable(marker, JsonSerializer.Serialize(new StoppedWorkAdviceLaunchMarker(
                 obligation.ObligationId, obligation.ContextSha256!, _now().ToUniversalTime(), selectedProvider), ReadinessJson));
         }
 
+        _ = SelectStoppedWorkDeliveryOwner(obligation, "legacy");
         var provider = ValidateStoppedWorkMarker(marker, obligation);
 
         if (started)
@@ -198,20 +324,7 @@ public sealed partial class ConductorObligationStore
                 $"Retained stopped-work advice response for '{key}' is incomplete or invalid; operator recovery required.", ex);
         }
 
-        var receipt = "stopped-work-advice-sha256:" +
-            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-                ReadBounded(responsePath, 64 * 1024))).ToLowerInvariant();
-        if (File.Exists(receiptPath))
-        {
-            var stored = System.Text.Encoding.UTF8.GetString(ReadBounded(receiptPath, 256)).Trim();
-            if (!string.Equals(stored, receipt, StringComparison.Ordinal))
-                throw new ConductorObligationStoreException(
-                    $"Stopped-work advice receipt for '{key}' conflicts with retained response; operator recovery required.");
-        }
-        else
-        {
-            WriteNewDurable(receiptPath, receipt + "\n");
-        }
+        var receipt = EnsureStoppedWorkAdviceReceipt(directory, key);
 
         var acknowledged = await SubmitAsync(key,
             (_, _) => Task.FromResult(new ConductorTransportResult(true, receipt)), cancellationToken)

@@ -132,10 +132,12 @@ def main():
     script = "\n".join(line[10:] for line in script.splitlines())
     cases = [
         ("pull_request", "success", "false", "true", "page-only", "gates-ci-page-only-quiet"),
-        ("pull_request", "success", "false", "false", "full", "gates-ci-quiet"),
+        ("pull_request", "success", "false", "false", "test-shard-complement", "gates-ci-test-complement-quiet"),
         ("pull_request", "success", "true", "true", "test-shard-complement", "gates-ci-test-complement-quiet"),
-        ("pull_request", "failure", "false", "true", "full", "gates-ci-quiet"),
-        ("pull_request", "", "", "", "full", "gates-ci-quiet"),
+        ("pull_request", "success", "true", "false", "test-shard-complement", "gates-ci-test-complement-quiet"),
+        ("pull_request", "failure", "false", "true", "test-shard-complement", "gates-ci-test-complement-quiet"),
+        ("pull_request", "", "", "", "test-shard-complement", "gates-ci-test-complement-quiet"),
+        ("pull_request", "success", "", "false", "test-shard-complement", "gates-ci-test-complement-quiet"),
         ("push", "skipped", "false", "true", "test-shard-complement", "gates-ci-test-complement-quiet"),
         ("workflow_dispatch", "skipped", "false", "true", "test-shard-complement", "gates-ci-test-complement-quiet"),
     ]

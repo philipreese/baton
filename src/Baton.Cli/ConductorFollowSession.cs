@@ -52,6 +52,15 @@ internal sealed record ConductorFollowEventIdentity(
     [property: JsonRequired] string SourceCapability,
     [property: JsonRequired] string ContextSha256);
 
+internal sealed record ConductorFollowRetainedSource(
+    [property: JsonRequired] string ObligationId,
+    [property: JsonRequired] string IdempotencyKey,
+    [property: JsonRequired] string Owner,
+    [property: JsonRequired] string Adapter,
+    [property: JsonRequired] string AdapterCapability,
+    [property: JsonRequired] ConductorObligationStatus Status,
+    [property: JsonRequired] StoppedWorkAdviceContext Context);
+
 internal sealed record ConductorFollowLaunch(
     [property: JsonRequired] int SchemaVersion,
     [property: JsonRequired] string ObligationKey,
@@ -66,6 +75,31 @@ internal sealed record ConductorFollowResponse(
     [property: JsonRequired] int ExitCode,
     [property: JsonRequired] IReadOnlyList<string> OutputLines);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed record ConductorFollowTypedDecision(
+    [property: JsonRequired] int SchemaVersion,
+    [property: JsonRequired] string ObligationKey,
+    [property: JsonRequired] string ObligationId,
+    [property: JsonRequired] string SourceHeadSha,
+    [property: JsonRequired] string Decision);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed record ConductorFollowDecisionEvidence(
+    [property: JsonRequired] int SchemaVersion,
+    [property: JsonRequired] string ObligationKey,
+    [property: JsonRequired] string ObligationId,
+    [property: JsonRequired] string SourceHeadSha,
+    [property: JsonRequired] string Decision,
+    [property: JsonRequired] string SourceRepository,
+    [property: JsonRequired] string SourceContextSha256,
+    [property: JsonRequired] string SourceDigest,
+    [property: JsonRequired] string RequestSha256,
+    [property: JsonRequired] string ClaimGeneration,
+    [property: JsonRequired] string SessionId,
+    [property: JsonRequired] string ConfigurationSha256,
+    [property: JsonRequired] string ResponseSha256,
+    [property: JsonRequired] string Receipt);
+
 internal sealed record ConductorFollowJournalEntry(
     [property: JsonRequired] int SchemaVersion,
     [property: JsonRequired] string ObligationKey,
@@ -76,7 +110,9 @@ internal sealed record ConductorFollowJournalEntry(
 
 internal sealed record ConductorFollowResult(
     string Status, string? ObligationKey, string? ObligationId, string EvidenceLocation,
-    string Diagnostic, string? Receipt = null, ConductorFollowResponse? Response = null);
+    string Diagnostic, string? Receipt = null, ConductorFollowResponse? Response = null,
+    RetainedStoppedWorkAdviceResponse? LegacyResponse = null,
+    ConductorFollowDecisionEvidence? DecisionEvidence = null);
 
 internal delegate Task<int> ConductorFollowBroker(
     CodexBrokerConfiguration configuration, string prompt, string outputDirectory,
@@ -84,10 +120,11 @@ internal delegate Task<int> ConductorFollowBroker(
     CancellationToken cancellationToken, Func<string, CancellationToken, Task>? threadStarted);
 
 /// <summary>Claim-bound transport evidence. The original obligation and queue lifecycle remain authoritative.</summary>
-internal sealed class ConductorFollowSession
+internal sealed partial class ConductorFollowSession
 {
     internal const int MaxResponseBytes = 1024 * 1024;
     private const int MaxInputChars = 8192;
+    private const int MaxDecisionChars = 8192;
     private const int SchemaVersion = 1;
     private const string LockPrefix = "baton-conductor-follow";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -193,14 +230,16 @@ internal sealed class ConductorFollowSession
         return 0;
     }
 
-    private async Task<ConductorFollowResult> DeliverAsync(string key, CancellationToken cancellationToken)
+    internal async Task<ConductorFollowResult> DeliverAsync(string key, CancellationToken cancellationToken,
+        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission = null)
     {
         try
         {
             // The mutex-owning thread blocks through the entire async operation, then releases on
             // that same thread. Passing an async delegate to RunUnderLock would release too early.
             return await Task.Run(() => MutexGuardedFileLock.RunUnderLock(StatePath, LockPrefix,
-                TimeSpan.FromMinutes(6), () => DeliverUnderLockAsync(key, cancellationToken).GetAwaiter().GetResult()),
+                TimeSpan.FromMinutes(6), () => _obligations.WithStoppedWorkDeliveryExclusiveAsync(key,
+                    () => DeliverUnderLockAsync(key, cancellationToken, requiredAdmission), cancellationToken).GetAwaiter().GetResult()),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsRefusal(ex))
@@ -209,7 +248,8 @@ internal sealed class ConductorFollowSession
         }
     }
 
-    private async Task<ConductorFollowResult> DeliverUnderLockAsync(string key, CancellationToken cancellationToken)
+    private async Task<ConductorFollowResult> DeliverUnderLockAsync(string key, CancellationToken cancellationToken,
+        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission)
     {
         ConductorObligation? obligation = null;
         ConductorFollowState? state = null;
@@ -243,6 +283,37 @@ internal sealed class ConductorFollowSession
                 WriteState(state with { Frozen = true });
                 return new("uncertain", key, obligation.ObligationId, evidence, "Unresolved or inconsistent session evidence; no retry admitted.");
             }
+            string owner;
+            try { owner = _obligations.SelectStoppedWorkDeliveryOwner(obligation, _directory); }
+            catch (Exception ex) when (IsRefusal(ex))
+            {
+                WriteState(state with { Frozen = true });
+                return new("uncertain", key, obligation.ObligationId, evidence,
+                    "Delivery owner evidence uncertain; inspect retained evidence.");
+            }
+            if (owner == "legacy")
+            {
+                try
+                {
+                    var legacy = _obligations.ReadCompleteLegacyDelivery(obligation);
+                    return new("replayed", key, obligation.ObligationId,
+                        _obligations.GetStoppedWorkAdviceEvidenceDirectory(key),
+                        "Retained complete legacy response; no follow turn.", legacy.Receipt,
+                        LegacyResponse: legacy.Response);
+                }
+                catch (Exception ex) when (IsRefusal(ex))
+                {
+                    WriteState(state with { Frozen = true });
+                    return new("uncertain", key, obligation.ObligationId, evidence,
+                        "Legacy launch outcome uncertain; inspect retained evidence.");
+                }
+            }
+            if (owner != _directory)
+            {
+                WriteState(state with { Frozen = true });
+                return new("uncertain", key, obligation.ObligationId, evidence,
+                    "Delivery owner evidence uncertain; inspect retained evidence.");
+            }
             evidence = Path.Combine(_directory, "events", Digest(obligation.ObligationId));
             var responsePath = Path.Combine(evidence, "response.json");
             if (File.Exists(responsePath))
@@ -253,8 +324,18 @@ internal sealed class ConductorFollowSession
                     || identity.SourceCapability != obligation.AdapterCapability)
                     throw new CliArgumentException("Replay source drifted.");
                 var response = ReadResponse(responsePath, identity, state);
+                var replayDecision = ReadDecisionEvidence(evidence);
                 return new("replayed", key, obligation.ObligationId, evidence, "Retained complete response; no vendor call.",
-                    EnsureReceipt(evidence), response);
+                    EnsureReceipt(evidence), response, DecisionEvidence: replayDecision);
+            }
+            // Daemon admission must refuse before any event identity or irreversible launch marker.
+            if (requiredAdmission is not null)
+                await requiredAdmission(obligation, cancellationToken).ConfigureAwait(false);
+            if (File.Exists(AttachmentPath))
+            {
+                var attachment = Read<ConductorFollowAttachment>(AttachmentPath);
+                ValidateAttachment(attachment);
+                if (!attachment.Attached) throw new CliArgumentException("Follow attachment is detached.");
             }
             Directory.CreateDirectory(evidence);
             var identityEvidence = new ConductorFollowEventIdentity(SchemaVersion, key, obligation.ObligationId,
@@ -263,22 +344,15 @@ internal sealed class ConductorFollowSession
             var identityPath = Path.Combine(evidence, "identity.json");
             Write(identityPath, identityEvidence);
             var sourcePath = Path.Combine(evidence, "source.json");
-            Write(sourcePath, new
-            {
-                obligation.ObligationId,
-                obligation.IdempotencyKey,
-                obligation.Owner,
-                obligation.Adapter,
-                obligation.AdapterCapability,
-                obligation.Status,
-                context
-            });
+            Write(sourcePath, new ConductorFollowRetainedSource(obligation.ObligationId, obligation.IdempotencyKey,
+                obligation.Owner, obligation.Adapter, obligation.AdapterCapability, obligation.Status, context));
             if (new FileInfo(sourcePath).Length > 64 * 1024) throw new CliArgumentException("Source exceeds bounded input.");
             // Re-read authority immediately before the irreversible launch marker, after source I/O.
             claim = await ConductorClaimStore.GetClaimAsync(_identity, _root, cancellationToken).ConfigureAwait(false);
             if (claim?.Holder != _request.Holder || ConductorClaimStore.GetClaimGeneration(claim) != _generation
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
+            _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
             Write(Path.Combine(evidence, "launch.json"),
                 new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
             launched = true;
@@ -309,8 +383,16 @@ internal sealed class ConductorFollowSession
             Write(responsePath, retained);
             _ = ReadResponse(responsePath, identityEvidence with { SessionId = state.SessionId }, state);
             var receipt = EnsureReceipt(evidence);
+            var decision = TryCreateDecisionEvidence(retained.OutputLines, evidence, identityEvidence with
+            {
+                SessionId = state.SessionId,
+            }, state, obligation);
             AppendJournal(new(SchemaVersion, key, obligation.ObligationId, state.SessionId!, FileDigest(responsePath), receipt));
-            return new("delivered", key, obligation.ObligationId, evidence, "Complete turn and transport receipt retained.", receipt, retained);
+            return new("delivered", key, obligation.ObligationId, evidence,
+                decision is null
+                    ? "Complete turn and transport receipt retained without an eligible typed decision."
+                    : "Complete turn, typed decision and transport receipt retained.",
+                receipt, retained, DecisionEvidence: decision);
         }
         catch (Exception ex) when (IsRefusal(ex) || ex is OperationCanceledException)
         {
@@ -397,7 +479,7 @@ internal sealed class ConductorFollowSession
     private void RecoverSession(ConductorFollowState state)
     {
         if (Directory.EnumerateFileSystemEntries(_directory).Any(path =>
-            Path.GetFileName(path) is not ("session.json" or "delivery.jsonl" or "events")))
+            Path.GetFileName(path) is not ("session.json" or "delivery.jsonl" or "events" or "attachment.json" or "request.json")))
             throw new IOException("Unknown session evidence.");
         var journal = new Dictionary<string, ConductorFollowJournalEntry>(StringComparer.Ordinal);
         if (File.Exists(JournalPath))
@@ -426,17 +508,27 @@ internal sealed class ConductorFollowSession
             if (identity.SchemaVersion != SchemaVersion || identity.Repository != state.Repository
                 || identity.ClaimGeneration != state.ClaimGeneration || identity.ConfigurationSha256 != ConfigurationDigest(state)
                 || string.IsNullOrWhiteSpace(identity.ObligationId) || !retained.Add(identity.ObligationId)
-                || Path.GetFileName(directory) != Digest(identity.ObligationId) || identity.SessionId != state.SessionId
+                || Path.GetFileName(directory) != Digest(identity.ObligationId)
                 || identity.SourceCapability != StoppedWorkJudgmentKey.Capability
                 || identity.ContextSha256 is not { Length: 64 })
                 throw new IOException("Incomplete event identity.");
-            var launch = Read<ConductorFollowLaunch>(Path.Combine(directory, "launch.json"));
+            var launchPath = Path.Combine(directory, "launch.json");
+            var responsePath = Path.Combine(directory, "response.json");
+            var decisionPath = Path.Combine(directory, "decision.json");
+            var markerFree = !File.Exists(launchPath) && !File.Exists(responsePath)
+                && !journal.ContainsKey(identity.ObligationId);
+            if (File.Exists(decisionPath) && !File.Exists(responsePath))
+                throw new IOException("Follow decision exists without a complete response.");
+            ValidateRetainedSource(directory, identity, state);
+            if (markerFree && identity.SessionId is null) continue;
+            if (identity.SessionId != state.SessionId) throw new IOException("Incomplete event identity.");
+            var launch = Read<ConductorFollowLaunch>(launchPath);
             if (launch.SchemaVersion != SchemaVersion || launch.ObligationId != identity.ObligationId
                 || launch.ObligationKey != identity.ObligationKey
                 || launch.ExpectedSessionId is not null && launch.ExpectedSessionId != state.SessionId)
                 throw new IOException("Incomplete launch identity.");
-            var responsePath = Path.Combine(directory, "response.json");
             var response = ReadResponse(responsePath, identity, state);
+            _ = ReadDecisionEvidence(directory);
             var receipt = EnsureReceipt(directory);
             var entry = new ConductorFollowJournalEntry(SchemaVersion, response.ObligationKey, response.ObligationId,
                 response.SessionId, FileDigest(responsePath), receipt);
@@ -449,6 +541,29 @@ internal sealed class ConductorFollowSession
         if (journal.Keys.Any(id => !retained.Contains(id))) throw new IOException("Missing journal response.");
     }
 
+    private static void ValidateRetainedSource(string directory, ConductorFollowEventIdentity identity,
+        ConductorFollowState state)
+    {
+        // Old prelaunch refusals need their own immutable source, not today's queue or authority.
+        var source = Read<ConductorFollowRetainedSource>(Path.Combine(directory, "source.json"), 64 * 1024);
+        if (identity.ObligationKey is not { Length: > 0 and <= 1024 } key || key.Any(char.IsControl)
+            || !StoppedWorkJudgmentKey.TryParse(key, out var repository, out var tag, out var attempt, out var stage)
+            || repository != state.Repository
+            || key != StoppedWorkJudgmentKey.For(repository, tag, attempt, stage)
+            || source.ObligationId != identity.ObligationId || source.IdempotencyKey != key
+            || source.Owner != state.Holder || source.Adapter != identity.SourceAdapter
+            || source.Adapter is not (StoppedWorkJudgmentKey.Adapter or StoppedWorkJudgmentKey.ProviderRoute
+                or "claude-subscription-cli")
+            || source.AdapterCapability != identity.SourceCapability
+            || source.AdapterCapability != StoppedWorkJudgmentKey.Capability
+            || !Enum.IsDefined(source.Status)
+            || source.Context is not { } context || context.Repository != repository
+            || context.Tag != tag || context.AttemptId != attempt || context.Stage != stage
+            || !Enum.IsDefined(context.HaltCause) || !Enum.IsDefined(context.State)
+            || StoppedWorkAdviceEvidence.Hash(context) != identity.ContextSha256)
+            throw new IOException("Retained event source identity drifted.");
+    }
+
     private static ConductorFollowResponse ReadResponse(string path, ConductorFollowEventIdentity identity, ConductorFollowState state)
     {
         var response = Read<ConductorFollowResponse>(path, MaxResponseBytes);
@@ -459,32 +574,129 @@ internal sealed class ConductorFollowSession
         return response;
     }
 
+    internal static ConductorFollowDecisionEvidence? ReadDecisionEvidence(string directory)
+    {
+        var path = Path.Combine(directory, "decision.json");
+        return File.Exists(path) ? Read<ConductorFollowDecisionEvidence>(path, 16 * 1024) : null;
+    }
+
+    private ConductorFollowDecisionEvidence? TryCreateDecisionEvidence(
+        IReadOnlyList<string> lines, string evidenceDirectory,
+        ConductorFollowEventIdentity identity, ConductorFollowState state,
+        ConductorObligation obligation)
+    {
+        var typed = TryParseTypedDecision(lines);
+        if (typed is null || typed.SchemaVersion != SchemaVersion
+            || typed.ObligationKey != identity.ObligationKey
+            || typed.ObligationId != obligation.ObligationId
+            || typed.SourceHeadSha != obligation.PullRequestHead
+            || typed.Decision is not ("Hold" or "ReplaceReview"))
+            return null;
+
+        var responseDigest = FileDigest(Path.Combine(evidenceDirectory, "response.json"));
+        var receipt = EnsureReceipt(evidenceDirectory);
+        var evidence = new ConductorFollowDecisionEvidence(
+            SchemaVersion, typed.ObligationKey, typed.ObligationId, typed.SourceHeadSha, typed.Decision,
+            obligation.TargetProject, obligation.ContextSha256!, FileDigest(Path.Combine(evidenceDirectory, "source.json")),
+            Digest(JsonSerializer.Serialize(_request, Json)), identity.ClaimGeneration, state.SessionId!,
+            identity.ConfigurationSha256, responseDigest, receipt);
+        var path = Path.Combine(evidenceDirectory, "decision.json");
+        if (File.Exists(path) && ReadDecisionEvidence(evidenceDirectory) != evidence)
+            throw new IOException("Conflicting retained follow decision.");
+        if (!File.Exists(path)) Write(path, evidence);
+        return evidence;
+    }
+
+    private static ConductorFollowTypedDecision? TryParseTypedDecision(IReadOnlyList<string> lines)
+    {
+        var parser = new CodexWorkerAdapter();
+        string? finalResponse = null;
+        for (var index = lines.Count - 1; index >= 0; index--)
+        {
+            if (string.IsNullOrWhiteSpace(lines[index])) continue;
+            if (parser.TryParseFinalResponse(lines[index], out var response))
+            {
+                finalResponse = response;
+                break;
+            }
+
+            if (!parser.IsPostResponseTerminalLine(lines[index])) return null;
+        }
+
+        if (finalResponse is null || finalResponse.Length > MaxDecisionChars
+            || Encoding.UTF8.GetByteCount(finalResponse) > MaxDecisionChars)
+            return null;
+        try
+        {
+            using var document = JsonDocument.Parse(finalResponse, new JsonDocumentOptions { MaxDepth = 8 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in root.EnumerateObject())
+                if (!names.Add(property.Name)) return null;
+            if (!names.SetEquals(["schemaVersion", "obligationKey", "obligationId", "sourceHeadSha", "decision"]))
+                return null;
+            if (!root.TryGetProperty("schemaVersion", out var schema) || schema.ValueKind != JsonValueKind.Number
+                || !schema.TryGetInt32(out var schemaVersion)
+                || !TryGetString(root, "obligationKey", out var key)
+                || !TryGetString(root, "obligationId", out var id)
+                || !TryGetString(root, "sourceHeadSha", out var head)
+                || !TryGetString(root, "decision", out var decision)
+                || decision is not ("Hold" or "ReplaceReview")
+                || head.Length != 40 || !head.All(Uri.IsHexDigit)
+                || key.Length is 0 or > 2048 || id.Length is 0 or > 256
+                || key.Any(char.IsControl) || id.Any(char.IsControl))
+                return null;
+            return new(schemaVersion, key, id, head, decision);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetString(JsonElement root, string name, out string value)
+    {
+        value = string.Empty;
+        return root.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && (value = property.GetString() ?? string.Empty).Length > 0;
+    }
+
     private static bool Complete(IReadOnlyList<string>? lines, string? sessionId)
     {
         if (string.IsNullOrWhiteSpace(sessionId) || lines is null) return false;
+        var parser = new CodexWorkerAdapter();
         var thread = false;
         var turn = false;
         var complete = false;
         foreach (var line in lines)
         {
-            using var document = JsonDocument.Parse(line);
-            var root = document.RootElement;
-            var type = root.GetProperty("type").GetString();
-            if (complete || type is "error" or "turn.failed") return false;
-            if (type == "thread.started")
+            if (complete && !string.IsNullOrWhiteSpace(line) && !parser.IsPostResponseTerminalLine(line))
+                return false;
+            if (parser.TryParseSessionId(line, out var parsedSession))
             {
-                if (thread || root.GetProperty("thread_id").GetString() != sessionId) return false;
+                if (thread || parsedSession != sessionId) return false;
                 thread = true;
             }
-            if (type == "turn.started")
+
+            if (parser.TryParseProgressEvent(line, out var progress))
             {
-                if (!thread || turn) return false;
-                turn = true;
+                if (progress?.Kind == "status" && progress.Text == "Turn started")
+                {
+                    if (!thread || turn) return false;
+                    turn = true;
+                }
+                else if (progress?.Kind == "result")
+                {
+                    if (progress.Text != "success" || !turn || complete) return false;
+                    complete = true;
+                }
             }
-            if (type == "turn.completed")
+
+            if (parser.IsPostResponseTerminalLine(line))
             {
                 if (!turn) return false;
-                complete = true;
             }
         }
         return thread && turn && complete;
@@ -539,7 +751,7 @@ internal sealed class ConductorFollowSession
     private static bool IsRefusal(Exception ex) => ex is IOException or UnauthorizedAccessException or JsonException
         or InvalidOperationException or ArgumentException or KeyNotFoundException or BatonFlowException;
 
-    private static string ConfigurationDigest(ConductorFollowState state) =>
+    internal static string ConfigurationDigest(ConductorFollowState state) =>
         Digest(JsonSerializer.Serialize(state with { SessionId = null, Frozen = false }, Json));
     private static string Digest(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
     private static string FileDigest(string path)

@@ -126,6 +126,12 @@ def check_pixi_and_workflow() -> None:
     assert workflow.count("ref: ${{ github.sha }}") >= 4
     assert "run: pixi run ${{ steps.coverage.outputs.task }}" in workflow
     assert "run: python tools/ci/aggregate.py" in workflow
+    assert (
+        "if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || "
+        "needs.recovery_target.result == 'success') && (github.event_name != 'pull_request' || "
+        "needs.changes.result != 'success' || needs.changes.outputs.page-only != 'true' || "
+        "needs.changes.outputs.dotnet != 'false') }}"
+    ) in workflow
 
     gates_tree = ast.parse((ROOT / "tools/gates/gates.py").read_text(encoding="utf-8"))
     after_fast = next(
@@ -141,7 +147,7 @@ def check_aggregate_table() -> None:
     valid = [
         ("push", "skipped", "", "success", "success", "test-shard-complement"),
         ("pull_request", "success", "true", "success", "success", "test-shard-complement"),
-        ("pull_request", "success", "false", "skipped", "success", "full"),
+        ("pull_request", "success", "false", "success", "success", "test-shard-complement"),
     ]
     for row in valid:
         assert not verify_coverage(*row, "false" if row[0] == "pull_request" else ""), row
@@ -159,7 +165,10 @@ def check_aggregate_table() -> None:
         base[:5] + ("",),
         base[:5] + ("full",),
         ("pull_request", "success", "false", "success", "success", "full"),
-        ("pull_request", "success", "", "skipped", "success", "full"),
+        ("pull_request", "success", "false", "skipped", "success", "full"),
+        ("pull_request", "success", "true", "skipped", "success", "page-only"),
+        ("pull_request", "failure", "false", "success", "success", "test-shard-complement"),
+        ("pull_request", "success", "", "success", "success", "test-shard-complement"),
     ]
     for row in mutations:
         assert verify_coverage(*row, "false" if row[0] == "pull_request" else ""), row
