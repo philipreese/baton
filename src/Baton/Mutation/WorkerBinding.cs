@@ -116,7 +116,8 @@ public abstract record WorkerBinding(WorkerContract Contract, GrantAuditMode Gra
         // selection record. The enforcement values themselves remain known from this binding.
         ExecutionLimitEvidence? LimitEvidence = null,
         int? MaxRepeatedToolSteps = null,
-        OwnedTaskExecutionIdentity? OwnedTaskIdentity = null)
+        OwnedTaskExecutionIdentity? OwnedTaskIdentity = null,
+        OwnedTaskExecutionPredecessor? OwnedTaskPredecessor = null)
         : WorkerBinding(Contract, GrantAuditMode)
     {
         public ExecutionLimitEvidence EffectiveLimitEvidence =>

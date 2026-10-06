@@ -235,7 +235,7 @@ public static class DispatchCommand
             var (continuedWorkerName, continuedEntry) = bindings.Single();
             WorkerBindingConfigEntry resumedEntry;
             (resumedEntry, continuation) = await ResolveContinuationAsync(
-                options.ContinueFromRoomDirectoryPath, continuedEntry, cancellationToken).ConfigureAwait(false);
+                options.ContinueFromRoomDirectoryPath, options.RoomDirectoryPath, continuedEntry, cancellationToken).ConfigureAwait(false);
             if (options.DeclaredTaskSize is not null && resumedEntry.DeclaredTaskSize is not null
                 && options.DeclaredTaskSize != resumedEntry.DeclaredTaskSize)
             {
@@ -1771,7 +1771,7 @@ public static class DispatchCommand
     /// spec/baton.md §3), or it has no <see cref="WorkerBindingConfigEntry.SessionId"/> recorded.
     /// </exception>
     private static async Task<(WorkerBindingConfigEntry Entry, ContinuationProvenance Provenance)> ResolveContinuationAsync(
-        string continueFromRoomDirectoryPath, WorkerBindingConfigEntry entry, CancellationToken cancellationToken)
+        string continueFromRoomDirectoryPath, string childRoomDirectoryPath, WorkerBindingConfigEntry entry, CancellationToken cancellationToken)
     {
         if (!Directory.Exists(continueFromRoomDirectoryPath))
         {
@@ -1848,6 +1848,13 @@ public static class DispatchCommand
         }
 
         var parentExecutionId = parentTerminal.Steps.FirstOrDefault()?.Execution;
+        var ownedTaskPredecessor = parentExecutionId is null ? null
+            : new OwnedTaskExecutionPredecessor(continueFromRoomDirectoryPath, parentExecutionId);
+        var inheritedOwner = ownedTaskPredecessor is null ? null : await OwnedTaskOwnership.ResolveAsync(
+            continueFromRoomDirectoryPath, parentEntry.OwnedTaskIdentity,
+            await new FlowEventLogReader(Path.Combine(continueFromRoomDirectoryPath, BatonPaths.FlowLogFileName))
+                .ReadAllAsync(cancellationToken).ConfigureAwait(false),
+            ownedTaskPredecessor, cancellationToken).ConfigureAwait(false);
         var authorizedRestoreBase = parentEntry.ExactFileRestoreBaseSha is { Length: > 0 } parentBase
             && string.Equals(
                 ExactFileRestoreAuthorityStore.Read(continueFromRoomDirectoryPath, parentWorkerName),
@@ -1857,6 +1864,8 @@ public static class DispatchCommand
                 : null;
         var resumedEntry = entry with
         {
+            OwnedTaskIdentity = inheritedOwner is null ? null : inheritedOwner with { RoomDirectory = childRoomDirectoryPath },
+            OwnedTaskPredecessor = ownedTaskPredecessor,
             // A continuation keeps the veteran's saved limit snapshot; mutable settings are not
             // consulted again for this same-session path.
             Timeout = parentEntry.Timeout,
@@ -1886,20 +1895,20 @@ public static class DispatchCommand
         IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
         CancellationToken cancellationToken)
     {
-        OwnedTaskExecutionIdentity? declaredIdentity = null;
+        var logPath = Path.Combine(roomDirectory, BatonPaths.FlowLogFileName);
+        var events = File.Exists(logPath)
+            ? await new FlowEventLogReader(logPath).ReadAllAsync(cancellationToken).ConfigureAwait(false)
+            : [];
         foreach (var binding in bindings.Values)
         {
-            if (binding.OwnedTaskIdentity is { } identity)
+            try
             {
-                if (declaredIdentity is not null && declaredIdentity != identity)
-                {
-                    throw new CliArgumentException(
-                        "The bindings file contains conflicting owned-task identities; no execution was admitted.");
-                }
-
-                declaredIdentity = identity;
-                await ValidateOwnedTaskIdentityAsync(roomDirectory, identity, cancellationToken)
-                    .ConfigureAwait(false);
+                await OwnedTaskOwnership.ResolveAsync(roomDirectory, binding.OwnedTaskIdentity,
+                    events, binding.OwnedTaskPredecessor, cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidOwnedTaskIdentityException ex)
+            {
+                throw new CliArgumentException(ex.Message);
             }
         }
     }
@@ -1909,61 +1918,11 @@ public static class DispatchCommand
         OwnedTaskExecutionIdentity identity,
         CancellationToken cancellationToken)
     {
-        if (!identity.IsAdmissionShape())
-        {
-            throw new CliArgumentException(
-                "The queue owned-task transport is malformed; no execution was admitted.");
-        }
-
-        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        var match = snapshot.Items.SingleOrDefault(item =>
-            item.State == QueueItemState.Launched
-            && item.OwnedTask is { } ownedTask
-            && ownedTask.Id == identity.TaskId
-            && ownedTask.Repository == identity.Repository
-            && ownedTask.Issue == identity.Issue
-            && item.Repository == identity.Repository
-            && item.Issue == identity.Issue
-            && item.AttemptId?.Value == identity.AttemptId
-            && item.AttemptEnvelope is { } envelope
-            && envelope.AttemptId.Value == identity.AttemptId
-            && envelope.OwnedTaskIdentity == identity
-            && item.RoomDirectory is { } recordedRoom
-            && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(recordedRoom), BatonPaths.RecordKey(roomDirectory))
-            && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(identity.RoomDirectory!), BatonPaths.RecordKey(roomDirectory)));
-
-        if (match is not null
-            && (match.OwnedTask is not { } acceptedOwner || !identity.HasExpectedTaskId()
-                || !string.Equals(acceptedOwner.Repository, match.Repository, StringComparison.Ordinal)
-                || acceptedOwner.Issue != match.Issue))
+        if (!await OwnedTaskOwnership.IsAdmittedAsync(roomDirectory, identity, cancellationToken).ConfigureAwait(false))
         {
             throw new CliArgumentException(
                 "The queue owned-task transport does not match one exact admitted queue attempt; no execution was admitted.");
         }
-
-        if (match is not null)
-        {
-            return;
-        }
-
-        var logPath = Path.Combine(roomDirectory, BatonPaths.FlowLogFileName);
-        if (!File.Exists(logPath))
-        {
-            throw new CliArgumentException(
-                "The owned-task binding has no durable queue admission or accepted predecessor; no execution was admitted.");
-        }
-
-        var accepted = await new FlowEventLogReader(logPath).ReadAllAsync(cancellationToken).ConfigureAwait(false);
-        if (accepted.OfType<FlowEvent.ExecutionRequestAccepted>().Any(entry =>
-                entry.Request.OwnedTaskIdentity is { } predecessor
-                && predecessor.ExecutionId is { Length: > 0 } predecessorExecution
-                && identity with { ExecutionId = predecessorExecution } == predecessor))
-        {
-            return;
-        }
-
-        throw new CliArgumentException(
-            "The owned-task binding does not preserve one exact admitted predecessor; no execution was admitted.");
     }
 
     private static bool SameOwnedTask(

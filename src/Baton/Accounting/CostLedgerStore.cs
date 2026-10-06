@@ -650,9 +650,9 @@ public static partial class CostLedgerStore
             && string.Equals(identity.Repository, repository.Value, StringComparison.Ordinal)
             && identity.RoomDirectory is { Length: > 0 } room
             && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(room), recordedRoomPath)
-            && (settledDelivery is null
-                || string.Equals(settledDelivery.Issue, identity.Issue.Value.ToString(
-                    System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal));
+            && settledDelivery is not null
+            && string.Equals(settledDelivery.Issue, identity.Issue.Value.ToString(
+                System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
         if (!valid)
         {

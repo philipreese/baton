@@ -927,13 +927,12 @@ public static class MutationInterface
             DeliveryGeneratedPaths: deliveryGeneratedPaths,
             DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
             Limits: CaptureAppliedLimitEvidence(processBinding),
-            ExactRunningTransport: processBinding.Target.ExactRunningTransport,
-            OwnedTaskIdentity: processBinding.OwnedTaskIdentity is { } identity
-                ? identity with { ExecutionId = executionId.Value }
-                : null);
+            ExactRunningTransport: processBinding.Target.ExactRunningTransport);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
-        await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
+        request = await AcceptExecutionRequestAsync(request, processBinding, roomDirectoryPath,
+            new OwnedTaskExecutionPredecessor(roomDirectoryPath, previousExecutionId.Value),
+            eventLogReader, eventLogWriter, cancellationToken).ConfigureAwait(false);
 
         var inFlightExecutions = new InFlightExecutionRegistry();
         inFlightExecutions.Bind(eventLogWriter);
@@ -1723,7 +1722,8 @@ public static class MutationInterface
                     // and fsync'd here — awaited sequentially, in declaration order — before that step's
                     // own dispatch is even started, and before the next step's intent is written.
                     var prepared = await PrepareExecutionAsync(
-                            workflowId, stepDefinition, snapshot, state, binding, artifactsRootPath, eventLogWriter, ioCancellationToken)
+                            workflowId, stepDefinition, snapshot, state, binding, roomDirectoryPath, artifactsRootPath,
+                            eventLogReader, eventLogWriter, ioCancellationToken)
                         .ConfigureAwait(false);
 
                     if (fallbackBinding is not null && previousBinding is WorkerBinding.Process previousProcess)
@@ -2165,7 +2165,9 @@ public static class MutationInterface
         WorkflowDefinitionSnapshot snapshot,
         FlowState state,
         WorkerBinding binding,
+        string roomDirectoryPath,
         string artifactsRootPath,
+        IEventLogReader eventLogReader,
         IEventLogWriter eventLogWriter,
         CancellationToken cancellationToken)
     {
@@ -2223,10 +2225,7 @@ public static class MutationInterface
             Limits: processBindingForRequest is { } processBinding
                 ? CaptureAppliedLimitEvidence(processBinding)
                 : null,
-            ExactRunningTransport: processBindingForRequest?.Target.ExactRunningTransport,
-            OwnedTaskIdentity: processBindingForRequest?.OwnedTaskIdentity is { } identity
-                ? identity with { ExecutionId = executionId.Value }
-                : null);
+            ExactRunningTransport: processBindingForRequest?.Target.ExactRunningTransport);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -2241,8 +2240,11 @@ public static class MutationInterface
                 stateByStepId[step.StepId], step.RetryPolicy.MaxAttempts, processBindingForRequest.Timeout);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
-        await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken)
-            .ConfigureAwait(false);
+        request = await AcceptExecutionRequestAsync(request, binding, roomDirectoryPath,
+            stateByStepId[step.StepId].LatestExecutionId is { } priorExecution
+                ? new OwnedTaskExecutionPredecessor(roomDirectoryPath, priorExecution.Value)
+                : processBindingForRequest?.OwnedTaskPredecessor,
+            eventLogReader, eventLogWriter, cancellationToken).ConfigureAwait(false);
 
         var priorRecoveryCause = stateByStepId[step.StepId].LatestRecoveryCause;
         var priorRecoveryOccurrence = stateByStepId[step.StepId].RecoveryOccurrence;
@@ -2343,6 +2345,23 @@ public static class MutationInterface
         var pid = Environment.ProcessId;
         var startTime = new DateTimeOffset(Process.GetCurrentProcess().StartTime).ToUniversalTime();
         return (pid, startTime);
+    }
+
+    private static async Task<ExecutionRequest> AcceptExecutionRequestAsync(
+        ExecutionRequest request, WorkerBinding binding, string roomDirectoryPath,
+        OwnedTaskExecutionPredecessor? predecessor, IEventLogReader reader,
+        IEventLogWriter writer, CancellationToken cancellationToken)
+    {
+        // Every fresh process acceptance goes through this join. Caller declarations never become
+        // accounting authority merely by acquiring the execution id allocated above.
+        var owner = binding is WorkerBinding.Process process
+            ? await OwnedTaskOwnership.ResolveAsync(roomDirectoryPath, process.OwnedTaskIdentity,
+                await reader.ReadAllAsync(cancellationToken).ConfigureAwait(false),
+                predecessor, cancellationToken).ConfigureAwait(false)
+            : null;
+        request = request with { OwnedTaskIdentity = owner is null ? null : owner with { ExecutionId = request.ExecutionId.Value } };
+        await writer.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
+        return request;
     }
 
     private static FlowEvent.ExecutionRequestAccepted CreateExecutionRequestAccepted(ExecutionRequest request)

@@ -273,8 +273,7 @@ public sealed record CostLedgerEntry(
     /// <summary>
     /// #1901 C1: the issue this attempt's work belongs to, as a bare decimal number with no <c>#</c>.
     /// Fresh queue executions use the producer-known owned-task identity joined to their accepted
-    /// execution. The workspace branch remains the compatibility source only when that context is
-    /// absent; a present invalid context remains unknown.
+    /// execution. A present invalid context remains unknown.
     /// (<see cref="LedgerQuery"/> normalizes both spellings on the filter side, so the writer picks one).
     /// For legacy direct/template executions this is copied from the immutable workspace-delivery
     /// observation when one is supplied; fresh terminal settlement supplies PR identity from its

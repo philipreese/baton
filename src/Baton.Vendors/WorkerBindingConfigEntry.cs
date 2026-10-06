@@ -305,7 +305,8 @@ public sealed record WorkerBindingConfigEntry(
     int? MaxRepeatedToolSteps = null,
     IReadOnlyList<string>? AttachmentNames = null,
     bool EnableAgyCorrection = false,
-    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);
+    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null,
+    Baton.Mutation.OwnedTaskExecutionPredecessor? OwnedTaskPredecessor = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and
