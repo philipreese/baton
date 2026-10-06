@@ -88,8 +88,8 @@ public sealed class ConductorFollowSessionTests
         using var fixture = await Fixture.CreateAsync();
         await fixture.RunAsync(fixture.Input("one"));
         var directory = Assert.Single(fixture.EventDirectories);
-        File.Delete(Path.Combine(directory, "receipt.txt"));
-        File.Delete(Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(directory))!, "delivery.jsonl"));
+        FileCleanup.EnsureDeleted(Path.Combine(directory, "receipt.txt"));
+        FileCleanup.EnsureDeleted(Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(directory))!, "delivery.jsonl"));
         if (partial)
         {
             var path = Path.Combine(directory, "response.json");
@@ -285,10 +285,9 @@ public sealed class ConductorFollowSessionTests
         {
             foreach (var process in processes)
             {
-                var stdout = process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-                var stderr = process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
-                await process.WaitForExitAsync(TestContext.Current.CancellationToken);
-                Assert.True(process.ExitCode == 0, await stdout + await stderr);
+                var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+                    process, TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+                Assert.True(process.ExitCode == 0, stdout + stderr);
             }
             var calls = File.ReadAllLines(Path.Combine(fixture.Root, "native-calls.jsonl"))
                 .Select(line => JsonNode.Parse(line)!).ToArray();

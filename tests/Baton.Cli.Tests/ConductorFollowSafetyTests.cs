@@ -82,7 +82,7 @@ public sealed class ConductorFollowSafetyTests
             {
                 // The actual controller callback must persist to this path before turn/start.
                 var statePath = Directory.GetFiles(Path.Combine(fixture.Root, "conductor-follow"), "session.json", SearchOption.AllDirectories).Single();
-                File.Delete(statePath);
+                FileCleanup.EnsureDeleted(statePath);
                 Directory.CreateDirectory(statePath);
             }
             var failure = await Record.ExceptionAsync(() => CodexAppServerBroker.RunProtocolAsync(
@@ -110,7 +110,8 @@ public sealed class ConductorFollowSafetyTests
         start.ArgumentList.Add(events);
         start.ArgumentList.Add(retained);
         using var process = System.Diagnostics.Process.Start(start)!;
-        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+        await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
         Assert.Equal(0, process.ExitCode);
         try
         {
