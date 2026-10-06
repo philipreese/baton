@@ -29,6 +29,18 @@ if (args.Length == 1 && args[0] == "claude-correction-address")
 if (args.Length == 2 && args[0] == "claude-correction-guard")
     return await ClaudeCorrectionCommand.GuardAsync(args[1], Console.In, Console.Out);
 
+if (args is ["task", "--help"] or ["task", "submit", "--help"])
+{
+    Console.Out.WriteLine(TaskOptionsParser.Usage);
+    return 0;
+}
+
+if (args is ["queue", "--help"] or ["queue", "add", "--help"])
+{
+    Console.Out.WriteLine(QueueOptionsParser.Usage);
+    return 0;
+}
+
 if (args.Length >= 1 && args[0] == "hook-check")
 {
     var deniedTools = Environment.GetEnvironmentVariable(HookCheckCommand.DeniedToolsEnvironmentVariable);
