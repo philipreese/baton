@@ -1,4 +1,5 @@
 using Baton.Accounting;
+using Baton.Cli;
 using Baton.Conductor;
 using Baton.Queue;
 using Baton.Status;
@@ -42,14 +43,24 @@ public sealed partial class QueueSchedulerService
         }
         var obligation = await _conductorObligations.ReadAsync(action.ObligationKey, cancellationToken)
             .ConfigureAwait(false);
-        if (obligation is null || obligation.Status != ConductorObligationStatus.TransportAcknowledged
-            || obligation.Owner != action.Holder || obligation.TransportReceipt != action.AdviceDigest)
-            throw new ConductorObligationStoreException("The retained obligation or advice digest changed.");
+        if (obligation is null || obligation.Owner != action.Holder)
+            throw new ConductorObligationStoreException("The retained obligation or evidence owner changed.");
         var identity = RepositoryIdentity.From("https://" + action.Repository, null);
         var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (claim?.Holder != action.Holder)
             throw new ConductorObligationStoreException("Conductor ownership changed.");
+        if (snapshot.Held)
+            throw new ConductorObligationStoreException("The queue is held.");
+        if (action.Origin == QueueReplacementReviewOrigin.Automatic)
+            ReplacementReviewConductorCommand.ValidateAutomaticAuthority(current, action.Repository);
+        if (ReplacementReviewEvidenceProvenance.For(action)
+            == ReplacementReviewEvidenceProvenance.CompletedFollow)
+            ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
+                obligation, current, action, ConductorClaimStore.GetClaimGeneration(claim));
+        else if (obligation.Status != ConductorObligationStatus.TransportAcknowledged
+            || obligation.TransportReceipt != action.AdviceDigest)
+            throw new ConductorObligationStoreException("The retained legacy advice digest changed.");
         var sourceTerminal = await TerminalSentinelWriter.TryReadAsync(action.SourceRoomDirectory, cancellationToken)
             .ConfigureAwait(false);
         if (sourceTerminal is null || sourceTerminal.State != current.StoppedWorkJudgment?.TerminalOutcome)
@@ -100,6 +111,9 @@ public sealed partial class QueueSchedulerService
         foreach (var item in snapshot.Items.Where(item => item.ReplacementReviewAction is not null))
         {
             var action = item.ReplacementReviewAction!;
+            string provenance;
+            try { provenance = ReplacementReviewEvidenceProvenance.For(action); }
+            catch (ConductorObligationStoreException) { continue; }
             if (action.Origin == QueueReplacementReviewOrigin.Automatic
                 && action.ReplacementAttemptId is null && item.State == QueueItemState.Queued)
             {
@@ -128,11 +142,42 @@ public sealed partial class QueueSchedulerService
             {
                 var obligation = await _conductorObligations.ReadAsync(action.ObligationKey, cancellationToken)
                     .ConfigureAwait(false);
-                if (obligation is not null
-                    && obligation.Owner == action.Holder
-                    && obligation.TransportReceipt == action.AdviceDigest
-                    && obligation.Status is ConductorObligationStatus.TransportAcknowledged
-                        or ConductorObligationStatus.ActionObserved)
+                var authentic = false;
+                if (obligation is not null && obligation.Owner == action.Holder)
+                {
+                    try
+                    {
+                        if (snapshot.Held) continue;
+                        if (action.Origin == QueueReplacementReviewOrigin.Automatic)
+                            ReplacementReviewConductorCommand.ValidateAutomaticAuthority(item, action.Repository);
+                        var identity = RepositoryIdentity.From("https://" + action.Repository, null);
+                        var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                        if (claim?.Holder != action.Holder) continue;
+                        await _advancer.ValidateReplacementReviewCompletionAsync(item, action, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow)
+                        {
+                            ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
+                                obligation, item, action, ConductorClaimStore.GetClaimGeneration(claim));
+                            authentic = obligation.Status is ConductorObligationStatus.Pending
+                                or ConductorObligationStatus.Submitted
+                                or ConductorObligationStatus.ActionObserved;
+                        }
+                        else
+                        {
+                            authentic = obligation.TransportReceipt == action.AdviceDigest
+                                && obligation.Status is ConductorObligationStatus.TransportAcknowledged
+                                    or ConductorObligationStatus.ActionObserved;
+                        }
+                    }
+                    catch (Exception ex) when (ex is ConductorObligationStoreException or IOException
+                        or UnauthorizedAccessException)
+                    {
+                        authentic = false;
+                    }
+                }
+                if (authentic)
                     await _conductorObligations.ObserveActionAsync(action.ObligationKey, proof, cancellationToken)
                         .ConfigureAwait(false);
                 continue;

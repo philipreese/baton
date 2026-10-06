@@ -75,7 +75,9 @@ mutations. The normative contract and recovery details are in
 [`spec/baton.md` §14](spec/baton.md#14-conductor-claims-durable-repository-ownership-register-2296).
 
 Use [continuing conductor delivery](spec/baton.md#continuing-conductor-follow-2628) for explicit
-attachment or manual event delivery.
+attachment or manual event delivery. An attached completed turn may provide one strict `Hold` or
+`ReplaceReview` evidence object; only the latter can enter the existing opted-in replacement-review
+slot after the host revalidates its source, claim, head, and follow provenance.
 
 ### Advice when a lifecycle stops
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Cli;
 using Baton.Conductor;
 using Baton.Accounting;
 using Baton.Domain;
@@ -29,8 +30,31 @@ public sealed partial class QueueSchedulerService
         try
         {
             if (intent.FollowAttachmentId is not null)
-                await ConductorFollowSession.NotifyAttachedAsync(source, token, FollowBroker,
+            {
+                var retained = await ConductorFollowSession.NotifyAttachedAsync(source, token, FollowBroker,
                     FollowRepositoryResolver).ConfigureAwait(false);
+                if (retained?.DecisionEvidence is { Decision: "ReplaceReview" } decision)
+                {
+                    await ReplacementReviewConductorCommand.ExecuteAsync(
+                        new ConductorOptions(
+                            ConductorVerb.Act,
+                            Holder: holder,
+                            ObligationKey: key,
+                            Action: "replace-review",
+                            ExpectedHead: decision.SourceHeadSha),
+                        TextWriter.Null,
+                        BatonPaths.Root,
+                        _advancer,
+                        _conductorObligations,
+                        token,
+                        automatic: true,
+                        evidence: new ReplacementReviewEvidenceInput(
+                            ReplacementReviewEvidenceProvenance.CompletedFollow,
+                            decision.ResponseSha256,
+                            retained.EvidenceLocation,
+                            decision)).ConfigureAwait(false);
+                }
+            }
             else if (source.OwnedTask is null || !ConductorFollowSession.HasRegistrationFor(source))
             {
                 await _conductorObligations.RecordLegacyHaltNotificationAsync(obligation, token).ConfigureAwait(false);

@@ -8973,6 +8973,20 @@ per-obligation delivery owner before either launch marker. Follow ownership supp
 transport without changing the original obligation; historical legacy markers retain legacy
 ownership. No receipt becomes `ActionObserved` or authorizes reply consumption.
 
+An attached follow turn may return one bounded strict JSON object with exactly
+`schemaVersion`, `obligationKey`, `obligationId`, `sourceHeadSha`, and `decision` (`Hold` or
+`ReplaceReview`). The host reads the completed Codex final response through the existing worker
+response reader and terminal-line rule; turn completion alone is not typed decision validity.
+Complete but malformed, foreign, overlong, duplicate-field, aliased, or prose output is retained
+as evidence and cannot authorize an action or buy a retry. A valid `ReplaceReview` is evidence only:
+the host binds its immutable source/context, request and configuration, claim generation, native
+thread, complete response digest, receipt, and follow provenance before consuming the existing one
+replacement-review slot. `Hold` consumes no slot. Follow evidence never fabricates or replaces the
+original obligation's legacy transport acknowledgement, and trusted completed-review proof may
+observe the original obligation directly from its pending/submitted state. Startup consumes a
+retained accepted decision through the same admission path without another native turn; legacy
+advice remains separately validated and readable.
+
 Daemon delivery checks current attachment, queue source, claim and recorded trust before launch.
 Its narrow required prelaunch hook uses persisted vendor snapshots, existing runway thresholds,
 reservation policy and admission ledger. Missing, stale, unreadable or refused required admission

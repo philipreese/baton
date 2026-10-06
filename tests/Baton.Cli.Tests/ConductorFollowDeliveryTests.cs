@@ -21,6 +21,169 @@ public sealed class ConductorFollowDeliveryTests
     private static readonly RepositoryIdentity Identity = RepositoryIdentity.From("https://" + Repository, null)!;
 
     [Fact]
+    public async Task Typed_follow_actual_journey_launches_once_and_observes_exact_head_idempotently()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "Hold";
+        await fixture.HaltAsync("warmup");
+        fixture.Reply = "ReplaceReview";
+        var launches = new List<QueueLaunchRequest>();
+        var advancer = fixture.Advancer();
+        using var scheduler = fixture.Scheduler(advancer, launch: (request, _) =>
+        {
+            launches.Add(request);
+            return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+        });
+        await fixture.HaltAsync("typed", scheduler: scheduler);
+        var admitted = await fixture.RowAsync("typed");
+        var action = Assert.IsType<QueueReplacementReviewAction>(admitted.ReplacementReviewAction);
+        Assert.Equal(QueueReplacementReviewOrigin.Automatic, action.Origin);
+        Assert.Equal(ReplacementReviewEvidenceProvenance.CompletedFollow, action.EvidenceProvenance);
+        Assert.Equal(string.Empty, action.AdviceDigest);
+        Assert.Equal(2, admitted.Round);
+        Assert.True(admitted.AutomaticFixUsed);
+        Assert.Equal("retained-thread", fixture.Calls[1].SessionId);
+        var original = (await fixture.Store.ReadAsync(fixture.Key("typed"), Ct))!;
+        Assert.Equal(ConductorObligationStatus.Pending, original.Status);
+        Assert.Null(original.TransportReceipt);
+        await scheduler.TickOnceAsync(Ct);
+        var launched = await fixture.RowAsync("typed");
+        Assert.Single(launches);
+        Assert.Equal(launched.AttemptId, launched.ReplacementReviewAction!.ReplacementAttemptId);
+        Assert.Equal(launched.RoomDirectory, launched.ReplacementReviewAction.ReplacementRoomDirectory);
+        await fixture.CompleteReviewAsync("typed");
+        await scheduler.TickOnceAsync(Ct);
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        var completed = await fixture.RowAsync("typed");
+        var observed = (await fixture.Store.ReadAsync(fixture.Key("typed"), Ct))!;
+        Assert.NotNull(completed.ReplacementReviewAction!.CompletionProof);
+        ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(observed, completed, completed.ReplacementReviewAction);
+        Assert.Equal(ConductorObligationStatus.ActionObserved, observed.Status);
+        Assert.Equal(completed.ReplacementReviewAction!.CompletionProof, observed.ActionProof);
+        ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(observed, completed, completed.ReplacementReviewAction);
+        var decision = ConductorFollowSession.ReadDecisionEvidence(action.EvidenceDirectory!)!;
+        Assert.Throws<ConductorObligationStoreException>(() => ReplacementReviewEvidenceValidator.ValidateCompletedFollow(
+            observed, completed, new(ReplacementReviewEvidenceProvenance.CompletedFollow,
+                action.EvidenceDigest!, action.EvidenceDirectory!, decision), "holder", Head));
+        Assert.Throws<ConductorObligationStoreException>(() => ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
+            observed, completed, completed.ReplacementReviewAction with { CompletionProof = "foreign-proof" }));
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        await scheduler.TickOnceAsync(Ct);
+        Assert.Equal(observed, await fixture.Store.ReadAsync(fixture.Key("typed"), Ct));
+        Assert.Single(launches);
+        Assert.Equal(2, fixture.Calls.Count);
+        Assert.Equal(0, fixture.LegacyCalls);
+    }
+
+    [Theory]
+    [InlineData("Hold")]
+    [InlineData("prose")]
+    [InlineData("duplicate")]
+    [InlineData("unknown")]
+    [InlineData("alias")]
+    [InlineData("overlong")]
+    [InlineData("foreign-key")]
+    [InlineData("foreign-id")]
+    [InlineData("foreign-head")]
+    public async Task Typed_complete_invalid_or_hold_is_retained_without_action_or_paid_retry(string reply)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = reply;
+        await fixture.HaltAsync("invalid");
+        Assert.NotNull(fixture.Receipt("invalid"));
+        Assert.Equal(reply == "Hold", File.Exists(fixture.EventEvidencePath("invalid", "decision.json")));
+        await fixture.Scheduler().RecoverAttachedFollowAsync(Ct);
+        await fixture.Scheduler().RecoverAttachedFollowAsync(Ct);
+        Assert.Null((await fixture.RowAsync("invalid")).ReplacementReviewAction);
+        Assert.Equal(1, (await fixture.RowAsync("invalid")).Round);
+        Assert.Single(fixture.Calls);
+        Assert.Equal(ConductorObligationStatus.Pending, (await fixture.Store.ReadAsync(fixture.Key("invalid"), Ct))!.Status);
+    }
+
+    [Theory]
+    [InlineData("both-trailers", true)]
+    [InlineData("completion-then-usage", true)]
+    [InlineData("usage-only", false)]
+    [InlineData("error", false)]
+    [InlineData("foreign-thread", false)]
+    [InlineData("repeated-turn", false)]
+    [InlineData("repeated-completion", false)]
+    [InlineData("post-completion-message", false)]
+    public async Task Typed_native_completion_requires_one_successful_same_thread_turn(string stream, bool valid)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        fixture.NativeStream = stream;
+        await fixture.HaltAsync("native");
+        Assert.Equal(valid, (await fixture.RowAsync("native")).ReplacementReviewAction is not null);
+        if (!valid)
+        {
+            fixture.NativeStream = null;
+            await fixture.HaltAsync("later");
+            Assert.Null((await fixture.RowAsync("later")).ReplacementReviewAction);
+        }
+        Assert.Single(fixture.Calls);
+    }
+
+    [Theory]
+    [InlineData("opt-in")]
+    [InlineData("held")]
+    [InlineData("detach")]
+    [InlineData("claim")]
+    [InlineData("trust")]
+    [InlineData("ineligible-halt")]
+    [InlineData("request")]
+    [InlineData("generation")]
+    [InlineData("thread")]
+    [InlineData("context")]
+    [InlineData("repository")]
+    [InlineData("source-attempt")]
+    [InlineData("receipt")]
+    public async Task Completed_saved_decision_revalidates_authority_and_immutable_bindings_before_admission(string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        if (change != "ineligible-halt") await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        await fixture.HaltAsync("saved", notify: false);
+        await fixture.Scheduler().ReconcileStoppedWorkAdviceAsync(Ct);
+        fixture.Reply = "ReplaceReview";
+        Assert.Equal("delivered", (await fixture.FollowAsync("saved")).GetProperty("status").GetString());
+        Assert.NotNull(ConductorFollowSession.ReadDecisionEvidence(Path.GetDirectoryName(fixture.EventEvidencePath("saved", "decision.json"))!));
+        await fixture.ChangeAsync("saved", change);
+        if (change == "ineligible-halt") await fixture.EnableAutomaticAsync();
+        await fixture.Scheduler().RecoverAttachedFollowAsync(Ct);
+        var row = await fixture.RowAsync("saved");
+        Assert.Null(row.ReplacementReviewAction);
+        Assert.Equal(1, row.Round);
+        Assert.Single(fixture.Calls);
+        Assert.True(File.Exists(fixture.EventEvidencePath("saved", "decision.json")));
+    }
+
+    [Fact]
+    public async Task Startup_and_raced_notification_consume_saved_typed_decision_without_another_turn()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        var halted = await fixture.HaltAsync("saved", notify: false);
+        await fixture.Scheduler().ReconcileStoppedWorkAdviceAsync(Ct);
+        fixture.Reply = "ReplaceReview";
+        await fixture.FollowAsync("saved");
+        Assert.Null((await fixture.RowAsync("saved")).ReplacementReviewAction);
+        await Task.WhenAll(fixture.Scheduler().RecoverAttachedFollowAsync(Ct),
+            fixture.Scheduler().NotifyOwnedHaltAsync(halted, Ct));
+        Assert.NotNull((await fixture.RowAsync("saved")).ReplacementReviewAction);
+        Assert.Equal(2, (await fixture.RowAsync("saved")).Round);
+        Assert.Single(fixture.Calls);
+    }
+
+    [Fact]
     public async Task Attach_actual_halt_enqueue_notification_receipt_restart_and_idle_controls()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -563,6 +726,139 @@ public sealed class ConductorFollowDeliveryTests
         }
     }
 
+    [Theory]
+    [InlineData("opt-in")]
+    [InlineData("held")]
+    [InlineData("detach")]
+    [InlineData("claim")]
+    [InlineData("trust")]
+    [InlineData("request")]
+    [InlineData("head")]
+    public async Task Typed_admitted_action_revalidates_authority_before_registered_launch(string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        await fixture.HaltAsync("launch");
+        var action = (await fixture.RowAsync("launch")).ReplacementReviewAction;
+        Assert.NotNull(action);
+        await fixture.ChangeAsync("launch", change);
+        var launches = 0;
+        await fixture.Scheduler(launch: (_, _) =>
+        {
+            launches++;
+            return Task.FromResult(new QueueLaunchOutcome(null));
+        }).TickOnceAsync(Ct);
+        Assert.Equal(0, launches);
+        var row = await fixture.RowAsync("launch");
+        Assert.Equal(2, row.Round);
+        Assert.Null(row.LaunchMayHaveBegunAt);
+        Assert.Equal(action.EvidenceDigest, row.ReplacementReviewAction!.EvidenceDigest);
+        Assert.Single(fixture.Calls);
+    }
+
+    [Theory]
+    [InlineData("opt-in")]
+    [InlineData("held")]
+    [InlineData("detach")]
+    [InlineData("claim")]
+    [InlineData("trust")]
+    [InlineData("head")]
+    [InlineData("artifactless")]
+    public async Task Typed_completion_proof_revalidates_authority_and_artifact_before_observation(string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        var advancer = fixture.Advancer();
+        using var scheduler = fixture.Scheduler(advancer, launch: (request, _) =>
+            Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+        await fixture.HaltAsync("observe", scheduler: scheduler);
+        await scheduler.TickOnceAsync(Ct);
+        await fixture.CompleteReviewAsync("observe");
+        var interrupted = false;
+        advancer.ReplacementReviewAfterProofPersisted = () =>
+        {
+            interrupted = true;
+            if (change == "artifactless")
+                FileCleanup.EnsureDeleted(Path.Combine((fixture.RowAsync("observe").GetAwaiter().GetResult())
+                    .ReplacementReviewAction!.ReplacementRoomDirectory!, "verdict.json"));
+            else fixture.ChangeAsync("observe", change).GetAwaiter().GetResult();
+            throw new IOException("Offline crash after proof commit");
+        };
+        await scheduler.TickOnceAsync(Ct);
+        Assert.True(interrupted);
+        var action = (await fixture.RowAsync("observe")).ReplacementReviewAction!;
+        Assert.NotNull(action.CompletionProof);
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        Assert.Equal(ConductorObligationStatus.Pending, (await fixture.Store.ReadAsync(fixture.Key("observe"), Ct))!.Status);
+        Assert.Equal(action.CompletionProof, (await fixture.RowAsync("observe")).ReplacementReviewAction!.CompletionProof);
+        Assert.Single(fixture.Calls);
+    }
+
+    [Theory]
+    [InlineData("artifactless")]
+    [InlineData("incomplete")]
+    [InlineData("stale-head")]
+    [InlineData("wrong-attempt")]
+    public async Task Typed_replacement_without_exact_independent_completion_never_observes_action(string kind)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        using var scheduler = fixture.Scheduler(launch: (request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+        await fixture.HaltAsync("review", scheduler: scheduler);
+        await scheduler.TickOnceAsync(Ct);
+        await fixture.CompleteReviewAsync("review", kind);
+        await scheduler.TickOnceAsync(Ct);
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        Assert.Null((await fixture.RowAsync("review")).ReplacementReviewAction!.CompletionProof);
+        Assert.Equal(ConductorObligationStatus.Pending, (await fixture.Store.ReadAsync(fixture.Key("review"), Ct))!.Status);
+        Assert.Single(fixture.Calls);
+    }
+
+    [Theory]
+    [InlineData("missing-digest")]
+    [InlineData("missing-directory")]
+    [InlineData("legacy-digest")]
+    [InlineData("missing-origin")]
+    [InlineData("foreign-origin")]
+    public async Task Follow_slot_with_missing_or_conflicting_provenance_never_falls_back_to_legacy(string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        await fixture.HaltAsync("provenance");
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => item with
+            {
+                ReplacementReviewAction = change switch
+                {
+                    "missing-digest" => item.ReplacementReviewAction! with { EvidenceDigest = null },
+                    "missing-directory" => item.ReplacementReviewAction! with { EvidenceDirectory = null },
+                    "legacy-digest" => item.ReplacementReviewAction! with { AdviceDigest = item.ReplacementReviewAction.EvidenceDigest! },
+                    "missing-origin" => item.ReplacementReviewAction! with { EvidenceProvenance = null },
+                    _ => item.ReplacementReviewAction! with { EvidenceProvenance = "foreign" },
+                },
+            }).ToList(),
+        }, Ct);
+        var launches = 0;
+        await fixture.Scheduler(launch: (_, _) =>
+        {
+            launches++;
+            return Task.FromResult(new QueueLaunchOutcome(null));
+        }).TickOnceAsync(Ct);
+        Assert.Equal(0, launches);
+        Assert.Equal(0, fixture.LegacyCalls);
+        Assert.Single(fixture.Calls);
+        Assert.Equal(2, (await fixture.RowAsync("provenance")).Round);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly IDisposable _scope;
@@ -574,9 +870,12 @@ public sealed class ConductorFollowDeliveryTests
         private string RequestPath => Path.Combine(Root, "explicit-request.json");
         public List<CodexBrokerConfiguration> Calls { get; } = [];
         public bool Interrupt { get; set; }
+        public string? Reply { get; set; }
+        public string? NativeStream { get; set; }
         public Func<CancellationToken, Task>? WaitInBroker { get; set; }
         public int LegacyCalls { get; private set; }
         public ConductorObligationStore Store { get; }
+        private FakeGh Gh { get; } = new();
 
         public Fixture(string? root = null)
         {
@@ -679,7 +978,85 @@ public sealed class ConductorFollowDeliveryTests
                 FollowRepositoryResolver = (_, _) => Task.FromResult<RepositoryIdentity?>(Identity),
             };
 
-        private static WorkItemAdvancer Advancer() => new(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
+        public WorkItemAdvancer Advancer() => new(Gh, (_, _) => Task.FromResult<string?>(Gh.HeadSha));
+
+        public async Task<QueueItem> RowAsync(string tag) =>
+            (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single(item => item.Tag == tag);
+
+        public Task EnableAutomaticAsync() => DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                AutomaticMissingVerdictReplacementReview = new Dictionary<string, JsonElement>
+                {
+                    [Repository] = JsonSerializer.SerializeToElement(true),
+                },
+            },
+        }, BatonPaths.SettingsFile, Ct);
+
+        public async Task ChangeAsync(string tag, string change)
+        {
+            if (change == "opt-in") await DaemonSettingsStore.SaveAsync(new(), BatonPaths.SettingsFile, Ct);
+            else if (change == "held") await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with { Held = true }, Ct);
+            else if (change == "detach") await CommandAsync("detach");
+            else if (change == "claim") await ConductorClaimStore.TakeoverAsync(Identity, "other", "fixture", Root, cancellationToken: Ct);
+            else if (change == "trust") ProjectCeilingStore.Revoke(Workspace, CeilingPath);
+            else if (change == "head") Gh.HeadSha = new string('f', 40);
+            else if (change == "request")
+            {
+                var path = Path.GetFullPath(Path.Combine(EventEvidencePath(tag, "identity.json"), "..", "..", "..", "request.json"));
+                var request = JsonNode.Parse(File.ReadAllText(path))!;
+                request["initialInstructions"] = "changed";
+                File.WriteAllText(path, request.ToJsonString());
+            }
+            else if (change is "generation" or "thread" or "context" or "repository")
+            {
+                var path = EventEvidencePath(tag, "identity.json");
+                var identity = JsonNode.Parse(File.ReadAllText(path))!;
+                identity[change switch
+                {
+                    "generation" => "claimGeneration",
+                    "thread" => "sessionId",
+                    "context" => "contextSha256",
+                    _ => "repository",
+                }] = "foreign";
+                File.WriteAllText(path, identity.ToJsonString());
+            }
+            else if (change == "source-attempt")
+            {
+                var path = EventEvidencePath(tag, "source.json");
+                var source = JsonNode.Parse(File.ReadAllText(path))!;
+                source["context"]!["attemptId"] = JsonSerializer.SerializeToNode(new FleetAttemptId("foreign"));
+                File.WriteAllText(path, source.ToJsonString());
+            }
+            else if (change == "receipt") File.WriteAllText(EventEvidencePath(tag, "receipt.txt"), "foreign");
+            else if (change != "ineligible-halt") throw new InvalidOperationException(change);
+        }
+
+        public async Task CompleteReviewAsync(string tag, string kind = "complete")
+        {
+            var row = await RowAsync(tag);
+            var room = row.RoomDirectory!;
+            Directory.CreateDirectory(room);
+            var verdict = Path.Combine(room, "verdict.json");
+            File.WriteAllText(verdict, JsonSerializer.Serialize(new
+            {
+                reviewedRef = kind == "stale-head" ? new string('f', 40) : Head,
+                completion = kind == "incomplete" ? "incomplete" : "complete",
+                decision = "approve",
+                summary = "Nothing blocking.",
+                findings = Array.Empty<object>(),
+            }));
+            await TerminalSentinelWriter.WriteAsync(room,
+                new(WorkflowOutcome.Succeeded, [], kind == "artifactless" ? [] : [verdict], null), Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+            {
+                Items = queue.Items.Select(item => item.Tag == tag ? item with
+                {
+                    AttemptId = kind == "wrong-attempt" ? new FleetAttemptId("foreign") : item.AttemptId,
+                } : item).ToList(),
+            }, Ct);
+        }
 
         public async Task<QueueItem> HaltAsync(string tag, bool notify = true, QueueSchedulerService? scheduler = null)
         {
@@ -692,6 +1069,9 @@ public sealed class ConductorFollowDeliveryTests
             {
                 Tag = tag,
                 Role = "review",
+                ScopeClass = "engine",
+                DeclaredTaskSize = TaskSizeDeclaration.Parse("small", "One bounded review recovery"),
+                Round = 1,
                 Workspace = Workspace,
                 SpecFile = Path.Combine(Root, tag + ".md"),
                 Issue = 2632,
@@ -767,13 +1147,53 @@ public sealed class ConductorFollowDeliveryTests
                 throw new IOException("Offline interruption after native identity");
             }
             using var nativeInput = new StringWriter();
+            var reply = JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                obligationKey = Reply == "foreign-key" ? Key("foreign") : key,
+                obligationId = Reply == "foreign-id" ? "foreign" : (await Store.ReadAsync(key, token))!.ObligationId,
+                sourceHeadSha = Reply == "foreign-head" ? new string('f', 40) : Head,
+                decision = Reply == "Hold" ? "Hold" : "ReplaceReview",
+            });
+            reply = Reply switch
+            {
+                "prose" => "Please " + reply,
+                "duplicate" => reply.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1", StringComparison.Ordinal),
+                "unknown" => reply.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"unknown\":true", StringComparison.Ordinal),
+                "alias" => reply.Replace("obligationKey", "ObligationKey", StringComparison.Ordinal),
+                "overlong" => new string(' ', 17000) + reply,
+                _ => reply,
+            };
+            var message = Reply is null ? string.Empty : JsonSerializer.Serialize(new
+            {
+                method = "item/completed",
+                @params = new { item = new { type = "agentMessage", text = reply } },
+            }) + "\n";
+            var usage = Reply is null ? string.Empty : "{\"method\":\"thread/tokenUsage/updated\",\"params\":{\"tokenUsage\":{\"last\":{\"inputTokens\":1,\"outputTokens\":1}}}}\n";
             using var nativeOutput = new StringReader("{\"id\":1,\"result\":{}}\n"
                 + "{\"id\":2,\"result\":{\"thread\":{\"id\":\"retained-thread\"}}}\n"
                 + "{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn\",\"status\":\"inProgress\"}}}\n"
+                + message + usage
                 + "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"status\":\"completed\"}}}\n");
+            using var captured = new StringWriter();
             var result = await CodexAppServerBroker.RunProtocolAsync(configuration, prompt,
                 CodexAppServerBroker.CreateDynamicToolPolicy(configuration, directory, inputs, null), null,
-                nativeInput, nativeOutput, output, error, token, threadStarted: started);
+                nativeInput, nativeOutput, captured, error, token, threadStarted: started);
+            foreach (var line in captured.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (NativeStream == "usage-only" && line.Contains("turn.completed", StringComparison.Ordinal)) continue;
+                await output.WriteLineAsync(NativeStream == "foreign-thread"
+                    ? line.Replace("retained-thread", "foreign-thread", StringComparison.Ordinal) : line);
+            }
+            if (NativeStream == "error") await output.WriteLineAsync("{\"type\":\"error\",\"message\":\"failed\"}");
+            if (NativeStream == "repeated-turn") await output.WriteLineAsync("{\"type\":\"turn.started\"}");
+            if (NativeStream == "repeated-completion") await output.WriteLineAsync("{\"type\":\"turn.completed\"}");
+            if (NativeStream == "completion-then-usage") await output.WriteLineAsync("{\"type\":\"turn.usage\",\"usage\":{}}");
+            if (NativeStream == "post-completion-message") await output.WriteLineAsync(JsonSerializer.Serialize(new
+            {
+                type = "item.completed",
+                item = new { type = "agent_message", text = reply },
+            }));
             Assert.Contains(configuration.ResumeSession ? "thread/resume" : "thread/start", nativeInput.ToString(), StringComparison.Ordinal);
             Assert.Contains("\"threadId\":\"retained-thread\"", nativeInput.ToString(), StringComparison.Ordinal);
             return result;
@@ -784,13 +1204,14 @@ public sealed class ConductorFollowDeliveryTests
 
     private sealed class FakeGh : IGhCliRunner
     {
+        public string HeadSha { get; set; } = Head;
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
-            if (args is ["api", ..]) return Task.FromResult(RequiredCheckFixture.Read(args, Repository, Head,
+            if (args is ["api", ..]) return Task.FromResult(RequiredCheckFixture.Read(args, Repository, HeadSha,
                 new GhCliResult(true, 0, "[{\"name\":\"ci\",\"bucket\":\"pass\"}]", "")));
             if (args is ["pr", "checks", ..]) return Task.FromResult(new GhCliResult(true, 0,
                 "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", ""));
-            var pr = "{\"number\":77,\"state\":\"OPEN\",\"isDraft\":true,\"headRefOid\":\"" + Head
+            var pr = "{\"number\":77,\"state\":\"OPEN\",\"isDraft\":true,\"headRefOid\":\"" + HeadSha
                 + "\",\"headRefName\":\"2632-lane\",\"baseRefName\":\"main\",\"isCrossRepository\":false,\"statusCheckRollup\":[]}";
             return Task.FromResult(new GhCliResult(true, 0, args is ["pr", "view", ..] ? pr : "[" + pr + "]", ""));
         }

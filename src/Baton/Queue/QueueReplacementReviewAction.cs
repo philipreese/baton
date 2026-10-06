@@ -35,4 +35,7 @@ public sealed record QueueReplacementReviewAction(
     string? BlockedReason = null,
     string? NextTrigger = null,
     QueueReplacementReviewOrigin Origin = QueueReplacementReviewOrigin.Manual,
-    string? PausedReason = null);
+    string? PausedReason = null,
+    string? EvidenceProvenance = null,
+    string? EvidenceDigest = null,
+    string? EvidenceDirectory = null);
