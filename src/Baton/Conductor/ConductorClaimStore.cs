@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Security.Cryptography;
 using Baton.Accounting;
 using Baton.Status;
 
@@ -93,7 +94,8 @@ public static class ConductorClaimStore
                     Holder: normalizedHolder,
                     AcquiredAt: timestamp,
                     Takeover: null,
-                    Transitions: transitions);
+                    Transitions: transitions,
+                    ClaimGeneration: Guid.NewGuid().ToString("N"));
 
                 WriteUnlocked(path, record);
                 return record;
@@ -170,7 +172,8 @@ public static class ConductorClaimStore
                     Holder: normalizedHolder,
                     AcquiredAt: timestamp,
                     Takeover: takeoverProvenance,
-                    Transitions: transitions);
+                    Transitions: transitions,
+                    ClaimGeneration: Guid.NewGuid().ToString("N"));
 
                 WriteUnlocked(path, record);
                 return (record, displaced);
@@ -240,7 +243,8 @@ public static class ConductorClaimStore
                     Holder: null,
                     AcquiredAt: null,
                     Takeover: null,
-                    Transitions: transitions);
+                    Transitions: transitions,
+                    ClaimGeneration: existing.ClaimGeneration);
 
                 WriteUnlocked(path, record);
                 return record;
@@ -263,6 +267,22 @@ public static class ConductorClaimStore
         return Task.Run(
             () => RunUnderClaimLock(path, () => ReadUnlocked(path)),
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns the immutable generation of the current acquisition. Older claim records predate the
+    /// field, so their complete retained history is deterministically fingerprinted instead of being
+    /// treated as interchangeable with a later acquisition.
+    /// </summary>
+    public static string GetClaimGeneration(ConductorClaimRecord claim)
+    {
+        ArgumentNullException.ThrowIfNull(claim);
+        if (!string.IsNullOrWhiteSpace(claim.ClaimGeneration))
+            return claim.ClaimGeneration;
+
+        var history = JsonSerializer.Serialize(claim.Transitions ?? [], SerializerOptions);
+        return "legacy-" + Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes($"{claim.Repository}\n{history}"))).ToLowerInvariant();
     }
 
     /// <summary>

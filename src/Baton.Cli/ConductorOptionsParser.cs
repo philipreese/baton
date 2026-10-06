@@ -11,7 +11,8 @@ public static class ConductorOptionsParser
                                 "       baton conductor takeover <holder> [--workspace <dir>] --reason <text>\n" +
                                 "       baton conductor prepare --request <file>\n" +
                                 "       baton conductor decide --obligation <key> --context <file>\n" +
-                                "       baton conductor act --obligation <key> --holder <holder> --action replace-review --expected-head <full-sha>";
+                                "       baton conductor act --obligation <key> --holder <holder> --action replace-review --expected-head <full-sha>\n" +
+                                "       baton conductor follow --request <file>";
 
     public static ConductorOptions Parse(string[] args)
     {
@@ -32,8 +33,18 @@ public static class ConductorOptionsParser
             "prepare" => ParseReadiness(args[1..], ConductorVerb.Prepare),
             "decide" => ParseReadiness(args[1..], ConductorVerb.Decide),
             "act" => ParseAct(args[1..]),
+            "follow" => ParseFollow(args[1..]),
             _ => throw new CliArgumentException($"Unknown 'baton conductor' sub-verb '{args[0]}'.\n{Usage}"),
         };
+    }
+
+    private static ConductorOptions ParseFollow(string[] args)
+    {
+        if (args.Length != 2 || args[0] != "--request" || string.IsNullOrWhiteSpace(args[1])
+            || args[1].StartsWith("--", StringComparison.Ordinal))
+            throw new CliArgumentException($"Invalid conductor follow arguments.\n{Usage}");
+
+        return new(ConductorVerb.Follow, FollowRequestFile: args[1]);
     }
 
     private static ConductorOptions ParseAct(string[] args)

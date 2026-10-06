@@ -50,6 +50,10 @@ public class ExecutionOutputDirectoryListingTests
         ["Baton/Mutation/MemoryProposalApplier.cs"] = "lists memoryRoot (room memory), not an execution output directory",
         // Lists only Baton's room-level exact-file recovery markers under <room>/.baton.
         ["Baton.Cli/Mcp/ExactFileRestoreTool.cs"] = "lists the exact-file audit directory, not an execution output directory",
+        // #2628: lists canonical claim-bound conductor session/event roots; each event's separate
+        // output/ broker directory is never enumerated by these retained-evidence checks.
+        ["Baton.Cli/ConductorFollowSession.cs"] =
+            "lists canonical conductor session/event evidence, never broker output directories",
         // Lists a memory-proposal capture directory, never an execution's own output directory.
         ["Baton/Mutation/MemoryProposalEscalation.cs"] = "lists captureDirectoryPath (proposal capture), not an execution output directory",
         // Lists a slash-command definitions directory shipped alongside the adapter, never an

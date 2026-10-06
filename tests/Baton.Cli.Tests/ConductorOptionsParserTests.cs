@@ -35,6 +35,17 @@ public sealed class ConductorOptionsParserTests
     }
 
     [Fact]
+    public void Parse_Follow_requires_only_a_request_file()
+    {
+        var options = ConductorOptionsParser.Parse(["follow", "--request", "follow.json"]);
+
+        Assert.Equal(ConductorVerb.Follow, options.Verb);
+        Assert.Equal("follow.json", options.FollowRequestFile);
+        Assert.Throws<CliArgumentException>(() =>
+            ConductorOptionsParser.Parse(["follow", "--request", "follow.json", "extra"]));
+    }
+
+    [Fact]
     public void Parse_Claim_ValidArgs()
     {
         var options = ConductorOptionsParser.Parse(["claim", "holder-1"]);

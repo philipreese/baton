@@ -8895,6 +8895,57 @@ This section defines the first bounded slice: a durable, auditable repository-cl
 - Writes use atomic replacement (`.tmp` file written then replaced via `File.Move(..., overwrite: true)`).
 - The durable record maintains full audit history in `transitions[]`, tracking every `Claim`, `Takeover`, and `Release` transition with timestamps, holders, displaced holders, and reasons.
 
+### Continuing conductor follow (#2628)
+
+`baton conductor follow --request <file>` is the explicitly invoked, repository-scoped front door
+for a continuing conductor; daemon event delivery and supported action consumption are subsequent
+work. Its strict JSON request requires `schemaVersion: 1`, canonical `repository`, absolute
+`workspace`, claim `holder`, `adapter: "codex"`, explicit `model` and `effort` from the recorded
+Codex capability catalog, `timeoutSeconds` (1–300), `initialInstructions` (at most 16 Ki characters),
+and `permissionGrant`. The grant must be exactly file reads only: `readFiles: true`, other authority
+false, and shell lists absent. Workspace writes, shell, network, restore, memory writes, subagents,
+and escalation are unavailable. Artifact-only `response.txt` output uses the existing broker
+policy. Unknown, missing, duplicate, or aliased fields refuse; `stateDirectory` is unsupported.
+
+The controller accepts newline JSON `{ "obligationKey": "..." }`, bounded to 8192 characters per
+event and 2048 per key. It blocks on idle stdin; EOF finishes without creating a turn. Each event
+returns one JSON result with `status` (`delivered`, `replayed`, `refused`, or `uncertain`), original
+`obligationKey` and `obligationId` when identifiable, `evidenceLocation`, and a safe `diagnostic`.
+Delivered/replayed results include the complete retained `response` and transport `receipt`.
+Malformed, empty, unknown, foreign, terminal, unsupported, or inconsistent events launch nothing.
+Only real claim-holder-owned halted-task `StoppedWorkJudgmentKey` handoffs in the existing
+`ConductorObligationStore` and matching `QueueStore` row are admitted. Ownership, attempt, stage,
+head, halt, and `StoppedWorkAdviceEvidence.Context/Hash` bind bounded as-of untrusted source data.
+Original adapter, capability, and status are preserved, including `TransportAcknowledged`: prior
+advice receipt proves neither action completion nor follow delivery. Follow never calls original
+`SubmitAsync` or `ObserveActionAsync`; trusted action observers remain authoritative.
+
+The host derives one session directory below the Baton root from the canonical repository slug and
+claim acquisition generation. It retains the repository, generation, holder, workspace,
+adapter/model/effort, timeout, initial-instruction digest, exact read-only grant, and recorded project
+ceiling. Claim and recorded project trust are revalidated every event; narrowed, revoked, forgotten,
+or drifted trust refuses further delivery. A broad requested grant is refused, never silently capped.
+Release/reacquire by the same holder creates a new acquisition generation; a retained prior session
+prevents silent conversation replacement. There is no automatic claim or takeover.
+All event keys, including distinct keys handled by concurrent controller processes, serialize on
+that session. The first event starts one Codex app-server thread; every later event resumes the
+retained vendor thread with `SessionId` and `ResumeSession: true`. The app-server's actual
+`thread.started` id is durably retained before `turn/start`; failed persistence or a mismatched
+resumed id prevents `turn/start`. No timer-generated turns, fresh conversation per event, model
+switch, failover, or root Desktop-task takeover exists.
+
+The session delivery journal is keyed by original obligation ID and correlates its key, identity, launch marker, validated complete
+response, and receipt. It is receipt evidence, not a second obligation queue or completion
+authority. A complete response replays without a vendor call, including after controller restart or
+an acknowledgement crash; a missing receipt may be repaired from that response. Missing or partial
+identity/evidence, a partial response, an incomplete receipt, a launch without a complete response,
+or an uncertain broker result freezes the whole session and is never retried blindly. Every retained
+event is scanned before another key may launch. Uncertain delivery stops the controller; linked or
+malformed retained state fails closed. Broker input
+and output paths are explicit for every event, ambient `BATON_INPUT_*`/`BATON_OUTPUT_DIR` values
+cannot redirect them, and the process environment is never mutated. Per-event timeout and stream
+bounds are emergency safeguards only and are not vendor token or billing guarantees.
+
 ### One-shot owned readiness advice (#2484)
 
 `baton conductor prepare --request <file>` creates one manually requested readiness obligation
