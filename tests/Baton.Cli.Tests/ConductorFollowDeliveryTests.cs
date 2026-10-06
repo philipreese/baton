@@ -141,6 +141,119 @@ public sealed class ConductorFollowDeliveryTests
         Assert.Equal(3, results.Length);
     }
 
+    [Fact]
+    public async Task Manual_follow_winning_legacy_scheduler_race_preserves_source_and_complete_replay()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                StoppedWorkAdvice = new Dictionary<string, JsonElement> { [Repository] = JsonSerializer.SerializeToElement(true) },
+            },
+        }, BatonPaths.SettingsFile, Ct);
+        var source = await fixture.HaltAsync("legacy-waits", notify: false);
+        Assert.Null(source.StoppedWorkJudgment!.FollowAttachmentId);
+        Assert.True(source.StoppedWorkJudgment.AdviceEligibleAtHalt);
+        using var scheduler = fixture.Scheduler();
+        await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+        var original = await fixture.Store.ReadAsync(fixture.Key(source.Tag), Ct);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.WaitInBroker = async token =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+        };
+        var follow = fixture.FollowAsync(source.Tag);
+        Task? legacy = null;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            // Manual follow holds the shared per-key lock and has selected its durable owner.
+            // The real scheduler schedules legacy transport while that owner is still busy.
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+            legacy = Assert.IsAssignableFrom<Task>(typeof(QueueSchedulerService)
+                .GetField("_stoppedWorkTask", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(scheduler));
+            Assert.Equal(0, fixture.LegacyCalls);
+        }
+        finally { release.TrySetResult(); }
+        var delivered = await follow.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        Assert.Equal("delivered", delivered.GetProperty("status").GetString());
+        // Join without cancellation so the ownership refusal reaches the real scheduler catch.
+        await legacy!.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        Assert.Equal(original, await fixture.Store.ReadAsync(fixture.Key(source.Tag), Ct));
+        Assert.Equal(JsonSerializer.Serialize(source),
+            JsonSerializer.Serialize((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single()));
+        var receipt = fixture.Receipt(source.Tag);
+        Assert.NotNull(receipt);
+        var replay = await fixture.FollowAsync(source.Tag);
+        Assert.Equal("replayed", replay.GetProperty("status").GetString());
+        Assert.Equal(delivered.GetProperty("receipt").GetString(), replay.GetProperty("receipt").GetString());
+        Assert.Equal(delivered.GetProperty("response").GetRawText(), replay.GetProperty("response").GetRawText());
+        Assert.Equal(receipt, fixture.Receipt(source.Tag));
+        Assert.Single(fixture.Calls);
+        Assert.Equal(0, fixture.LegacyCalls);
+        var directory = fixture.Store.GetStoppedWorkAdviceEvidenceDirectory(fixture.Key(source.Tag));
+        Assert.True(File.Exists(Path.Combine(directory, "delivery-owner.json")));
+        Assert.False(File.Exists(Path.Combine(directory, "launch.json")));
+    }
+
+    [Theory]
+    [InlineData("attach")]
+    [InlineData("detach")]
+    [InlineData("advice")]
+    public async Task Deferred_legacy_notification_rechecks_follow_registration_and_advice_revocation(string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings
+        {
+            Queue = new QueueSettings
+            {
+                StoppedWorkAdvice = new Dictionary<string, JsonElement> { [Repository] = JsonSerializer.SerializeToElement(true) },
+            },
+        }, BatonPaths.SettingsFile, Ct);
+        var first = await fixture.HaltAsync("busy", notify: false);
+        var second = await fixture.HaltAsync("deferred", notify: false);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var scheduler = fixture.Scheduler(legacy: async (obligation, request, _, _, token) =>
+        {
+            Assert.Equal(first.Tag, request.Tag);
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return new(new(obligation.ObligationId, Repository, first.Tag, request.AttemptId.Value,
+                request.ContextSha256, StoppedWorkAdviceChoice.Hold, "Retained advice"),
+                StoppedWorkAdviceProviderDescriptor.Codex.Adapter, StoppedWorkAdviceProviderDescriptor.Codex.Model,
+                StoppedWorkAdviceProviderDescriptor.Codex.Effort, DateTimeOffset.UtcNow);
+        });
+        await scheduler.NotifyOwnedHaltAsync(first, Ct);
+        var pending = Assert.IsAssignableFrom<Task>(typeof(QueueSchedulerService)
+            .GetField("_stoppedWorkTask", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(scheduler));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            await scheduler.NotifyOwnedHaltAsync(second, Ct);
+            if (change == "advice") await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
+            else
+            {
+                await fixture.CommandAsync("attach");
+                if (change == "detach") await fixture.CommandAsync("detach");
+            }
+        }
+        finally { release.TrySetResult(); }
+        await pending.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        await scheduler.DrainStoppedWorkAdviceAsync();
+        Assert.Equal(1, fixture.LegacyCalls);
+        Assert.Equal(ConductorObligationStatus.Pending, (await fixture.Store.ReadAsync(fixture.Key(second.Tag), Ct))?.Status);
+        Assert.False(File.Exists(Path.Combine(fixture.Store.GetStoppedWorkAdviceEvidenceDirectory(fixture.Key(second.Tag)), "launch.json")));
+        if (change == "detach") await fixture.CommandAsync("attach");
+        Assert.Equal("delivered", (await fixture.FollowAsync(second.Tag)).GetProperty("status").GetString());
+        Assert.Single(fixture.Calls);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
@@ -316,6 +429,7 @@ public sealed class ConductorFollowDeliveryTests
         private string RequestPath => Path.Combine(Root, "explicit-request.json");
         public List<CodexBrokerConfiguration> Calls { get; } = [];
         public bool Interrupt { get; set; }
+        public Func<CancellationToken, Task>? WaitInBroker { get; set; }
         public int LegacyCalls { get; private set; }
         public ConductorObligationStore Store { get; }
 
@@ -372,20 +486,23 @@ public sealed class ConductorFollowDeliveryTests
         }
 
         public QueueSchedulerService Scheduler(WorkItemAdvancer? advancer = null,
-            Func<TimeSpan, CancellationToken, Task>? delay = null) => new(
+            Func<TimeSpan, CancellationToken, Task>? delay = null,
+            Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
+                string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>>? legacy = null) => new(
             (_, _) => Task.FromResult(new QueueLaunchOutcome(null)), _ => Task.FromResult(0d), () => 16d,
             () => DateTimeOffset.UtcNow, advancer: advancer ?? Advancer(), conductorObligations: Store,
             adopt: _ => Task.FromResult<IReadOnlyList<QueueLaneAdoption>>([]),
             loopDriver: new DaemonLoopDriver(delay: delay),
-            stoppedWorkAdvice: (_, _, _, _, _) =>
+            stoppedWorkAdvice: (obligation, request, context, directory, token) =>
             {
                 LegacyCalls++;
+                if (legacy is not null) return legacy(obligation, request, context, directory, token);
                 throw new InvalidOperationException("Offline control: legacy fallback must not launch.");
             })
-            {
-                FollowBroker = Broker,
-                FollowRepositoryResolver = (_, _) => Task.FromResult<RepositoryIdentity?>(Identity),
-            };
+                {
+                    FollowBroker = Broker,
+                    FollowRepositoryResolver = (_, _) => Task.FromResult<RepositoryIdentity?>(Identity),
+                };
 
         private static WorkItemAdvancer Advancer() => new(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
 
@@ -456,6 +573,7 @@ public sealed class ConductorFollowDeliveryTests
         private ConductorFollowBroker Broker => async (configuration, prompt, directory, inputs, output, error, token, started) =>
         {
             Calls.Add(configuration);
+            if (WaitInBroker is not null) await WaitInBroker(token);
             if (!_ownsRoot)
             {
                 File.AppendAllText(Path.Combine(Root, "process-calls.jsonl"), "follow\n");

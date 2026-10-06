@@ -8966,10 +8966,12 @@ startup pass recovers attachment-stamped commit/enqueue/notification gaps from t
 repeated starts and notifications replay complete receipts without new turns. Historical rows never
 cross automatic admission. Timer reconciliation may enqueue obligations and reconcile complete
 legacy evidence, but cannot launch a model turn. New legacy advice is triggered by a committed halt
-notification. Legacy and follow use the obligation store's existing cross-process per-key admission
-serialization and persist one per-obligation delivery owner before either launch marker. Follow
-ownership suppresses legacy spend; historical legacy markers retain legacy ownership. No receipt
-becomes `ActionObserved` or authorizes reply consumption.
+notification retained with its obligation ID and context digest; provider completion and startup
+drain accepted notifications without spending on unnotified backlog. Legacy and follow use the
+obligation store's existing cross-process per-key admission serialization and persist one
+per-obligation delivery owner before either launch marker. Follow ownership suppresses legacy
+transport without changing the original obligation; historical legacy markers retain legacy
+ownership. No receipt becomes `ActionObserved` or authorizes reply consumption.
 
 Daemon delivery checks current attachment, queue source, claim and recorded trust before launch.
 Its narrow required prelaunch hook uses persisted vendor snapshots, existing runway thresholds,

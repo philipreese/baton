@@ -25,6 +25,9 @@ internal sealed record StoppedWorkAdviceView(
     RetainedStoppedWorkAdviceResponse? Response = null,
     bool AutomaticAdmissionRefused = false);
 
+internal sealed class StoppedWorkDeliverySuppressedException()
+    : ConductorObligationStoreException("Stopped-work legacy delivery is suppressed by retained follow authority.");
+
 public sealed partial class ConductorObligationStore
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ActiveStoppedWorkAdvice =
@@ -89,11 +92,69 @@ public sealed partial class ConductorObligationStore
 
     private sealed record StoppedWorkDeliveryOwner(string ObligationId, string ContextSha256, string Owner);
 
+    // These are transport receipts for real post-enqueue notifications, not a new work queue.
+    // The projection mutex protects their short file operations without waiting on a paid owner.
+    private sealed record LegacyHaltNotification(string ObligationId, string ContextSha256);
+
+    internal Task RecordLegacyHaltNotificationAsync(ConductorObligation obligation, CancellationToken token) =>
+        WithLegacyHaltNotificationAsync(obligation, directory =>
+        {
+            EnsureLegacyHaltNotification(Path.Combine(directory, "legacy-notification.json"), obligation);
+            return true;
+        }, token);
+
+    internal Task<bool> HasPendingLegacyHaltNotificationAsync(ConductorObligation obligation, CancellationToken token) =>
+        WithLegacyHaltNotificationAsync(obligation, directory =>
+        {
+            var accepted = Path.Combine(directory, "legacy-notification.json");
+            if (!File.Exists(accepted)) return false;
+            EnsureLegacyHaltNotification(accepted, obligation);
+            var handled = Path.Combine(directory, "legacy-notification-handled.json");
+            if (!File.Exists(handled)) return true;
+            EnsureLegacyHaltNotification(handled, obligation);
+            return false;
+        }, token);
+
+    internal Task CompleteLegacyHaltNotificationAsync(ConductorObligation obligation, CancellationToken token) =>
+        WithLegacyHaltNotificationAsync(obligation, directory =>
+        {
+            var accepted = Path.Combine(directory, "legacy-notification.json");
+            if (File.Exists(accepted))
+            {
+                EnsureLegacyHaltNotification(accepted, obligation);
+                EnsureLegacyHaltNotification(Path.Combine(directory, "legacy-notification-handled.json"), obligation);
+            }
+            return true;
+        }, token);
+
+    private Task<T> WithLegacyHaltNotificationAsync<T>(ConductorObligation obligation,
+        Func<string, T> action, CancellationToken token) => Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+            _snapshotPath, LockNamePrefix, LockTimeout, () =>
+            {
+                token.ThrowIfCancellationRequested();
+                var directory = StoppedWorkAdviceDirectory(obligation.IdempotencyKey);
+                Directory.CreateDirectory(directory);
+                return action(directory);
+            }), token);
+
+    private static void EnsureLegacyHaltNotification(string path, ConductorObligation obligation)
+    {
+        var expected = new LegacyHaltNotification(obligation.ObligationId, obligation.ContextSha256!);
+        if (!File.Exists(path))
+        {
+            WriteNewDurable(path, JsonSerializer.Serialize(expected, ReadinessJson));
+            return;
+        }
+        var retained = JsonSerializer.Deserialize<LegacyHaltNotification>(ReadBounded(path, 4096), ReadinessJson);
+        if (retained != expected)
+            throw new ConductorObligationStoreException("Legacy halt notification source identity drifted.");
+    }
+
     private void RequireLegacyDeliveryOwner(ConductorObligation obligation)
     {
         var path = Path.Combine(StoppedWorkAdviceDirectory(obligation.IdempotencyKey), "delivery-owner.json");
         if (File.Exists(path) && SelectStoppedWorkDeliveryOwner(obligation, "legacy") != "legacy")
-            throw new ConductorObligationStoreException("Stopped-work delivery is owned by the retained follow session.");
+            throw new StoppedWorkDeliverySuppressedException();
     }
 
     /// <summary>

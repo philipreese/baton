@@ -181,8 +181,14 @@ public sealed class StoppedWorkAdviceSchedulerTests
             BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            var first = Item("stopped-a", "attempt-a", "conductor-one", home);
-            var second = Item("stopped-b", "attempt-b", "conductor-one", home);
+            var first = Item("stopped-a", "attempt-a", "conductor-one", home) with
+            {
+                OwnedTask = new("task-a", Repository, 2632, "digest", "conductor-one", Now),
+            };
+            var second = Item("stopped-b", "attempt-b", "conductor-one", home) with
+            {
+                OwnedTask = new("task-b", Repository, 2632, "digest", "conductor-one", Now),
+            };
             await SeedAsync(home, [first, second], "conductor-one");
             var store = Store();
             var firstEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -220,9 +226,9 @@ public sealed class StoppedWorkAdviceSchedulerTests
 
             var scheduler = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
                 Task.FromResult<string?>(Head)), Launch);
-            await NotifyAndTickAsync(scheduler);
+            await scheduler.NotifyOwnedHaltAsync(first, Ct);
             await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
-            await NotifyAndTickAsync(scheduler);
+            await scheduler.NotifyOwnedHaltAsync(second, Ct);
             Assert.Equal(1, calls);
             Assert.False(secondEntered.Task.IsCompleted);
 
@@ -230,16 +236,14 @@ public sealed class StoppedWorkAdviceSchedulerTests
             await WaitForAsync(async () =>
                 (await store.ReadAsync(first.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.TransportAcknowledged);
-            await WaitForAsync(async () =>
-            {
-                await NotifyAndTickAsync(scheduler);
-                return secondEntered.Task.IsCompleted;
-            });
+            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             Assert.Equal(1, Volatile.Read(ref maximum));
 
             await WaitForAsync(async () =>
                 (await store.ReadAsync(second.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.TransportAcknowledged);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+            Assert.Equal(2, calls);
         }
         finally
         {
@@ -277,6 +281,84 @@ public sealed class StoppedWorkAdviceSchedulerTests
         }
         finally
         {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Restart_drains_only_real_notifications_and_never_retries_an_uncertain_call()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        QueueSchedulerService? scheduler = null;
+        QueueSchedulerService? restarted = null;
+        try
+        {
+            var first = Item("interrupted", "attempt-first", "conductor-one", home) with
+            {
+                OwnedTask = new("task-first", Repository, 2632, "digest", "conductor-one", Now),
+            };
+            var second = Item("accepted", "attempt-second", "conductor-one", home) with
+            {
+                OwnedTask = new("task-second", Repository, 2632, "digest", "conductor-one", Now),
+            };
+            var historical = Item("historical", "attempt-old", "conductor-one", home);
+            await SeedAsync(home, [first, second, historical], "conductor-one");
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstCalls = 0;
+            scheduler = Scheduler(Store(), new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
+                Task.FromResult<string?>(Head)), async (_, _, _, _, token) =>
+            {
+                Interlocked.Increment(ref firstCalls);
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                throw new InvalidOperationException("Shutdown must cancel the offline provider.");
+            });
+            await scheduler.TickOnceAsync(Ct);
+            await scheduler.RecoverAttachedFollowAsync(Ct);
+            Assert.Equal(0, firstCalls);
+            await scheduler.NotifyOwnedHaltAsync(first, Ct);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            await scheduler.NotifyOwnedHaltAsync(second, Ct);
+            Assert.Equal(1, firstCalls);
+            await scheduler.DrainStoppedWorkAdviceAsync();
+
+            var store = Store();
+            var resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var restartedCalls = 0;
+            restarted = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
+                Task.FromResult<string?>(Head)), (obligation, request, _, _, _) =>
+            {
+                Assert.Equal(second.Tag, request.Tag);
+                Interlocked.Increment(ref restartedCalls);
+                resumed.TrySetResult();
+                return Task.FromResult(Response(obligation, request));
+            });
+            // Startup reads durable accepted notifications. Neither source is notified again.
+            await restarted.RecoverAttachedFollowAsync(Ct);
+            await resumed.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            await WaitForAsync(async () => (await store.ReadAsync(second.StoppedWorkJudgment!.Key!, Ct))?.Status
+                == ConductorObligationStatus.TransportAcknowledged);
+            await restarted.DrainStoppedWorkAdviceAsync();
+            using var idle = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
+                Task.FromResult<string?>(Head)), (_, _, _, _, _) =>
+                throw new InvalidOperationException("Idle and historical backlog cannot spend."));
+            await idle.RecoverAttachedFollowAsync(Ct);
+            await idle.TickOnceAsync(Ct);
+            await idle.RecoverAttachedFollowAsync(Ct);
+            await idle.DrainStoppedWorkAdviceAsync();
+            Assert.Equal(1, firstCalls);
+            Assert.Equal(1, restartedCalls);
+            Assert.False(File.Exists(Path.Combine(store.GetStoppedWorkAdviceEvidenceDirectory(
+                historical.StoppedWorkJudgment!.Key!), "launch.json")));
+            Assert.Equal(ConductorObligationStatus.Submitted,
+                (await store.ReadAsync(first.StoppedWorkJudgment!.Key!, Ct))?.Status);
+        }
+        finally
+        {
+            if (scheduler is not null) await scheduler.DrainStoppedWorkAdviceAsync();
+            if (restarted is not null) await restarted.DrainStoppedWorkAdviceAsync();
             DirectoryCleanup.DeleteRecursively(home);
         }
     }
