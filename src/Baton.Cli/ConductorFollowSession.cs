@@ -471,19 +471,21 @@ internal sealed partial class ConductorFollowSession
             if (identity.SchemaVersion != SchemaVersion || identity.Repository != state.Repository
                 || identity.ClaimGeneration != state.ClaimGeneration || identity.ConfigurationSha256 != ConfigurationDigest(state)
                 || string.IsNullOrWhiteSpace(identity.ObligationId) || !retained.Add(identity.ObligationId)
-                || Path.GetFileName(directory) != Digest(identity.ObligationId) || identity.SessionId != state.SessionId
+                || Path.GetFileName(directory) != Digest(identity.ObligationId)
                 || identity.SourceCapability != StoppedWorkJudgmentKey.Capability
                 || identity.ContextSha256 is not { Length: 64 })
                 throw new IOException("Incomplete event identity.");
             var launchPath = Path.Combine(directory, "launch.json");
-            if (!File.Exists(launchPath) && !File.Exists(Path.Combine(directory, "response.json"))
-                && !journal.ContainsKey(identity.ObligationId)) continue;
+            var responsePath = Path.Combine(directory, "response.json");
+            var markerFree = !File.Exists(launchPath) && !File.Exists(responsePath)
+                && !journal.ContainsKey(identity.ObligationId);
+            if (markerFree && identity.SessionId is null) continue;
+            if (identity.SessionId != state.SessionId) throw new IOException("Incomplete event identity.");
             var launch = Read<ConductorFollowLaunch>(launchPath);
             if (launch.SchemaVersion != SchemaVersion || launch.ObligationId != identity.ObligationId
                 || launch.ObligationKey != identity.ObligationKey
                 || launch.ExpectedSessionId is not null && launch.ExpectedSessionId != state.SessionId)
                 throw new IOException("Incomplete launch identity.");
-            var responsePath = Path.Combine(directory, "response.json");
             var response = ReadResponse(responsePath, identity, state);
             var receipt = EnsureReceipt(directory);
             var entry = new ConductorFollowJournalEntry(SchemaVersion, response.ObligationKey, response.ObligationId,

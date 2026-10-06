@@ -81,6 +81,70 @@ public sealed class ConductorFollowDeliveryTests
         Assert.Single(fixture.Calls);
     }
 
+    [Fact]
+    public async Task Hosted_startup_contains_malformed_attached_registration_and_reaches_unrelated_work()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        var halted = await fixture.HaltAsync("malformed-registration", notify: false);
+        Assert.NotNull(halted.StoppedWorkJudgment?.FollowAttachmentId);
+        File.WriteAllText(fixture.RegistrationPath, "{");
+        File.WriteAllText(Path.Combine(fixture.Root, "unrelated-startup-work.md"), "Fixture");
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = [.. snapshot.Items, new QueueItem
+            {
+                Tag = "unrelated-startup-work",
+                Role = "review",
+                Workspace = fixture.Workspace,
+                SpecFile = Path.Combine(fixture.Root, "unrelated-startup-work.md"),
+            }],
+        }, Ct);
+
+        var reachedUnrelatedWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var scheduler = fixture.Scheduler(launch: (request, _) =>
+        {
+            reachedUnrelatedWork.TrySetResult();
+            return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+        });
+        await scheduler.StartAsync(Ct);
+        await reachedUnrelatedWork.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        await scheduler.StopAsync(Ct);
+
+        Assert.Empty(fixture.Calls);
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(fixture.Root, "conductor-follow"),
+            "launch.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task Marker_free_refusal_for_one_key_does_not_freeze_a_completed_replay_for_another_key()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        await fixture.HaltAsync("never-launched", notify: false);
+        await fixture.HaltAsync("real-delivery", notify: false);
+        await fixture.Scheduler().ReconcileStoppedWorkAdviceAsync(Ct);
+
+        var refused = await fixture.FollowWithAdmissionAsync("never-launched", (_, _) =>
+        {
+            ProjectCeilingStore.Revoke(fixture.Workspace, fixture.CeilingPath);
+            return Task.CompletedTask;
+        });
+        Assert.Equal("refused", refused.Status);
+        Assert.True(File.Exists(fixture.EventEvidencePath("never-launched", "identity.json")));
+        Assert.False(File.Exists(fixture.EventEvidencePath("never-launched", "launch.json")));
+
+        ProjectCeilingStore.Set(fixture.Workspace, ProjectCeiling.Unrestricted, fixture.CeilingPath);
+        var delivered = await fixture.FollowAsync("real-delivery");
+        var replay = await fixture.FollowAsync("real-delivery");
+
+        Assert.Equal("delivered", delivered.GetProperty("status").GetString());
+        Assert.Equal("replayed", replay.GetProperty("status").GetString());
+        Assert.Equal(delivered.GetProperty("receipt").GetString(), replay.GetProperty("receipt").GetString());
+        Assert.Single(fixture.Calls);
+        Assert.NotNull(await fixture.Store.ReadAsync(fixture.Key("real-delivery"), Ct));
+    }
+
     [Theory]
     [InlineData("detach")]
     [InlineData("trust")]
@@ -426,6 +490,7 @@ public sealed class ConductorFollowDeliveryTests
         public string Root { get; }
         public string Workspace => Path.Combine(Root, "workspace");
         public string CeilingPath => Path.Combine(Root, "project-ceilings.json");
+        public string RegistrationPath => Path.Combine(Root, "conductor-follow", Identity.FileSlug, "registration.json");
         private string RequestPath => Path.Combine(Root, "explicit-request.json");
         public List<CodexBrokerConfiguration> Calls { get; } = [];
         public bool Interrupt { get; set; }
@@ -485,12 +550,42 @@ public sealed class ConductorFollowDeliveryTests
             return document.RootElement.Clone();
         }
 
+        public Task<ConductorFollowResult> FollowWithAdmissionAsync(string tag,
+            Func<ConductorObligation, CancellationToken, Task> admission) => DeliverWithAdmissionAsync(
+                Key(tag), admission);
+
+        private async Task<ConductorFollowResult> DeliverWithAdmissionAsync(string key,
+            Func<ConductorObligation, CancellationToken, Task> admission)
+        {
+            var session = await ConductorFollowSession.CreateAsync(RequestPath, Root,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(Identity), Ct, Broker);
+            return await session.DeliverAsync(key, Ct, admission);
+        }
+
+        public string EventEvidencePath(string tag, string file)
+        {
+            foreach (var identityPath in Directory.EnumerateFiles(
+                Path.Combine(Root, "conductor-follow"), "identity.json", SearchOption.AllDirectories))
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(identityPath));
+                if (document.RootElement.GetProperty("obligationKey").GetString() == Key(tag))
+                    return Path.Combine(Path.GetDirectoryName(identityPath)!, file);
+            }
+
+            throw new InvalidOperationException($"No event evidence for {tag}.");
+        }
+
         public QueueSchedulerService Scheduler(WorkItemAdvancer? advancer = null,
             Func<TimeSpan, CancellationToken, Task>? delay = null,
             Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
-                string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>>? legacy = null) => new(
-            (_, _) => Task.FromResult(new QueueLaunchOutcome(null)), _ => Task.FromResult(0d), () => 16d,
-            () => DateTimeOffset.UtcNow, advancer: advancer ?? Advancer(), conductorObligations: Store,
+                string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>>? legacy = null,
+            Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>>? launch = null) => new(
+            launch ?? ((_, _) => Task.FromResult(new QueueLaunchOutcome(null))),
+            _ => Task.FromResult(0d),
+            () => 16d,
+            () => DateTimeOffset.UtcNow,
+            advancer: advancer ?? Advancer(),
+            conductorObligations: Store,
             adopt: _ => Task.FromResult<IReadOnlyList<QueueLaneAdoption>>([]),
             loopDriver: new DaemonLoopDriver(delay: delay),
             stoppedWorkAdvice: (obligation, request, context, directory, token) =>
@@ -499,10 +594,10 @@ public sealed class ConductorFollowDeliveryTests
                 if (legacy is not null) return legacy(obligation, request, context, directory, token);
                 throw new InvalidOperationException("Offline control: legacy fallback must not launch.");
             })
-                {
-                    FollowBroker = Broker,
-                    FollowRepositoryResolver = (_, _) => Task.FromResult<RepositoryIdentity?>(Identity),
-                };
+            {
+                FollowBroker = Broker,
+                FollowRepositoryResolver = (_, _) => Task.FromResult<RepositoryIdentity?>(Identity),
+            };
 
         private static WorkItemAdvancer Advancer() => new(new FakeGh(), (_, _) => Task.FromResult<string?>(Head));
 

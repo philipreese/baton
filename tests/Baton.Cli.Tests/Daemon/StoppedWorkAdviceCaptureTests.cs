@@ -403,10 +403,11 @@ public sealed class StoppedWorkAdviceCaptureTests
 
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = true }, Ct);
             await NotifyAndTickAsync(scheduler);
+            var pending = CaptureStoppedWorkAdviceTask(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
-            await scheduler.DrainStoppedWorkAdviceAsync();
+            await JoinStoppedWorkAdviceAsync(pending);
             Assert.Equal(1, adviceCalls);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
 
@@ -415,11 +416,12 @@ public sealed class StoppedWorkAdviceCaptureTests
             gh.FailFromCall = gh.Calls.Count + 1;
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = false }, Ct);
             await NotifyAndTickAsync(scheduler);
+            var resumed = CaptureStoppedWorkAdviceTask(scheduler);
             var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
             await WaitForAsync(() => Task.FromResult(
                 File.Exists(Path.Combine(evidenceDirectory, "source-stale"))
                 || File.Exists(Path.Combine(evidenceDirectory, "automatic-admission-refused"))));
-            await scheduler.DrainStoppedWorkAdviceAsync();
+            await JoinStoppedWorkAdviceAsync(resumed);
 
             Assert.Equal(StoppedWorkJudgmentState.Available,
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
@@ -463,10 +465,11 @@ public sealed class StoppedWorkAdviceCaptureTests
             });
 
             await NotifyAndTickAsync(scheduler);
+            var pending = CaptureStoppedWorkAdviceTask(scheduler);
             var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
             await WaitForAsync(() => Task.FromResult(File.Exists(
                 Path.Combine(evidenceDirectory, "automatic-admission-refused"))));
-            await scheduler.DrainStoppedWorkAdviceAsync();
+            await JoinStoppedWorkAdviceAsync(pending);
             var refused = await ReadBackAsync();
             Assert.Null(refused.ReplacementReviewAction);
             Assert.Equal(1, adviceCalls);
@@ -951,6 +954,16 @@ public sealed class StoppedWorkAdviceCaptureTests
         }
 
         Assert.Fail("Timed out waiting for durable stopped-work advice state.");
+    }
+
+    private static Task CaptureStoppedWorkAdviceTask(QueueSchedulerService scheduler) =>
+        Assert.IsAssignableFrom<Task>(typeof(QueueSchedulerService)
+            .GetField("_stoppedWorkTask", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(scheduler));
+
+    private static async Task JoinStoppedWorkAdviceAsync(Task pending)
+    {
+        await pending.WaitAsync(TimeSpan.FromSeconds(60), Ct);
     }
 
 }

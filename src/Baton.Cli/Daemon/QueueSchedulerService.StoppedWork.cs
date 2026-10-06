@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Baton.Conductor;
 using Baton.Accounting;
 using Baton.Domain;
@@ -37,7 +38,7 @@ public sealed partial class QueueSchedulerService
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliArgumentException
-            or ConductorClaimException or ConductorObligationStoreException)
+            or ConductorClaimException or ConductorObligationStoreException or JsonException)
         {
             Console.Error.WriteLine("Owned-halt delivery refused; durable source and obligation retained.");
         }
