@@ -174,26 +174,53 @@ public static class TerminalSettleRecorder
         return result;
     }
 
-    /// <summary>Joins producer-known owned-task identity to the exact accepted execution id.</summary>
+    /// <summary>
+    /// Joins producer-known owned-task identity to each exact execution request. Supplementary
+    /// requests are carried by their producer events rather than by an acceptance event.
+    /// </summary>
     internal static IReadOnlyDictionary<string, WorkspaceDelivery> ReadOwnedTaskDeliveryByExecution(
         IReadOnlyList<LogEntry> entries,
         IReadOnlyDictionary<string, WorkspaceDelivery> deliveryByWorker)
     {
         var result = new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal);
-        var accepted = entries.OfType<LogEntry.FlowLogEntry>()
-            .Select(entry => entry.Event)
-            .OfType<FlowEvent.ExecutionRequestAccepted>();
-        foreach (var entry in accepted)
+        foreach (var entry in entries.OfType<LogEntry.FlowLogEntry>())
         {
-            if (entry.Request.OwnedTaskIdentity is not { } identity)
+            switch (entry.Event)
             {
-                continue;
+                case FlowEvent.ExecutionRequestAccepted accepted:
+                    Add(accepted.Request, accepted.Request.ExecutionId, "accepted request");
+                    break;
+                case FlowEvent.GraceTurnClaimed grace:
+                    Add(grace.Request, grace.GraceExecutionId, "grace request");
+                    break;
+                case FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } checkpoint:
+                    Add(checkpointRequest, checkpoint.CheckpointExecutionId, "checkpoint request");
+                    break;
+                case FlowEvent.ArtifactCheckpointAttempted checkpoint:
+                    Console.Error.WriteLine(
+                        $"Cost ledger: legacy checkpoint '{checkpoint.CheckpointExecutionId.Value}' has no immutable request; issue identity remains unknown.");
+                    break;
+            }
+        }
+
+        void Add(ExecutionRequest request, ExecutionId childExecutionId, string requestKind)
+        {
+            if (request.ExecutionId != childExecutionId)
+            {
+                Console.Error.WriteLine(
+                    $"Cost ledger: {requestKind} for execution '{childExecutionId.Value}' has mismatched request coordinates; issue identity remains unknown.");
+                return;
             }
 
-            var workspaceDelivery = deliveryByWorker.TryGetValue(entry.Request.Worker, out var delivery)
+            if (request.OwnedTaskIdentity is not { } identity)
+            {
+                return;
+            }
+
+            var workspaceDelivery = deliveryByWorker.TryGetValue(request.Worker, out var delivery)
                 ? delivery
                 : new WorkspaceDelivery();
-            result[entry.Request.ExecutionId.Value] = workspaceDelivery with
+            result[childExecutionId.Value] = workspaceDelivery with
             {
                 Issue = identity.HasExpectedTaskId() && identity.Issue is > 0
                     ? identity.Issue.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)

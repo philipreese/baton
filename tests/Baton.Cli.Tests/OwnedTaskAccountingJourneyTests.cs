@@ -80,6 +80,126 @@ public sealed class OwnedTaskAccountingJourneyTests
     }
 
     [Fact]
+    public async Task Supplementary_children_publish_their_own_owner_without_borrowing_parent_or_sibling()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        using var scope = fixture.Activate();
+        var (parent, _) = await fixture.LaunchAsync(WorkStage.Implement);
+        var parentRequest = Assert.Single(await AcceptedAsync(parent.RoomDirectoryPath!));
+        var owner = parentRequest.OwnedTaskIdentity!;
+        var graceParentId = new ExecutionId("grace-accounting-parent");
+        var graceId = new ExecutionId("grace-accounting-child");
+        var checkpointId = new ExecutionId("checkpoint-accounting-child");
+        var legacyCheckpointId = new ExecutionId("legacy-checkpoint-accounting-child");
+        var mismatchedCheckpointId = new ExecutionId("mismatched-checkpoint-accounting-child");
+
+        await AppendSupplementaryAccountingEventsAsync(parent.RoomDirectoryPath!, parentRequest, owner, graceParentId,
+            graceId, checkpointId, legacyCheckpointId, mismatchedCheckpointId);
+        await TerminalSettleRecorder.RecordAsync(parent, Ct);
+
+        var rows = await CostLedgerStore.ReadAllAsync(fixture.Ledger, Ct);
+        Assert.Equal(5, rows.Count);
+        Assert.Equal("2637", Assert.Single(rows, row => row.Execution == parentRequest.ExecutionId.Value).Issue);
+        Assert.Equal("2637", Assert.Single(rows, row => row.Execution == graceId.Value).Issue);
+        Assert.Equal("2637", Assert.Single(rows, row => row.Execution == checkpointId.Value).Issue);
+        Assert.Null(Assert.Single(rows, row => row.Execution == legacyCheckpointId.Value).Issue);
+        Assert.Null(Assert.Single(rows, row => row.Execution == mismatchedCheckpointId.Value).Issue);
+
+        using var owned = await QueryAsync("2637");
+        Assert.Equal(3, owned.RootElement.GetProperty("rows").GetArrayLength());
+        Assert.Equal(124, owned.RootElement.GetProperty("total").GetProperty("tokensIn").GetInt64());
+        Assert.Equal(62, owned.RootElement.GetProperty("total").GetProperty("tokensOut").GetInt64());
+
+        await TerminalSettleRecorder.RecordAsync(parent, Ct);
+        Assert.Equal(5, (await CostLedgerStore.ReadAllAsync(fixture.Ledger, Ct)).Count);
+
+        var backfillDirectory = Path.Combine(fixture.Root, "supplementary-backfill-ledger");
+        using var output = new StringWriter();
+        for (var run = 0; run < 2; run++)
+            Assert.Equal(0, await LedgerBackfillCommand.ExecuteAsync(new LedgerBackfillOptions(), output,
+                new AccountingForge(), backfillDirectory, repositoryProbe: null, cancellationToken: Ct));
+
+        var backfilled = await CostLedgerStore.ReadAllAsync(
+            Path.Combine(backfillDirectory, Identity.FileSlug + ".jsonl"), Ct);
+        Assert.Equal(5, backfilled.Count);
+        Assert.Equal("2637", Assert.Single(backfilled, row => row.Execution == parentRequest.ExecutionId.Value).Issue);
+        Assert.Equal("2637", Assert.Single(backfilled, row => row.Execution == graceId.Value).Issue);
+        Assert.Equal("2637", Assert.Single(backfilled, row => row.Execution == checkpointId.Value).Issue);
+        Assert.Null(Assert.Single(backfilled, row => row.Execution == legacyCheckpointId.Value).Issue);
+        Assert.Null(Assert.Single(backfilled, row => row.Execution == mismatchedCheckpointId.Value).Issue);
+        Assert.Equal(124, backfilled.Where(row => row.Issue == "2637").Sum(row => row.TokensIn));
+        Assert.Equal(62, backfilled.Where(row => row.Issue == "2637").Sum(row => row.TokensOut));
+    }
+
+    private static async Task AppendSupplementaryAccountingEventsAsync(
+        string room,
+        ExecutionRequest parentRequest,
+        OwnedTaskExecutionIdentity owner,
+        ExecutionId graceParentId,
+        ExecutionId graceId,
+        ExecutionId checkpointId,
+        ExecutionId legacyCheckpointId,
+        ExecutionId mismatchedCheckpointId)
+    {
+        var graceParentRequest = parentRequest with
+        {
+            ExecutionId = graceParentId,
+            OwnedTaskIdentity = owner with { ExecutionId = graceParentId.Value },
+        };
+        var graceRequest = graceParentRequest with
+        {
+            ExecutionId = graceId,
+            Limits = GraceTurn.CreateLimitEvidence(monitorInputsKnown: true),
+            OwnedTaskIdentity = owner with { ExecutionId = graceId.Value },
+        };
+        var checkpointRequest = parentRequest with
+        {
+            ExecutionId = checkpointId,
+            Timeout = ArtifactCheckpoint.WallClockTimeout,
+            Limits = ArtifactCheckpoint.CreateLimitEvidence(monitorInputsKnown: true),
+            OwnedTaskIdentity = owner with { ExecutionId = checkpointId.Value },
+        };
+        var mismatchedRequest = parentRequest with
+        {
+            ExecutionId = mismatchedCheckpointId,
+            Timeout = ArtifactCheckpoint.WallClockTimeout,
+            Limits = ArtifactCheckpoint.CreateLimitEvidence(monitorInputsKnown: true),
+            OwnedTaskIdentity = owner with { ExecutionId = "not-the-child" },
+        };
+        var baseline = new GraceCheckpointEvidence(
+            "head", "refs/heads/main", "origin", "refs/heads/main", "tip", "endpoint", "config", "workspace");
+        await using var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+        await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(graceParentRequest), Ct);
+        var parentArrest = new FlowEvent.ExecutionArrested(graceParentId, Reason: ArrestReason.TokenBudget);
+        await writer.AppendAsync(parentArrest, Ct);
+        await writer.AppendAsync(new FlowEvent.GraceTurnClaimed(
+            graceParentId, graceId, graceRequest, baseline,
+            new GraceParentRecoveryEvidence(true, -1, CoreExitReason.CancelRequested, false, false, parentArrest)), Ct);
+        await writer.AppendAsync(new FlowEvent.GraceTurnCompleted(
+            graceId, CoreExitReason.Natural, new WorkerUsage(TokensIn: 11, TokensOut: 5)), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionStarted(graceId, 1), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionExited(graceId, 0, CoreExitReason.Natural), Ct);
+        await writer.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
+            checkpointId, parentRequest.ExecutionId, ["report.md"], checkpointRequest), Ct);
+        await writer.AppendAsync(new FlowEvent.ArtifactCheckpointCompleted(
+            checkpointId, CoreExitReason.Natural, new WorkerUsage(TokensIn: 13, TokensOut: 7)), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionStarted(checkpointId, 2), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionExited(checkpointId, 0, CoreExitReason.Natural), Ct);
+        await writer.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
+            legacyCheckpointId, parentRequest.ExecutionId, ["legacy.md"]), Ct);
+        await writer.AppendAsync(new FlowEvent.ArtifactCheckpointCompleted(
+            legacyCheckpointId, CoreExitReason.Natural, new WorkerUsage(TokensIn: 17, TokensOut: 9)), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionStarted(legacyCheckpointId, 3), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionExited(legacyCheckpointId, 0, CoreExitReason.Natural), Ct);
+        await writer.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
+            mismatchedCheckpointId, parentRequest.ExecutionId, ["mismatched.md"], mismatchedRequest), Ct);
+        await writer.AppendAsync(new FlowEvent.ArtifactCheckpointCompleted(
+            mismatchedCheckpointId, CoreExitReason.Natural, new WorkerUsage(TokensIn: 19, TokensOut: 11)), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionStarted(mismatchedCheckpointId, 4), Ct);
+        await writer.AppendAsync(new CoreEvent.ExecutionExited(mismatchedCheckpointId, 0, CoreExitReason.Natural), Ct);
+    }
+
+    [Fact]
     public async Task Resume_continue_and_redispatch_inherit_exact_accepted_owner_when_binding_omits_it()
     {
         using var fixture = await Fixture.CreateAsync();
