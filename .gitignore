@@ -78,6 +78,11 @@ gates-run.txt
 gates-output.txt
 gates-exit.txt
 
+# Machine-local acceptance rooms and retired vendor-loop scratch state. These contain
+# vendor runtime databases, not repository changes for status/diff tools to inspect.
+/.scratch-2180-*/
+/aer-agy-loop-scratch/
+
 # Retired Fleet Glass mailbox-plane credentials and state remain machine-local and ignored until an
 # operator explicitly verifies their local purge or migration. Keep these narrow entries so a broad
 # add cannot stage surviving secrets or Wrangler state after the retired delivery is removed.
