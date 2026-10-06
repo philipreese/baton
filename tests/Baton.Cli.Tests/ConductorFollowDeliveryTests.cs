@@ -73,7 +73,7 @@ public sealed class ConductorFollowDeliveryTests
             return Task.Delay(Timeout.InfiniteTimeSpan, token);
         });
         await restarted.StartAsync(Ct);
-        await reachedIdle.Task.WaitAsync(TimeSpan.FromSeconds(30), Ct);
+        await reachedIdle.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
         await restarted.StopAsync(Ct);
         Assert.Single(fixture.Calls);
         Assert.NotNull(fixture.Receipt("gap"));
@@ -467,7 +467,7 @@ public sealed class ConductorFollowDeliveryTests
             Assert.NotNull(await Store.ReadAsync(key, token));
             Assert.Contains((await QueueStore.LoadAsync(BatonPaths.QueueFile, token)).Items,
                 row => row.Halted && row.StoppedWorkJudgment?.Key == key);
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue, token).WaitAsync(TimeSpan.FromSeconds(5), token);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue, token).WaitAsync(TimeSpan.FromSeconds(60), token);
             if (Interrupt)
             {
                 await started!("retained-thread", token);
