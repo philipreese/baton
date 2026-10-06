@@ -17,7 +17,7 @@ public static class DispatchOptionsParser
 {
     /// <summary>The one copy of <c>baton dispatch</c>'s usage line, printed here on error and by <c>Program</c>.</summary>
     public const string Usage =
-        $"Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <{TaskSizeDeclaration.Usage}> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--max-repeated-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--originating-pr <owner/repo#number>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
+        $"Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <{TaskSizeDeclaration.Usage}> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--enable-agy-correction] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--max-repeated-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--originating-pr <owner/repo#number>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
 
     /// <summary>
     /// <c>--label</c>'s cap (#1499) — a Fleet Glass room title, not a description; long enough for "the
@@ -89,6 +89,7 @@ public static class DispatchOptionsParser
         var skills = new List<string>();
         var requirements = new List<string>();
         var noDefaultSkills = false;
+        var enableAgyCorrection = false;
         var listCapabilities = false;
         string? declaredSize = null;
         string? sizeRationale = null;
@@ -101,6 +102,17 @@ public static class DispatchOptionsParser
             {
                 case "--no-default-skills":
                     noDefaultSkills = true;
+                    i++;
+                    break;
+                case "--enable-agy-correction":
+                    if (enableAgyCorrection)
+                    {
+                        throw new CliArgumentException(
+                            "'--enable-agy-correction' is nonrepeatable — pass it at most once.",
+                            "remove the duplicate --enable-agy-correction flag.");
+                    }
+
+                    enableAgyCorrection = true;
                     i++;
                     break;
                 case "--spec":
@@ -259,6 +271,13 @@ public static class DispatchOptionsParser
                 $"run 'baton dispatch --list-capabilities' on its own, or drop the flag to dispatch '{name}'.");
         }
 
+        if (enableAgyCorrection && listCapabilities)
+        {
+            throw new CliArgumentException(
+                "'--enable-agy-correction' applies to an ordinary role dispatch, not --list-capabilities.",
+                "pass the flag with a role name and task spec.");
+        }
+
         if (name is null && !listCapabilities)
         {
             throw new CliArgumentException(
@@ -337,7 +356,8 @@ public static class DispatchOptionsParser
             originatingPullRequest,
             originatingPullRequestBranch,
             memoryAddGrant,
-            maxRepeatedToolSteps);
+            maxRepeatedToolSteps,
+            enableAgyCorrection);
     }
 
     internal static TaskSizeDeclaration? ParseTaskSizeDeclaration(string? declaredSize, string? sizeRationale)

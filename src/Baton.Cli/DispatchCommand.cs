@@ -244,6 +244,8 @@ public static class DispatchCommand
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 
+        ValidateAgyCorrection(options, bindings);
+
         var recoveryExpectedHead = await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
             options, workspace, cancellationToken).ConfigureAwait(false);
         if (options.OriginatingPullRequest is not null)
@@ -1293,6 +1295,14 @@ public static class DispatchCommand
     private static async Task<(WorkflowDefinition, IReadOnlyDictionary<string, WorkerBindingConfigEntry>)>
         MaterializeTemplateAsync(DispatchOptions options, string workspaceDirectory, CancellationToken cancellationToken)
     {
+        if (options.EnableAgyCorrection)
+        {
+            throw new CliArgumentException(
+                $"'{options.Name}' is a workflow template — --enable-agy-correction applies only to an "
+                + "ordinary role dispatch and cannot select a transport for all template phases.",
+                "remove --enable-agy-correction, or dispatch a single role instead of a template.");
+        }
+
         // #1518: a template rejects every spec source, not just a file — --spec-text/--spec - are two
         // more ways to say the same thing --spec already refuses here, so a template dispatch cannot
         // silently discard an inline spec the way it never could silently discard a file one.
@@ -1543,7 +1553,8 @@ public static class DispatchCommand
             // Directory.CreateDirectory below -- so an unknown --skill leaves no room behind.
             skills: options.Skills,
             // #2110: the role's own default_skills ride ahead of --skill unless opted out.
-            attachDefaultSkills: !options.NoDefaultSkills);
+            attachDefaultSkills: !options.NoDefaultSkills,
+            enableAgyCorrection: options.EnableAgyCorrection);
 
         if (options.MemoryAddGrant is not { } memoryAddGrant)
         {
@@ -1597,6 +1608,30 @@ public static class DispatchCommand
             MaxRepeatedToolSteps = resolution.MaxRepeatedToolSteps,
             ExecutionLimitResolution = resolution,
         };
+    }
+
+    private static void ValidateAgyCorrection(
+        DispatchOptions options,
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings)
+    {
+        if (!options.EnableAgyCorrection)
+        {
+            return;
+        }
+
+        var binding = bindings.Count == 1 ? bindings.Single().Value : null;
+        if (binding is null
+            || !OperatingSystem.IsWindows()
+            || !string.Equals(binding.Adapter, "agy", StringComparison.OrdinalIgnoreCase)
+            || !binding.StreamJson
+            || binding.ResumeSession
+            || binding.SessionId is not null)
+        {
+            throw new CliArgumentException(
+                "--enable-agy-correction requires the actual resolved adapter to be a fresh Windows "
+                + "AGY stream-json execution; templates, other adapters, and vendor-session resume are refused.",
+                "dispatch a fresh role with --adapter agy on Windows, without --continue.");
+        }
     }
 
     /// <summary>

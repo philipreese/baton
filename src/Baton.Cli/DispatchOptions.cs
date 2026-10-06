@@ -165,6 +165,8 @@ namespace Baton.Cli;
 /// <param name="Requirements">Explicit task capabilities which must already be present in the
 /// materialized role grant. Null means the caller did not declare any; the CLI parser normalizes an
 /// explicit <c>--require</c> list before this record is created.</param>
+/// <param name="EnableAgyCorrection"><c>--enable-agy-correction</c>, explicitly selecting the existing
+/// AGY correction transport for a fresh ordinary role dispatch. Defaults to false.</param>
 public sealed record DispatchOptions(
     string Name,
     string? SpecFilePath,
@@ -199,4 +201,5 @@ public sealed record DispatchOptions(
     string? OriginatingPullRequest = null,
     string? OriginatingPullRequestBranch = null,
     MemoryAddDispatchGrant? MemoryAddGrant = null,
-    int? MaxRepeatedToolSteps = null);
+    int? MaxRepeatedToolSteps = null,
+    bool EnableAgyCorrection = false);
