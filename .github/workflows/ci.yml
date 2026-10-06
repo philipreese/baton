@@ -81,10 +81,11 @@ jobs:
 
   test:
     needs: [changes, recovery_target]
-    # PR: run only when .NET-relevant files changed. Push to main: always run (main stays green).
+    # PR: skip only after successful authoritative page-only classification. Push to main: always run
+    # (main stays green).
     # !cancelled() makes this a status-check expression, so a skipped `changes` (PR-only, #410)
     # does not skip this job on push.
-    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') && (github.event_name != 'pull_request' || needs.changes.outputs.dotnet == 'true') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.page-only != 'true' || needs.changes.outputs.dotnet != 'false') }}
     name: test (${{ matrix.name }})
     timeout-minutes: 17
     strategy:
@@ -277,7 +278,7 @@ jobs:
 
   # record-once-ok: #2182 spec/baton.md
   # The sole gates/test aggregate. `diff-shape` and `pr-body-lint` remain separate required checks.
-  # This job contributes either full local-gate coverage or the complement of same-SHA test shards;
+  # This job contributes either page-only gate coverage or the complement of same-SHA test shards;
   # only `ci` below may claim their union. `pack` remains outside PR mergeability.
   # The register meta-check (#589, #620). Deliberately its own job rather than a step in `test`:
   # it is OS-independent, so running it on all three matrix legs would triple the cost for one
@@ -295,7 +296,8 @@ jobs:
   # added there, or in pixi.toml, go unrun in CI until someone remembered to add a step). What
   # `--ci` enforces: spec/baton.md §11 C-12. Several members must catch docs-only changes too, so
   # gates always runs; only its coverage mode changes. Relevant PRs/pushes/recovery run the test
-  # complement beside shards. Non-.NET PRs run full gates unless the complete diff is page-only.
+  # complement beside shards. Only a complete, successful page-only classification uses the narrow
+  # page-only gate set.
   #
   # Cost, stated once: the former `audit` job passed `audit-recordonce` an explicit
   # `origin/${{ github.base_ref || 'main' }}` argument; the tracked `pixi run audit-recordonce`
@@ -326,9 +328,6 @@ jobs:
           if [ "$EVENT" = "pull_request" ] && [ "$CHANGES" = "success" ] && [ "$DOTNET" = "false" ] && [ "$PAGE_ONLY" = "true" ]; then
             echo "mode=page-only" >> "$GITHUB_OUTPUT"
             echo "task=gates-ci-page-only-quiet" >> "$GITHUB_OUTPUT"
-          elif [ "$EVENT" = "pull_request" ] && [ "$DOTNET" != "true" ]; then
-            echo "mode=full" >> "$GITHUB_OUTPUT"
-            echo "task=gates-ci-quiet" >> "$GITHUB_OUTPUT"
           else
             echo "mode=test-shard-complement" >> "$GITHUB_OUTPUT"
             echo "task=gates-ci-test-complement-quiet" >> "$GITHUB_OUTPUT"

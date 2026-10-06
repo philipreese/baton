@@ -6841,13 +6841,11 @@ hook re-verifies, not what CI verifies: CI remains cold, same-revision evidence 
 or produces a local receipt.
 
 **The pre-push hook is a fast local mirror; the `ci` aggregate owns CI coverage (#1676, #2182).**
-On a push or .NET-relevant PR, `.github/workflows/ci.yml` runs the two solution-test shards and
-`gates.py --ci --ci-test-shards-cover` in parallel at `github.sha`; the latter subtracts exactly
-`SOLUTION_TEST_MEMBER` from `_all_members()`. On a non-.NET PR the shards skip and ordinary
-`gates.py --ci` runs the full member register instead, except for the narrow page-only case below.
-The always-reporting `ci` job accepts successful complement plus successful shards, successful full
-gates plus skipped shards, or the independently classified page-only shape. Path-filter failure,
-a missing/contradictory mode, and every failed,
+On a push or pull request other than the narrow page-only case below, `.github/workflows/ci.yml`
+runs the two solution-test shards and `gates.py --ci --ci-test-shards-cover` in parallel at
+`github.sha`; the latter subtracts exactly `SOLUTION_TEST_MEMBER` from `_all_members()`. The
+always-reporting `ci` job accepts only successful complement plus successful shards, or the
+independently classified page-only shape. Path-filter failure, a missing/contradictory mode, and every failed,
 cancelled, or unexpectedly skipped coverage job are red. This is the sole gates/test aggregate;
 `diff-shape` and `pr-body-lint` remain separate checks. A green complement job alone makes no full
 coverage claim. All CI gate modes derive from the same tracked register, exclude any reasoned and
