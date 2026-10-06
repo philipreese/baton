@@ -14,6 +14,37 @@ public sealed class ConductorClaimStoreTests
         RepositoryIdentity.From("https://github.com/philipreese/repo-b.git", null)!;
 
     [Fact]
+    public async Task Acquisition_generation_is_idempotent_but_changes_on_same_holder_reacquire()
+    {
+        var temp = NewTempDir();
+        try
+        {
+            var token = TestContext.Current.CancellationToken;
+            var first = await ConductorClaimStore.ClaimAsync(RepoA, "holder", temp, cancellationToken: token);
+            var repeated = await ConductorClaimStore.ClaimAsync(RepoA, "holder", temp, cancellationToken: token);
+            Assert.Equal(ConductorClaimStore.GetClaimGeneration(first), ConductorClaimStore.GetClaimGeneration(repeated));
+            await ConductorClaimStore.ReleaseAsync(RepoA, "holder", "fixture", temp, cancellationToken: token);
+            var reacquired = await ConductorClaimStore.ClaimAsync(RepoA, "holder", temp, cancellationToken: token);
+            Assert.NotEqual(ConductorClaimStore.GetClaimGeneration(first), ConductorClaimStore.GetClaimGeneration(reacquired));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(temp);
+        }
+    }
+
+    [Fact]
+    public void Legacy_acquisition_generation_is_stable_and_history_bound()
+    {
+        var time = new DateTime(2026, 10, 5, 0, 0, 0, DateTimeKind.Utc);
+        var original = new ConductorClaimRecord(RepoA.Value, RepoA.FileSlug, "holder", time,
+            Transitions: [new(ConductorClaimTransitionKind.Claim, "holder", null, null, time)]);
+        Assert.Equal(ConductorClaimStore.GetClaimGeneration(original), ConductorClaimStore.GetClaimGeneration(original with { }));
+        var changed = original with { Transitions = [.. original.Transitions!, new(ConductorClaimTransitionKind.Release, "holder", null, "fixture", time)] };
+        Assert.NotEqual(ConductorClaimStore.GetClaimGeneration(original), ConductorClaimStore.GetClaimGeneration(changed));
+    }
+
+    [Fact]
     public async Task First_claim_succeeds_and_survives_fresh_read()
     {
         var temp = NewTempDir();

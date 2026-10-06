@@ -56,6 +56,7 @@ The [arm comparator](benchmarks/comparator.md) records the matched-brief routing
 | `baton conductor claim <holder> [--workspace <dir>]` / `list [--json]` / `release <holder> [--workspace <dir>] --reason <text>` / `takeover <holder> [--workspace <dir>] --reason <text>` | Durable repository-claim register coordinating external conductor sessions across disjoint repositories (`spec/baton.md` §14). Mutation enforcement is deferred. |
 | `baton conductor prepare --request <file>` / `decide --obligation <key> --context <file>` | Manually prepare and record one exact-revision readiness decision under an existing claim. The response is advice only; the [typed file contract and recovery rule](spec/baton.md#one-shot-owned-readiness-advice-2484) govern the command. |
 | `baton conductor act --obligation <key> --holder <holder> --action replace-review --expected-head <full-sha>` | Explicitly authorize one ordinary-round replacement for a saved missing-verdict `Review` or `ReReview` halt. The queue remains subject to hold and normal admission. A durable action slot and independently verified exact-head verdict are required before the stopped-work obligation is marked observed. |
+| `baton conductor follow --request <file>` | Deliver existing owned halted-task handoffs to one claim-bound Codex conversation using newline JSON `{ "obligationKey": "..." }`. EOF ends the controller; idle stdin creates no turns. [Request, result, and recovery contract](spec/baton.md#continuing-conductor-follow-2628). |
 | `baton mcp` / `baton daemon` | The stdio MCP server workers connect to (`fleet_status`, `yield`, `memory-edit-proposal`, `promote-artifact`, `room_detail`), and the narrowed background daemon (`spec/baton.md` §7). |
 
 `spec/baton.md` is the authority on every verb's exact contract — this table is an index, not a
@@ -71,6 +72,9 @@ Use `claim`, `list`, `release`, and `takeover` as listed above. The opt-in one-s
 commands require the current claim holder; claims do not otherwise enforce queue, room, or other
 mutations. The normative contract and recovery details are in
 [`spec/baton.md` §14](spec/baton.md#14-conductor-claims-durable-repository-ownership-register-2296).
+
+`baton conductor follow --request <file>` explicitly starts local delivery under an existing claim.
+Daemon event wiring and supported action consumption remain subsequent work.
 
 ### Advice when a lifecycle stops
 

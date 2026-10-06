@@ -53,7 +53,10 @@ public sealed record ConductorClaimRecord(
     ConductorTakeoverProvenance? Takeover = null,
     [property: JsonPropertyName("transitions")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<ConductorClaimTransition>? Transitions = null);
+    IReadOnlyList<ConductorClaimTransition>? Transitions = null,
+    [property: JsonPropertyName("claimGeneration")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ClaimGeneration = null);
 
 /// <summary>
 /// The public projection of an actively held repository claim for <c>baton conductor list</c>

@@ -12,6 +12,7 @@ public enum ConductorVerb
     Prepare,
     Decide,
     Act,
+    Follow,
 }
 
 /// <summary>
@@ -27,4 +28,5 @@ public sealed record ConductorOptions(
     string? ObligationKey = null,
     string? ContextFile = null,
     string? Action = null,
-    string? ExpectedHead = null);
+    string? ExpectedHead = null,
+    string? FollowRequestFile = null);

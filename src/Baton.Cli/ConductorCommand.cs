@@ -20,7 +20,18 @@ public static class ConductorCommand
         TextWriter stdout,
         string? batonRoot = null,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver = null,
+        TextReader? stdin = null,
         CancellationToken cancellationToken = default)
+        => ExecuteAsync(options, stdout, batonRoot, repositoryResolver, stdin, cancellationToken, null);
+
+    internal static Task<int> ExecuteAsync(
+        ConductorOptions options,
+        TextWriter stdout,
+        string? batonRoot,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryResolver,
+        TextReader? stdin,
+        CancellationToken cancellationToken,
+        ConductorFollowBroker? broker)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(stdout);
@@ -40,6 +51,9 @@ public static class ConductorCommand
                 options.ContextFile!, stdout, root, cancellationToken: cancellationToken),
             ConductorVerb.Act => ReplacementReviewConductorCommand.ExecuteAsync(
                 options, stdout, root, cancellationToken: cancellationToken),
+            ConductorVerb.Follow => ConductorFollowCommand.ExecuteAsync(
+                options.FollowRequestFile!, stdout, root, resolver, stdin ?? Console.In,
+                cancellationToken: cancellationToken, broker: broker),
             _ => throw new ArgumentOutOfRangeException(nameof(options)),
         };
     }

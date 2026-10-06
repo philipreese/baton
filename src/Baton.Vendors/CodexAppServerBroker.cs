@@ -149,6 +149,90 @@ public static class CodexAppServerBroker
         }
     }
 
+    /// <summary>
+    /// Runs one brokered turn with host-resolved artifact paths. Continuing conductor sessions use
+    /// this overload so ambient <c>BATON_INPUT_*</c> and <c>BATON_OUTPUT_DIR</c> values cannot
+    /// redirect their evidence.
+    /// </summary>
+    public static async Task<int> RunAsync(
+        CodexBrokerConfiguration configuration,
+        string prompt,
+        string outputDirectory,
+        IEnumerable<string> inputPaths,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken = default,
+        Func<string, CancellationToken, Task>? threadStarted = null)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        ArgumentNullException.ThrowIfNull(inputPaths);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(error);
+
+        var resolvedOutputDirectory = Path.GetFullPath(outputDirectory);
+        var resolvedInputPaths = inputPaths.Select(Path.GetFullPath).ToArray();
+        string isolatedHome;
+        try
+        {
+            isolatedHome = CodexIsolatedHome.Prepare(BatonPaths.Root);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            await error.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            return 1;
+        }
+
+        var policy = CreateDynamicToolPolicy(
+            configuration, resolvedOutputDirectory, resolvedInputPaths, artifactOnlyOutputNames: null);
+        using var process = StartAppServer(configuration, isolatedHome);
+        if (process is null)
+        {
+            await error.WriteLineAsync("Baton could not start codex app-server.").ConfigureAwait(false);
+            return 1;
+        }
+
+        var stderrDrain = DrainStderrAsync(process.StandardError, error, cancellationToken);
+        try
+        {
+            return await RunProtocolAsync(
+                configuration, prompt, policy, resolvedOutputDirectory, process.StandardInput,
+                process.StandardOutput, output, error, cancellationToken, enableSteering: false,
+                threadStarted: threadStarted).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException
+            or UnauthorizedAccessException)
+        {
+            await EmitAsync(output, new JsonObject
+            {
+                ["type"] = "error",
+                ["message"] = ex.Message,
+            }).ConfigureAwait(false);
+            return 1;
+        }
+        finally
+        {
+            process.StandardInput.Close();
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The process raced the broker to a normal exit.
+                }
+            }
+            await stderrDrain.ConfigureAwait(false);
+        }
+    }
+
     private static IReadOnlyList<string>? ReadArtifactOnlyOutputs()
     {
         var raw = Environment.GetEnvironmentVariable("BATON_ARTIFACT_ONLY_OUTPUTS");
@@ -528,7 +612,8 @@ public static class CodexAppServerBroker
         TextWriter batonOutput,
         TextWriter error,
         CancellationToken cancellationToken,
-        bool enableSteering = false)
+        bool enableSteering = false,
+        Func<string, CancellationToken, Task>? threadStarted = null)
     {
         await InitializeAsync(serverInput, serverOutput, error, cancellationToken).ConfigureAwait(false);
 
@@ -543,6 +628,13 @@ public static class CodexAppServerBroker
             serverOutput, ThreadRequestId, error, cancellationToken).ConfigureAwait(false);
         var threadId = threadResponse["result"]?["thread"]?["id"]?.GetValue<string>()
             ?? throw new InvalidOperationException("Codex app-server did not return a thread ID.");
+
+        if (configuration.ResumeSession
+            && !string.Equals(threadId, configuration.SessionId, StringComparison.Ordinal))
+            throw new InvalidOperationException("Codex app-server resumed a different thread ID.");
+
+        if (threadStarted is not null)
+            await threadStarted(threadId, cancellationToken).ConfigureAwait(false);
 
         await EmitAsync(batonOutput, new JsonObject
         {
