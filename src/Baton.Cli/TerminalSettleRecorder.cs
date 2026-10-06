@@ -118,6 +118,7 @@ public static class TerminalSettleRecorder
                 // The ledger is an as-of execution record. Read the immutable post-execution stamp
                 // rather than reprobe a workspace whose remote state may have changed after settle.
                 var delivery = ReadDeliveryEvidenceByWorker(terminalEntries);
+                var ownedTaskDelivery = ReadOwnedTaskDeliveryByExecution(terminalEntries, delivery);
 
                 // identitySource, from the resolver rather than assumed here (#1931 re-review MEDIUM):
                 // the settle site writes most of the ledger, so a field only the backfill stamped would
@@ -130,7 +131,8 @@ public static class TerminalSettleRecorder
                     labelByWorker: stamps.LabelByWorker,
                     identitySource: identitySource,
                     modelResolvedByWorker: stamps.ModelResolvedByWorker,
-                    declaredTaskSizeByWorker: stamps.DeclaredTaskSizeByWorker);
+                    declaredTaskSizeByWorker: stamps.DeclaredTaskSizeByWorker,
+                    deliveryByExecutionId: ownedTaskDelivery);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else
@@ -167,6 +169,36 @@ public static class TerminalSettleRecorder
                 result[worker] = new WorkspaceDelivery(
                     PullRequest: pullRequestNumber.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>Joins producer-known owned-task identity to the exact accepted execution id.</summary>
+    internal static IReadOnlyDictionary<string, WorkspaceDelivery> ReadOwnedTaskDeliveryByExecution(
+        IReadOnlyList<LogEntry> entries,
+        IReadOnlyDictionary<string, WorkspaceDelivery> deliveryByWorker)
+    {
+        var result = new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal);
+        var accepted = entries.OfType<LogEntry.FlowLogEntry>()
+            .Select(entry => entry.Event)
+            .OfType<FlowEvent.ExecutionRequestAccepted>();
+        foreach (var entry in accepted)
+        {
+            if (entry.Request.OwnedTaskIdentity is not { } identity)
+            {
+                continue;
+            }
+
+            var workspaceDelivery = deliveryByWorker.TryGetValue(entry.Request.Worker, out var delivery)
+                ? delivery
+                : new WorkspaceDelivery();
+            result[entry.Request.ExecutionId.Value] = workspaceDelivery with
+            {
+                Issue = identity.HasExpectedTaskId() && identity.Issue is > 0
+                    ? identity.Issue.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : null,
+            };
         }
 
         return result;

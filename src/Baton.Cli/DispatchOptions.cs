@@ -199,4 +199,5 @@ public sealed record DispatchOptions(
     string? OriginatingPullRequest = null,
     string? OriginatingPullRequestBranch = null,
     MemoryAddDispatchGrant? MemoryAddGrant = null,
-    int? MaxRepeatedToolSteps = null);
+    int? MaxRepeatedToolSteps = null,
+    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);

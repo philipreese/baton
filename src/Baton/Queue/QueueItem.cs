@@ -463,7 +463,10 @@ public sealed record QueueAttemptEnvelope(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RoomId,
     [property: JsonPropertyName("attemptBaseRevision")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AttemptBaseRevision,
-    [property: JsonPropertyName("factTimestamp")] DateTimeOffset FactTimestamp);
+    [property: JsonPropertyName("factTimestamp")] DateTimeOffset FactTimestamp,
+    [property: JsonPropertyName("ownedTaskIdentity")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);
 
 /// <summary>The durable, pre-call identity for one queue-owned draft PR handoff.</summary>
 public sealed record QueueDraftPullRequestCreateMarker(

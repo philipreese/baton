@@ -304,7 +304,8 @@ public sealed record WorkerBindingConfigEntry(
     ExecutionLimitResolution? ExecutionLimitResolution = null,
     int? MaxRepeatedToolSteps = null,
     IReadOnlyList<string>? AttachmentNames = null,
-    bool EnableAgyCorrection = false);
+    bool EnableAgyCorrection = false,
+    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

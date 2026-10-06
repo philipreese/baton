@@ -116,4 +116,5 @@ public sealed record ExecutionRequest(
     // #2449: immutable ordinary-execution enforcement inputs. Null is explicit legacy/supplementary
     // unknown evidence; null monitor brakes are known unlimited only when MonitorInputsKnown is true.
     ExecutionLimitEvidence? Limits = null,
-    string? ExactRunningTransport = null);
+    string? ExactRunningTransport = null,
+    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);

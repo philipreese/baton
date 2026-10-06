@@ -115,7 +115,8 @@ public abstract record WorkerBinding(WorkerContract Contract, GrantAuditMode Gra
         // #2449: profile provenance is optional because hand-authored/legacy bindings have no
         // selection record. The enforcement values themselves remain known from this binding.
         ExecutionLimitEvidence? LimitEvidence = null,
-        int? MaxRepeatedToolSteps = null)
+        int? MaxRepeatedToolSteps = null,
+        OwnedTaskExecutionIdentity? OwnedTaskIdentity = null)
         : WorkerBinding(Contract, GrantAuditMode)
     {
         public ExecutionLimitEvidence EffectiveLimitEvidence =>

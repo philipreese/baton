@@ -4871,6 +4871,14 @@ already emits.
 `AppendAsync` skips an execution id the file already holds — its own doc comment states against which
 repeated-settle shapes, and what inflated totals that skip is buying, not restated here.
 
+For a fresh execution admitted from an issue-backed owned task, `issue` comes from the immutable
+owned-task identity frozen in the accepted queue attempt and carried by the accepted
+`ExecutionRequest`; settlement joins that identity by exact execution id. The repository, task,
+attempt, room, execution, and task-id declarations must agree with that accepted identity. A missing,
+malformed, mismatched, or conflicting declaration leaves `issue` absent and emits a diagnostic; it
+does not fall back to a branch-shaped hint. When owned-task context is absent, the existing direct/
+template workspace-delivery behavior remains unchanged. This does not rewrite historical rows.
+
 **Schema** (JSON names exactly; every field except `sourceKind`, `estimateStatus` and
 `planMeterEstimateStatus` is independently absent when unavailable — omitted, never zero, never
 `null`):

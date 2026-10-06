@@ -927,7 +927,10 @@ public static class MutationInterface
             DeliveryGeneratedPaths: deliveryGeneratedPaths,
             DeliveryAuthorizedPaths: deliveryAuthorizedPaths,
             Limits: CaptureAppliedLimitEvidence(processBinding),
-            ExactRunningTransport: processBinding.Target.ExactRunningTransport);
+            ExactRunningTransport: processBinding.Target.ExactRunningTransport,
+            OwnedTaskIdentity: processBinding.OwnedTaskIdentity is { } identity
+                ? identity with { ExecutionId = executionId.Value }
+                : null);
 
         // The write-sequence rule: intent recorded and fsync'd before Core is ever asked to run.
         await eventLogWriter.AppendAsync(CreateExecutionRequestAccepted(request), cancellationToken).ConfigureAwait(false);
@@ -2220,7 +2223,10 @@ public static class MutationInterface
             Limits: processBindingForRequest is { } processBinding
                 ? CaptureAppliedLimitEvidence(processBinding)
                 : null,
-            ExactRunningTransport: processBindingForRequest?.Target.ExactRunningTransport);
+            ExactRunningTransport: processBindingForRequest?.Target.ExactRunningTransport,
+            OwnedTaskIdentity: processBindingForRequest?.OwnedTaskIdentity is { } identity
+                ? identity with { ExecutionId = executionId.Value }
+                : null);
 
 
         // #1373: built from the step as projected BEFORE the accept below is appended, which is what
@@ -3781,6 +3787,9 @@ public static class MutationInterface
             ExecutionId = checkpointExecutionId,
             Timeout = ArtifactCheckpoint.WallClockTimeout,
             Limits = ArtifactCheckpoint.CreateLimitEvidence(monitor is not null),
+            OwnedTaskIdentity = prepared.Request.OwnedTaskIdentity is { } identity
+                ? identity with { ExecutionId = checkpointExecutionId.Value }
+                : null,
         };
         using var checkpointCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hostCancellationToken);
         using var linked = monitor is null ? null : CancellationTokenSource.CreateLinkedTokenSource(checkpointCancellation.Token, monitor.ArrestRequested);
@@ -3936,6 +3945,9 @@ public static class MutationInterface
             Timeout = GraceTurn.WallClockTimeout,
             Environment = graceEnvironment,
             Limits = GraceTurn.CreateLimitEvidence(graceMonitor is not null),
+            OwnedTaskIdentity = prepared.Request.OwnedTaskIdentity is { } identity
+                ? identity with { ExecutionId = graceExecutionId.Value }
+                : null,
         };
 
         // Recovery reads this before generic parent crash classification. The event contains no raw

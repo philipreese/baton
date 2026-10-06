@@ -76,6 +76,10 @@ public static partial class CostLedgerStore
     /// remarks), null everywhere else. Absent entries leave the row's fields absent; nothing here
     /// guesses one from another.
     /// </param>
+    /// <param name="deliveryByExecutionId">
+    /// Producer-known owned-task issue identity joined to the exact accepted execution id. A present
+    /// but invalid context remains unknown and never falls back to the workspace issue hint.
+    /// </param>
     /// <param name="labelByWorker">
     /// #1901 C2: worker name to the <c>--label</c> recorded on that worker's binding at dispatch,
     /// supplied by the settle site (and by the backfill) for the same two reasons
@@ -110,7 +114,8 @@ public static partial class CostLedgerStore
         IReadOnlyDictionary<string, string>? labelByWorker = null,
         RepositoryIdentitySource? identitySource = null,
         IReadOnlyDictionary<string, string>? modelResolvedByWorker = null,
-        IReadOnlyDictionary<string, TaskSizeDeclaration>? declaredTaskSizeByWorker = null)
+        IReadOnlyDictionary<string, TaskSizeDeclaration>? declaredTaskSizeByWorker = null,
+        IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByExecutionId = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -287,10 +292,19 @@ public static partial class CostLedgerStore
             // #1901 C1 item 1/3: the workspace facts the settle site resolved for THIS row's worker.
             // Keyed on the worker name for the same reason the runway override is: bindings are
             // per-worker, and a composed template's phases can sit in different workspaces.
-            var delivery = request?.Worker is { } deliveryWorker && deliveryByWorker is not null
-                && deliveryByWorker.TryGetValue(deliveryWorker, out var resolvedDelivery)
-                    ? resolvedDelivery
-                    : null;
+            WorkspaceDelivery? executionDelivery = null;
+            var hasExecutionDelivery = deliveryByExecutionId is not null
+                && deliveryByExecutionId.TryGetValue(executionId, out executionDelivery);
+            var delivery = hasExecutionDelivery
+                ? executionDelivery
+                : request?.Worker is { } deliveryWorker && deliveryByWorker is not null
+                    && deliveryByWorker.TryGetValue(deliveryWorker, out var resolvedDelivery)
+                        ? resolvedDelivery
+                        : null;
+            var issue = request?.OwnedTaskIdentity is { } ownedTaskIdentity
+                ? ResolveOwnedTaskIssue(ownedTaskIdentity, executionId, recordedRoomPath, repository,
+                    hasExecutionDelivery ? executionDelivery : null)
+                : delivery?.Issue;
 
             // #1901 C1 item 2: read straight off this execution's own artifact directory. No injection
             // needed and none wanted -- verdict.json is a file the engine already owns the path of
@@ -317,7 +331,7 @@ public static partial class CostLedgerStore
                 ModelAnomaly: modelAnomaly,
                 ModelsObserved: usage.ModelsObserved,
                 Outcome: outcome,
-                Issue: delivery?.Issue,
+                Issue: issue,
                 PullRequest: delivery?.PullRequest,
                 StartedAt: startedAt,
                 EndedAt: endedAt,
@@ -621,6 +635,35 @@ public static partial class CostLedgerStore
     /// states why every instant it writes is UTC). Defaults to now; injectable only so a test can put
     /// the row inside or outside a fixed window.
     /// </param>
+    private static string? ResolveOwnedTaskIssue(
+        OwnedTaskExecutionIdentity identity,
+        string executionId,
+        string recordedRoomPath,
+        RepositoryIdentity? repository,
+        WorkspaceDelivery? settledDelivery)
+    {
+        var valid = identity.HasExpectedTaskId()
+            && identity.Issue is > 0
+            && identity.AttemptId is { Length: > 0 }
+            && string.Equals(identity.ExecutionId, executionId, StringComparison.Ordinal)
+            && repository is not null
+            && string.Equals(identity.Repository, repository.Value, StringComparison.Ordinal)
+            && identity.RoomDirectory is { Length: > 0 } room
+            && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(room), recordedRoomPath)
+            && (settledDelivery is null
+                || string.Equals(settledDelivery.Issue, identity.Issue.Value.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal));
+
+        if (!valid)
+        {
+            Console.Error.WriteLine(
+                $"Cost ledger: owned-task context for execution '{executionId}' was invalid; issue identity remains unknown.");
+            return null;
+        }
+
+        return identity.Issue.GetValueOrDefault().ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     public static CostLedgerEntry? BuildResolutionRow(
         IReadOnlyList<CostLedgerEntry> existingRows,
         string recordedRoomKey,

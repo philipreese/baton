@@ -244,6 +244,16 @@ public static class DispatchCommand
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 
+        if (options.OwnedTaskIdentity is { } ownedTaskIdentity)
+        {
+            await ValidateOwnedTaskIdentityAsync(options.RoomDirectoryPath, ownedTaskIdentity, cancellationToken)
+                .ConfigureAwait(false);
+            bindings = bindings.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value with { OwnedTaskIdentity = ownedTaskIdentity },
+                StringComparer.Ordinal);
+        }
+
         var recoveryExpectedHead = await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
             options, workspace, cancellationToken).ConfigureAwait(false);
         if (options.OriginatingPullRequest is not null)
@@ -1861,6 +1871,43 @@ public static class DispatchCommand
         };
         var provenance = new ContinuationProvenance(continueFromRoomDirectoryPath, parentExecutionId, parentEntry.SessionId);
         return (resumedEntry, provenance);
+    }
+
+    private static async Task ValidateOwnedTaskIdentityAsync(
+        string roomDirectory,
+        OwnedTaskExecutionIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        if (!identity.IsAdmissionShape())
+        {
+            throw new CliArgumentException(
+                "The queue owned-task transport is malformed; no execution was admitted.");
+        }
+
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var match = snapshot.Items.SingleOrDefault(item =>
+            item.State == QueueItemState.Launched
+            && item.OwnedTask is { } ownedTask
+            && ownedTask.Id == identity.TaskId
+            && ownedTask.Repository == identity.Repository
+            && ownedTask.Issue == identity.Issue
+            && item.Repository == identity.Repository
+            && item.Issue == identity.Issue
+            && item.AttemptId?.Value == identity.AttemptId
+            && item.AttemptEnvelope is { } envelope
+            && envelope.AttemptId.Value == identity.AttemptId
+            && envelope.OwnedTaskIdentity == identity
+            && item.RoomDirectory is { } recordedRoom
+            && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(recordedRoom), BatonPaths.RecordKey(roomDirectory))
+            && BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(identity.RoomDirectory!), BatonPaths.RecordKey(roomDirectory)));
+
+        if (match?.OwnedTask is not { } acceptedOwner || !identity.HasExpectedTaskId()
+            || !string.Equals(acceptedOwner.Repository, match.Repository, StringComparison.Ordinal)
+            || acceptedOwner.Issue != match.Issue)
+        {
+            throw new CliArgumentException(
+                "The queue owned-task transport does not match one exact admitted queue attempt; no execution was admitted.");
+        }
     }
 
     private static bool SupportsDispatchContinuation(string adapter) =>
