@@ -108,7 +108,7 @@ internal sealed partial class ConductorFollowSession
         var session = await CreateAsync(Path.Combine(registration.SessionDirectory, "request.json"),
             BatonPaths.Root, resolver ?? RepositoryIdentityResolver.TryResolveAsync, token, broker).ConfigureAwait(false);
         session.ValidateAttachment(registration);
-        return await session.DeliverAsync(key, token, async (obligation, ct) =>
+        var result = await session.DeliverAsync(key, token, async (obligation, ct) =>
         {
             var current = Read<ConductorFollowAttachment>(path);
             session.ValidateAttachment(current);
@@ -120,6 +120,18 @@ internal sealed partial class ConductorFollowSession
                 throw new CliArgumentException("Follow source admission changed.");
             await session.AdmitDaemonTurnAsync(obligation, ct).ConfigureAwait(false);
         }).ConfigureAwait(false);
+        if (result.Status is "delivered" or "replayed")
+        {
+            var current = Read<ConductorFollowAttachment>(path);
+            session.ValidateAttachment(current);
+            if (!current.Attached || current.Id != id)
+                throw new CliArgumentException("Follow attachment revoked after delivery.");
+            var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, token).ConfigureAwait(false);
+            var row = queue.Items.SingleOrDefault(item => item.StoppedWorkJudgment?.Key == key);
+            if (queue.Held || row?.StoppedWorkJudgment?.FollowAttachmentId != id)
+                throw new CliArgumentException("Follow source admission changed after delivery.");
+        }
+        return result;
     }
 
     private async Task AdmitDaemonTurnAsync(ConductorObligation obligation, CancellationToken token)

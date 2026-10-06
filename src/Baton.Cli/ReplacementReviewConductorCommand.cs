@@ -20,7 +20,8 @@ internal static class ReplacementReviewConductorCommand
         ConductorObligationStore? obligations = null,
         CancellationToken cancellationToken = default,
         Func<CancellationToken, Task>? beforeAdviceRead = null,
-        bool automatic = false)
+        bool automatic = false,
+        ReplacementReviewEvidenceInput? evidence = null)
     {
         var key = options.ObligationKey!;
         var holder = options.Holder!;
@@ -50,7 +51,7 @@ internal static class ReplacementReviewConductorCommand
         var source = candidates[0];
         if (source.ReplacementReviewAction is { } retained)
         {
-            RequireSameRequest(retained, obligation, holder, expectedHead);
+            RequireSameRequest(retained, obligation, holder, expectedHead, evidence);
             if (!automatic && retained.Origin == QueueReplacementReviewOrigin.Automatic)
             {
                 await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
@@ -59,7 +60,7 @@ internal static class ReplacementReviewConductorCommand
                     {
                         if (item.Tag != source.Tag || item.ReplacementReviewAction is not { } currentAction)
                             return item;
-                        RequireSameRequest(currentAction, obligation, holder, expectedHead);
+                        RequireSameRequest(currentAction, obligation, holder, expectedHead, evidence);
                         retained = currentAction with
                         {
                             Origin = QueueReplacementReviewOrigin.Manual,
@@ -78,24 +79,25 @@ internal static class ReplacementReviewConductorCommand
         }
         if (snapshot.Held)
             throw new ConductorObligationStoreException("The queue is held; replacement review admission is refused.");
-        if (obligation.Status != ConductorObligationStatus.TransportAcknowledged
-            || obligation.Owner != holder || obligation.TransportReceipt is not { Length: > 0 } digest
-            || !digest.StartsWith("stopped-work-advice-sha256:", StringComparison.Ordinal)
-            || obligation.PullRequestHead != expectedHead
-            || obligation.TargetRevision != expectedHead
-            || source.StoppedWorkJudgment is not { } intent
+        if (source.StoppedWorkJudgment is not { } intent
             || intent.AttemptId != sourceAttempt || intent.Stage != stage
             || intent.ContextSha256 != obligation.ContextSha256
             || intent.Holder != holder || intent.PullRequestHead != expectedHead
             || intent.PullRequest is not > 0 || source.RoomDirectory is not { Length: > 0 }
-            || source.Branch is not { Length: > 0 } || source.Repository != repository)
+            || source.Branch is not { Length: > 0 } || source.Repository != repository
+            || evidence is null && (obligation.Status != ConductorObligationStatus.TransportAcknowledged
+                || obligation.Owner != holder || obligation.TransportReceipt is not { Length: > 0 } digest
+                || !digest.StartsWith("stopped-work-advice-sha256:", StringComparison.Ordinal))
+            || evidence is not null && (obligation.Status is not (ConductorObligationStatus.Pending
+                or ConductorObligationStatus.Submitted) || obligation.Owner != holder))
             throw new ConductorObligationStoreException("Stopped-work advice, source, holder, or PR head is ineligible.");
 
         if (beforeAdviceRead is not null)
             await beforeAdviceRead(cancellationToken).ConfigureAwait(false);
-        var view = await obligations.ReadStoppedWorkAdviceViewAsync(obligation, cancellationToken)
-            .ConfigureAwait(false);
-        if (view is not { State: StoppedWorkJudgmentState.Available, Response: not null })
+        var view = evidence is null
+            ? await obligations.ReadStoppedWorkAdviceViewAsync(obligation, cancellationToken).ConfigureAwait(false)
+            : null;
+        if (evidence is null && view is not { State: StoppedWorkJudgmentState.Available, Response: not null })
         {
             // Another identical caller may have admitted the slot after this caller loaded the
             // halted source. That admission itself makes the advice projection stale.
@@ -103,7 +105,7 @@ internal static class ReplacementReviewConductorCommand
             var sources = latest.Items.Where(item => item.StoppedWorkJudgment?.Key == key).ToArray();
             if (sources.Length == 1 && sources[0].ReplacementReviewAction is { } raced)
             {
-                RequireSameRequest(raced, obligation, holder, expectedHead);
+                RequireSameRequest(raced, obligation, holder, expectedHead, evidence);
                 RequireSameSource(raced, source);
                 if (!automatic && raced.Origin == QueueReplacementReviewOrigin.Automatic)
                 {
@@ -115,7 +117,7 @@ internal static class ReplacementReviewConductorCommand
                             ?? throw new ConductorObligationStoreException("The retained source disappeared.");
                         var currentAction = current.ReplacementReviewAction
                             ?? throw new ConductorObligationStoreException("The retained action slot disappeared.");
-                        RequireSameRequest(currentAction, obligation, holder, expectedHead);
+                        RequireSameRequest(currentAction, obligation, holder, expectedHead, evidence);
                         RequireSameSource(currentAction, source);
                         if (currentAction.Origin != QueueReplacementReviewOrigin.Automatic)
                             return currentSnapshot;
@@ -144,12 +146,12 @@ internal static class ReplacementReviewConductorCommand
         // Automatic admission is the one narrow exception to advice-only routing: a retained
         // typed MissingVerdict source plus Recommend may consume this existing action slot, but
         // neither explanation text nor any other halt or choice is authority.
-        if (automatic
+        if (evidence is null && automatic
             && (intent.HaltCause != StoppedWorkHaltCause.MissingVerdict
                 || intent.Stage is not (WorkStage.Review or WorkStage.ReReview)
                 || !intent.AutomaticMissingVerdictReplacementReviewEligible
                 || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository)
-                || view.Response.Decision.Choice != StoppedWorkAdviceChoice.Recommend))
+                || view!.Response!.Decision.Choice != StoppedWorkAdviceChoice.Recommend))
             throw new ConductorObligationStoreException(
                 "Automatic replacement review requires an opted-in MissingVerdict source and a retained Recommend advice choice.");
 
@@ -160,11 +162,20 @@ internal static class ReplacementReviewConductorCommand
         if (claim?.Holder != holder)
             throw new ConductorObligationStoreException("Conductor ownership changed.");
 
+        if (evidence is not null)
+            ReplacementReviewEvidenceValidator.ValidateCompletedFollow(
+                obligation, source, evidence, holder, expectedHead,
+                ConductorClaimStore.GetClaimGeneration(claim));
+
         var action = new QueueReplacementReviewAction(
-            key, holder, digest, repository, tag, sourceAttempt, source.RoomDirectory,
+            key, holder, evidence is null ? obligation.TransportReceipt! : string.Empty,
+            repository, tag, sourceAttempt, source.RoomDirectory,
             stage, source.Round, intent.PullRequest.Value, expectedHead, source.Workspace,
             source.Branch, DateTimeOffset.UtcNow,
-            Origin: automatic ? QueueReplacementReviewOrigin.Automatic : QueueReplacementReviewOrigin.Manual);
+            Origin: automatic ? QueueReplacementReviewOrigin.Automatic : QueueReplacementReviewOrigin.Manual,
+            EvidenceProvenance: evidence?.Provenance,
+            EvidenceDigest: evidence?.Digest,
+            EvidenceDirectory: evidence?.EvidenceDirectory);
         await advancer.ValidateReplacementReviewSourceAsync(source, action, cancellationToken)
             .ConfigureAwait(false);
         var destinationRole = WorkStages.RoleFor(stage);
@@ -180,7 +191,7 @@ internal static class ReplacementReviewConductorCommand
             var current = currentSnapshot.Items.FirstOrDefault(item => item.Tag == tag);
             if (current?.ReplacementReviewAction is { } existing)
             {
-                RequireSameRequest(existing, obligation, holder, expectedHead);
+                RequireSameRequest(existing, obligation, holder, expectedHead, evidence);
                 replayed = true;
                 if (!automatic && existing.Origin == QueueReplacementReviewOrigin.Automatic)
                 {
@@ -255,14 +266,25 @@ internal static class ReplacementReviewConductorCommand
     }
 
     internal static void RequireSameRequest(
-        QueueReplacementReviewAction action, ConductorObligation obligation, string holder, string head)
+        QueueReplacementReviewAction action, ConductorObligation obligation, string holder, string head,
+        ReplacementReviewEvidenceInput? evidence = null)
     {
+        var provenance = ReplacementReviewEvidenceProvenance.For(action);
         if (action.ObligationKey != obligation.IdempotencyKey || action.Holder != holder
-            || action.AdviceDigest != obligation.TransportReceipt
             || action.HeadSha != head || action.Repository != obligation.TargetProject
             || action.Tag != obligation.TargetExecution)
             throw new ConductorObligationConflictException(obligation.IdempotencyKey,
                 "replacement review request differs from the retained action slot");
+        if (provenance == ReplacementReviewEvidenceProvenance.LegacyAdvice
+            && (evidence is not null || action.AdviceDigest != obligation.TransportReceipt))
+            throw new ConductorObligationConflictException(obligation.IdempotencyKey,
+                "replacement review evidence provenance differs from the retained action slot");
+        if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow
+            && evidence is not null
+            && (evidence.Provenance != provenance || action.EvidenceDigest != evidence.Digest
+                || action.EvidenceDirectory != evidence.EvidenceDirectory))
+            throw new ConductorObligationConflictException(obligation.IdempotencyKey,
+                "completed follow evidence differs from the retained action slot");
     }
 
     private static void RequireSameSource(QueueReplacementReviewAction action, QueueItem source)

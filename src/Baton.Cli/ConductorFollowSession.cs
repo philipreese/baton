@@ -75,6 +75,31 @@ internal sealed record ConductorFollowResponse(
     [property: JsonRequired] int ExitCode,
     [property: JsonRequired] IReadOnlyList<string> OutputLines);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed record ConductorFollowTypedDecision(
+    [property: JsonRequired] int SchemaVersion,
+    [property: JsonRequired] string ObligationKey,
+    [property: JsonRequired] string ObligationId,
+    [property: JsonRequired] string SourceHeadSha,
+    [property: JsonRequired] string Decision);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed record ConductorFollowDecisionEvidence(
+    [property: JsonRequired] int SchemaVersion,
+    [property: JsonRequired] string ObligationKey,
+    [property: JsonRequired] string ObligationId,
+    [property: JsonRequired] string SourceHeadSha,
+    [property: JsonRequired] string Decision,
+    [property: JsonRequired] string SourceRepository,
+    [property: JsonRequired] string SourceContextSha256,
+    [property: JsonRequired] string SourceDigest,
+    [property: JsonRequired] string RequestSha256,
+    [property: JsonRequired] string ClaimGeneration,
+    [property: JsonRequired] string SessionId,
+    [property: JsonRequired] string ConfigurationSha256,
+    [property: JsonRequired] string ResponseSha256,
+    [property: JsonRequired] string Receipt);
+
 internal sealed record ConductorFollowJournalEntry(
     [property: JsonRequired] int SchemaVersion,
     [property: JsonRequired] string ObligationKey,
@@ -86,7 +111,8 @@ internal sealed record ConductorFollowJournalEntry(
 internal sealed record ConductorFollowResult(
     string Status, string? ObligationKey, string? ObligationId, string EvidenceLocation,
     string Diagnostic, string? Receipt = null, ConductorFollowResponse? Response = null,
-    RetainedStoppedWorkAdviceResponse? LegacyResponse = null);
+    RetainedStoppedWorkAdviceResponse? LegacyResponse = null,
+    ConductorFollowDecisionEvidence? DecisionEvidence = null);
 
 internal delegate Task<int> ConductorFollowBroker(
     CodexBrokerConfiguration configuration, string prompt, string outputDirectory,
@@ -98,6 +124,7 @@ internal sealed partial class ConductorFollowSession
 {
     internal const int MaxResponseBytes = 1024 * 1024;
     private const int MaxInputChars = 8192;
+    private const int MaxDecisionChars = 8192;
     private const int SchemaVersion = 1;
     private const string LockPrefix = "baton-conductor-follow";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -297,8 +324,9 @@ internal sealed partial class ConductorFollowSession
                     || identity.SourceCapability != obligation.AdapterCapability)
                     throw new CliArgumentException("Replay source drifted.");
                 var response = ReadResponse(responsePath, identity, state);
+                var replayDecision = ReadDecisionEvidence(evidence);
                 return new("replayed", key, obligation.ObligationId, evidence, "Retained complete response; no vendor call.",
-                    EnsureReceipt(evidence), response);
+                    EnsureReceipt(evidence), response, DecisionEvidence: replayDecision);
             }
             // Daemon admission must refuse before any event identity or irreversible launch marker.
             if (requiredAdmission is not null)
@@ -355,8 +383,16 @@ internal sealed partial class ConductorFollowSession
             Write(responsePath, retained);
             _ = ReadResponse(responsePath, identityEvidence with { SessionId = state.SessionId }, state);
             var receipt = EnsureReceipt(evidence);
+            var decision = TryCreateDecisionEvidence(retained.OutputLines, evidence, identityEvidence with
+            {
+                SessionId = state.SessionId,
+            }, state, obligation);
             AppendJournal(new(SchemaVersion, key, obligation.ObligationId, state.SessionId!, FileDigest(responsePath), receipt));
-            return new("delivered", key, obligation.ObligationId, evidence, "Complete turn and transport receipt retained.", receipt, retained);
+            return new("delivered", key, obligation.ObligationId, evidence,
+                decision is null
+                    ? "Complete turn and transport receipt retained without an eligible typed decision."
+                    : "Complete turn, typed decision and transport receipt retained.",
+                receipt, retained, DecisionEvidence: decision);
         }
         catch (Exception ex) when (IsRefusal(ex) || ex is OperationCanceledException)
         {
@@ -478,8 +514,11 @@ internal sealed partial class ConductorFollowSession
                 throw new IOException("Incomplete event identity.");
             var launchPath = Path.Combine(directory, "launch.json");
             var responsePath = Path.Combine(directory, "response.json");
+            var decisionPath = Path.Combine(directory, "decision.json");
             var markerFree = !File.Exists(launchPath) && !File.Exists(responsePath)
                 && !journal.ContainsKey(identity.ObligationId);
+            if (File.Exists(decisionPath) && !File.Exists(responsePath))
+                throw new IOException("Follow decision exists without a complete response.");
             ValidateRetainedSource(directory, identity, state);
             if (markerFree && identity.SessionId is null) continue;
             if (identity.SessionId != state.SessionId) throw new IOException("Incomplete event identity.");
@@ -489,6 +528,7 @@ internal sealed partial class ConductorFollowSession
                 || launch.ExpectedSessionId is not null && launch.ExpectedSessionId != state.SessionId)
                 throw new IOException("Incomplete launch identity.");
             var response = ReadResponse(responsePath, identity, state);
+            _ = ReadDecisionEvidence(directory);
             var receipt = EnsureReceipt(directory);
             var entry = new ConductorFollowJournalEntry(SchemaVersion, response.ObligationKey, response.ObligationId,
                 response.SessionId, FileDigest(responsePath), receipt);
@@ -534,31 +574,123 @@ internal sealed partial class ConductorFollowSession
         return response;
     }
 
+    internal static ConductorFollowDecisionEvidence? ReadDecisionEvidence(string directory)
+    {
+        var path = Path.Combine(directory, "decision.json");
+        return File.Exists(path) ? Read<ConductorFollowDecisionEvidence>(path, 16 * 1024) : null;
+    }
+
+    private ConductorFollowDecisionEvidence? TryCreateDecisionEvidence(
+        IReadOnlyList<string> lines, string evidenceDirectory,
+        ConductorFollowEventIdentity identity, ConductorFollowState state,
+        ConductorObligation obligation)
+    {
+        var typed = TryParseTypedDecision(lines);
+        if (typed is null || typed.SchemaVersion != SchemaVersion
+            || typed.ObligationKey != identity.ObligationKey
+            || typed.ObligationId != obligation.ObligationId
+            || typed.SourceHeadSha != obligation.PullRequestHead
+            || typed.Decision is not ("Hold" or "ReplaceReview"))
+            return null;
+
+        var responseDigest = FileDigest(Path.Combine(evidenceDirectory, "response.json"));
+        var receipt = EnsureReceipt(evidenceDirectory);
+        var evidence = new ConductorFollowDecisionEvidence(
+            SchemaVersion, typed.ObligationKey, typed.ObligationId, typed.SourceHeadSha, typed.Decision,
+            obligation.TargetProject, obligation.ContextSha256!, FileDigest(Path.Combine(evidenceDirectory, "source.json")),
+            Digest(JsonSerializer.Serialize(_request, Json)), identity.ClaimGeneration, state.SessionId!,
+            identity.ConfigurationSha256, responseDigest, receipt);
+        var path = Path.Combine(evidenceDirectory, "decision.json");
+        if (File.Exists(path) && ReadDecisionEvidence(evidenceDirectory) != evidence)
+            throw new IOException("Conflicting retained follow decision.");
+        if (!File.Exists(path)) Write(path, evidence);
+        return evidence;
+    }
+
+    private static ConductorFollowTypedDecision? TryParseTypedDecision(IReadOnlyList<string> lines)
+    {
+        var parser = new CodexWorkerAdapter();
+        string? finalResponse = null;
+        for (var index = lines.Count - 1; index >= 0; index--)
+        {
+            if (string.IsNullOrWhiteSpace(lines[index])) continue;
+            if (parser.TryParseFinalResponse(lines[index], out var response))
+            {
+                finalResponse = response;
+                break;
+            }
+
+            if (!parser.IsPostResponseTerminalLine(lines[index])) return null;
+        }
+
+        if (finalResponse is null || finalResponse.Length > MaxDecisionChars
+            || Encoding.UTF8.GetByteCount(finalResponse) > MaxDecisionChars)
+            return null;
+        try
+        {
+            using var document = JsonDocument.Parse(finalResponse, new JsonDocumentOptions { MaxDepth = 8 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in root.EnumerateObject())
+                if (!names.Add(property.Name)) return null;
+            if (!names.SetEquals(["schemaVersion", "obligationKey", "obligationId", "sourceHeadSha", "decision"]))
+                return null;
+            if (!root.TryGetProperty("schemaVersion", out var schema) || schema.ValueKind != JsonValueKind.Number
+                || !schema.TryGetInt32(out var schemaVersion)
+                || !TryGetString(root, "obligationKey", out var key)
+                || !TryGetString(root, "obligationId", out var id)
+                || !TryGetString(root, "sourceHeadSha", out var head)
+                || !TryGetString(root, "decision", out var decision)
+                || decision is not ("Hold" or "ReplaceReview")
+                || head.Length != 40 || !head.All(Uri.IsHexDigit)
+                || key.Length is 0 or > 2048 || id.Length is 0 or > 256
+                || key.Any(char.IsControl) || id.Any(char.IsControl))
+                return null;
+            return new(schemaVersion, key, id, head, decision);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetString(JsonElement root, string name, out string value)
+    {
+        value = string.Empty;
+        return root.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && (value = property.GetString() ?? string.Empty).Length > 0;
+    }
+
     private static bool Complete(IReadOnlyList<string>? lines, string? sessionId)
     {
         if (string.IsNullOrWhiteSpace(sessionId) || lines is null) return false;
+        var parser = new CodexWorkerAdapter();
         var thread = false;
         var turn = false;
         var complete = false;
         foreach (var line in lines)
         {
-            using var document = JsonDocument.Parse(line);
-            var root = document.RootElement;
-            var type = root.GetProperty("type").GetString();
-            if (complete || type is "error" or "turn.failed") return false;
-            if (type == "thread.started")
+            if (parser.TryParseSessionId(line, out var parsedSession))
             {
-                if (thread || root.GetProperty("thread_id").GetString() != sessionId) return false;
+                if (thread || parsedSession != sessionId) return false;
                 thread = true;
             }
-            if (type == "turn.started")
+
+            if (parser.TryParseProgressEvent(line, out var progress))
             {
-                if (!thread || turn) return false;
-                turn = true;
+                if (progress?.Kind == "status" && progress.Text == "Turn started")
+                {
+                    if (!thread || turn) return false;
+                    turn = true;
+                }
+                else if (progress?.Kind == "result" && progress.Text != "success") return false;
             }
-            if (type == "turn.completed")
+
+            if (parser.IsPostResponseTerminalLine(line))
             {
-                if (!turn) return false;
+                if (!turn || complete) return false;
                 complete = true;
             }
         }
@@ -614,7 +746,7 @@ internal sealed partial class ConductorFollowSession
     private static bool IsRefusal(Exception ex) => ex is IOException or UnauthorizedAccessException or JsonException
         or InvalidOperationException or ArgumentException or KeyNotFoundException or BatonFlowException;
 
-    private static string ConfigurationDigest(ConductorFollowState state) =>
+    internal static string ConfigurationDigest(ConductorFollowState state) =>
         Digest(JsonSerializer.Serialize(state with { SessionId = null, Frozen = false }, Json));
     private static string Digest(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
     private static string FileDigest(string path)

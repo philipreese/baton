@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Baton.Cli;
 using Baton.Accounting;
 using Baton.Conductor;
 using Baton.Domain;
@@ -134,7 +135,9 @@ public sealed partial class WorkItemAdvancer
         }
 
         var verdictDigest = Convert.ToHexString(SHA256.HashData(verdictBytes)).ToLowerInvariant();
-        var proofPayload = string.Join('|', action.ObligationKey, action.AdviceDigest,
+        var evidenceDigest = action.EvidenceDigest ?? action.AdviceDigest ?? string.Empty;
+        var proofPayload = string.Join('|', ReplacementReviewEvidenceProvenance.For(action),
+            action.ObligationKey, evidenceDigest,
             action.ReplacementAttemptId.Value.Value, action.ReplacementRoomDirectory,
             action.HeadSha, verdictDigest, verdict.Decision);
         var proof = "replacement-review-sha256:"
