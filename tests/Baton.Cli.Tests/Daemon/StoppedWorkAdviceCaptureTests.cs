@@ -146,7 +146,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     entered.TrySetResult(true);
                     return Task.FromResult(Response(obligation, request));
                 });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(judgment.Key!, Ct))?.Status
@@ -214,17 +214,17 @@ public sealed class StoppedWorkAdviceCaptureTests
                     return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
                 });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () => (await ReadBackAsync()).ReplacementReviewAction is not null);
             Assert.Equal(1, adviceCalls);
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(1, launches);
             Assert.Equal(QueueItemState.Launched, (await ReadBackAsync()).State);
 
             await WaitForAsync(async () =>
             {
-                await scheduler.TickOnceAsync(Ct);
+                await NotifyAndTickAsync(scheduler);
                 return (await ReadBackAsync()).Stage == WorkStage.Ready;
             });
             var recovered = await ReadBackAsync();
@@ -239,7 +239,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Action = recovered.ReplacementReviewAction
                 }));
             Assert.NotNull(recovered.ReplacementReviewAction?.CompletionProof);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(ConductorObligationStatus.ActionObserved,
                 (await store.ReadAsync(intent.Key!, Ct))?.Status);
         }
@@ -290,7 +290,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Interlocked.Increment(ref adviceCalls);
                     return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
                 });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
             {
                 var obligation = await store.ReadAsync(intent.Key!, Ct);
@@ -311,7 +311,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                         ObligationKey: intent.Key, Action: "replace-review", ExpectedHead: Head),
                     TextWriter.Null, home, advancer, store, Ct, automatic: true));
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await scheduler.DrainStoppedWorkAdviceAsync();
             Assert.Equal(1, adviceCalls);
             Assert.Equal(0, launches);
@@ -354,7 +354,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
@@ -402,7 +402,7 @@ public sealed class StoppedWorkAdviceCaptureTests
             });
 
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = true }, Ct);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
@@ -414,7 +414,7 @@ public sealed class StoppedWorkAdviceCaptureTests
             // this same first failing operation belongs to automatic action admission instead.
             gh.FailFromCall = gh.Calls.Count + 1;
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with { Held = false }, Ct);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
             await WaitForAsync(() => Task.FromResult(
                 File.Exists(Path.Combine(evidenceDirectory, "source-stale"))
@@ -462,7 +462,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             var evidenceDirectory = store.GetStoppedWorkAdviceEvidenceDirectory(intent.Key!);
             await WaitForAsync(() => Task.FromResult(File.Exists(
                 Path.Combine(evidenceDirectory, "automatic-admission-refused"))));
@@ -474,7 +474,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State);
 
             var callsAfterRefusal = gh.Calls.Count;
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await scheduler.DrainStoppedWorkAdviceAsync();
             Assert.Equal(callsAfterRefusal, gh.Calls.Count);
             Assert.Equal(1, adviceCalls);
@@ -523,7 +523,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 await EnableStoppedWorkAdviceAsync();
                 return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
             });
-            await first.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(first);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
@@ -536,7 +536,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                 Interlocked.Increment(ref adviceCalls);
                 throw new InvalidOperationException("Retained advice must be replayed without another model call.");
             });
-            await restarted.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(restarted);
             await WaitForAsync(async () => (await ReadBackAsync()).ReplacementReviewAction is not null);
             Assert.Equal(1, adviceCalls);
             Assert.Equal(QueueReplacementReviewOrigin.Automatic,
@@ -573,11 +573,11 @@ public sealed class StoppedWorkAdviceCaptureTests
                 return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Hold));
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadStoppedWorkAdviceViewAsync((await store.ReadAsync(intent.Key!, Ct))!, Ct))?.State
                     == StoppedWorkJudgmentState.Available);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(1, calls);
             Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
             await scheduler.DrainStoppedWorkAdviceAsync();
@@ -651,8 +651,8 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Interlocked.Increment(ref adviceCalls);
                     throw new InvalidOperationException("Advice is disabled for this repository.");
                 });
-            await scheduler.TickOnceAsync(Ct);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
+            await NotifyAndTickAsync(scheduler);
             var obligation = await store.ReadAsync(intent.Key!, Ct);
             Assert.Equal(ConductorObligationStatus.Pending, obligation?.Status);
             Assert.Equal("recorded-owner", obligation?.Owner);
@@ -712,7 +712,7 @@ public sealed class StoppedWorkAdviceCaptureTests
                     Interlocked.Increment(ref calls);
                     return Task.FromResult(Response(obligation, request));
                 });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () => (await store.ReadAsync(intent.Key!, Ct))?.Status is
                 ConductorObligationStatus.Blocked or ConductorObligationStatus.TransportAcknowledged);
             await scheduler.DrainStoppedWorkAdviceAsync();
@@ -899,6 +899,14 @@ public sealed class StoppedWorkAdviceCaptureTests
             100_000),
         BatonPaths.ConductorObligationsFile,
         () => Now);
+
+    private static async Task NotifyAndTickAsync(QueueSchedulerService scheduler)
+    {
+        var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+        foreach (var source in queue.Items.Where(item => item.Halted && item.StoppedWorkJudgment?.Key is not null))
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+        await scheduler.TickOnceAsync(Ct);
+    }
 
     private static QueueSchedulerService Scheduler(
         ConductorObligationStore store,

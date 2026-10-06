@@ -51,7 +51,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                         Effort = provider.Effort,
                     });
                 });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () => (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status is
                 ConductorObligationStatus.TransportAcknowledged or ConductorObligationStatus.Blocked);
             await scheduler.DrainStoppedWorkAdviceAsync();
@@ -69,7 +69,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 await DaemonSettingsStore.SaveAsync(new DaemonSettings(), BatonPaths.SettingsFile, Ct);
                 var restarted = Scheduler(Store(), new WorkItemAdvancer(new PullRequestGh(), (_, _) => Task.FromResult<string?>(Head)),
                     (_, _, _, _, _) => throw new InvalidOperationException("Settings drift cannot charge another provider"));
-                await restarted.TickOnceAsync(Ct);
+                await NotifyAndTickAsync(restarted);
                 await restarted.DrainStoppedWorkAdviceAsync();
                 Assert.Equal(1, calls);
             }
@@ -116,7 +116,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 Interlocked.Increment(ref calls);
                 throw new InvalidOperationException("Recovery must not call a provider");
             });
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await restarted.ReadAsync(intent.Key!, Ct))?.Status
                     == ConductorObligationStatus.TransportAcknowledged);
@@ -150,20 +150,20 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 return Task.FromResult(Response(obligation, request));
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await response.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.TransportAcknowledged);
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
 
             var restarted = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
                 Task.FromResult<string?>(Head)), (_, _, _, _, _) =>
             {
                 throw new InvalidOperationException("a retained stopped-work response must not relaunch");
             });
-            await restarted.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(restarted);
 
             Assert.Equal(1, calls);
         }
@@ -220,9 +220,9 @@ public sealed class StoppedWorkAdviceSchedulerTests
 
             var scheduler = Scheduler(store, new WorkItemAdvancer(new PullRequestGh(), (_, _) =>
                 Task.FromResult<string?>(Head)), Launch);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             Assert.Equal(1, calls);
             Assert.False(secondEntered.Task.IsCompleted);
 
@@ -232,7 +232,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                     == ConductorObligationStatus.TransportAcknowledged);
             await WaitForAsync(async () =>
             {
-                await scheduler.TickOnceAsync(Ct);
+                await NotifyAndTickAsync(scheduler);
                 return secondEntered.Task.IsCompleted;
             });
             Assert.Equal(1, Volatile.Read(ref maximum));
@@ -267,6 +267,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 throw new OperationCanceledException(cancellationToken);
             });
 
+            await scheduler.NotifyOwnedHaltAsync(item, Ct);
             var tick = scheduler.TickOnceAsync(Ct);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
             await tick.WaitAsync(TimeSpan.FromSeconds(60), Ct);
@@ -299,7 +300,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 throw new InvalidOperationException("unreachable");
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
 
             await scheduler.DrainStoppedWorkAdviceAsync().WaitAsync(TimeSpan.FromSeconds(60), Ct);
@@ -329,7 +330,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 throw new InvalidOperationException("preflight should refuse before provider launch");
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.Blocked);
@@ -364,7 +365,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 throw new InvalidOperationException("changed source must refuse before provider launch");
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.Blocked);
@@ -412,7 +413,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 throw new InvalidOperationException("current source disposition must refuse before launch");
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.Blocked);
@@ -466,7 +467,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                     }, Ct);
                 });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
                 (await store.ReadAsync(item.StoppedWorkJudgment!.Key!, Ct))?.Status
                     == ConductorObligationStatus.Blocked);
@@ -527,11 +528,11 @@ public sealed class StoppedWorkAdviceSchedulerTests
 
             try
             {
-                await scheduler.TickOnceAsync(Ct);
+                await NotifyAndTickAsync(scheduler);
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
                 await QueueStore.MutateAsync(BatonPaths.QueueFile,
                     state => state with { Items = state.Items.Append(advancing).ToArray() }, Ct);
-                await scheduler.TickOnceAsync(Ct);
+                await NotifyAndTickAsync(scheduler);
                 var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
                 var advanced = Assert.Single(snapshot.Items, current => current.Tag == advancing.Tag);
                 Assert.True(advanced.Stage == WorkStage.Ready, advanced.Error);
@@ -594,7 +595,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
                 return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
             });
 
-            await scheduler.TickOnceAsync(Ct);
+            await NotifyAndTickAsync(scheduler);
             await WaitForAsync(async () =>
             {
                 var obligation = await store.ReadAsync(first.StoppedWorkJudgment!.Key!, Ct);
@@ -604,7 +605,7 @@ public sealed class StoppedWorkAdviceSchedulerTests
             });
             await WaitForAsync(async () =>
             {
-                await scheduler.TickOnceAsync(Ct);
+                await NotifyAndTickAsync(scheduler);
                 var obligation = await store.ReadAsync(second.StoppedWorkJudgment!.Key!, Ct);
                 return obligation is not null
                     && (await store.ReadStoppedWorkAdviceViewAsync(obligation, Ct))?.State
@@ -619,6 +620,14 @@ public sealed class StoppedWorkAdviceSchedulerTests
         {
             DirectoryCleanup.DeleteRecursively(home);
         }
+    }
+
+    private static async Task NotifyAndTickAsync(QueueSchedulerService scheduler)
+    {
+        var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+        foreach (var source in queue.Items.Where(item => item.Halted && item.StoppedWorkJudgment?.Key is not null))
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+        await scheduler.TickOnceAsync(Ct);
     }
 
     private static QueueSchedulerService Scheduler(

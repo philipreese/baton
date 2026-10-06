@@ -11,8 +11,45 @@ public sealed partial class QueueSchedulerService
 {
     private readonly SemaphoreSlim _adviceReconciliation = new(1, 1);
     private CancellationTokenSource? _adviceCancellation;
+    internal ConductorFollowBroker? FollowBroker { get; set; }
+    internal Func<string, CancellationToken, Task<RepositoryIdentity?>>? FollowRepositoryResolver { get; set; }
 
-    internal async Task ReconcileStoppedWorkAdviceAsync(CancellationToken cancellationToken)
+    internal async Task NotifyOwnedHaltAsync(QueueItem source, CancellationToken token)
+    {
+        if (!source.Halted || source.StoppedWorkJudgment is not
+            { Key: { } key, AttemptId: not null, Holder: { } holder } intent) return;
+        var existing = await _conductorObligations.ReadAsync(key, token).ConfigureAwait(false);
+        await _conductorObligations.EnqueueAsync(new(key, intent.Repository, null, intent.Tag, intent.PullRequestHead,
+            StoppedWorkJudgmentKey.Action, holder, intent.ObservedAt,
+            existing?.Adapter ?? StoppedWorkJudgmentKey.ProviderRoute, StoppedWorkJudgmentKey.Capability, true,
+            TargetRevision: intent.PullRequestHead, ContextSha256: intent.ContextSha256), token).ConfigureAwait(false);
+        // Queue commit and obligation enqueue are both complete. No queue lock crosses this boundary.
+        try
+        {
+            if (intent.FollowAttachmentId is not null)
+                await ConductorFollowSession.NotifyAttachedAsync(source, token, FollowBroker,
+                    FollowRepositoryResolver).ConfigureAwait(false);
+            else if (source.OwnedTask is null || !ConductorFollowSession.HasRegistrationFor(source))
+                await ReconcileStoppedWorkAdviceAsync(token, allowLaunch: true, eventKey: key).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliArgumentException
+            or ConductorClaimException or ConductorObligationStoreException)
+        {
+            Console.Error.WriteLine("Owned-halt delivery refused; durable source and obligation retained.");
+        }
+    }
+
+    internal async Task RecoverAttachedFollowAsync(CancellationToken token)
+    {
+        // Exactly one startup pass; the existing queue is the recovery source, never a new work queue.
+        var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, token).ConfigureAwait(false);
+        foreach (var source in queue.Items.Where(item => item.Halted && item.OwnedTask is not null
+            && item.StoppedWorkJudgment?.FollowAttachmentId is not null))
+            await NotifyOwnedHaltAsync(source, token).ConfigureAwait(false);
+    }
+
+    internal async Task ReconcileStoppedWorkAdviceAsync(CancellationToken cancellationToken,
+        bool allowLaunch = false, string? eventKey = null)
     {
         await _adviceReconciliation.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -43,6 +80,8 @@ public sealed partial class QueueSchedulerService
                     or ConductorObligationStatus.ActionObserved) continue;
                 var directory = _conductorObligations.GetStoppedWorkAdviceEvidenceDirectory(intent.Key);
                 var marked = File.Exists(Path.Combine(directory, "launch.json"));
+                if (!allowLaunch && !marked || eventKey is not null && intent.Key != eventKey
+                    || intent.FollowAttachmentId is not null) continue;
                 if (marked && !File.Exists(Path.Combine(directory, "response.json"))) continue;
                 if (obligation.Status == ConductorObligationStatus.TransportAcknowledged)
                 {

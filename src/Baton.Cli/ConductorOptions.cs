@@ -13,6 +13,8 @@ public enum ConductorVerb
     Decide,
     Act,
     Follow,
+    Attach,
+    Detach,
 }
 
 /// <summary>

@@ -12,7 +12,9 @@ public static class ConductorOptionsParser
                                 "       baton conductor prepare --request <file>\n" +
                                 "       baton conductor decide --obligation <key> --context <file>\n" +
                                 "       baton conductor act --obligation <key> --holder <holder> --action replace-review --expected-head <full-sha>\n" +
-                                "       baton conductor follow --request <file>";
+                                "       baton conductor follow --request <file>\n" +
+                                "       baton conductor attach --request <file>\n" +
+                                "       baton conductor detach --request <file>";
 
     public static ConductorOptions Parse(string[] args)
     {
@@ -34,6 +36,8 @@ public static class ConductorOptionsParser
             "decide" => ParseReadiness(args[1..], ConductorVerb.Decide),
             "act" => ParseAct(args[1..]),
             "follow" => ParseFollow(args[1..]),
+            "attach" => ParseFollow(args[1..]) with { Verb = ConductorVerb.Attach },
+            "detach" => ParseFollow(args[1..]) with { Verb = ConductorVerb.Detach },
             _ => throw new CliArgumentException($"Unknown 'baton conductor' sub-verb '{args[0]}'.\n{Usage}"),
         };
     }

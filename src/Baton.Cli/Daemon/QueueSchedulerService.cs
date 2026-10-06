@@ -130,6 +130,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
             appendFleetEvent: _appendFleetEvent,
             conductorObligations: _conductorObligations);
         _loopDriver = loopDriver ?? new DaemonLoopDriver();
+        _advancer.OwnedHaltCommitted = NotifyOwnedHaltAsync;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -155,6 +156,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
 
         try
         {
+            await RecoverAttachedFollowAsync(stoppingToken).ConfigureAwait(false);
             await _loopDriver.RunAsync(
             nameof(QueueSchedulerService),
             TickOnceAsync,

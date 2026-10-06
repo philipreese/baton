@@ -76,7 +76,8 @@ internal sealed record ConductorFollowJournalEntry(
 
 internal sealed record ConductorFollowResult(
     string Status, string? ObligationKey, string? ObligationId, string EvidenceLocation,
-    string Diagnostic, string? Receipt = null, ConductorFollowResponse? Response = null);
+    string Diagnostic, string? Receipt = null, ConductorFollowResponse? Response = null,
+    RetainedStoppedWorkAdviceResponse? LegacyResponse = null);
 
 internal delegate Task<int> ConductorFollowBroker(
     CodexBrokerConfiguration configuration, string prompt, string outputDirectory,
@@ -84,7 +85,7 @@ internal delegate Task<int> ConductorFollowBroker(
     CancellationToken cancellationToken, Func<string, CancellationToken, Task>? threadStarted);
 
 /// <summary>Claim-bound transport evidence. The original obligation and queue lifecycle remain authoritative.</summary>
-internal sealed class ConductorFollowSession
+internal sealed partial class ConductorFollowSession
 {
     internal const int MaxResponseBytes = 1024 * 1024;
     private const int MaxInputChars = 8192;
@@ -193,14 +194,16 @@ internal sealed class ConductorFollowSession
         return 0;
     }
 
-    private async Task<ConductorFollowResult> DeliverAsync(string key, CancellationToken cancellationToken)
+    internal async Task<ConductorFollowResult> DeliverAsync(string key, CancellationToken cancellationToken,
+        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission = null)
     {
         try
         {
             // The mutex-owning thread blocks through the entire async operation, then releases on
             // that same thread. Passing an async delegate to RunUnderLock would release too early.
             return await Task.Run(() => MutexGuardedFileLock.RunUnderLock(StatePath, LockPrefix,
-                TimeSpan.FromMinutes(6), () => DeliverUnderLockAsync(key, cancellationToken).GetAwaiter().GetResult()),
+                TimeSpan.FromMinutes(6), () => _obligations.WithStoppedWorkDeliveryExclusiveAsync(key,
+                    () => DeliverUnderLockAsync(key, cancellationToken, requiredAdmission), cancellationToken).GetAwaiter().GetResult()),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsRefusal(ex))
@@ -209,7 +212,8 @@ internal sealed class ConductorFollowSession
         }
     }
 
-    private async Task<ConductorFollowResult> DeliverUnderLockAsync(string key, CancellationToken cancellationToken)
+    private async Task<ConductorFollowResult> DeliverUnderLockAsync(string key, CancellationToken cancellationToken,
+        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission)
     {
         ConductorObligation? obligation = null;
         ConductorFollowState? state = null;
@@ -243,6 +247,37 @@ internal sealed class ConductorFollowSession
                 WriteState(state with { Frozen = true });
                 return new("uncertain", key, obligation.ObligationId, evidence, "Unresolved or inconsistent session evidence; no retry admitted.");
             }
+            string owner;
+            try { owner = _obligations.SelectStoppedWorkDeliveryOwner(obligation, _directory); }
+            catch (Exception ex) when (IsRefusal(ex))
+            {
+                WriteState(state with { Frozen = true });
+                return new("uncertain", key, obligation.ObligationId, evidence,
+                    "Delivery owner evidence uncertain; inspect retained evidence.");
+            }
+            if (owner == "legacy")
+            {
+                try
+                {
+                    var legacy = _obligations.ReadCompleteLegacyDelivery(obligation);
+                    return new("replayed", key, obligation.ObligationId,
+                        _obligations.GetStoppedWorkAdviceEvidenceDirectory(key),
+                        "Retained complete legacy response; no follow turn.", legacy.Receipt,
+                        LegacyResponse: legacy.Response);
+                }
+                catch (Exception ex) when (IsRefusal(ex))
+                {
+                    WriteState(state with { Frozen = true });
+                    return new("uncertain", key, obligation.ObligationId, evidence,
+                        "Legacy launch outcome uncertain; inspect retained evidence.");
+                }
+            }
+            if (owner != _directory)
+            {
+                WriteState(state with { Frozen = true });
+                return new("uncertain", key, obligation.ObligationId, evidence,
+                    "Delivery owner evidence uncertain; inspect retained evidence.");
+            }
             evidence = Path.Combine(_directory, "events", Digest(obligation.ObligationId));
             var responsePath = Path.Combine(evidence, "response.json");
             if (File.Exists(responsePath))
@@ -255,6 +290,15 @@ internal sealed class ConductorFollowSession
                 var response = ReadResponse(responsePath, identity, state);
                 return new("replayed", key, obligation.ObligationId, evidence, "Retained complete response; no vendor call.",
                     EnsureReceipt(evidence), response);
+            }
+            // Daemon admission must refuse before any event identity or irreversible launch marker.
+            if (requiredAdmission is not null)
+                await requiredAdmission(obligation, cancellationToken).ConfigureAwait(false);
+            if (File.Exists(AttachmentPath))
+            {
+                var attachment = Read<ConductorFollowAttachment>(AttachmentPath);
+                ValidateAttachment(attachment);
+                if (!attachment.Attached) throw new CliArgumentException("Follow attachment is detached.");
             }
             Directory.CreateDirectory(evidence);
             var identityEvidence = new ConductorFollowEventIdentity(SchemaVersion, key, obligation.ObligationId,
@@ -279,6 +323,7 @@ internal sealed class ConductorFollowSession
             if (claim?.Holder != _request.Holder || ConductorClaimStore.GetClaimGeneration(claim) != _generation
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
+            _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
             Write(Path.Combine(evidence, "launch.json"),
                 new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
             launched = true;
@@ -397,7 +442,7 @@ internal sealed class ConductorFollowSession
     private void RecoverSession(ConductorFollowState state)
     {
         if (Directory.EnumerateFileSystemEntries(_directory).Any(path =>
-            Path.GetFileName(path) is not ("session.json" or "delivery.jsonl" or "events")))
+            Path.GetFileName(path) is not ("session.json" or "delivery.jsonl" or "events" or "attachment.json" or "request.json")))
             throw new IOException("Unknown session evidence.");
         var journal = new Dictionary<string, ConductorFollowJournalEntry>(StringComparer.Ordinal);
         if (File.Exists(JournalPath))
@@ -430,7 +475,10 @@ internal sealed class ConductorFollowSession
                 || identity.SourceCapability != StoppedWorkJudgmentKey.Capability
                 || identity.ContextSha256 is not { Length: 64 })
                 throw new IOException("Incomplete event identity.");
-            var launch = Read<ConductorFollowLaunch>(Path.Combine(directory, "launch.json"));
+            var launchPath = Path.Combine(directory, "launch.json");
+            if (!File.Exists(launchPath) && !File.Exists(Path.Combine(directory, "response.json"))
+                && !journal.ContainsKey(identity.ObligationId)) continue;
+            var launch = Read<ConductorFollowLaunch>(launchPath);
             if (launch.SchemaVersion != SchemaVersion || launch.ObligationId != identity.ObligationId
                 || launch.ObligationKey != identity.ObligationKey
                 || launch.ExpectedSessionId is not null && launch.ExpectedSessionId != state.SessionId)
