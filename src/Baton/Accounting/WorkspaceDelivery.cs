@@ -2,8 +2,9 @@ namespace Baton.Accounting;
 
 /// <summary>
 /// The value <c>Baton.Cli.WorkspaceDeliveryProbe</c> resolves and this ledger records (#1901 C1 items
-/// 1 and 3) — what one worker's WORKSPACE says about the work its attempt delivered. Each member's
-/// meaning, and what its absence does and does not assert, is the corresponding
+/// 1 and 3) — what one worker's WORKSPACE says about the work its attempt delivered. Settlement may
+/// also join producer-known owned-task identity by exact accepted execution ID. Each member's meaning,
+/// and what its absence does and does not assert, is the corresponding
 /// <see cref="CostLedgerEntry"/> field's own doc; nothing is restated here.
 /// </summary>
 /// <remarks>
@@ -13,7 +14,8 @@ namespace Baton.Accounting;
 /// uses and for the same two reasons: the engine layer stays git-agnostic and holds no
 /// <c>Baton.Vendors</c> reference (so it cannot read a room's bindings to find the workspace at all),
 /// and a ledger unit test must never spawn <c>git</c> or reach GitHub to exercise a field.
-/// <c>Baton.Cli.WorkspaceDeliveryProbe</c> is the one production producer.
+/// <c>Baton.Cli.WorkspaceDeliveryProbe</c> is the one production producer of workspace observations;
+/// the settle recorder is the producer of the owned-task issue member.
 /// </para>
 /// <para>
 /// <b>Every member is independently absent</b>, on the row's own doctrine: an unresolvable fact is

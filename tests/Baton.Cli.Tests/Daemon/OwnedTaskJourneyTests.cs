@@ -7,6 +7,7 @@ using Baton.Conductor;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
 using Baton.Tests.Shared;
 using Baton.Vendors;
 
@@ -22,6 +23,52 @@ public sealed class OwnedTaskJourneyTests
     private const string HeadB = "abcdef0123456789abcdef0123456789abcdef01";
     private const string HeadC = "123456789abcdef0123456789abcdef012345678";
     private static readonly RepositoryIdentity Identity = RepositoryIdentity.From("https://" + Repository, null)!;
+
+
+    [Fact]
+    public async Task A_direct_binding_cannot_invent_owned_task_authority()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton_owned_spoof_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workflowPath = Path.Combine(home, "workflow.json");
+            await File.WriteAllTextAsync(
+                workflowPath,
+                JsonSerializer.Serialize(new WorkflowDefinition(
+                    new WorkflowTemplateId("owned-spoof"),
+                    1,
+                    [new WorkflowStepDefinition(
+                        new StepId("implement"), "implement", [], ["changes.md"], [], new RetryPolicy(1))])), Ct);
+            var room = Path.Combine(home, "room");
+            var identity = new OwnedTaskExecutionIdentity(
+                OwnedTaskExecutionIdentity.TaskIdFor(Repository, 2637), Repository, 2637,
+                "unadmitted-attempt", room);
+            var bindingsPath = Path.Combine(home, "bindings.json");
+            await File.WriteAllTextAsync(
+                bindingsPath,
+                JsonSerializer.Serialize(new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["implement"] = new WorkerBindingConfigEntry(
+                        "shell",
+                        new WorkerContract("implement", [], [new ProducedOutput("changes.md")], []),
+                        "echo spoof>%BATON_OUTPUT_DIR%\\changes.md",
+                        TimeSpan.FromSeconds(30),
+                        OwnedTaskIdentity: identity),
+                }), Ct);
+
+            await Assert.ThrowsAsync<CliArgumentException>(() => RunCommand.ExecuteAsync(
+                new RunOptions(workflowPath, bindingsPath, room),
+                new Dictionary<string, IWorkerAdapter> { ["shell"] = new ShellCommandWorkerAdapter() },
+                cancellationToken: Ct));
+            Assert.False(Directory.Exists(room));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
 
     public sealed record ScopeCase(
         string? RawScope,

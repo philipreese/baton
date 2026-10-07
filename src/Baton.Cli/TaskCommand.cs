@@ -124,10 +124,7 @@ public static class TaskCommand
     }
 
     internal static string TaskId(string repository, int issue)
-    {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{repository}\0{issue}"));
-        return "task-" + Convert.ToHexString(bytes).ToLowerInvariant()[..58];
-    }
+        => OwnedTaskExecutionIdentity.TaskIdFor(repository, issue);
 
     /// <summary>
     /// Submissions with no scope, reason, or worker selection preserve the exact historical

@@ -1613,7 +1613,15 @@ public sealed partial class QueueSchedulerService : BackgroundService
             room,
             room is null ? null : BatonPaths.RecordKey(room),
             baseRevision,
-            at);
+            at,
+            item.OwnedTask is { } ownedTask
+                ? new OwnedTaskExecutionIdentity(
+                    ownedTask.Id,
+                    ownedTask.Repository,
+                    ownedTask.Issue,
+                    attemptId.Value,
+                    room)
+                : null);
 
     private async Task<QueueItem?> CommitAdmissionAsync(
         QueueItem item,

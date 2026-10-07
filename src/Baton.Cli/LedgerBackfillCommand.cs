@@ -277,7 +277,9 @@ public static class LedgerBackfillCommand
                     runwayOverrideReasonByWorker: stamps.RunwayOverrideReasonByWorker,
                     labelByWorker: stamps.LabelByWorker,
                     identitySource: identitySource,
-                    modelResolvedByWorker: stamps.ModelResolvedByWorker)
+                    modelResolvedByWorker: stamps.ModelResolvedByWorker,
+                    deliveryByExecutionId: TerminalSettleRecorder.ReadOwnedTaskDeliveryByExecution(
+                        entries, TerminalSettleRecorder.ReadDeliveryEvidenceByWorker(entries)))
                 .Where(window.TimeMatches)
                 .ToList();
 

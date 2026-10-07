@@ -202,4 +202,5 @@ public sealed record DispatchOptions(
     string? OriginatingPullRequestBranch = null,
     MemoryAddDispatchGrant? MemoryAddGrant = null,
     int? MaxRepeatedToolSteps = null,
-    bool EnableAgyCorrection = false);
+    bool EnableAgyCorrection = false,
+    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);

@@ -986,6 +986,55 @@ public sealed class QueueSchedulerServiceTests
     }
 
 
+    [Fact]
+    public async Task An_owned_task_admission_freezes_identity_on_the_attempt_envelope_before_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string repository = "github.com/example/repo";
+            var owner = new OwnedTaskSubmission(
+                OwnedTaskExecutionIdentity.TaskIdFor(repository, 2637), repository, 2637,
+                "input-digest", "conductor", DateTimeOffset.UtcNow);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [Item("owned-2637") with
+                {
+                    Stage = WorkStage.Implement,
+                    Issue = 2637,
+                    Repository = repository,
+                    Workspace = home,
+                    OwnedTask = owner,
+                    IssuePreparation = new QueueIssuePreparation(
+                        TaskPreparationState.Prepared, DateTimeOffset.UtcNow),
+                }],
+            }, Ct);
+
+            QueueLaunchRequest? launch = null;
+            var service = Service((request, _) =>
+            {
+                launch = request;
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            var identity = launch!.Item.AttemptEnvelope!.OwnedTaskIdentity;
+            Assert.NotNull(identity);
+            Assert.Equal(owner.Id, identity!.TaskId);
+            Assert.Equal(owner.Repository, identity.Repository);
+            Assert.Equal(owner.Issue, identity.Issue);
+            Assert.Equal(launch.Item.AttemptEnvelope.AttemptId.Value, identity.AttemptId);
+            Assert.Equal(launch.RoomDirectory, identity.RoomDirectory);
+            Assert.Equal(identity, QueueLauncher.BuildOptions(launch).OwnedTaskIdentity);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
     private static string CreateTempHome()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_svc_" + Guid.NewGuid().ToString("n"));

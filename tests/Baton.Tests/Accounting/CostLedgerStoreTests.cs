@@ -69,7 +69,8 @@ public sealed class CostLedgerStoreTests
         string worker,
         string? adapter,
         string? model,
-        ExecutionLimitEvidence? limits = null) => new(
+        ExecutionLimitEvidence? limits = null,
+        OwnedTaskExecutionIdentity? ownedTaskIdentity = null) => new(
         executionId,
         new WorkflowId("wf-cost-ledger"),
         new StepId(worker),
@@ -81,7 +82,8 @@ public sealed class CostLedgerStoreTests
         UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
         Adapter: adapter,
         Model: model,
-        Limits: limits);
+        Limits: limits,
+        OwnedTaskIdentity: ownedTaskIdentity);
 
     /// <summary>
     /// Writes the captured stdout the projector reads its usage out of, at exactly the path
@@ -119,9 +121,11 @@ public sealed class CostLedgerStoreTests
         string? model,
         DateTime start,
         string worker = "implement",
-        ExecutionLimitEvidence? limits = null) =>
+        ExecutionLimitEvidence? limits = null,
+        OwnedTaskExecutionIdentity? ownedTaskIdentity = null) =>
     [
-        new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(AcceptedRequest(executionId, worker, adapter, model, limits))),
+        new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(
+            AcceptedRequest(executionId, worker, adapter, model, limits, ownedTaskIdentity))),
         new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(executionId, Pid: 1), start),
         new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(executionId, 0, CoreExitReason.Natural), start.AddSeconds(2)),
         new LogEntry.FlowLogEntry(new FlowEvent.ExecutionSucceeded(executionId)),
@@ -1590,6 +1594,71 @@ public sealed class CostLedgerStoreTests
     /// land on the row for the worker they were resolved for, and a row whose worker has no entry
     /// carries none of them — absent, not zero, and not present in the serialized JSON at all.
     /// </summary>
+    [Fact]
+    public void An_accepted_owned_task_identity_overrides_branch_delivery_and_joins_exact_execution()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-owned-task");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var identity = new OwnedTaskExecutionIdentity(
+                OwnedTaskExecutionIdentity.TaskIdFor(Repository.Value, 2637),
+                Repository.Value, 2637, "attempt-owned", room, executionId.Value);
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start,
+                    ownedTaskIdentity: identity), room, Repository,
+                deliveryByWorker: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    ["implement"] = new(Issue: "9999", PullRequest: "2638"),
+                },
+                deliveryByExecutionId: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    [executionId.Value] = new(Issue: "2637", PullRequest: "2638"),
+                }));
+
+            Assert.Equal("2637", row.Issue);
+            Assert.Equal("2638", row.PullRequest);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public void An_invalid_owned_task_context_does_not_fall_back_to_a_branch_issue()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-invalid-owned-task");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var identity = new OwnedTaskExecutionIdentity(
+                OwnedTaskExecutionIdentity.TaskIdFor(Repository.Value, 2637),
+                Repository.Value, 2637, "attempt-owned", room, "different-execution");
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start,
+                    ownedTaskIdentity: identity), room, Repository,
+                deliveryByWorker: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    ["implement"] = new(Issue: "9999"),
+                },
+                deliveryByExecutionId: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    [executionId.Value] = new(Issue: null),
+                }));
+
+            Assert.Null(row.Issue);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
     [Fact]
     public void The_issue_pr_and_diff_shape_land_on_the_row_for_the_worker_they_were_resolved_for()
     {

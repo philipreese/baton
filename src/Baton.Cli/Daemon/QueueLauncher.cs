@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Baton.Accounting;
 using Baton.Core;
 using Baton.Domain;
@@ -644,6 +645,10 @@ public static class QueueLauncher
         Add("--expect-pr", options.ExpectPr is { } expectPr ? (expectPr ? "true" : "false") : null);
         Add("--originating-pr", options.OriginatingPullRequest);
         Add("--originating-pr-branch", options.OriginatingPullRequestBranch);
+        if (options.OwnedTaskIdentity is { } ownedTaskIdentity)
+        {
+            Add("--owned-task-context", Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(ownedTaskIdentity)));
+        }
         if (options.MemoryAddGrant is { } memoryAddGrant)
         {
             Add("--memory-add-dispatch", memoryAddGrant.DispatchId);
@@ -1065,7 +1070,8 @@ public static class QueueLauncher
             // The immutable binding keeps this launch contract if the setting later changes;
             // the advancer separately rechecks opt-in before admitting any create call.
             ExpectPr: UsesDaemonDraftPullRequestHandoff(item) ? false : null,
-            MemoryAddGrant: item.MemoryAddGrant);
+            MemoryAddGrant: item.MemoryAddGrant,
+            OwnedTaskIdentity: item.AttemptEnvelope?.OwnedTaskIdentity);
     }
 
     private static bool UsesDaemonDraftPullRequestHandoff(QueueItem item) =>
