@@ -9,6 +9,21 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.69.0](https://github.com/philipreese/baton/compare/v0.68.0...v0.69.0) (2026-10-07)
+
+
+### Features
+
+* **cli:** provide non-mutating help for task and queue entry points ([#2644](https://github.com/philipreese/baton/issues/2644)) ([181c165](https://github.com/philipreese/baton/commit/181c165bc0c921c9e75759d5567da0e1c47d70aa))
+* **dispatch:** expose explicit per-execution AGY correction opt-in ([#2647](https://github.com/philipreese/baton/issues/2647)) ([82848f5](https://github.com/philipreese/baton/commit/82848f5e6787122960ccfe4b8acf715f968f79ce))
+
+
+### Bug Fixes
+
+* **accounting:** retain owned-task issue identity in fresh execution ledger rows ([#2645](https://github.com/philipreese/baton/issues/2645)) ([8c8d36b](https://github.com/philipreese/baton/commit/8c8d36b9c48afa80437ac51b99f2114f7691c837))
+* **ci:** Use existing test shards for every non-page-only PR ([#2636](https://github.com/philipreese/baton/issues/2636)) ([da9365d](https://github.com/philipreese/baton/commit/da9365d23ab057c1285ba9877ef60240736d8384))
+* **tooling:** Exclude machine-local vendor scratch state ([#2633](https://github.com/philipreese/baton/issues/2633)) ([0e63c37](https://github.com/philipreese/baton/commit/0e63c3731ae95e6b34908c2e0a0d79f62f948d07))
+
 ## [0.68.0](https://github.com/philipreese/baton/compare/v0.67.1...v0.68.0) (2026-10-06)
 
 
