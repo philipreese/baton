@@ -6,6 +6,7 @@ using Baton.Mutation;
 using Baton.Runway;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
 using Baton.Templates;
 using Baton.Workspaces;
 
@@ -234,7 +235,7 @@ public static class DispatchCommand
             var (continuedWorkerName, continuedEntry) = bindings.Single();
             WorkerBindingConfigEntry resumedEntry;
             (resumedEntry, continuation) = await ResolveContinuationAsync(
-                options.ContinueFromRoomDirectoryPath, continuedEntry, cancellationToken).ConfigureAwait(false);
+                options.ContinueFromRoomDirectoryPath, options.RoomDirectoryPath, continuedEntry, cancellationToken).ConfigureAwait(false);
             if (options.DeclaredTaskSize is not null && resumedEntry.DeclaredTaskSize is not null
                 && options.DeclaredTaskSize != resumedEntry.DeclaredTaskSize)
             {
@@ -242,6 +243,23 @@ public static class DispatchCommand
                     $"This workstream recorded declared size '{resumedEntry.DeclaredTaskSize.Value.Size.ToString().ToLowerInvariant()}'; it cannot be replaced on continuation.");
             }
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
+        }
+
+        if (options.OwnedTaskIdentity is { } ownedTaskIdentity)
+        {
+            await ValidateOwnedTaskIdentityAsync(options.RoomDirectoryPath, ownedTaskIdentity, cancellationToken)
+                .ConfigureAwait(false);
+            if (bindings.Values.Any(binding => binding.OwnedTaskIdentity is { } declared
+                && !SameOwnedTask(declared, ownedTaskIdentity)))
+            {
+                throw new CliArgumentException(
+                    "The queue owned-task transport conflicts with a binding-owned task identity; no execution was admitted.");
+            }
+
+            bindings = bindings.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value with { OwnedTaskIdentity = ownedTaskIdentity },
+                StringComparer.Ordinal);
         }
 
         var recoveryExpectedHead = await OriginatingPullRequestVerifier.ResolveRecoveryExpectedHeadAsync(
@@ -1753,7 +1771,7 @@ public static class DispatchCommand
     /// spec/baton.md §3), or it has no <see cref="WorkerBindingConfigEntry.SessionId"/> recorded.
     /// </exception>
     private static async Task<(WorkerBindingConfigEntry Entry, ContinuationProvenance Provenance)> ResolveContinuationAsync(
-        string continueFromRoomDirectoryPath, WorkerBindingConfigEntry entry, CancellationToken cancellationToken)
+        string continueFromRoomDirectoryPath, string childRoomDirectoryPath, WorkerBindingConfigEntry entry, CancellationToken cancellationToken)
     {
         if (!Directory.Exists(continueFromRoomDirectoryPath))
         {
@@ -1830,6 +1848,13 @@ public static class DispatchCommand
         }
 
         var parentExecutionId = parentTerminal.Steps.FirstOrDefault()?.Execution;
+        var ownedTaskPredecessor = parentExecutionId is null ? null
+            : new OwnedTaskExecutionPredecessor(continueFromRoomDirectoryPath, parentExecutionId);
+        var inheritedOwner = ownedTaskPredecessor is null ? null : await OwnedTaskOwnership.ResolveAsync(
+            continueFromRoomDirectoryPath, parentEntry.OwnedTaskIdentity,
+            await new FlowEventLogReader(Path.Combine(continueFromRoomDirectoryPath, BatonPaths.FlowLogFileName))
+                .ReadAllAsync(cancellationToken).ConfigureAwait(false),
+            ownedTaskPredecessor, cancellationToken).ConfigureAwait(false);
         var authorizedRestoreBase = parentEntry.ExactFileRestoreBaseSha is { Length: > 0 } parentBase
             && string.Equals(
                 ExactFileRestoreAuthorityStore.Read(continueFromRoomDirectoryPath, parentWorkerName),
@@ -1839,6 +1864,8 @@ public static class DispatchCommand
                 : null;
         var resumedEntry = entry with
         {
+            OwnedTaskIdentity = inheritedOwner is null ? null : inheritedOwner with { RoomDirectory = childRoomDirectoryPath },
+            OwnedTaskPredecessor = ownedTaskPredecessor,
             // A continuation keeps the veteran's saved limit snapshot; mutable settings are not
             // consulted again for this same-session path.
             Timeout = parentEntry.Timeout,
@@ -1862,6 +1889,48 @@ public static class DispatchCommand
         var provenance = new ContinuationProvenance(continueFromRoomDirectoryPath, parentExecutionId, parentEntry.SessionId);
         return (resumedEntry, provenance);
     }
+
+    internal static async Task ValidateOwnedTaskBindingsAsync(
+        string roomDirectory,
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        CancellationToken cancellationToken)
+    {
+        var logPath = Path.Combine(roomDirectory, BatonPaths.FlowLogFileName);
+        var events = File.Exists(logPath)
+            ? await new FlowEventLogReader(logPath).ReadAllAsync(cancellationToken).ConfigureAwait(false)
+            : [];
+        foreach (var binding in bindings.Values)
+        {
+            try
+            {
+                await OwnedTaskOwnership.ResolveAsync(roomDirectory, binding.OwnedTaskIdentity,
+                    events, binding.OwnedTaskPredecessor, cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidOwnedTaskIdentityException ex)
+            {
+                throw new CliArgumentException(ex.Message);
+            }
+        }
+    }
+
+    internal static async Task ValidateOwnedTaskIdentityAsync(
+        string roomDirectory,
+        OwnedTaskExecutionIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        if (!await OwnedTaskOwnership.IsAdmittedAsync(roomDirectory, identity, cancellationToken).ConfigureAwait(false))
+        {
+            throw new CliArgumentException(
+                "The queue owned-task transport does not match one exact admitted queue attempt; no execution was admitted.");
+        }
+    }
+
+    private static bool SameOwnedTask(
+        OwnedTaskExecutionIdentity left,
+        OwnedTaskExecutionIdentity right) =>
+        string.Equals(left.TaskId, right.TaskId, StringComparison.Ordinal)
+        && string.Equals(left.Repository, right.Repository, StringComparison.Ordinal)
+        && left.Issue == right.Issue;
 
     private static bool SupportsDispatchContinuation(string adapter) =>
         string.Equals(adapter, "claude", StringComparison.OrdinalIgnoreCase)

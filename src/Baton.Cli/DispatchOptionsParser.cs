@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Baton.Domain;
 using Baton.Queue;
@@ -85,6 +86,7 @@ public static class DispatchOptionsParser
         string? originatingPullRequestBranch = null;
         string? memoryAddDispatch = null;
         string? memoryAddRepository = null;
+        string? ownedTaskContext = null;
         var attachments = new List<string>();
         var skills = new List<string>();
         var requirements = new List<string>();
@@ -221,6 +223,11 @@ public static class DispatchOptionsParser
                 case "--memory-add-repository":
                     memoryAddRepository = RequireValue(args, ref i, arg);
                     break;
+                // Queue-only transport. Dispatch validates this context against the durable admitted
+                // attempt; these argv values are never authority by themselves.
+                case "--owned-task-context":
+                    ownedTaskContext = RequireValue(args, ref i, arg);
+                    break;
                 case "--override-runway":
                     overrideRunwayReason = RequireOverrideRunwayReason(RequireValue(args, ref i, arg));
                     break;
@@ -310,6 +317,8 @@ public static class DispatchOptionsParser
             throw new CliArgumentException("The queue memory-add transport is malformed.");
         }
 
+        var ownedTaskIdentity = ParseOwnedTaskIdentity(ownedTaskContext);
+
         return new DispatchOptions(
             name ?? string.Empty, specFilePath, RoomDirectoryPath.Resolve(roomDirectoryPath), adapter, workflowId,
             workspaceDirectory is null ? null : Path.GetFullPath(workspaceDirectory),
@@ -337,7 +346,31 @@ public static class DispatchOptionsParser
             originatingPullRequest,
             originatingPullRequestBranch,
             memoryAddGrant,
-            maxRepeatedToolSteps);
+            maxRepeatedToolSteps,
+            ownedTaskIdentity);
+    }
+
+    private static OwnedTaskExecutionIdentity? ParseOwnedTaskIdentity(string? encoded)
+    {
+        if (encoded is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var bytes = Convert.FromBase64String(encoded);
+            return JsonSerializer.Deserialize<OwnedTaskExecutionIdentity>(bytes)
+                ?? throw new CliArgumentException("The queue owned-task transport was empty.");
+        }
+        catch (FormatException)
+        {
+            throw new CliArgumentException("The queue owned-task transport was not valid base64.");
+        }
+        catch (JsonException ex)
+        {
+            throw new CliArgumentException($"The queue owned-task transport was not valid JSON: {ex.Message}");
+        }
     }
 
     internal static TaskSizeDeclaration? ParseTaskSizeDeclaration(string? declaredSize, string? sizeRationale)

@@ -271,13 +271,16 @@ public sealed record CostLedgerEntry(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Outcome = null,
     /// <summary>
-    /// #1901 C1: the issue this attempt's work belongs to, as a bare decimal number with no <c>#</c>
+    /// #1901 C1: the issue this attempt's work belongs to, as a bare decimal number with no <c>#</c>.
+    /// Fresh queue executions use the producer-known owned-task identity joined to their accepted
+    /// execution. A present invalid context remains unknown.
     /// (<see cref="LedgerQuery"/> normalizes both spellings on the filter side, so the writer picks one).
-    /// Derived at settle from the leading <c>&lt;n&gt;-</c> of the workspace's checked-out branch — the
-    /// ONLY source Baton has, because no room record carries an issue number. <b>Absent means "this
-    /// branch does not name an issue", never "no issue"</b>: a branch created any other way than
-    /// <c>gh issue develop</c> is unattributable here, and a room whose workspace directory is gone by
-    /// settle time (a torn-down worktree) has nothing left to read.
+    /// For legacy direct/template executions this is copied from the immutable workspace-delivery
+    /// observation when one is supplied; fresh terminal settlement supplies PR identity from its
+    /// recorded delivery event, while backfill may supply the branch-derived issue observation.
+    /// Owned-task executions do not use that observation. <b>Absent means "no authoritative issue
+    /// observation was available", never "no issue"</b>; a room whose workspace directory is gone by
+    /// settle time has nothing left to read.
     /// </summary>
     [property: JsonPropertyName("issue")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

@@ -118,6 +118,7 @@ public static class TerminalSettleRecorder
                 // The ledger is an as-of execution record. Read the immutable post-execution stamp
                 // rather than reprobe a workspace whose remote state may have changed after settle.
                 var delivery = ReadDeliveryEvidenceByWorker(terminalEntries);
+                var ownedTaskDelivery = ReadOwnedTaskDeliveryByExecution(terminalEntries, delivery);
 
                 // identitySource, from the resolver rather than assumed here (#1931 re-review MEDIUM):
                 // the settle site writes most of the ledger, so a field only the backfill stamped would
@@ -130,7 +131,8 @@ public static class TerminalSettleRecorder
                     labelByWorker: stamps.LabelByWorker,
                     identitySource: identitySource,
                     modelResolvedByWorker: stamps.ModelResolvedByWorker,
-                    declaredTaskSizeByWorker: stamps.DeclaredTaskSizeByWorker);
+                    declaredTaskSizeByWorker: stamps.DeclaredTaskSizeByWorker,
+                    deliveryByExecutionId: ownedTaskDelivery);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else
@@ -167,6 +169,63 @@ public static class TerminalSettleRecorder
                 result[worker] = new WorkspaceDelivery(
                     PullRequest: pullRequestNumber.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Joins producer-known owned-task identity to each exact execution request. Supplementary
+    /// requests are carried by their producer events rather than by an acceptance event.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, WorkspaceDelivery> ReadOwnedTaskDeliveryByExecution(
+        IReadOnlyList<LogEntry> entries,
+        IReadOnlyDictionary<string, WorkspaceDelivery> deliveryByWorker)
+    {
+        var result = new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal);
+        foreach (var entry in entries.OfType<LogEntry.FlowLogEntry>())
+        {
+            switch (entry.Event)
+            {
+                case FlowEvent.ExecutionRequestAccepted accepted:
+                    Add(accepted.Request, accepted.Request.ExecutionId, "accepted request");
+                    break;
+                case FlowEvent.GraceTurnClaimed grace:
+                    Add(grace.Request, grace.GraceExecutionId, "grace request");
+                    break;
+                case FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } checkpoint:
+                    Add(checkpointRequest, checkpoint.CheckpointExecutionId, "checkpoint request");
+                    break;
+                case FlowEvent.ArtifactCheckpointAttempted checkpoint:
+                    Console.Error.WriteLine(
+                        $"Cost ledger: legacy checkpoint '{checkpoint.CheckpointExecutionId.Value}' has no immutable request; issue identity remains unknown.");
+                    break;
+            }
+        }
+
+        void Add(ExecutionRequest request, ExecutionId childExecutionId, string requestKind)
+        {
+            if (request.ExecutionId != childExecutionId)
+            {
+                Console.Error.WriteLine(
+                    $"Cost ledger: {requestKind} for execution '{childExecutionId.Value}' has mismatched request coordinates; issue identity remains unknown.");
+                return;
+            }
+
+            if (request.OwnedTaskIdentity is not { } identity)
+            {
+                return;
+            }
+
+            var workspaceDelivery = deliveryByWorker.TryGetValue(request.Worker, out var delivery)
+                ? delivery
+                : new WorkspaceDelivery();
+            result[childExecutionId.Value] = workspaceDelivery with
+            {
+                Issue = identity.HasExpectedTaskId() && identity.Issue is > 0
+                    ? identity.Issue.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : null,
+            };
         }
 
         return result;

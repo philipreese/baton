@@ -119,6 +119,8 @@ public static class RunCommand
         // so DispatchCommand's earlier admission check is not sufficient; refusing after registration
         // or snapshot persistence leaves a non-runnable room that looks like a real dispatch.
         WorkerBindingResolver.RefuseConductorOnlyWorkerModels(bindingConfig);
+        await DispatchCommand.ValidateOwnedTaskBindingsAsync(
+            options.RoomDirectoryPath, bindingConfig, cancellationToken).ConfigureAwait(false);
 
         // #1649: captured before WorktreeWorkspaces.Provision below runs (and therefore before the
         // sweep further down) — CancelRequestFile.DeleteStalePendingRequestAsync uses this to tell a

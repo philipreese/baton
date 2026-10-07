@@ -277,6 +277,23 @@ public static class RedispatchCommand
         WorkerBindingResolver.RefuseConductorOnlyWorkerModels(
             new Dictionary<string, WorkerBindingConfigEntry> { [workerName] = entry });
 
+        // Ownership comes from the execution actually redispatched, before any child files exist.
+        var parentExecution = parentTerminal?.Steps.FirstOrDefault()?.Execution;
+        var predecessor = parentExecution is null ? null
+            : new Baton.Mutation.OwnedTaskExecutionPredecessor(options.ParentRoomDirectoryPath, parentExecution);
+        if (predecessor is null && parentEntry.OwnedTaskIdentity is not null)
+            throw new CliArgumentException("Owned-task redispatch has no exact accepted parent execution.");
+        var inheritedOwner = predecessor is null ? null : await Baton.Mutation.OwnedTaskOwnership.ResolveAsync(
+            options.ParentRoomDirectoryPath, parentEntry.OwnedTaskIdentity,
+            await new Baton.Store.FlowEventLogReader(Path.Combine(options.ParentRoomDirectoryPath, BatonPaths.FlowLogFileName))
+                .ReadAllAsync(cancellationToken).ConfigureAwait(false),
+            predecessor, cancellationToken).ConfigureAwait(false);
+        entry = entry with
+        {
+            OwnedTaskIdentity = inheritedOwner is null ? null : inheritedOwner with { RoomDirectory = options.RoomDirectoryPath },
+            OwnedTaskPredecessor = predecessor,
+        };
+
         Directory.CreateDirectory(options.RoomDirectoryPath);
 
         // #1619: the navigational half of the ruling -- the redispatched room's workstream is whatever

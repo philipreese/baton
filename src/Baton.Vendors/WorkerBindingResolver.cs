@@ -321,7 +321,7 @@ public static class WorkerBindingResolver
             entry.VerifyPixiTask, entry.VerifyCommandOverride, entry.TokenBudget, entry.MaxToolSteps,
             entry.BilledRateLimit, entry.IsWorktree, entry.WorktreeBaseSha, entry.ChangesTree,
             entry.DeliversBranch, entry.ExpectPr, entry.VerifiesWorkspace,
-            limitEvidence, entry.MaxRepeatedToolSteps);
+            limitEvidence, entry.MaxRepeatedToolSteps, entry.OwnedTaskIdentity, entry.OwnedTaskPredecessor);
     }
 
     private static ExecutionLimitEvidence CreateLimitEvidence(
