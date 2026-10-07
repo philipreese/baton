@@ -590,6 +590,33 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Agy_correction_opt_in_refuses_actual_vendor_resume_before_child_provisioning()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-continue-agy-correction-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentWithSessionAsync(
+                testRoot, "Start the bounded task.", "sess-agy-correction");
+            var childRoom = Path.Combine(testRoot, "child");
+            var childOptions = new DispatchOptions(
+                "advise", await WriteSpecAsync(testRoot, "Continue the bounded task."), childRoom,
+                Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom,
+                EnableAgyCorrection: true);
+
+            var ex = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                childOptions, Adapters, TestContext.Current.CancellationToken,
+                evaluateRunway: RunwayTestGate.Admit));
+
+            Assert.Contains("fresh Windows AGY stream-json", ex.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(childRoom));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static async Task<string> DispatchTerminalParentWithSessionAsync(
         string testRoot, string spec, string sessionId, string adapter = "claude")
     {

@@ -28,6 +28,31 @@ public class DispatchOptionsParserTests
     }
 
     [Fact]
+    public void Parses_the_valueless_agy_correction_opt_in()
+    {
+        var options = DispatchOptionsParser.Parse(["review", "--spec", "task.md", "--enable-agy-correction"]);
+
+        Assert.True(options.EnableAgyCorrection);
+    }
+
+    [Fact]
+    public void The_agy_correction_opt_in_defaults_to_false()
+    {
+        var options = DispatchOptionsParser.Parse(["review", "--spec", "task.md"]);
+
+        Assert.False(options.EnableAgyCorrection);
+    }
+
+    [Fact]
+    public void The_agy_correction_opt_in_is_nonrepeatable()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => DispatchOptionsParser.Parse(
+            ["review", "--spec", "task.md", "--enable-agy-correction", "--enable-agy-correction"]));
+
+        Assert.Contains("nonrepeatable", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_name_without_a_spec_parses_because_a_template_takes_none()
     {
         // The parser no longer requires --spec: a template dispatch has none, and rejecting it here

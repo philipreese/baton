@@ -143,7 +143,8 @@ public static class RoleDispatch
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null,
         bool? expectPrOverride = null, string? verifyResultsPath = null,
         IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true,
-        int? maxRepeatedToolStepsOverride = null)
+        int? maxRepeatedToolStepsOverride = null,
+        bool enableAgyCorrection = false)
     {
         ArgumentNullException.ThrowIfNull(role);
         ArgumentNullException.ThrowIfNull(spec);
@@ -288,7 +289,8 @@ public static class RoleDispatch
             ModelResolved: modelResolved,
             ModelSource: modelSource,
             EffortResolved: effortResolved,
-            EffortSource: effortSource);
+            EffortSource: effortSource,
+            EnableAgyCorrection: enableAgyCorrection);
     }
 
     /// <summary>
@@ -388,7 +390,8 @@ public static class RoleDispatch
         string? attachmentsDirectory = null, long? tokenBudgetOverride = null, int? maxToolStepsOverride = null,
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null, bool? expectPrOverride = null,
         string? verifyResultsPath = null, IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true,
-        int? maxRepeatedToolStepsOverride = null)
+        int? maxRepeatedToolStepsOverride = null,
+        bool enableAgyCorrection = false)
     {
         ArgumentNullException.ThrowIfNull(role);
 
@@ -400,7 +403,8 @@ public static class RoleDispatch
             billedRateLimitOverride: billedRateLimitOverride,
             verifyCommandOverride: verifyCommandOverride, expectPrOverride: expectPrOverride,
             verifyResultsPath: verifyResultsPath, skills: skills, attachDefaultSkills: attachDefaultSkills,
-            maxRepeatedToolStepsOverride: maxRepeatedToolStepsOverride);
+            maxRepeatedToolStepsOverride: maxRepeatedToolStepsOverride,
+            enableAgyCorrection: enableAgyCorrection);
 
         var stepOutputs = binding.Contract.ProducedOutputs.Select(o => o.Name).ToList();
 

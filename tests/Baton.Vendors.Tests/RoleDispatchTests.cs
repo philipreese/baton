@@ -42,6 +42,43 @@ public class RoleDispatchTests
     }
 
     [Fact]
+    public void Agy_correction_propagates_through_both_role_materializers_without_changing_limits_or_grant()
+    {
+        var ordinary = RoleDispatch.ToBinding(Review, "Review the change.", adapterOverride: "agy");
+        var opted = RoleDispatch.ToBinding(
+            Review, "Review the change.", adapterOverride: "agy", enableAgyCorrection: true);
+        var materialized = RoleDispatch.Materialize(
+            Review, "Review the change.", adapterOverride: "agy", enableAgyCorrection: true);
+
+        Assert.False(ordinary.EnableAgyCorrection);
+        Assert.True(opted.EnableAgyCorrection);
+        Assert.True(materialized.Bindings[Review.Id].EnableAgyCorrection);
+        AssertSameGrant(ordinary.PermissionGrant!, opted.PermissionGrant!);
+        Assert.Equal(ordinary.Timeout, opted.Timeout);
+        Assert.Equal(ordinary.TokenBudget, opted.TokenBudget);
+        Assert.Equal(ordinary.MaxToolSteps, opted.MaxToolSteps);
+        AssertSameGrant(ordinary.PermissionGrant!, materialized.Bindings[Review.Id].PermissionGrant!);
+    }
+
+    private static void AssertSameGrant(PermissionGrant expected, PermissionGrant actual)
+    {
+        Assert.Equal(expected.ReadFiles, actual.ReadFiles);
+        Assert.Equal(expected.WriteFiles, actual.WriteFiles);
+        Assert.Equal(expected.RunShellCommands, actual.RunShellCommands);
+        Assert.True((expected.ShellCommandPatterns ?? Array.Empty<string>()).SequenceEqual(
+            actual.ShellCommandPatterns ?? Array.Empty<string>()));
+        Assert.Equal(expected.NetworkAccess, actual.NetworkAccess);
+        Assert.True((expected.DeniedShellCommandPatterns ?? Array.Empty<string>()).SequenceEqual(
+            actual.DeniedShellCommandPatterns ?? Array.Empty<string>()));
+        Assert.Equal(expected.ShellCommandsAreReadOnly, actual.ShellCommandsAreReadOnly);
+        Assert.True((expected.DeniedShellOptionTokens ?? Array.Empty<string>()).SequenceEqual(
+            actual.DeniedShellOptionTokens ?? Array.Empty<string>()));
+        Assert.True((expected.DeniedShellCommandExceptions ?? Array.Empty<string>()).SequenceEqual(
+            actual.DeniedShellCommandExceptions ?? Array.Empty<string>()));
+        Assert.Equal(expected.ExactFileRestore, actual.ExactFileRestore);
+    }
+
+    [Fact]
     public void The_prompt_is_the_spec_followed_by_every_output_instruction()
     {
         var binding = RoleDispatch.ToBinding(Review, "Review the change.");
