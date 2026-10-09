@@ -250,6 +250,9 @@ public sealed record QueueItem
     /// </summary>
     public QueueWorkerAccount? SettledWorkerAccount { get; init; }
 
+    /// <summary>The incomplete mutating attempt that recorded no account; retained across review retargeting.</summary>
+    public FleetAttemptId? SettledWorkerAccountUnavailableAttemptId { get; init; }
+
     /// <summary>
     /// How many rounds the queue has run for this item: 0 at add time, and <c>WorkItemLifecycle</c>
     /// raises it whenever it queues another, whatever the stage (spec/baton.md §13 has the counting rule

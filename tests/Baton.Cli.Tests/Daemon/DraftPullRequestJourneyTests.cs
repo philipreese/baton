@@ -78,9 +78,12 @@ public sealed class DraftPullRequestJourneyTests
             Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
             var spec = BatonPaths.QueueSpecFile(Branch);
             await File.WriteAllTextAsync(spec, "# Implement #2486", Ct);
+            var accountPath = Path.Combine(room, "artifacts", "execution_execution-2486", "changes.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(accountPath)!);
+            await File.WriteAllTextAsync(accountPath, "Implementation account for the settled attempt.", Ct);
             await TerminalSentinelWriter.WriteAsync(room,
                 new WorkflowStatusView(WorkflowOutcome.Succeeded,
-                    [new WorkflowStatusStepView("implement", "Succeeded", "execution-2486")], [], null), Ct);
+                    [new WorkflowStatusStepView("implement", "Succeeded", "execution-2486")], [accountPath], null), Ct);
             ProjectCeilingStore.Set(workspace,
                 new ProjectCeiling(ReadFiles: true, WriteFiles: true,
                     RunShellCommands: true, NetworkAccess: true), ProjectCeilingStore.DefaultPath);

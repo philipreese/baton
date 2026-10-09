@@ -33,6 +33,34 @@ public sealed class QueueLauncherTests : IDisposable
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    [Theory]
+    [InlineData(WorkStage.Fix)]
+    [InlineData(WorkStage.Continue)]
+    public void Historical_account_is_not_an_input_or_prerequisite_of_mutating_launches(WorkStage stage)
+    {
+        var item = new QueueItem
+        {
+            Tag = "history-only",
+            Role = "implement",
+            Workspace = Path.GetTempPath(),
+            SpecFile = "fixture.md",
+            Repository = "github.com/example/project",
+            Branch = "fixture-lane",
+            PullRequest = 77,
+            Stage = stage,
+            Round = 4,
+            AutomaticFixUsed = true,
+            SettledWorkerAccount = new QueueWorkerAccount([1], new string('0', 64),
+                new FleetAttemptId("old-attempt"), "old-execution", "github.com/example/project", Path.GetTempPath()),
+        };
+        var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(item,
+            new QueueTierResolution("standard", "codex", "fixture-model", "medium", false, null), Path.GetTempPath()));
+        Assert.Null(options.Attachments);
+        Assert.Null(options.ReviewHandoffSha256);
+        Assert.Equal(4, item.Round);
+        Assert.True(item.AutomaticFixUsed);
+    }
+
     private static readonly IReadOnlyDictionary<string, IWorkerAdapter> NoOpAdapters =
         new Dictionary<string, IWorkerAdapter> { [NoOpWorkerAdapter.AdapterName] = new NoOpWorkerAdapter() };
 

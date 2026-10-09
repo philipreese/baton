@@ -124,8 +124,16 @@ public sealed class DraftPullRequestHandoffTests
             Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
             var spec = BatonPaths.QueueSpecFile(Branch);
             await File.WriteAllTextAsync(spec, "# Implement #2486", Ct);
+            var accountPath = Path.Combine(room, "artifacts", "execution_grant-test", "changes.md");
+            if (succeeded)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(accountPath)!);
+                await File.WriteAllTextAsync(accountPath, "Settled implementation account.", Ct);
+            }
             await TerminalSentinelWriter.WriteAsync(room,
-                new WorkflowStatusView(succeeded ? WorkflowOutcome.Succeeded : WorkflowOutcome.Failed, [], [], null), Ct);
+                new WorkflowStatusView(succeeded ? WorkflowOutcome.Succeeded : WorkflowOutcome.Failed,
+                    [new WorkflowStatusStepView(WorkStages.RoleFor(stage), succeeded ? "Succeeded" : "Failed", "grant-test")],
+                    succeeded ? [accountPath] : [], null), Ct);
             if (settingsRepository is not null)
                 await DaemonSettingsStore.SaveAsync(new DaemonSettings
                 {

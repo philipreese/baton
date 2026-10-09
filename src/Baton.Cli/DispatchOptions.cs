@@ -203,4 +203,5 @@ public sealed record DispatchOptions(
     MemoryAddDispatchGrant? MemoryAddGrant = null,
     int? MaxRepeatedToolSteps = null,
     bool EnableAgyCorrection = false,
-    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);
+    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null,
+    string? ReviewHandoffSha256 = null);

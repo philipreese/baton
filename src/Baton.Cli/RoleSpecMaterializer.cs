@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using Baton.Domain;
+using Baton.Queue;
 using Baton.Vendors;
 
 namespace Baton.Cli;
@@ -92,8 +94,12 @@ internal static class RoleSpecMaterializer
     /// a narrower gap outside this issue's scope.
     /// </para>
     /// </summary>
-    public static void CopyAttachmentsIntoRoom(IReadOnlyList<string>? attachments, string roomDirectoryPath)
+    public static void CopyAttachmentsIntoRoom(
+        IReadOnlyList<string>? attachments, string roomDirectoryPath, string? reviewHandoffSha256 = null)
     {
+        if (reviewHandoffSha256 is not null
+            && (attachments is not { Count: 1 } || Path.GetFileName(attachments[0]) != "changes.md"))
+            throw new CliArgumentException("review-handoff-invalid: the retained account must bind exactly one changes.md attachment.");
         if (attachments is not { Count: > 0 } attachmentsToCopy)
         {
             return;
@@ -120,6 +126,13 @@ internal static class RoleSpecMaterializer
             try
             {
                 File.Copy(attachPath, destPath, overwrite: true);
+                // Protected invariant: admission follows validation of the actual destination bytes,
+                // not an earlier read of replaceable staging input. Ordinary attachments are unchanged.
+                if (reviewHandoffSha256 is not null
+                    && !string.Equals(Convert.ToHexString(SHA256.HashData(
+                            QueueWorkerAccount.ReadAtMostMaxBytes(destPath))),
+                        reviewHandoffSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new CliArgumentException("review-handoff-invalid: destination account bytes do not match the retained digest; no worker was started.");
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

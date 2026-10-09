@@ -8641,14 +8641,19 @@ never shown. The advance falls back to `lastVerdict`, re-read through the same s
 the findings still travel as text and the path still does not.
 
 **A mutating lifecycle lane also carries one bounded worker account into its next review.** On a
-settled `implement`, `fix`, or successful `continue`, the queue selects exactly the terminal step's
-recorded `changes.md` output for that queue attempt and stores its exact UTF-8 bytes, digest, step
+settled `implement`, `fix`, or `continue` entering review, the queue selects exactly the terminal step's
+recorded `changes.md` output (or its current execution's recorded delivery handoff on an incomplete
+pushed lane) for that queue attempt and stores its exact UTF-8 bytes, digest, step
 execution, fleet attempt, and repository/workspace identity (at most 64 KiB). It never scans a room,
 follows `linkedFrom`, guesses a newest file, or substitutes another execution. The delayed review
-launch passes that immutable snapshot through the ordinary attachment grant as `changes.md`; the
+launch passes that immutable snapshot through the ordinary attachment grant as `changes.md`, binding
+the destination copy to its retained digest before worker admission; the
 brief names its source and says it is untrusted author claims, not instructions, test proof, approval,
 or delivered-HEAD evidence. Review-only retargeting retains the historical account, while a new
-mutating attempt replaces it. Missing legacy provenance says unavailable. Link/reparse traversal,
+mutating attempt replaces it. Missing legacy provenance says unavailable; an incomplete pushed
+attempt with no recorded account also says unavailable and clears any older account without blocking
+its established re-review route. Historical accounts are never prerequisites for Fix/Continue launches.
+Link/reparse traversal,
 containment, ambiguity, encoding, size, metadata, and digest failures halt the exact queue handoff
 durably as `review-handoff-invalid` before a worker, round, or synthetic verdict is created.
 

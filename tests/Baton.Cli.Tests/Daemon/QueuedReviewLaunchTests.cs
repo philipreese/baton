@@ -263,8 +263,10 @@ public sealed class QueuedReviewLaunchTests
         }
     }
 
-    [Fact]
-    public async Task Corrupt_retained_review_handoff_halts_once_without_launching_or_spending_a_round()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Corrupt_retained_review_handoff_halts_once_without_launching_or_spending_a_round(bool replaceStaging)
     {
         var home = CreateHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -276,7 +278,9 @@ public sealed class QueuedReviewLaunchTests
                 AutomaticFixUsed = true,
                 SettledWorkerAccount = new QueueWorkerAccount(
                     System.Text.Encoding.UTF8.GetBytes("corrupt"),
-                    new string('0', 64),
+                    replaceStaging
+                        ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("corrupt"))).ToLowerInvariant()
+                        : new string('0', 64),
                     new FleetAttemptId("source-attempt"),
                     "source-execution",
                     "github.com/philipreese/baton",
@@ -288,10 +292,23 @@ public sealed class QueuedReviewLaunchTests
                 snapshot => snapshot with { Items = [item] }, Ct);
 
             var launches = 0;
-            var service = Service(home, new CurrentPullRequest(), (_, _) =>
+            var materializations = 0;
+            var service = Service(home, new CurrentPullRequest(), (request, _) =>
             {
+                var options = QueueLauncher.BuildOptions(request);
+                materializations++;
+                File.WriteAllText(Assert.Single(options.Attachments!), "replacement bytes after validation");
+                try
+                {
+                    RoleSpecMaterializer.CopyAttachmentsIntoRoom(options.Attachments, options.RoomDirectoryPath, options.ReviewHandoffSha256);
+                }
+                catch (CliArgumentException ex)
+                {
+                    return Task.FromResult(QueueLauncher.ClassifyReviewHandoffRefusal(
+                        new QueueLaunchOutcome(null, Error: ex.Message), options.RoomDirectoryPath, options.ReviewHandoffSha256));
+                }
                 launches++;
-                return Task.FromResult(new QueueLaunchOutcome(home));
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
             });
 
             await service.TickOnceAsync(Ct);
@@ -305,6 +322,7 @@ public sealed class QueuedReviewLaunchTests
 
             await service.TickOnceAsync(Ct);
             Assert.Equal(0, launches);
+            Assert.Equal(replaceStaging ? 1 : 0, materializations);
             var second = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.True(second.Halted);
             Assert.Equal(halted.State, second.State);

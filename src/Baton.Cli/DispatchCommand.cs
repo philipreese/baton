@@ -414,7 +414,8 @@ public static class DispatchCommand
         // and inbound: it is not part of the daemon's fleet projection or its declared step outputs,
         // so it is never published as a deliverable (#1500 second-reader LOW-6 — state the mechanism
         // instead of the ambiguous phrase "never passes the gate").
-        RoleSpecMaterializer.CopyAttachmentsIntoRoom(options.Attachments, options.RoomDirectoryPath);
+        RoleSpecMaterializer.CopyAttachmentsIntoRoom(
+            options.Attachments, options.RoomDirectoryPath, options.ReviewHandoffSha256);
 
         var primaryOutputName = definition.Steps.FirstOrDefault()?.Outputs.FirstOrDefault() ?? "output";
         Console.Out.WriteLine($"Room directory: {options.RoomDirectoryPath}");
