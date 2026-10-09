@@ -169,8 +169,11 @@ public sealed class StoppedWorkAdviceCaptureTests
         }
     }
 
-    [Fact]
-    public async Task Scheduler_recovers_an_opted_in_missing_verdict_through_advice_launch_and_exact_head_proof()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Scheduler_recovers_an_opted_in_missing_verdict_through_advice_launch_and_exact_head_proof(
+        bool delayedAdvice)
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(
@@ -202,6 +205,7 @@ public sealed class StoppedWorkAdviceCaptureTests
             var store = Store();
             var adviceCalls = 0;
             var launches = 0;
+            var adviceBarrier = delayedAdvice ? new OperationBarrier() : null;
             var scheduler = new QueueSchedulerService(async (request, _) =>
             {
                 Interlocked.Increment(ref launches);
@@ -215,13 +219,29 @@ public sealed class StoppedWorkAdviceCaptureTests
                 return new QueueLaunchOutcome(request.RoomDirectory);
             }, _ => Task.FromResult(0d), () => 16d, () => Now,
                 advancer: advancer, conductorObligations: store,
-                stoppedWorkAdvice: (obligation, request, _, _, _) =>
+                stoppedWorkAdvice: async (obligation, request, _, _, token) =>
                 {
                     Interlocked.Increment(ref adviceCalls);
-                    return Task.FromResult(Response(obligation, request, StoppedWorkAdviceChoice.Recommend));
+                    if (adviceBarrier is not null) await adviceBarrier.HoldAsync(token);
+                    return Response(obligation, request, StoppedWorkAdviceChoice.Recommend);
                 });
 
-            await NotifyAndTickAsync(scheduler);
+            if (adviceBarrier is null)
+            {
+                await NotifyAsync(scheduler);
+            }
+            else
+            {
+                try
+                {
+                    await NotifyAndTickAsync(scheduler);
+                    await adviceBarrier.Entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                    Assert.Equal(0, launches);
+                    Assert.Null((await ReadBackAsync()).ReplacementReviewAction);
+                }
+                finally { adviceBarrier.Release.TrySetResult(); }
+            }
+
             await WaitForAsync(async () => (await ReadBackAsync()).ReplacementReviewAction is not null);
             Assert.Equal(1, adviceCalls);
 
@@ -249,6 +269,8 @@ public sealed class StoppedWorkAdviceCaptureTests
             await NotifyAndTickAsync(scheduler);
             Assert.Equal(ConductorObligationStatus.ActionObserved,
                 (await store.ReadAsync(intent.Key!, Ct))?.Status);
+            Assert.Equal(1, adviceCalls);
+            Assert.Equal(1, launches);
         }
         finally
         {
