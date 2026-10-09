@@ -304,7 +304,7 @@ public sealed class QueuedReviewLaunchTests
                 materializations++;
                 var staging = Assert.Single(options.Attachments!);
                 if (refusalCase == "replacement") File.WriteAllText(staging, "replacement bytes after validation");
-                if (refusalCase is "missing" or "copy-io" or "copy-access") File.Delete(staging);
+                if (refusalCase is "missing" or "copy-io" or "copy-access") Baton.Tests.Shared.FileCleanup.EnsureDeleted(staging);
                 if (refusalCase == "copy-access") Directory.CreateDirectory(staging);
                 try
                 {
