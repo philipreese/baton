@@ -243,6 +243,14 @@ public sealed record QueueItem
     public string? LastVerdict { get; init; }
 
     /// <summary>
+    /// The one bounded, immutable worker account retained from the latest settled mutating attempt
+    /// for a later lifecycle review. The bytes are the declared <c>changes.md</c> output itself;
+    /// provenance is retained beside them because the prose is untrusted author claims, never review
+    /// authority, test proof, approval, instructions or delivered-head evidence.
+    /// </summary>
+    public QueueWorkerAccount? SettledWorkerAccount { get; init; }
+
+    /// <summary>
     /// How many rounds the queue has run for this item: 0 at add time, and <c>WorkItemLifecycle</c>
     /// raises it whenever it queues another, whatever the stage (spec/baton.md §13 has the counting rule
     /// and why it is not per-fix). Names nothing on disk; it is what a brief's header and the transition
@@ -467,6 +475,78 @@ public sealed record QueueAttemptEnvelope(
     [property: JsonPropertyName("ownedTaskIdentity")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     OwnedTaskExecutionIdentity? OwnedTaskIdentity = null);
+
+/// <summary>One exact settled mutating worker account carried across lifecycle review.</summary>
+public sealed record QueueWorkerAccount(
+    [property: JsonPropertyName("bytes")] byte[]? Bytes,
+    [property: JsonPropertyName("sha256")] string Sha256,
+    [property: JsonPropertyName("sourceAttemptId")] FleetAttemptId SourceAttemptId,
+    [property: JsonPropertyName("sourceExecutionId")] string SourceExecutionId,
+    [property: JsonPropertyName("sourceRepository")] string SourceRepository,
+    [property: JsonPropertyName("sourceWorkspace")] string SourceWorkspace)
+{
+    public const int MaxBytes = 64 * 1024;
+
+    public bool HasValidDigest()
+    {
+        if (Bytes is null || Bytes.Length > MaxBytes || Sha256 is not { Length: 64 }
+            || !Sha256.All(char.IsAsciiHexDigit)
+            || SourceAttemptId.Value is not { Length: > 0 }
+            || SourceExecutionId is not { Length: > 0 }
+            || SourceRepository is not { Length: > 0 }
+            || SourceWorkspace is not { Length: > 0 })
+        {
+            return false;
+        }
+
+        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Bytes)).ToLowerInvariant();
+        return string.Equals(digest, Sha256, StringComparison.Ordinal);
+    }
+
+    public bool TryValidateFor(string? repository, string? workspace, out string reason)
+    {
+        if (!HasValidDigest())
+        {
+            reason = "retained bytes, digest or provenance metadata is malformed";
+            return false;
+        }
+
+        try
+        {
+            var text = new System.Text.UTF8Encoding(false, true).GetString(Bytes!);
+            if (!Bytes!.SequenceEqual(new System.Text.UTF8Encoding(false, true).GetBytes(text)))
+            {
+                reason = "retained bytes are not an exact UTF-8 byte sequence";
+                return false;
+            }
+        }
+        catch (System.Text.DecoderFallbackException)
+        {
+            reason = "retained bytes are not valid UTF-8";
+            return false;
+        }
+
+        if (!string.Equals(SourceRepository, repository, StringComparison.Ordinal)
+            || !string.Equals(SourceWorkspace, workspace, StringComparison.Ordinal))
+        {
+            reason = "retained repository/workspace identity does not match the queue item";
+            return false;
+        }
+
+        if (SourceExecutionId.Contains(Path.DirectorySeparatorChar)
+            || SourceExecutionId.Contains(Path.AltDirectorySeparatorChar)
+            || SourceExecutionId.Contains(':')
+            || SourceExecutionId is "." or ".."
+            || SourceExecutionId.Contains("..", StringComparison.Ordinal))
+        {
+            reason = "retained step execution identity is not a safe recorded execution";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+}
 
 /// <summary>The durable, pre-call identity for one queue-owned draft PR handoff.</summary>
 public sealed record QueueDraftPullRequestCreateMarker(

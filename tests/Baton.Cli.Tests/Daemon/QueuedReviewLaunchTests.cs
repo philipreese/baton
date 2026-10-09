@@ -264,6 +264,61 @@ public sealed class QueuedReviewLaunchTests
     }
 
     [Fact]
+    public async Task Corrupt_retained_review_handoff_halts_once_without_launching_or_spending_a_round()
+    {
+        var home = CreateHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = ReviewItem(home, "corrupt-handoff", WorkStage.Review) with
+            {
+                Round = 7,
+                AutomaticFixUsed = true,
+                SettledWorkerAccount = new QueueWorkerAccount(
+                    System.Text.Encoding.UTF8.GetBytes("corrupt"),
+                    new string('0', 64),
+                    new FleetAttemptId("source-attempt"),
+                    "source-execution",
+                    "github.com/philipreese/baton",
+                    home),
+            };
+            File.WriteAllText(item.SpecFile, QueueBriefTemplates.Compose(item.Stage!.Value, item, new(
+                Do: item.Instructions!, PullRequest: item.PullRequest, HeadSha: OldHead, Round: item.Round)));
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                snapshot => snapshot with { Items = [item] }, Ct);
+
+            var launches = 0;
+            var service = Service(home, new CurrentPullRequest(), (_, _) =>
+            {
+                launches++;
+                return Task.FromResult(new QueueLaunchOutcome(home));
+            });
+
+            await service.TickOnceAsync(Ct);
+            var halted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(0, launches);
+            Assert.True(halted.Halted);
+            Assert.Equal(QueueItemState.Failed, halted.State);
+            Assert.Equal(7, halted.Round);
+            Assert.True(halted.AutomaticFixUsed);
+            Assert.Contains("review-handoff-invalid", halted.Error!, StringComparison.Ordinal);
+
+            await service.TickOnceAsync(Ct);
+            Assert.Equal(0, launches);
+            var second = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.True(second.Halted);
+            Assert.Equal(halted.State, second.State);
+            Assert.Equal(halted.Round, second.Round);
+            Assert.Equal(halted.AutomaticFixUsed, second.AutomaticFixUsed);
+            Assert.Equal(halted.Error, second.Error);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_review_brief_write_failure_does_not_claim_or_launch_the_row()
     {
         var home = CreateHome();

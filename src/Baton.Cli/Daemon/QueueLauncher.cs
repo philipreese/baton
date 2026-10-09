@@ -663,6 +663,10 @@ public static class QueueLauncher
         {
             Add("--skill", skill);
         }
+        foreach (var attachment in options.Attachments ?? [])
+        {
+            Add("--attach", attachment);
+        }
 
         return arguments;
 
@@ -1059,6 +1063,7 @@ public static class QueueLauncher
             DeclaredTaskSize: item.DeclaredTaskSize.Size == DeclaredTaskSize.Unknown
                 ? null
                 : item.DeclaredTaskSize,
+            Attachments: MaterializeSettledWorkerAccount(item),
             OriginatingPullRequest: followOn
                 && item.Repository is { Length: > 0 } repository
                 && item.PullRequest is { } pullRequest
@@ -1072,6 +1077,73 @@ public static class QueueLauncher
             ExpectPr: UsesDaemonDraftPullRequestHandoff(item) ? false : null,
             MemoryAddGrant: item.MemoryAddGrant,
             OwnedTaskIdentity: item.AttemptEnvelope?.OwnedTaskIdentity);
+    }
+
+    private static IReadOnlyList<string>? MaterializeSettledWorkerAccount(QueueItem item)
+    {
+        if (item.SettledWorkerAccount is not { } account)
+        {
+            return null;
+        }
+
+        if (!account.TryValidateFor(item.Repository, item.Workspace, out var reason))
+        {
+            throw new CliArgumentException($"review-handoff-invalid: {reason}; no worker was started");
+        }
+
+        var attachmentDirectory = Path.Combine(
+            BatonPaths.QueueSpecsDirectory, $"review-handoff-{account.Sha256}");
+        var attachmentPath = Path.Combine(attachmentDirectory, "changes.md");
+        if (AttachmentReadInputs.CrossesLink(BatonPaths.QueueSpecsDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentPath))
+        {
+            throw new CliArgumentException(
+                "review-handoff-invalid: the retained attachment staging path crosses a link; no worker was started");
+        }
+
+        Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        Directory.CreateDirectory(attachmentDirectory);
+        if (AttachmentReadInputs.CrossesLink(BatonPaths.QueueSpecsDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentPath))
+        {
+            throw new CliArgumentException(
+                "review-handoff-invalid: the retained attachment staging path crosses a link; no worker was started");
+        }
+        if (File.Exists(attachmentPath))
+        {
+            byte[] existing;
+            try
+            {
+                existing = File.ReadAllBytes(attachmentPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new CliArgumentException(
+                    $"review-handoff-invalid: retained attachment staging file could not be read: {ex.Message}");
+            }
+
+            if (!existing.SequenceEqual(account.Bytes!))
+            {
+                throw new CliArgumentException(
+                    "review-handoff-invalid: materialized attachment bytes do not match the retained digest; no worker was started");
+            }
+        }
+        else
+        {
+            try
+            {
+                File.WriteAllBytes(attachmentPath, account.Bytes!);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new CliArgumentException(
+                    $"review-handoff-invalid: retained attachment could not be materialized: {ex.Message}");
+            }
+        }
+
+        return [attachmentPath];
     }
 
     private static bool UsesDaemonDraftPullRequestHandoff(QueueItem item) =>

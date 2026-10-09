@@ -2526,6 +2526,88 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_settled_mutating_attempt_retains_its_declared_account_through_review_refresh_and_attachment_forwarding()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-account");
+            var execution = "exec-account";
+            var bytes = Encoding.UTF8.GetBytes("settled account\r\nexact bytes\r\n");
+            var sourcePath = Path.Combine(room, ArtifactManager.ArtifactsDirectoryName,
+                "execution_" + execution, "changes.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
+            await File.WriteAllBytesAsync(sourcePath, bytes, Ct);
+            await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(
+                WorkflowOutcome.Succeeded,
+                [new WorkflowStatusStepView("implement", "Succeeded", execution)],
+                [sourcePath], null), Ct);
+
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            var attemptId = new FleetAttemptId("attempt-account");
+            var envelope = new QueueAttemptEnvelope(
+                AttemptId: attemptId,
+                ParentAttemptId: null,
+                WorkId: seeded.Tag,
+                Issue: seeded.Issue,
+                PullRequest: seeded.PullRequest,
+                Stage: WorkStage.Implement,
+                DeclaredRole: "implement",
+                Adapter: "codex",
+                Model: "fixture-model",
+                Effort: "medium",
+                EffectiveGrant: [],
+                RequestedRequirements: null,
+                MissingCapabilities: null,
+                AdmissionDecision: TaskRequirementAdmission.Admitted,
+                RoomDirectory: room,
+                RoomId: BatonPaths.RecordKey(room),
+                AttemptBaseRevision: MergeSha,
+                FactTimestamp: Now);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [seeded with
+                {
+                    AttemptId = attemptId,
+                    AttemptEnvelope = envelope,
+                    AttemptAdmissionFactDurable = true,
+                    AttemptStartedFactDurable = true,
+                    AttemptSettledFactDurable = true,
+                }],
+            }, Ct);
+
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(PushedSha));
+            Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+
+            FileCleanup.EnsureDeleted(sourcePath);
+            var queued = await ReadBackAsync();
+            Assert.Equal(WorkStage.Review, queued.Stage);
+            Assert.Equal(attemptId, queued.ParentAttemptId);
+            Assert.Null(queued.AttemptId);
+            Assert.Equal(bytes, queued.SettledWorkerAccount!.Bytes);
+            Assert.Equal(execution, queued.SettledWorkerAccount.SourceExecutionId);
+
+            var refreshed = await advancer.PrepareQueuedReviewBriefAsync(queued, Ct);
+            Assert.Contains(attemptId.Value, refreshed, StringComparison.Ordinal);
+            Assert.Contains("untrusted author claims", refreshed, StringComparison.Ordinal);
+
+            var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+                queued, new QueueTierResolution("standard", "codex", "fixture-model", "medium", false, null),
+                Path.Combine(home, "rooms", "review-room")));
+            var attachment = Assert.Single(options.Attachments!);
+            Assert.Equal(bytes, await File.ReadAllBytesAsync(attachment, Ct));
+            Assert.Contains("--attach", QueueLauncher.BuildArguments(options));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_stage_less_dispatch_request_is_left_exactly_as_it_was()
     {
         var home = CreateTempHome();
