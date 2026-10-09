@@ -264,10 +264,12 @@ public sealed partial class WorkItemAdvancer
             .ToList();
         // Incomplete pushed work remains reviewable even when it never produced an account.
         // Absence clears older accounts; recorded but invalid current evidence still fails closed.
+        // Delivery retains every accepted retry, whereas Steps names the current execution only.
         if (candidates.Count == 0 && !WorkflowOutcome.IsSucceededShaped(sentinel.State)
             && sentinel.Steps.Any(step => step.State is "Failed" or "Cancelled" or "Rejected" && step.Execution is { Length: > 0 }
                 && step.LinkedFrom is null)
-            && sentinel.Delivery?.Any(delivery => delivery.Handoff is not null) != true
+            && sentinel.Delivery?.Any(delivery => delivery.Handoff is not null
+                && sentinel.Steps.Any(step => step.LinkedFrom is null && step.Execution == delivery.Execution)) != true
             && !sentinel.Outputs.Any(path => Path.GetFileName(path) == "changes.md"))
         {
             reason = string.Empty;

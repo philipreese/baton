@@ -8651,11 +8651,14 @@ the destination copy to its retained digest before worker admission; the
 brief names its source and says it is untrusted author claims, not instructions, test proof, approval,
 or delivered-HEAD evidence. Review-only retargeting retains the historical account, while a new
 mutating attempt replaces it. Missing legacy provenance says unavailable; an incomplete pushed
-attempt with no recorded account also says unavailable and clears any older account without blocking
-its established re-review route. Historical accounts are never prerequisites for Fix/Continue launches.
+attempt with no recorded account in its current terminal execution also says unavailable and clears
+any older account without blocking its established re-review route; earlier retry executions remain
+history, not evidence of a current account. Historical accounts are never prerequisites for Fix/Continue launches.
 Link/reparse traversal,
 containment, ambiguity, encoding, size, metadata, and digest failures halt the exact queue handoff
-durably as `review-handoff-invalid` before a worker, round, or synthetic verdict is created.
+durably as `review-handoff-invalid` before a worker, round, or synthetic verdict is created. A child
+attachment refusal carries that explicit classification in its pre-ledger terminal sentinel even
+when no destination account was created; unrelated child refusals do not acquire it.
 
 **Both review briefs carry the Verdict sentence** — the `decision` field, what the two words mean, and
 that a verdict without one stops the item for a person rather than carrying the round (never that it

@@ -1573,7 +1573,8 @@ public static class DispatchCommand
             skills: options.Skills,
             // #2110: the role's own default_skills ride ahead of --skill unless opted out.
             attachDefaultSkills: !options.NoDefaultSkills,
-            enableAgyCorrection: options.EnableAgyCorrection);
+            enableAgyCorrection: options.EnableAgyCorrection,
+            reviewHandoffSha256: options.ReviewHandoffSha256);
 
         if (options.MemoryAddGrant is not { } memoryAddGrant)
         {

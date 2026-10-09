@@ -236,7 +236,11 @@ public sealed record WorkflowStatusView(
     // predecessor explicit at the workflow root without replacing the parent's ordinary step usage.
     [property: JsonPropertyName("unresolvedGraceChildren")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyDictionary<string, ExecutionUsageView>? UnresolvedGraceChildren = null);
+    IReadOnlyDictionary<string, ExecutionUsageView>? UnresolvedGraceChildren = null,
+    // A pre-ledger child refused its retained review attachment, before any worker admission.
+    [property: JsonPropertyName("reviewHandoffInvalid")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    bool ReviewHandoffInvalid = false);
 
 /// <summary>
 /// The machine-owned delivery observation for one execution. <see cref="State"/> is authoritative:

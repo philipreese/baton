@@ -58,9 +58,11 @@ public static class TerminalSentinelWriter
     /// file-watching agent reads instead of stderr — <c>null</c> when the refusal had no suggestion.
     /// </summary>
     public static Task WriteValidationRefusedAsync(
-        string roomDirectoryPath, string reason, CancellationToken cancellationToken, string? tryInvocation = null)
+        string roomDirectoryPath, string reason, CancellationToken cancellationToken, string? tryInvocation = null,
+        bool reviewHandoffInvalid = false)
     {
-        var view = new WorkflowStatusView(WorkflowOutcome.Failed, [], [], reason, tryInvocation);
+        var view = new WorkflowStatusView(WorkflowOutcome.Failed, [], [], reason, tryInvocation,
+            ReviewHandoffInvalid: reviewHandoffInvalid);
         return WriteAsync(roomDirectoryPath, view, cancellationToken);
     }
 
@@ -71,11 +73,13 @@ public static class TerminalSentinelWriter
     /// </summary>
     /// <returns><c>true</c> when the sentinel was written; <c>false</c> for ordinary filesystem access failures.</returns>
     public static async Task<bool> TryWriteValidationRefusedAsync(
-        string roomDirectoryPath, string reason, CancellationToken cancellationToken, string? tryInvocation = null)
+        string roomDirectoryPath, string reason, CancellationToken cancellationToken, string? tryInvocation = null,
+        bool reviewHandoffInvalid = false)
     {
         try
         {
-            await WriteValidationRefusedAsync(roomDirectoryPath, reason, cancellationToken, tryInvocation).ConfigureAwait(false);
+            await WriteValidationRefusedAsync(roomDirectoryPath, reason, cancellationToken, tryInvocation,
+                reviewHandoffInvalid).ConfigureAwait(false);
             return true;
         }
         catch (Exception ex) when (IsOptionalPersistenceFailure(ex))

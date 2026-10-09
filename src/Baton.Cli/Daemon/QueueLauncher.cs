@@ -213,7 +213,8 @@ public static class QueueLauncher
             // worker, so the exact-room admission row still decides hold versus ordinary failure.
             var refusal = ClassifyPreProvisionExit(
                 exitCode, roomDirectory, await ReadAdmissionRowsAsync().ConfigureAwait(false), relay.StderrTail);
-            return ClassifyReviewHandoffRefusal(refusal, roomDirectory, reviewHandoffSha256);
+            return ClassifyReviewHandoffRefusal(refusal, roomDirectory, reviewHandoffSha256,
+                await TerminalSentinelWriter.TryReadAsync(roomDirectory, cancellationToken).ConfigureAwait(false));
         }
 
         // Still running: settle it when it finishes, so a queue-launched room that faults after
@@ -225,8 +226,18 @@ public static class QueueLauncher
     }
 
     internal static QueueLaunchOutcome ClassifyReviewHandoffRefusal(
-        QueueLaunchOutcome outcome, string roomDirectory, string? expectedDigest)
+        QueueLaunchOutcome outcome, string roomDirectory, string? expectedDigest,
+        WorkflowStatusView? childRefusal = null)
     {
+        // Protected invariant: an explicit child attachment refusal survives even when copying
+        // never created a destination. An unrelated pre-provision refusal is not handoff failure.
+        if (outcome.Error is not null && expectedDigest is not null
+            && childRefusal is { ReviewHandoffInvalid: true, State: WorkflowOutcome.Failed, Steps.Count: 0 })
+            return outcome with
+            {
+                ReviewHandoffInvalid = true,
+                Error = $"review-handoff-invalid: {childRefusal.Error}"
+            };
         var destination = Path.Combine(roomDirectory, ArtifactManager.ArtifactsDirectoryName, "attachments", "changes.md");
         if (outcome.Error is null || expectedDigest is null || !File.Exists(destination))
             return outcome;

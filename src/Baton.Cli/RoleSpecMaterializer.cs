@@ -42,9 +42,17 @@ internal static class RoleSpecMaterializer
         IReadOnlyList<string>? skills = null,
         bool attachDefaultSkills = true,
         int? maxRepeatedToolStepsOverride = null,
-        bool enableAgyCorrection = false)
+        bool enableAgyCorrection = false,
+        string? reviewHandoffSha256 = null)
     {
-        ValidateAttachments(attachments);
+        try
+        {
+            ValidateAttachments(attachments);
+        }
+        catch (CliArgumentException ex) when (reviewHandoffSha256 is not null)
+        {
+            throw ReviewHandoffRefusal(ex);
+        }
 
         // #1500: Spec/grant mismatch lint (WARN, never fail). The guarantee is asserted on
         // DispatchSpecLinter's own class doc and in docs/dispatch.md; this try/catch is what actually
@@ -96,6 +104,24 @@ internal static class RoleSpecMaterializer
     /// </summary>
     public static void CopyAttachmentsIntoRoom(
         IReadOnlyList<string>? attachments, string roomDirectoryPath, string? reviewHandoffSha256 = null)
+    {
+        try
+        {
+            CopyAttachmentsIntoRoomCore(attachments, roomDirectoryPath, reviewHandoffSha256);
+        }
+        catch (Exception ex) when (reviewHandoffSha256 is not null
+            && ex is CliArgumentException or IOException or UnauthorizedAccessException)
+        {
+            throw ReviewHandoffRefusal(ex);
+        }
+    }
+
+    private static CliArgumentException ReviewHandoffRefusal(Exception exception) =>
+        new($"review-handoff-invalid: retained account attachment refused before worker admission: {exception.Message}")
+        { ReviewHandoffInvalid = true };
+
+    private static void CopyAttachmentsIntoRoomCore(
+        IReadOnlyList<string>? attachments, string roomDirectoryPath, string? reviewHandoffSha256)
     {
         if (reviewHandoffSha256 is not null
             && (attachments is not { Count: 1 } || Path.GetFileName(attachments[0]) != "changes.md"))

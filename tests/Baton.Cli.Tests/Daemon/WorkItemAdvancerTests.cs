@@ -5,6 +5,9 @@ using Baton.Artifacts;
 using Baton.Conductor;
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Projection;
+using Baton.Store;
+using Baton.Templates;
 using Baton.Dispatch;
 using Baton.Queue;
 using Baton.Status;
@@ -2539,8 +2542,10 @@ public sealed class WorkItemAdvancerTests
     [InlineData(WorkStage.Implement, true, true, "Cancelled")]
     [InlineData(WorkStage.Implement, true, false, "Cancelled")]
     [InlineData(WorkStage.Implement, false, false, "Legacy")]
+    [InlineData(WorkStage.Implement, true, false, "Failed", true)]
+    [InlineData(WorkStage.Fix, true, true, "Failed", true)]
     public async Task A_settled_mutating_attempt_retains_its_declared_account_through_review_refresh_and_attachment_forwarding(
-        WorkStage sourceStage, bool incomplete, bool hasAccount, string incompleteStepState)
+        WorkStage sourceStage, bool incomplete, bool hasAccount, string incompleteStepState, bool retryHistory = false)
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -2554,14 +2559,43 @@ public sealed class WorkItemAdvancerTests
             Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
             if (hasAccount) await File.WriteAllBytesAsync(sourcePath, bytes, Ct);
             await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(sourcePath)!, "decoy.md"), "decoy", Ct);
-            await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(
+            var terminal = new WorkflowStatusView(
                 incomplete ? incompleteStepState == "Cancelled" ? WorkflowOutcome.Cancelled : WorkflowOutcome.Indeterminate : WorkflowOutcome.Succeeded,
                 [new WorkflowStatusStepView(WorkStages.RoleFor(sourceStage), incomplete ? incompleteStepState : "Succeeded", execution,
                     IndeterminateProducerKind: incomplete ? "Arrested" : null)],
                 incomplete ? [] : [sourcePath], null,
                 Delivery: incomplete && hasAccount ? [new ExecutionDeliveryStatusView(execution,
                     new DeliveryObservationStatusView("unknown"),
-                    new DeliveryHandoffStatusView(Path.GetRelativePath(room, sourcePath), Now.ToString("O")))] : null), Ct);
+                    new DeliveryHandoffStatusView(Path.GetRelativePath(room, sourcePath), Now.ToString("O")))] : null);
+            if (retryHistory)
+            {
+                var stepId = new StepId(WorkStages.RoleFor(sourceStage));
+                var snapshot = new WorkflowDefinitionSnapshot(new WorkflowDefinitionSnapshotId("retry-history"),
+                    new WorkflowTemplateId("retry-history"), 1,
+                    [new WorkflowStepDefinition(stepId, stepId.Value, [], ["changes.md"], [], new RetryPolicy(3))]);
+                ExecutionRequest Request(string id) => new(new ExecutionId(id), new WorkflowId("retry-history"),
+                    stepId, stepId.Value, [], ["changes.md"], TimeSpan.FromMinutes(10), [],
+                    new Dictionary<StepId, ExecutionId>(), Adapter: "codex");
+                var events = new FlowEvent[]
+                {
+                    new FlowEvent.ExecutionRequestAccepted(Request("earlier-execution")),
+                    new FlowEvent.ExecutionArrested(new ExecutionId("earlier-execution"), new WorkerUsage(1, 1), []),
+                    new FlowEvent.ExecutionRequestAccepted(Request(execution)),
+                    new FlowEvent.ExecutionArrested(new ExecutionId(execution), new WorkerUsage(1, 1), []),
+                };
+                var historicalPath = Path.Combine(room, ArtifactManager.ArtifactsDirectoryName,
+                    "execution_earlier-execution", "changes.md");
+                Directory.CreateDirectory(Path.GetDirectoryName(historicalPath)!);
+                await File.WriteAllTextAsync(historicalPath, "valid earlier account, not the current account", Ct);
+                var entries = events.Select(e => (LogEntry)new LogEntry.FlowLogEntry(e, Now.UtcDateTime)).ToList();
+                terminal = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+                    WorkflowStatusProjector.Project(StateProjector.Project(events, snapshot), snapshot, room, entries),
+                    entries, room, Ct);
+                Assert.Equal(execution, Assert.Single(terminal.Steps).Execution);
+                Assert.Contains(terminal.Delivery!, d => d.Execution == "earlier-execution" && d.Handoff is not null);
+                Assert.Equal(hasAccount, terminal.Delivery!.Any(d => d.Execution == execution && d.Handoff is not null));
+            }
+            await TerminalSentinelWriter.WriteAsync(room, terminal, Ct);
 
             var seeded = await SeedAsync(home, sourceStage, room,
                 incomplete ? QueueItemState.Failed : QueueItemState.Done);

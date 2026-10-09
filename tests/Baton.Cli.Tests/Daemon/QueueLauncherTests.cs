@@ -75,6 +75,7 @@ public sealed class QueueLauncherTests : IDisposable
     [InlineData("held", true, false)]
     [InlineData("other-room", false, false)]
     [InlineData("ordinary-refusal", false, false)]
+    [InlineData("handoff-refusal", false, false)]
     [InlineData("started-failure", false, true)]
     [InlineData("started-success", false, true)]
     public async Task A_child_written_terminal_room_does_not_turn_a_runway_refusal_into_a_launch(
@@ -97,7 +98,8 @@ public sealed class QueueLauncherTests : IDisposable
             }
             else
             {
-                await TerminalSentinelWriter.WriteValidationRefusedAsync(staging, reason, Ct);
+                await TerminalSentinelWriter.WriteValidationRefusedAsync(staging, reason, Ct,
+                    reviewHandoffInvalid: caseName == "handoff-refusal");
             }
             var admission = caseName is "held" or "other-room"
                 ? new RunwayAdmissionEntry(
@@ -145,9 +147,10 @@ public sealed class QueueLauncherTests : IDisposable
                 await child.WaitForExitAsync(Ct);
             }
 
-            var outcome = await QueueLauncher.ObserveLaunchedProcessAsync(child, "refusal", room, Ct);
+            var outcome = await QueueLauncher.ObserveLaunchedProcessAsync(child, "refusal", room, Ct, new string('a', 64));
 
             Assert.Equal(expectedHold, outcome.RunwayHeld);
+            Assert.Equal(caseName == "handoff-refusal", outcome.ReviewHandoffInvalid);
             Assert.Equal(writeFlowLedger, outcome.RoomDirectory is not null);
             if (!expectedHold && !writeFlowLedger)
             {
