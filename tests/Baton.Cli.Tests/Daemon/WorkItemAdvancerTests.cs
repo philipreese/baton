@@ -4,6 +4,10 @@ using Baton.Accounting;
 using Baton.Artifacts;
 using Baton.Conductor;
 using Baton.Domain;
+using Baton.Mutation;
+using Baton.Projection;
+using Baton.Store;
+using Baton.Templates;
 using Baton.Dispatch;
 using Baton.Queue;
 using Baton.Status;
@@ -2525,6 +2529,317 @@ public sealed class WorkItemAdvancerTests
         }
     }
 
+    [Theory]
+    [InlineData(WorkStage.Implement, false, true, "Failed")]
+    [InlineData(WorkStage.Fix, false, true, "Failed")]
+    [InlineData(WorkStage.Continue, false, true, "Failed")]
+    [InlineData(WorkStage.Implement, true, true, "Failed")]
+    [InlineData(WorkStage.Fix, true, true, "Failed")]
+    [InlineData(WorkStage.Continue, true, true, "Failed")]
+    [InlineData(WorkStage.Implement, true, false, "Failed")]
+    [InlineData(WorkStage.Fix, true, false, "Failed")]
+    [InlineData(WorkStage.Continue, true, false, "Failed")]
+    [InlineData(WorkStage.Implement, true, true, "Cancelled")]
+    [InlineData(WorkStage.Implement, true, false, "Cancelled")]
+    [InlineData(WorkStage.Implement, false, false, "Legacy")]
+    [InlineData(WorkStage.Implement, true, false, "Failed", true)]
+    [InlineData(WorkStage.Fix, true, true, "Failed", true)]
+    public async Task A_settled_mutating_attempt_retains_its_declared_account_through_review_refresh_and_attachment_forwarding(
+        WorkStage sourceStage, bool incomplete, bool hasAccount, string incompleteStepState, bool retryHistory = false)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-account");
+            var execution = "exec-account";
+            var bytes = Encoding.UTF8.GetBytes("settled account\r\nexact bytes\r\n");
+            var sourcePath = Path.Combine(room, ArtifactManager.ArtifactsDirectoryName,
+                "execution_" + execution, "changes.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
+            if (hasAccount) await File.WriteAllBytesAsync(sourcePath, bytes, Ct);
+            await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(sourcePath)!, "decoy.md"), "decoy", Ct);
+            var terminal = new WorkflowStatusView(
+                incomplete ? incompleteStepState == "Cancelled" ? WorkflowOutcome.Cancelled : WorkflowOutcome.Indeterminate : WorkflowOutcome.Succeeded,
+                [new WorkflowStatusStepView(WorkStages.RoleFor(sourceStage), incomplete ? incompleteStepState : "Succeeded", execution,
+                    IndeterminateProducerKind: incomplete ? "Arrested" : null)],
+                incomplete ? [] : [sourcePath], null,
+                Delivery: incomplete && hasAccount ? [new ExecutionDeliveryStatusView(execution,
+                    new DeliveryObservationStatusView("unknown"),
+                    new DeliveryHandoffStatusView(Path.GetRelativePath(room, sourcePath), Now.ToString("O")))] : null);
+            if (retryHistory)
+            {
+                var stepId = new StepId(WorkStages.RoleFor(sourceStage));
+                var snapshot = new WorkflowDefinitionSnapshot(new WorkflowDefinitionSnapshotId("retry-history"),
+                    new WorkflowTemplateId("retry-history"), 1,
+                    [new WorkflowStepDefinition(stepId, stepId.Value, [], ["changes.md"], [], new RetryPolicy(3))]);
+                ExecutionRequest Request(string id) => new(new ExecutionId(id), new WorkflowId("retry-history"),
+                    stepId, stepId.Value, [], ["changes.md"], TimeSpan.FromMinutes(10), [],
+                    new Dictionary<StepId, ExecutionId>(), Adapter: "codex");
+                var events = new FlowEvent[]
+                {
+                    new FlowEvent.ExecutionRequestAccepted(Request("earlier-execution")),
+                    new FlowEvent.ExecutionArrested(new ExecutionId("earlier-execution"), new WorkerUsage(1, 1), []),
+                    new FlowEvent.ExecutionRequestAccepted(Request(execution)),
+                    new FlowEvent.ExecutionArrested(new ExecutionId(execution), new WorkerUsage(1, 1), []),
+                };
+                var historicalPath = Path.Combine(room, ArtifactManager.ArtifactsDirectoryName,
+                    "execution_earlier-execution", "changes.md");
+                Directory.CreateDirectory(Path.GetDirectoryName(historicalPath)!);
+                await File.WriteAllTextAsync(historicalPath, "valid earlier account, not the current account", Ct);
+                var entries = events.Select(e => (LogEntry)new LogEntry.FlowLogEntry(e, Now.UtcDateTime)).ToList();
+                terminal = await WorkflowStatusProjector.WithDeliveryEvidenceAsync(
+                    WorkflowStatusProjector.Project(StateProjector.Project(events, snapshot), snapshot, room, entries),
+                    entries, room, Ct);
+                Assert.Equal(execution, Assert.Single(terminal.Steps).Execution);
+                Assert.Contains(terminal.Delivery!, d => d.Execution == "earlier-execution" && d.Handoff is not null);
+                Assert.Equal(hasAccount, terminal.Delivery!.Any(d => d.Execution == execution && d.Handoff is not null));
+            }
+            await TerminalSentinelWriter.WriteAsync(room, terminal, Ct);
+
+            var seeded = await SeedAsync(home, sourceStage, room,
+                incomplete ? QueueItemState.Failed : QueueItemState.Done);
+            var attemptId = new FleetAttemptId("attempt-account");
+            var envelope = new QueueAttemptEnvelope(
+                AttemptId: attemptId,
+                ParentAttemptId: null,
+                WorkId: seeded.Tag,
+                Issue: seeded.Issue,
+                PullRequest: seeded.PullRequest,
+                Stage: sourceStage,
+                DeclaredRole: WorkStages.RoleFor(sourceStage),
+                Adapter: "codex",
+                Model: "fixture-model",
+                Effort: "medium",
+                EffectiveGrant: [],
+                RequestedRequirements: null,
+                MissingCapabilities: null,
+                AdmissionDecision: TaskRequirementAdmission.Admitted,
+                RoomDirectory: room,
+                RoomId: BatonPaths.RecordKey(room),
+                AttemptBaseRevision: MergeSha,
+                FactTimestamp: Now);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items = [seeded with
+                {
+                    AttemptId = attemptId,
+                    AttemptBaseRevision = MergeSha,
+                    SettledWorkerAccount = new QueueWorkerAccount(Encoding.UTF8.GetBytes("old"),
+                        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("old"))).ToLowerInvariant(),
+                        new FleetAttemptId("old-attempt"), "old-execution", Repository, seeded.Workspace),
+                    AttemptEnvelope = incompleteStepState == "Legacy" ? null : envelope,
+                    AttemptAdmissionFactDurable = true,
+                    AttemptStartedFactDurable = true,
+                    AttemptSettledFactDurable = true,
+                }],
+            }, Ct);
+
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(PushedSha));
+            Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+
+            if (hasAccount) FileCleanup.EnsureDeleted(sourcePath);
+            var queued = await ReadBackAsync();
+            Assert.Equal(incomplete || sourceStage == WorkStage.Fix ? WorkStage.ReReview : WorkStage.Review, queued.Stage);
+            Assert.Equal(attemptId, queued.ParentAttemptId);
+            Assert.Null(queued.AttemptId);
+            var refreshed = await new WorkItemAdvancer(new FakeGh(PrJson(77, MergeSha)),
+                (_, _) => Task.FromResult<string?>(MergeSha)).PrepareQueuedReviewBriefAsync(queued, Ct);
+            Assert.Contains(MergeSha, refreshed, StringComparison.Ordinal);
+            if (!hasAccount)
+            {
+                Assert.Null(queued.SettledWorkerAccount);
+                if (incompleteStepState == "Legacy")
+                {
+                    Assert.Null(queued.SettledWorkerAccountUnavailableAttemptId);
+                    Assert.Contains("explicit compatibility absence", refreshed, StringComparison.Ordinal);
+                }
+                else
+                {
+                    Assert.Equal(attemptId, queued.SettledWorkerAccountUnavailableAttemptId);
+                    Assert.Contains("produced no provable recorded account", refreshed, StringComparison.Ordinal);
+                    Assert.Contains(attemptId.Value, refreshed, StringComparison.Ordinal);
+                    var retargeted = queued with { ParentAttemptId = new FleetAttemptId("later-review-attempt") };
+                    Assert.Contains(attemptId.Value, await advancer.PrepareQueuedReviewBriefAsync(retargeted, Ct), StringComparison.Ordinal);
+                }
+                return;
+            }
+            Assert.Equal(bytes, queued.SettledWorkerAccount!.Bytes);
+            Assert.Equal(execution, queued.SettledWorkerAccount.SourceExecutionId);
+
+            Assert.Contains(attemptId.Value, refreshed, StringComparison.Ordinal);
+            Assert.Contains("untrusted author claims", refreshed, StringComparison.Ordinal);
+
+            var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+                queued, new QueueTierResolution("standard", "codex", "fixture-model", "medium", false, null),
+                Path.Combine(home, "rooms", "review-room")));
+            var attachment = Assert.Single(options.Attachments!);
+            Assert.Equal(bytes, await File.ReadAllBytesAsync(attachment, Ct));
+            Assert.Contains("--attach", QueueLauncher.BuildArguments(options));
+            var parsed = DispatchOptionsParser.Parse(QueueLauncher.BuildArguments(options).Skip(1).ToArray());
+            Assert.Equal(queued.SettledWorkerAccount.Sha256, parsed.ReviewHandoffSha256);
+            var (_, bindings) = RoleSpecMaterializer.Materialize(
+                WorkerRoleCatalog.For("review"), refreshed, "codex", queued.Workspace, "fixture-model", "medium",
+                null, null, parsed.Attachments, parsed.RoomDirectoryPath, null, null, null, null,
+                attachDefaultSkills: false);
+            RoleSpecMaterializer.CopyAttachmentsIntoRoom(parsed.Attachments, parsed.RoomDirectoryPath, parsed.ReviewHandoffSha256);
+            var destination = Assert.Single(AttachmentReadInputs.Resolve(bindings.Values.First().AttachmentNames, parsed.RoomDirectoryPath));
+            Assert.Equal(bytes, await File.ReadAllBytesAsync(destination, Ct));
+            await File.WriteAllTextAsync(sourcePath, "source edited after capture", Ct);
+            var sibling = Path.Combine(Path.GetDirectoryName(destination)!, "sibling.md");
+            await File.WriteAllTextAsync(sibling, "unattached sibling", Ct);
+            var policy = new CodexDynamicToolPolicy(new PermissionGrant(ReadFiles: true, WriteFiles: true), queued.Workspace,
+                Path.Combine(parsed.RoomDirectoryPath, "output"), [], [], attachmentPaths: [destination]);
+            var read = await policy.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool,
+                JsonSerializer.SerializeToElement(new { path = destination }), Ct);
+            Assert.Contains("exact bytes", read.Text, StringComparison.Ordinal);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await policy.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool,
+                JsonSerializer.SerializeToElement(new { path = sourcePath }), Ct)).Rule);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await policy.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool,
+                JsonSerializer.SerializeToElement(new { path = sibling }), Ct)).Rule);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await policy.ExecuteAsync(CodexDynamicToolPolicy.ListFilesTool,
+                JsonSerializer.SerializeToElement(new { path = Path.GetDirectoryName(destination) }), Ct)).Rule);
+            Assert.Equal(GrantRules.PathOutsideRoots, (await policy.ExecuteAsync(CodexDynamicToolPolicy.WriteTextTool,
+                JsonSerializer.SerializeToElement(new { path = destination, content = "overwrite" }), Ct)).Rule);
+
+            await File.WriteAllTextAsync(attachment, "replaced after options validation", Ct);
+            var copyRefusal = Assert.Throws<CliArgumentException>(() => RoleSpecMaterializer.CopyAttachmentsIntoRoom(
+                parsed.Attachments, parsed.RoomDirectoryPath, parsed.ReviewHandoffSha256));
+            Assert.Contains("review-handoff-invalid", copyRefusal.Message, StringComparison.Ordinal);
+            Assert.True(QueueLauncher.ClassifyReviewHandoffRefusal(new QueueLaunchOutcome(null, Error: copyRefusal.Message),
+                parsed.RoomDirectoryPath, parsed.ReviewHandoffSha256).ReviewHandoffInvalid);
+            foreach (var mutatingStage in new[] { WorkStage.Fix, WorkStage.Continue })
+            {
+                var mutatingOptions = QueueLauncher.BuildOptions(new QueueLaunchRequest(queued with { Stage = mutatingStage },
+                    new QueueTierResolution("standard", "codex", "fixture-model", "medium", false, null), parsed.RoomDirectoryPath));
+                Assert.Null(mutatingOptions.Attachments);
+                Assert.Null(mutatingOptions.ReviewHandoffSha256);
+            }
+
+            await File.WriteAllBytesAsync(
+                attachment, Enumerable.Repeat((byte)'y', QueueWorkerAccount.MaxBytes + 1).ToArray(), Ct);
+            var stagingRefusal = Assert.Throws<CliArgumentException>(() => QueueLauncher.BuildOptions(
+                new QueueLaunchRequest(
+                    queued, new QueueTierResolution("standard", "codex", "fixture-model", "medium", false, null),
+                    Path.Combine(home, "rooms", "review-room"))));
+            Assert.Contains("review-handoff-invalid", stagingRefusal.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("bad/child", 1, "safe recorded execution")]
+    [InlineData("execution-large", 65537, "larger than")]
+    [InlineData("execution-utf8", 1, "valid UTF-8")]
+    [InlineData("execution-ambiguous", 1, "unique current")]
+    [InlineData("execution-mismatch", 1, "unique current")]
+    [InlineData("execution-linked", 1, "unique current")]
+    [InlineData("execution-io", 1, "could not be inspected")]
+    [InlineData("execution-denied", 1, "could not be inspected")]
+    [InlineData("execution-link", 1, "linked")]
+    [InlineData("execution-missing", 1, "missing")]
+    [InlineData("execution-identity", 1, "bound to its recorded room")]
+    public async Task A_new_handoff_source_refusal_retains_the_settled_attempt_without_spending_a_round(
+        string execution, int byteCount, string expectedReason)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-account-invalid");
+            var bytes = execution == "execution-utf8" ? new byte[] { 0xff } : Enumerable.Repeat((byte)'x', byteCount).ToArray();
+            var sourcePath = Path.Combine(room, ArtifactManager.ArtifactsDirectoryName,
+                "execution_" + execution, "changes.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
+            await File.WriteAllBytesAsync(sourcePath, bytes, Ct);
+            await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(
+                WorkflowOutcome.Succeeded,
+                [new WorkflowStatusStepView("implement", "Succeeded", execution,
+                    LinkedFrom: execution == "execution-linked" ? "previous" : null)],
+                execution == "execution-ambiguous" ? [sourcePath, sourcePath]
+                    : execution == "execution-mismatch" ? [Path.Combine(room, "artifacts", "execution_other", "changes.md")]
+                    : [sourcePath], null), Ct);
+
+            var priorVerdict = Path.Combine(home, "prior-verdict.json");
+            await File.WriteAllTextAsync(priorVerdict, BlockingVerdict, Ct);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room, round: 1) with
+            {
+                LastVerdict = priorVerdict,
+            };
+            var attemptId = new FleetAttemptId("attempt-invalid-account");
+            var envelope = new QueueAttemptEnvelope(
+                AttemptId: attemptId,
+                ParentAttemptId: null,
+                WorkId: seeded.Tag,
+                Issue: seeded.Issue,
+                PullRequest: seeded.PullRequest,
+                Stage: WorkStage.Implement,
+                DeclaredRole: "implement",
+                Adapter: "codex",
+                Model: "fixture-model",
+                Effort: "medium",
+                EffectiveGrant: [],
+                RequestedRequirements: null,
+                MissingCapabilities: null,
+                AdmissionDecision: TaskRequirementAdmission.Admitted,
+                RoomDirectory: room,
+                RoomId: BatonPaths.RecordKey(room),
+                AttemptBaseRevision: MergeSha,
+                FactTimestamp: Now);
+            if (execution == "execution-identity") envelope = envelope with { RoomDirectory = room + "-other" };
+            if (execution == "execution-missing") FileCleanup.EnsureDeleted(sourcePath);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seeded with
+                {
+                    AttemptId = attemptId,
+                    AttemptEnvelope = envelope,
+                    AttemptAdmissionFactDurable = true,
+                    AttemptStartedFactDurable = true,
+                    AttemptSettledFactDurable = true,
+                }],
+            }, Ct);
+
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(PushedSha));
+            var inspections = 0;
+            advancer.SourceCrossesLink = path =>
+            {
+                inspections++;
+                if (path == sourcePath && execution == "execution-io") throw new IOException("fixture probe failed");
+                if (path == sourcePath && execution == "execution-denied") throw new UnauthorizedAccessException("fixture ACL denied");
+                return path == sourcePath && execution == "execution-link" || AttachmentReadInputs.CrossesLink(path);
+            };
+            var facts = await advancer.AdvanceAsync(Now, Ct);
+
+            var halted = await ReadBackAsync();
+            Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Failed, facts[0].Decision);
+            Assert.Equal(WorkStage.Implement, halted.Stage);
+            Assert.Equal(QueueItemState.Failed, halted.State);
+            Assert.True(halted.Halted);
+            Assert.Equal(1, halted.Round);
+            Assert.Equal(room, halted.RoomDirectory);
+            Assert.Equal(attemptId, halted.AttemptId);
+            Assert.Equal(priorVerdict, halted.LastVerdict);
+            Assert.Contains(expectedReason, halted.Error!, StringComparison.Ordinal);
+            Assert.False(halted.AutomaticFixUsed);
+            var firstInspections = inspections;
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(firstInspections, inspections);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task A_stage_less_dispatch_request_is_left_exactly_as_it_was()
     {
@@ -2852,11 +3167,38 @@ public sealed class WorkItemAdvancerTests
                 steps: [new WorkflowStatusStepView("implement", "Failed", "execution-continuation")]);
             var seeded = await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
             var sourceAttempt = new FleetAttemptId("attempt-valid-continuation");
+            var envelope = new QueueAttemptEnvelope(
+                AttemptId: sourceAttempt,
+                ParentAttemptId: null,
+                WorkId: seeded.Tag,
+                Issue: seeded.Issue,
+                PullRequest: seeded.PullRequest,
+                Stage: WorkStage.Implement,
+                DeclaredRole: "implement",
+                Adapter: "codex",
+                Model: "fixture-model",
+                Effort: "medium",
+                EffectiveGrant: [],
+                RequestedRequirements: null,
+                MissingCapabilities: null,
+                AdmissionDecision: TaskRequirementAdmission.Admitted,
+                RoomDirectory: room,
+                RoomId: BatonPaths.RecordKey(room),
+                AttemptBaseRevision: MergeSha,
+                FactTimestamp: Now);
             await QueueStore.MutateAsync(
                 BatonPaths.QueueFile,
                 snapshot => snapshot with
                 {
-                    Items = [seeded with { AttemptId = sourceAttempt, LaunchedAt = Now }],
+                    Items = [seeded with
+                    {
+                        AttemptId = sourceAttempt,
+                        AttemptEnvelope = envelope,
+                        AttemptAdmissionFactDurable = true,
+                        AttemptStartedFactDurable = true,
+                        AttemptSettledFactDurable = true,
+                        LaunchedAt = Now,
+                    }],
                 },
                 Ct);
             var obligations = NewObligationStore();

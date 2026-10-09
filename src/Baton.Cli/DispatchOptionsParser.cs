@@ -87,6 +87,7 @@ public static class DispatchOptionsParser
         string? memoryAddDispatch = null;
         string? memoryAddRepository = null;
         string? ownedTaskContext = null;
+        string? reviewHandoffSha256 = null;
         var attachments = new List<string>();
         var skills = new List<string>();
         var requirements = new List<string>();
@@ -145,6 +146,11 @@ public static class DispatchOptionsParser
                     break;
                 case "--attach":
                     attachments.Add(RequireValue(args, ref i, arg));
+                    break;
+                case "--review-handoff-sha256":
+                    reviewHandoffSha256 = RequireValue(args, ref i, arg);
+                    if (reviewHandoffSha256.Length != 64 || !reviewHandoffSha256.All(char.IsAsciiHexDigit))
+                        throw new CliArgumentException("review-handoff-invalid: expected a canonical SHA-256 digest.");
                     break;
                 case "--skill":
                     skills.Add(RequireValue(args, ref i, arg));
@@ -367,7 +373,8 @@ public static class DispatchOptionsParser
             memoryAddGrant,
             maxRepeatedToolSteps,
             enableAgyCorrection,
-            ownedTaskIdentity);
+            ownedTaskIdentity,
+            reviewHandoffSha256);
     }
 
     private static OwnedTaskExecutionIdentity? ParseOwnedTaskIdentity(string? encoded)

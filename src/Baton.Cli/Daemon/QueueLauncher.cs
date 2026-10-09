@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Artifacts;
 using Baton.Core;
 using Baton.Domain;
 using Baton.Outcomes;
@@ -39,7 +40,8 @@ public sealed record QueueLaunchRequest(QueueItem Item, QueueTierResolution Tier
 /// </param>
 /// <param name="Error">Why the launch failed, or null when it started.</param>
 /// <param name="Deferred">Whether the launch was deferred without failure (e.g. by an active worktree cleanup claim).</param>
-public sealed record QueueLaunchOutcome(string? RoomDirectory, bool RunwayHeld = false, string? Error = null, bool Deferred = false);
+public sealed record QueueLaunchOutcome(string? RoomDirectory, bool RunwayHeld = false, string? Error = null, bool Deferred = false,
+    bool ReviewHandoffInvalid = false);
 
 /// <summary>
 /// What re-adopting one <see cref="QueueItemState.Launched"/> row on daemon start found (#2082):
@@ -125,7 +127,9 @@ public static class QueueLauncher
         }
         catch (CliArgumentException ex)
         {
-            return new QueueLaunchOutcome(null, Error: ex.Message);
+            return new QueueLaunchOutcome(null, Error: ex.Message,
+                ReviewHandoffInvalid: item.Stage is WorkStage.Review or WorkStage.ReReview
+                    && item.SettledWorkerAccount is not null);
         }
 
         var (fileName, leadingArguments) = ResolveLaneCommand();
@@ -174,12 +178,14 @@ public static class QueueLauncher
             }
         }
 
-        return await ObserveLaunchedProcessAsync(process, item.Tag, roomDirectory, cancellationToken).ConfigureAwait(false);
+        return await ObserveLaunchedProcessAsync(process, item.Tag, roomDirectory, cancellationToken,
+            options.ReviewHandoffSha256).ConfigureAwait(false);
     }
 
     /// <summary>Observes the process the launcher just started until a real ledger or an exit settles its admission.</summary>
     internal static async Task<QueueLaunchOutcome> ObserveLaunchedProcessAsync(
-        Process process, string tag, string roomDirectory, CancellationToken cancellationToken)
+        Process process, string tag, string roomDirectory, CancellationToken cancellationToken,
+        string? reviewHandoffSha256 = null)
     {
         var relay = new LaneOutputRelay(tag, process);
 
@@ -205,8 +211,10 @@ public static class QueueLauncher
 
             // Program may have written terminal.json for a validation refusal. It did not run a
             // worker, so the exact-room admission row still decides hold versus ordinary failure.
-            return ClassifyPreProvisionExit(
+            var refusal = ClassifyPreProvisionExit(
                 exitCode, roomDirectory, await ReadAdmissionRowsAsync().ConfigureAwait(false), relay.StderrTail);
+            return ClassifyReviewHandoffRefusal(refusal, roomDirectory, reviewHandoffSha256,
+                await TerminalSentinelWriter.TryReadAsync(roomDirectory, cancellationToken).ConfigureAwait(false));
         }
 
         // Still running: settle it when it finishes, so a queue-launched room that faults after
@@ -215,6 +223,44 @@ public static class QueueLauncher
         _ = SuperviseAsync(process, tag, roomDirectory);
 
         return new QueueLaunchOutcome(roomDirectory);
+    }
+
+    internal static QueueLaunchOutcome ClassifyReviewHandoffRefusal(
+        QueueLaunchOutcome outcome, string roomDirectory, string? expectedDigest,
+        WorkflowStatusView? childRefusal = null)
+    {
+        // Protected invariant: an explicit child attachment refusal survives even when copying
+        // never created a destination. An unrelated pre-provision refusal is not handoff failure.
+        if (outcome.Error is not null && expectedDigest is not null
+            && childRefusal is { ReviewHandoffInvalid: true, State: WorkflowOutcome.Failed, Steps.Count: 0 })
+            return outcome with
+            {
+                ReviewHandoffInvalid = true,
+                Error = $"review-handoff-invalid: {childRefusal.Error}"
+            };
+        var destination = Path.Combine(roomDirectory, ArtifactManager.ArtifactsDirectoryName, "attachments", "changes.md");
+        if (outcome.Error is null || expectedDigest is null || !File.Exists(destination))
+            return outcome;
+        try
+        {
+            if (!AttachmentReadInputs.CrossesLink(destination)
+                && string.Equals(Convert.ToHexString(SHA256.HashData(QueueWorkerAccount.ReadAtMostMaxBytes(destination))),
+                    expectedDigest, StringComparison.OrdinalIgnoreCase))
+                return outcome;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return outcome with
+            {
+                ReviewHandoffInvalid = true,
+                Error = $"review-handoff-invalid: destination account could not be inspected: {ex.Message}"
+            };
+        }
+        return outcome with
+        {
+            ReviewHandoffInvalid = true,
+            Error = "review-handoff-invalid: destination account does not match retained bytes; no worker was started"
+        };
     }
 
     /// <summary>
@@ -663,6 +709,11 @@ public static class QueueLauncher
         {
             Add("--skill", skill);
         }
+        foreach (var attachment in options.Attachments ?? [])
+        {
+            Add("--attach", attachment);
+        }
+        Add("--review-handoff-sha256", options.ReviewHandoffSha256);
 
         return arguments;
 
@@ -1059,6 +1110,7 @@ public static class QueueLauncher
             DeclaredTaskSize: item.DeclaredTaskSize.Size == DeclaredTaskSize.Unknown
                 ? null
                 : item.DeclaredTaskSize,
+            Attachments: MaterializeSettledWorkerAccount(item),
             OriginatingPullRequest: followOn
                 && item.Repository is { Length: > 0 } repository
                 && item.PullRequest is { } pullRequest
@@ -1071,7 +1123,89 @@ public static class QueueLauncher
             // the advancer separately rechecks opt-in before admitting any create call.
             ExpectPr: UsesDaemonDraftPullRequestHandoff(item) ? false : null,
             MemoryAddGrant: item.MemoryAddGrant,
-            OwnedTaskIdentity: item.AttemptEnvelope?.OwnedTaskIdentity);
+            OwnedTaskIdentity: item.AttemptEnvelope?.OwnedTaskIdentity,
+            ReviewHandoffSha256: item.Stage is WorkStage.Review or WorkStage.ReReview
+                ? item.SettledWorkerAccount?.Sha256 : null);
+    }
+
+    private static IReadOnlyList<string>? MaterializeSettledWorkerAccount(QueueItem item)
+    {
+        try
+        {
+            return MaterializeSettledWorkerAccountCore(item);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new CliArgumentException($"review-handoff-invalid: retained attachment could not be inspected: {ex.Message}");
+        }
+    }
+
+    private static IReadOnlyList<string>? MaterializeSettledWorkerAccountCore(QueueItem item)
+    {
+        if (item.Stage is not (WorkStage.Review or WorkStage.ReReview)
+            || item.SettledWorkerAccount is not { } account)
+        {
+            return null;
+        }
+
+        if (!account.TryValidateFor(item.Repository, item.Workspace, out var reason))
+        {
+            throw new CliArgumentException($"review-handoff-invalid: {reason}; no worker was started");
+        }
+
+        var attachmentDirectory = Path.Combine(
+            BatonPaths.QueueSpecsDirectory, $"review-handoff-{account.Sha256}");
+        var attachmentPath = Path.Combine(attachmentDirectory, "changes.md");
+        if (AttachmentReadInputs.CrossesLink(BatonPaths.QueueSpecsDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentPath))
+        {
+            throw new CliArgumentException(
+                "review-handoff-invalid: the retained attachment staging path crosses a link; no worker was started");
+        }
+
+        Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        Directory.CreateDirectory(attachmentDirectory);
+        if (AttachmentReadInputs.CrossesLink(BatonPaths.QueueSpecsDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentDirectory)
+            || AttachmentReadInputs.CrossesLink(attachmentPath))
+        {
+            throw new CliArgumentException(
+                "review-handoff-invalid: the retained attachment staging path crosses a link; no worker was started");
+        }
+        if (File.Exists(attachmentPath))
+        {
+            byte[] existing;
+            try
+            {
+                existing = QueueWorkerAccount.ReadAtMostMaxBytes(attachmentPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new CliArgumentException(
+                    $"review-handoff-invalid: retained attachment staging file could not be read: {ex.Message}");
+            }
+
+            if (!existing.SequenceEqual(account.Bytes!))
+            {
+                throw new CliArgumentException(
+                    "review-handoff-invalid: materialized attachment bytes do not match the retained digest; no worker was started");
+            }
+        }
+        else
+        {
+            try
+            {
+                File.WriteAllBytes(attachmentPath, account.Bytes!);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new CliArgumentException(
+                    $"review-handoff-invalid: retained attachment could not be materialized: {ex.Message}");
+            }
+        }
+
+        return [attachmentPath];
     }
 
     private static bool UsesDaemonDraftPullRequestHandoff(QueueItem item) =>

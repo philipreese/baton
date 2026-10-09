@@ -10,6 +10,9 @@ namespace Baton.Cli;
 /// </summary>
 public sealed class CliArgumentException : BatonFlowException
 {
+    // Only attachment validation/copy bound to a retained lifecycle account may set this.
+    internal bool ReviewHandoffInvalid { get; init; }
+
     public CliArgumentException(string message)
         : base(message)
     {

@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using Baton.Domain;
+using Baton.Queue;
 using Baton.Vendors;
 
 namespace Baton.Cli;
@@ -40,9 +42,17 @@ internal static class RoleSpecMaterializer
         IReadOnlyList<string>? skills = null,
         bool attachDefaultSkills = true,
         int? maxRepeatedToolStepsOverride = null,
-        bool enableAgyCorrection = false)
+        bool enableAgyCorrection = false,
+        string? reviewHandoffSha256 = null)
     {
-        ValidateAttachments(attachments);
+        try
+        {
+            ValidateAttachments(attachments);
+        }
+        catch (CliArgumentException ex) when (reviewHandoffSha256 is not null)
+        {
+            throw ReviewHandoffRefusal(ex);
+        }
 
         // #1500: Spec/grant mismatch lint (WARN, never fail). The guarantee is asserted on
         // DispatchSpecLinter's own class doc and in docs/dispatch.md; this try/catch is what actually
@@ -92,8 +102,30 @@ internal static class RoleSpecMaterializer
     /// a narrower gap outside this issue's scope.
     /// </para>
     /// </summary>
-    public static void CopyAttachmentsIntoRoom(IReadOnlyList<string>? attachments, string roomDirectoryPath)
+    public static void CopyAttachmentsIntoRoom(
+        IReadOnlyList<string>? attachments, string roomDirectoryPath, string? reviewHandoffSha256 = null)
     {
+        try
+        {
+            CopyAttachmentsIntoRoomCore(attachments, roomDirectoryPath, reviewHandoffSha256);
+        }
+        catch (Exception ex) when (reviewHandoffSha256 is not null
+            && ex is CliArgumentException or IOException or UnauthorizedAccessException)
+        {
+            throw ReviewHandoffRefusal(ex);
+        }
+    }
+
+    private static CliArgumentException ReviewHandoffRefusal(Exception exception) =>
+        new($"review-handoff-invalid: retained account attachment refused before worker admission: {exception.Message}")
+        { ReviewHandoffInvalid = true };
+
+    private static void CopyAttachmentsIntoRoomCore(
+        IReadOnlyList<string>? attachments, string roomDirectoryPath, string? reviewHandoffSha256)
+    {
+        if (reviewHandoffSha256 is not null
+            && (attachments is not { Count: 1 } || Path.GetFileName(attachments[0]) != "changes.md"))
+            throw new CliArgumentException("review-handoff-invalid: the retained account must bind exactly one changes.md attachment.");
         if (attachments is not { Count: > 0 } attachmentsToCopy)
         {
             return;
@@ -120,6 +152,13 @@ internal static class RoleSpecMaterializer
             try
             {
                 File.Copy(attachPath, destPath, overwrite: true);
+                // Protected invariant: admission follows validation of the actual destination bytes,
+                // not an earlier read of replaceable staging input. Ordinary attachments are unchanged.
+                if (reviewHandoffSha256 is not null
+                    && !string.Equals(Convert.ToHexString(SHA256.HashData(
+                            QueueWorkerAccount.ReadAtMostMaxBytes(destPath))),
+                        reviewHandoffSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new CliArgumentException("review-handoff-invalid: destination account bytes do not match the retained digest; no worker was started.");
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

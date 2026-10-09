@@ -263,6 +263,98 @@ public sealed class QueuedReviewLaunchTests
         }
     }
 
+    [Theory]
+    [InlineData("retained", true)]
+    [InlineData("replacement", true)]
+    [InlineData("missing", true)]
+    [InlineData("copy-io", true)]
+    [InlineData("copy-access", true)]
+    [InlineData("unrelated", false)]
+    public async Task Corrupt_retained_review_handoff_halts_once_without_launching_or_spending_a_round(
+        string refusalCase, bool handoffInvalid)
+    {
+        var home = CreateHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = ReviewItem(home, "corrupt-handoff", WorkStage.Review) with
+            {
+                Round = 7,
+                AutomaticFixUsed = true,
+                SettledWorkerAccount = new QueueWorkerAccount(
+                    System.Text.Encoding.UTF8.GetBytes("corrupt"),
+                    refusalCase != "retained"
+                        ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("corrupt"))).ToLowerInvariant()
+                        : new string('0', 64),
+                    new FleetAttemptId("source-attempt"),
+                    "source-execution",
+                    "github.com/philipreese/baton",
+                    home),
+            };
+            File.WriteAllText(item.SpecFile, QueueBriefTemplates.Compose(item.Stage!.Value, item, new(
+                Do: item.Instructions!, PullRequest: item.PullRequest, HeadSha: OldHead, Round: item.Round)));
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                snapshot => snapshot with { Items = [item] }, Ct);
+
+            var launches = 0;
+            var materializations = 0;
+            var service = Service(home, new CurrentPullRequest(), async (request, _) =>
+            {
+                var options = QueueLauncher.BuildOptions(request);
+                materializations++;
+                var staging = Assert.Single(options.Attachments!);
+                if (refusalCase == "replacement") File.WriteAllText(staging, "replacement bytes after validation");
+                if (refusalCase is "missing" or "copy-io" or "copy-access") Baton.Tests.Shared.FileCleanup.EnsureDeleted(staging);
+                if (refusalCase == "copy-access") Directory.CreateDirectory(staging);
+                try
+                {
+                    if (refusalCase == "unrelated") throw new CliArgumentException("unrelated child refusal");
+                    if (refusalCase == "missing")
+                        RoleSpecMaterializer.Materialize(WorkerRoleCatalog.For("review"), "review", "codex",
+                            request.Item.Workspace, "fixture-model", "medium", null, null, options.Attachments,
+                            options.RoomDirectoryPath, null, null, null, null,
+                            reviewHandoffSha256: options.ReviewHandoffSha256);
+                    RoleSpecMaterializer.CopyAttachmentsIntoRoom(options.Attachments, options.RoomDirectoryPath, options.ReviewHandoffSha256);
+                }
+                catch (CliArgumentException ex)
+                {
+                    await TerminalSentinelWriter.TryWriteValidationRefusedAsync(options.RoomDirectoryPath,
+                        ex.Message, Ct, reviewHandoffInvalid: ex.ReviewHandoffInvalid);
+                    if (refusalCase is "missing" or "copy-io" or "copy-access" or "unrelated")
+                        Assert.False(File.Exists(Path.Combine(options.RoomDirectoryPath, "artifacts", "attachments", "changes.md")));
+                    return QueueLauncher.ClassifyReviewHandoffRefusal(
+                        new QueueLaunchOutcome(null, Error: ex.Message), options.RoomDirectoryPath, options.ReviewHandoffSha256,
+                        await TerminalSentinelWriter.TryReadAsync(options.RoomDirectoryPath, Ct));
+                }
+                launches++;
+                return new QueueLaunchOutcome(request.RoomDirectory);
+            });
+
+            await service.TickOnceAsync(Ct);
+            var halted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(0, launches);
+            Assert.Equal(handoffInvalid, halted.Halted);
+            Assert.Equal(QueueItemState.Failed, halted.State);
+            Assert.Equal(7, halted.Round);
+            Assert.True(halted.AutomaticFixUsed);
+            Assert.Equal(handoffInvalid, halted.Error!.Contains("review-handoff-invalid", StringComparison.Ordinal));
+
+            await service.TickOnceAsync(Ct);
+            Assert.Equal(0, launches);
+            Assert.Equal(refusalCase != "retained" ? 1 : 0, materializations);
+            var second = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(handoffInvalid, second.Halted);
+            Assert.Equal(halted.State, second.State);
+            Assert.Equal(halted.Round, second.Round);
+            Assert.Equal(halted.AutomaticFixUsed, second.AutomaticFixUsed);
+            Assert.Equal(halted.Error, second.Error);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task A_review_brief_write_failure_does_not_claim_or_launch_the_row()
     {

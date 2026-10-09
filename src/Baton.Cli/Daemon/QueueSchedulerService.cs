@@ -828,7 +828,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 // pointing at nothing rather than at a directory that does not exist.
                 await FailAsync(
                     item, error, outcome.RoomDirectory, now, recordedDecision, tier, CancellationToken.None,
-                    attemptId: attemptId)
+                    attemptId: attemptId, halt: outcome.ReviewHandoffInvalid)
                     .ConfigureAwait(false);
                 return interval;
             }
@@ -1035,7 +1035,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
         QueueTierResolution tier,
         CancellationToken cancellationToken,
         TaskRequirementAdmission? admission = null,
-        FleetAttemptId? attemptId = null)
+        FleetAttemptId? attemptId = null,
+        bool halt = false)
     {
         // RoomDirectory is assigned, never merged with what the item already carried: the pre-launch
         // mark writes the room the dispatch was GOING to use, and a refusal that never provisioned it
@@ -1060,6 +1061,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 {
                     State = QueueItemState.Failed,
                     Error = error,
+                    Halted = halt || existing.Halted,
                     RoomDirectory = room,
                     LastAdmission = admission ?? existing.LastAdmission,
                     AttemptId = attemptId ?? existing.AttemptId,

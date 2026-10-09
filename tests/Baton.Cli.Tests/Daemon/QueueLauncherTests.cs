@@ -33,6 +33,34 @@ public sealed class QueueLauncherTests : IDisposable
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    [Theory]
+    [InlineData(WorkStage.Fix)]
+    [InlineData(WorkStage.Continue)]
+    public void Historical_account_is_not_an_input_or_prerequisite_of_mutating_launches(WorkStage stage)
+    {
+        var item = new QueueItem
+        {
+            Tag = "history-only",
+            Role = "implement",
+            Workspace = Path.GetTempPath(),
+            SpecFile = "fixture.md",
+            Repository = "github.com/example/project",
+            Branch = "fixture-lane",
+            PullRequest = 77,
+            Stage = stage,
+            Round = 4,
+            AutomaticFixUsed = true,
+            SettledWorkerAccount = new QueueWorkerAccount([1], new string('0', 64),
+                new FleetAttemptId("old-attempt"), "old-execution", "github.com/example/project", Path.GetTempPath()),
+        };
+        var options = QueueLauncher.BuildOptions(new QueueLaunchRequest(item,
+            new QueueTierResolution("standard", "codex", "fixture-model", "medium", false, null), Path.GetTempPath()));
+        Assert.Null(options.Attachments);
+        Assert.Null(options.ReviewHandoffSha256);
+        Assert.Equal(4, item.Round);
+        Assert.True(item.AutomaticFixUsed);
+    }
+
     private static readonly IReadOnlyDictionary<string, IWorkerAdapter> NoOpAdapters =
         new Dictionary<string, IWorkerAdapter> { [NoOpWorkerAdapter.AdapterName] = new NoOpWorkerAdapter() };
 
@@ -47,6 +75,7 @@ public sealed class QueueLauncherTests : IDisposable
     [InlineData("held", true, false)]
     [InlineData("other-room", false, false)]
     [InlineData("ordinary-refusal", false, false)]
+    [InlineData("handoff-refusal", false, false)]
     [InlineData("started-failure", false, true)]
     [InlineData("started-success", false, true)]
     public async Task A_child_written_terminal_room_does_not_turn_a_runway_refusal_into_a_launch(
@@ -69,7 +98,8 @@ public sealed class QueueLauncherTests : IDisposable
             }
             else
             {
-                await TerminalSentinelWriter.WriteValidationRefusedAsync(staging, reason, Ct);
+                await TerminalSentinelWriter.WriteValidationRefusedAsync(staging, reason, Ct,
+                    reviewHandoffInvalid: caseName == "handoff-refusal");
             }
             var admission = caseName is "held" or "other-room"
                 ? new RunwayAdmissionEntry(
@@ -117,9 +147,10 @@ public sealed class QueueLauncherTests : IDisposable
                 await child.WaitForExitAsync(Ct);
             }
 
-            var outcome = await QueueLauncher.ObserveLaunchedProcessAsync(child, "refusal", room, Ct);
+            var outcome = await QueueLauncher.ObserveLaunchedProcessAsync(child, "refusal", room, Ct, new string('a', 64));
 
             Assert.Equal(expectedHold, outcome.RunwayHeld);
+            Assert.Equal(caseName == "handoff-refusal", outcome.ReviewHandoffInvalid);
             Assert.Equal(writeFlowLedger, outcome.RoomDirectory is not null);
             if (!expectedHold && !writeFlowLedger)
             {

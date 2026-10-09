@@ -331,11 +331,17 @@ public sealed class OwnedTaskJourneyTests
                 if (verdict is not null)
                     await File.WriteAllTextAsync(verdict,
                         $$"""{"reviewedRef":"{{head}}","completion":"complete","decision":"{{decision}}","findings":[]}""", Ct);
+                var accountPath = Path.Combine(launch.RoomDirectory, "artifacts", "execution_synthetic-execution", "changes.md");
+                if (verdict is null)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(accountPath)!);
+                    await File.WriteAllTextAsync(accountPath, "Settled mutating attempt account.", Ct);
+                }
                 await TerminalSentinelWriter.WriteAsync(launch.RoomDirectory,
                     new WorkflowStatusView(outcome,
                         [new WorkflowStatusStepView(launch.Item.Role,
                             outcome == WorkflowOutcome.Succeeded ? "Succeeded" : "Failed", "synthetic-execution")],
-                        verdict is null ? [] : [verdict], null), Ct);
+                        verdict is null ? [accountPath] : [verdict], null), Ct);
             }
 
             void AssertDispatchBinding(QueueLaunchRequest launch)

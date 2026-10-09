@@ -758,7 +758,8 @@ catch (BatonFlowException ex)
             // path must not replace it with a native crash merely because the best-effort
             // queryability sentinel cannot be written (#2387).
             await TerminalSentinelWriter.TryWriteValidationRefusedAsync(
-                roomDirectoryPathForFailureSentinel, ex.Message, CancellationToken.None, ex.TryInvocation).ConfigureAwait(false);
+                roomDirectoryPathForFailureSentinel, ex.Message, CancellationToken.None, ex.TryInvocation,
+                reviewHandoffInvalid: ex is CliArgumentException { ReviewHandoffInvalid: true }).ConfigureAwait(false);
         }
 
         return (int)RunExitCode.ValidationRefused;
