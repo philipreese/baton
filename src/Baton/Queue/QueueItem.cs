@@ -487,6 +487,56 @@ public sealed record QueueWorkerAccount(
 {
     public const int MaxBytes = 64 * 1024;
 
+    public static byte[] ReadAtMostMaxBytes(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+        var buffer = new byte[MaxBytes + 1];
+        var count = 0;
+        while (count < buffer.Length)
+        {
+            var read = stream.Read(buffer.AsSpan(count));
+            if (read == 0)
+            {
+                break;
+            }
+
+            count += read;
+        }
+
+        return count == buffer.Length ? buffer : buffer[..count];
+    }
+
+    public static bool TryValidateSourceMetadata(
+        FleetAttemptId sourceAttemptId,
+        string? sourceExecutionId,
+        string? sourceRepository,
+        string? sourceWorkspace,
+        out string reason)
+    {
+        if (sourceAttemptId.Value is not { Length: > 0 }
+            || sourceExecutionId is not { Length: > 0 }
+            || sourceRepository is not { Length: > 0 }
+            || sourceWorkspace is not { Length: > 0 })
+        {
+            reason = "source attempt, execution, repository or workspace metadata is missing";
+            return false;
+        }
+
+        if (sourceExecutionId.Contains(Path.DirectorySeparatorChar)
+            || sourceExecutionId.Contains(Path.AltDirectorySeparatorChar)
+            || sourceExecutionId.Contains(':')
+            || sourceExecutionId is "." or ".."
+            || sourceExecutionId.Contains("..", StringComparison.Ordinal))
+        {
+            reason = "retained step execution identity is not a safe recorded execution";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
     public bool HasValidDigest()
     {
         if (Bytes is null || Bytes.Length > MaxBytes || Sha256 is not { Length: 64 }
@@ -526,20 +576,16 @@ public sealed record QueueWorkerAccount(
             return false;
         }
 
+        if (!TryValidateSourceMetadata(
+                SourceAttemptId, SourceExecutionId, SourceRepository, SourceWorkspace, out reason))
+        {
+            return false;
+        }
+
         if (!string.Equals(SourceRepository, repository, StringComparison.Ordinal)
             || !string.Equals(SourceWorkspace, workspace, StringComparison.Ordinal))
         {
             reason = "retained repository/workspace identity does not match the queue item";
-            return false;
-        }
-
-        if (SourceExecutionId.Contains(Path.DirectorySeparatorChar)
-            || SourceExecutionId.Contains(Path.AltDirectorySeparatorChar)
-            || SourceExecutionId.Contains(':')
-            || SourceExecutionId is "." or ".."
-            || SourceExecutionId.Contains("..", StringComparison.Ordinal))
-        {
-            reason = "retained step execution identity is not a safe recorded execution";
             return false;
         }
 

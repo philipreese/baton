@@ -1116,7 +1116,7 @@ public static class QueueLauncher
             byte[] existing;
             try
             {
-                existing = File.ReadAllBytes(attachmentPath);
+                existing = QueueWorkerAccount.ReadAtMostMaxBytes(attachmentPath);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

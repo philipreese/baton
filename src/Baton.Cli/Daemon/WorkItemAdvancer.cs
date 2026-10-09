@@ -242,6 +242,13 @@ public sealed partial class WorkItemAdvancer
         }
 
         var executionId = candidates[0].Execution!;
+        if (!QueueWorkerAccount.TryValidateSourceMetadata(
+                attempt, executionId, repository, workspace, out var metadataReason))
+        {
+            reason = metadataReason;
+            return false;
+        }
+
         var sourcePath = Path.Combine(artifactsRoot, $"execution_{executionId}", "changes.md");
         var fullSourcePath = Path.GetFullPath(sourcePath);
         if (!PathWithin(artifactsRoot, fullSourcePath)
@@ -257,7 +264,7 @@ public sealed partial class WorkItemAdvancer
         byte[] bytes;
         try
         {
-            bytes = File.ReadAllBytes(fullSourcePath);
+            bytes = QueueWorkerAccount.ReadAtMostMaxBytes(fullSourcePath);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -893,7 +900,9 @@ public sealed partial class WorkItemAdvancer
             WorkerRoleCatalog.For(destinationRole), destinationSelection?.Requirements);
 
         QueueWorkerAccount? settledWorkerAccount = item.SettledWorkerAccount;
-        if (IsMutatingStage(from) && item.AttemptEnvelope is not null)
+        if (IsMutatingStage(from)
+            && next is (WorkStage.Review or WorkStage.ReReview)
+            && item.AttemptEnvelope is not null)
         {
             if (TryCaptureSettledWorkerAccount(item, from, room, sentinel, out var captured, out var captureReason))
             {

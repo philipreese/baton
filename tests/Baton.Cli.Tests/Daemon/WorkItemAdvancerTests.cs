@@ -2600,6 +2600,95 @@ public sealed class WorkItemAdvancerTests
             var attachment = Assert.Single(options.Attachments!);
             Assert.Equal(bytes, await File.ReadAllBytesAsync(attachment, Ct));
             Assert.Contains("--attach", QueueLauncher.BuildArguments(options));
+
+            await File.WriteAllBytesAsync(
+                attachment, Enumerable.Repeat((byte)'y', QueueWorkerAccount.MaxBytes + 1).ToArray(), Ct);
+            var stagingRefusal = Assert.Throws<CliArgumentException>(() => QueueLauncher.BuildOptions(
+                new QueueLaunchRequest(
+                    queued, new QueueTierResolution("standard", "codex", "fixture-model", "medium", false, null),
+                    Path.Combine(home, "rooms", "review-room"))));
+            Assert.Contains("review-handoff-invalid", stagingRefusal.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("bad/child", 1, "safe recorded execution")]
+    [InlineData("execution-large", 65537, "larger than")]
+    public async Task A_new_handoff_source_refusal_retains_the_settled_attempt_without_spending_a_round(
+        string execution, int byteCount, string expectedReason)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-account-invalid");
+            var bytes = Enumerable.Repeat((byte)'x', byteCount).ToArray();
+            var sourcePath = Path.Combine(room, ArtifactManager.ArtifactsDirectoryName,
+                "execution_" + execution, "changes.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
+            await File.WriteAllBytesAsync(sourcePath, bytes, Ct);
+            await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(
+                WorkflowOutcome.Succeeded,
+                [new WorkflowStatusStepView("implement", "Succeeded", execution)],
+                [sourcePath], null), Ct);
+
+            var priorVerdict = Path.Combine(home, "prior-verdict.json");
+            await File.WriteAllTextAsync(priorVerdict, BlockingVerdict, Ct);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room, round: 1) with
+            {
+                LastVerdict = priorVerdict,
+            };
+            var attemptId = new FleetAttemptId("attempt-invalid-account");
+            var envelope = new QueueAttemptEnvelope(
+                AttemptId: attemptId,
+                ParentAttemptId: null,
+                WorkId: seeded.Tag,
+                Issue: seeded.Issue,
+                PullRequest: seeded.PullRequest,
+                Stage: WorkStage.Implement,
+                DeclaredRole: "implement",
+                Adapter: "codex",
+                Model: "fixture-model",
+                Effort: "medium",
+                EffectiveGrant: [],
+                RequestedRequirements: null,
+                MissingCapabilities: null,
+                AdmissionDecision: TaskRequirementAdmission.Admitted,
+                RoomDirectory: room,
+                RoomId: BatonPaths.RecordKey(room),
+                AttemptBaseRevision: MergeSha,
+                FactTimestamp: Now);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seeded with
+                {
+                    AttemptId = attemptId,
+                    AttemptEnvelope = envelope,
+                    AttemptAdmissionFactDurable = true,
+                    AttemptStartedFactDurable = true,
+                    AttemptSettledFactDurable = true,
+                }],
+            }, Ct);
+
+            var facts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+
+            var halted = await ReadBackAsync();
+            Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Failed, facts[0].Decision);
+            Assert.Equal(WorkStage.Implement, halted.Stage);
+            Assert.Equal(QueueItemState.Failed, halted.State);
+            Assert.True(halted.Halted);
+            Assert.Equal(1, halted.Round);
+            Assert.Equal(room, halted.RoomDirectory);
+            Assert.Equal(attemptId, halted.AttemptId);
+            Assert.Equal(priorVerdict, halted.LastVerdict);
+            Assert.Contains(expectedReason, halted.Error!, StringComparison.Ordinal);
         }
         finally
         {
@@ -2934,11 +3023,38 @@ public sealed class WorkItemAdvancerTests
                 steps: [new WorkflowStatusStepView("implement", "Failed", "execution-continuation")]);
             var seeded = await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
             var sourceAttempt = new FleetAttemptId("attempt-valid-continuation");
+            var envelope = new QueueAttemptEnvelope(
+                AttemptId: sourceAttempt,
+                ParentAttemptId: null,
+                WorkId: seeded.Tag,
+                Issue: seeded.Issue,
+                PullRequest: seeded.PullRequest,
+                Stage: WorkStage.Implement,
+                DeclaredRole: "implement",
+                Adapter: "codex",
+                Model: "fixture-model",
+                Effort: "medium",
+                EffectiveGrant: [],
+                RequestedRequirements: null,
+                MissingCapabilities: null,
+                AdmissionDecision: TaskRequirementAdmission.Admitted,
+                RoomDirectory: room,
+                RoomId: BatonPaths.RecordKey(room),
+                AttemptBaseRevision: MergeSha,
+                FactTimestamp: Now);
             await QueueStore.MutateAsync(
                 BatonPaths.QueueFile,
                 snapshot => snapshot with
                 {
-                    Items = [seeded with { AttemptId = sourceAttempt, LaunchedAt = Now }],
+                    Items = [seeded with
+                    {
+                        AttemptId = sourceAttempt,
+                        AttemptEnvelope = envelope,
+                        AttemptAdmissionFactDurable = true,
+                        AttemptStartedFactDurable = true,
+                        AttemptSettledFactDurable = true,
+                        LaunchedAt = Now,
+                    }],
                 },
                 Ct);
             var obligations = NewObligationStore();
