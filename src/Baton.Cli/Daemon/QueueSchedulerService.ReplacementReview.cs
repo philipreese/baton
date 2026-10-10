@@ -8,7 +8,7 @@ namespace Baton.Cli.Daemon;
 
 public sealed partial class QueueSchedulerService
 {
-    private async Task<bool> ValidateReplacementReviewLaunchAsync(
+    private async Task<ConductorObligation?> ValidateReplacementReviewLaunchAsync(
         QueueItem selected, QueueReplacementReviewAction action, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
@@ -27,11 +27,11 @@ public sealed partial class QueueSchedulerService
             };
             if (action.Origin == QueueReplacementReviewOrigin.Automatic
                 && current.ReplacementReviewAction == promoted)
-                return false;
+                return null;
             if (action.Origin == QueueReplacementReviewOrigin.Automatic
                 && current.ReplacementReviewAction is { PausedReason: not null }
                 && !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(action.Repository))
-                return false;
+                return null;
             throw new ConductorObligationStoreException("The authorized queue identity changed.");
         }
         if (action.Origin == QueueReplacementReviewOrigin.Automatic
@@ -39,7 +39,7 @@ public sealed partial class QueueSchedulerService
         {
             await PauseReplacementReviewAsync(action, "automatic replacement review opt-in was revoked",
                 "Re-enable the repository opt-in to resume this unlaunched action.").ConfigureAwait(false);
-            return false;
+            return null;
         }
         var obligation = await _conductorObligations.ReadAsync(action.ObligationKey, cancellationToken)
             .ConfigureAwait(false);
@@ -67,7 +67,7 @@ public sealed partial class QueueSchedulerService
             throw new ConductorObligationStoreException("Source terminal evidence is unavailable.");
         await _advancer.ValidateReplacementReviewHeadAsync(current, action, cancellationToken)
             .ConfigureAwait(false);
-        return true;
+        return obligation;
     }
 
     private static Task PauseReplacementReviewAsync(
@@ -88,12 +88,13 @@ public sealed partial class QueueSchedulerService
                     : item).ToList(),
         }, CancellationToken.None);
 
-    private static Task BlockReplacementReviewAsync(string tag, string key, string reason, string trigger) =>
+    private static Task BlockReplacementReviewAsync(QueueReplacementReviewAction expected, string reason, string trigger) =>
         QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
         {
             Items = snapshot.Items.Select(item =>
-                item.Tag == tag && item.ReplacementReviewAction is { } action
-                    && action.ObligationKey == key && action.ReplacementAttemptId is null
+                item.Tag == expected.Tag && item.ReplacementReviewAction is { } action
+                    && action == expected && action.ReplacementAttemptId is null
+                    && item.LaunchMayHaveBegunAt is null
                     && item.State == QueueItemState.Queued
                     ? item with
                     {

@@ -859,7 +859,7 @@ public sealed partial class ConductorFollowDeliveryTests
         Assert.Equal(2, (await fixture.RowAsync("provenance")).Round);
     }
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private readonly IDisposable _scope;
         private readonly bool _ownsRoot;
@@ -958,12 +958,14 @@ public sealed partial class ConductorFollowDeliveryTests
             Func<TimeSpan, CancellationToken, Task>? delay = null,
             Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
                 string, CancellationToken, Task<RetainedStoppedWorkAdviceResponse>>? legacy = null,
-            Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>>? launch = null) => new(
+            Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>>? launch = null,
+            Func<CancellationToken, Task>? beforeLaunchClaim = null) => new(
             launch ?? ((_, _) => Task.FromResult(new QueueLaunchOutcome(null))),
             _ => Task.FromResult(0d),
             () => 16d,
             () => DateTimeOffset.UtcNow,
             advancer: advancer ?? Advancer(),
+            beforeLaunchClaim: beforeLaunchClaim,
             conductorObligations: Store,
             adopt: _ => Task.FromResult<IReadOnlyList<QueueLaneAdoption>>([]),
             loopDriver: new DaemonLoopDriver(delay: delay),
@@ -978,7 +980,8 @@ public sealed partial class ConductorFollowDeliveryTests
                 FollowRepositoryResolver = (_, _) => Task.FromResult<RepositoryIdentity?>(Identity),
             };
 
-        public WorkItemAdvancer Advancer() => new(Gh, (_, _) => Task.FromResult<string?>(Gh.HeadSha));
+        public WorkItemAdvancer Advancer(Func<string, CancellationToken, Task<string?>>? workspaceHead = null) =>
+            new(Gh, workspaceHead ?? ((_, _) => Task.FromResult<string?>(Gh.HeadSha)));
 
         public async Task<QueueItem> RowAsync(string tag) =>
             (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single(item => item.Tag == tag);
