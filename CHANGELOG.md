@@ -9,6 +9,14 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.72.0](https://github.com/philipreese/baton/compare/v0.71.0...v0.72.0) (2026-10-10)
+
+
+### Features
+
+* **glass:** Show recorded tasks beside the conductor ([#2684](https://github.com/philipreese/baton/issues/2684)) ([9572daf](https://github.com/philipreese/baton/commit/9572dafcb49e6f04ee1a3af0bc7127cc96dc6f28))
+* **queue:** Enable AGY correction for explicit lifecycle stages ([#2687](https://github.com/philipreese/baton/issues/2687)) ([68b5c5d](https://github.com/philipreese/baton/commit/68b5c5d450f75b63c379ba9196876937314b3c63))
+
 ## [0.71.0](https://github.com/philipreese/baton/compare/v0.70.0...v0.71.0) (2026-10-10)
 
 
