@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 SOLUTION = ROOT / "Baton.slnx"
 FLOW_ANCHOR = PurePosixPath("tests/Baton.Tests/Baton.Tests.csproj")
+OTHER_ANCHOR = PurePosixPath("tests/Baton.Cli.Tests/Baton.Cli.Tests.csproj")
 IDENTITY_PROPERTIES = ("IsTestProject", "IsTestingPlatformApplication")
 
 
@@ -85,9 +86,11 @@ def discover_shards(
 
     if FLOW_ANCHOR not in tests:
         raise ContractError(f"flow anchor is absent or not a test project: {FLOW_ANCHOR}")
+    if OTHER_ANCHOR not in tests:
+        raise ContractError(f"other anchor is absent or not a test project: {OTHER_ANCHOR}")
     shards = {
-        "flow": [FLOW_ANCHOR],
-        "other": [project for project in tests if project != FLOW_ANCHOR],
+        "flow": [project for project in tests if project != OTHER_ANCHOR],
+        "other": [OTHER_ANCHOR],
     }
     for name, projects in shards.items():
         if not projects:

@@ -16,6 +16,7 @@ from test_shards import ContractError, discover_shards, evaluated_identity, test
 
 ROOT = Path(__file__).resolve().parents[2]
 FLOW = PurePosixPath("tests/Baton.Tests/Baton.Tests.csproj")
+CLI = PurePosixPath("tests/Baton.Cli.Tests/Baton.Cli.Tests.csproj")
 FLOW_COMMAND = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py flow"
 OTHER_COMMAND = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py other"
 
@@ -43,7 +44,7 @@ def write_solution(root: Path, projects: list[str]) -> Path:
 def check_discovery() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        names = [str(FLOW), "tests/One.Tests/One.Tests.csproj", "tests/Two.Tests/Two.Tests.csproj", "tests/Three.Tests/Three.Tests.csproj", "tests/Four.Tests/Four.Tests.csproj", "tests/Helper/Helper.csproj"]
+        names = [str(FLOW), str(CLI), "tests/One.Tests/One.Tests.csproj", "tests/Two.Tests/Two.Tests.csproj", "tests/Three.Tests/Three.Tests.csproj", "tests/Four.Tests/Four.Tests.csproj", "tests/Helper/Helper.csproj"]
         solution = write_solution(root, names)
         identities = {name: (("false", "false") if "Helper" in name else ("true", "true")) for name in names}
         calls: list[str] = []
@@ -54,23 +55,40 @@ def check_discovery() -> None:
             return identities[relative]
 
         shards = discover_shards(solution, evaluate)
-        assert shards["flow"] == [FLOW]
-        assert shards["other"] == [PurePosixPath(name) for name in names[1:5]]
+        assert shards["flow"] == [FLOW, *[PurePosixPath(name) for name in names[2:6]]]
+        assert shards["other"] == [CLI]
         assert calls == names
         assert set(shards["flow"]).isdisjoint(shards["other"])
-        assert set(shards["flow"] + shards["other"]) == {PurePosixPath(name) for name in names[:5]}
+        assert set(shards["flow"] + shards["other"]) == {PurePosixPath(name) for name in names[:6]}
 
         new_name = "tests/New.Tests/New.Tests.csproj"
         identities[new_name] = ("true", "true")
         solution = write_solution(root, names + [new_name])
-        assert discover_shards(solution, evaluate)["other"][-1] == PurePosixPath(new_name)
+        assert discover_shards(solution, evaluate)["flow"][-1] == PurePosixPath(new_name)
 
         identities[str(FLOW)] = ("false", "false")
         refused(lambda: discover_shards(solution, evaluate), "flow anchor")
         identities[str(FLOW)] = ("true", "true")
-        for name in names[1:5] + [new_name]:
-            identities[name] = ("false", "false")
-        refused(lambda: discover_shards(solution, evaluate), "other shard is empty")
+        identities[str(CLI)] = ("false", "false")
+        refused(lambda: discover_shards(solution, evaluate), "other anchor")
+        identities[str(CLI)] = ("true", "true")
+        no_cli_solution = write_solution(root, [name for name in names if name != str(CLI)])
+        refused(
+            lambda: discover_shards(
+                no_cli_solution,
+                lambda project: identities.get(project.relative_to(root).as_posix(), ("false", "false")),
+            ),
+            "other anchor",
+        )
+        no_flow_solution = write_solution(root, [name for name in names if name != str(FLOW)])
+        refused(
+            lambda: discover_shards(
+                no_flow_solution,
+                lambda project: identities.get(project.relative_to(root).as_posix(), ("false", "false")),
+            ),
+            "flow anchor",
+        )
+        solution = write_solution(root, names + [new_name])
         identities[names[1]] = ("", "")
         refused(lambda: discover_shards(solution, evaluate), "ambiguous test identity")
         identities[names[1]] = ("true", "false")
@@ -94,8 +112,10 @@ def check_discovery() -> None:
         assert evaluated_identity(project) == ("true", "true")
 
     current = discover_shards(ROOT / "Baton.slnx")
-    assert current["flow"] == [FLOW]
-    assert len(current["other"]) == 4
+    assert FLOW in current["flow"]
+    assert current["other"] == [CLI]
+    assert set(current["flow"]).isdisjoint(current["other"])
+    assert len(current["flow"]) + len(current["other"]) == 5
     assert test_command(FLOW) == [
         sys.executable,
         str(ROOT / "tools/buildlock.py"),
