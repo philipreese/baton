@@ -36,6 +36,7 @@
     <ProjectReference Include="..\..\src\Baton.Vendors\Baton.Vendors.csproj" />
     <ProjectReference Include="..\..\src\Baton\Baton.csproj" />
     <ProjectReference Include="..\Baton.CrashTestHost\Baton.CrashTestHost.csproj" />
+    <ProjectReference Include="..\Baton.Compatibility068\Baton.Compatibility068.csproj" Aliases="old068" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

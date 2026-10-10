@@ -8147,7 +8147,7 @@ departed from. Nothing in the queue substitutes a model.
 
 `baton task submit --issue <n> --project <dir> --declared-size small|medium|large|unknown
 --size-rationale <why> [--spec <file>] [--scope engine|tooling|docs] [--adapter <name>] [--model <name>]
-[--effort <name>] [--reason <why>] [--stage implement|review|fix|re-review|continue]
+[--effort <name>] [--reason <why>] [--stage implement|review|fix|re-review|continue [--enable-agy-correction]]
 [--timeout <minutes>] [--max-tool-steps <n>] [--token-budget <n>]` is the
 ordinary project-work entry point. It accepts exactly one canonical remote repository and issue under
 an existing conductor claim and returns a stable `task-` ID. `unknown` is an explicit size declaration
@@ -8248,7 +8248,8 @@ fields are absent.
 
 **Task-local routing and brakes (#2620).** `--scope` remains global to the lifecycle. With no
 `--stage`, adapter/model/effort/reason flags select implement only. A stage marker sets the context
-for subsequent axes until the next marker; each explicit stage must contain an axis and has its own
+for subsequent axes until the next marker; each explicit stage must contain an axis or the transport
+declaration below and has its own
 reason rules. A reason requires a scope and an axis, and a scope plus an axis requires a nonblank
 reason. Reasons are never borrowed from another stage. Bare and named implement axes are merged
 before adapter inference; conflicting values and duplicate axes/reasons within a stage refuse. The
@@ -8265,6 +8266,39 @@ or dropping a stage, axis, reason, or brake conflicts during preparation as well
 Equivalent bare/named implement maps have one digest in this domain; an old-domain submission is
 never silently migrated. Existing reservation, frozen brief, permission/runway admission,
 one-fix/re-review bound, and readiness/advance rules remain the authority.
+
+#### Explicit stage transport and compatible-reader recovery (#2685)
+
+`task submit` and lifecycle `queue add` accept `--enable-agy-correction` only after an explicit
+`--stage implement|review|fix|re-review|continue`, once per named stage. Bare/global input,
+`--lifecycle-pin`, and single-dispatch queue input refuse. A transport-only stage needs no invented
+axis or rationale. The flag never chooses AGY implicitly: dispatch still checks the actual resolved
+adapter, Windows platform, fresh stream-json execution and absence of vendor-session resume through
+the existing §10 correction contract. A fresh lifecycle `continue` dispatch is not native resume.
+Omitted input preserves one-shot behavior and every previous submission digest preimage. Opted-in
+input uses `baton-task-stage-transport-input-v1`, covering all previous explicit fields, stable named
+stage declarations including transport and requirements, and brakes. Changing only transport conflicts
+with the accepted task, including during preparation; identical input returns retained evidence.
+Admission CAS compares retained transport declarations. The attempt envelope freezes transport before
+launch and supplies it on restart; a missing or contradictory corresponding declaration refuses.
+The opt-in changes no permission, deadline, cap, recipient, subsequent-turn allowance, replay/retry,
+receipt or settlement meaning; fallback clearing and §10's `outcomeUnknown` receipt rule still apply.
+
+At the existing `StageSelections` property seam, null and legacy arrays retain their representation.
+Transport-bearing history uses `{version:1,selections:[...]}` with unique valid dispatch stages and
+at least one retained true declaration. True declarations in legacy arrays, malformed objects and
+unsupported versions refuse through QueueStore's existing JSON refusal; false transport fields are
+omitted, including in envelopes. Exact unmodified v0.68.0
+(`5a6d5fdfa3dbdd6c926f60d37bc9c63948d3282a`) refuses this object as its typed-list input before
+mutation or launch. This claim does not cover arbitrary ancient readers. Advancement, completion,
+cancellation, retirement and unrelated writes preserve the fence while opted-in history remains.
+
+After the first opt-in, retained history requires a compatible reader even when the selected stage
+has completed or the row has retired. There is no supported clear/remove or cancellation-based
+downgrade. For recovery, stop queue/room writers, take an offline backup of the exact queue, rooms,
+outbox and ledgers, and recover using a compatible release with all those stores preserved. Never
+remove declarations or restore a stale queue snapshot as rollback. Source and isolated compatibility
+tests do not replace the later installed useful-task acceptance owned by the conductor.
 
 The existing daemon drives implement → PR → review → one allowed fix → re-review → ready without
 another operator prompt. Readiness requires the existing exact-current-head approval and passing

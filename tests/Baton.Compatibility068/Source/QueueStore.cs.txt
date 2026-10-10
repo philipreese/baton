@@ -1,7 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Baton.Accounting;
-using Baton.Conductor;
 using Baton.Status;
 
 namespace Baton.Queue;
@@ -87,10 +85,6 @@ public static class QueueStore
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
     private const string CleanupOperationLockDirectorySuffix = ".cleanup-operations";
 
-    // Test-only persistence seam; production always replaces the temporary sibling atomically.
-    internal static Action<string, string> MoveOverwriting { get; set; } =
-        (source, destination) => File.Move(source, destination, overwrite: true);
-
     internal static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
@@ -99,11 +93,10 @@ public static class QueueStore
 
     /// <summary>The queue as it stands. An absent file is <see cref="QueueSnapshot.Empty"/>.</summary>
     /// <exception cref="QueueStoreException">The file exists but is not readable as a queue.</exception>
-    public static Task<QueueSnapshot> LoadAsync(string path, CancellationToken cancellationToken = default,
-        TimeSpan? lockTimeout = null)
+    public static Task<QueueSnapshot> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
-        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, lockTimeout ?? LockTimeout, () => ReadUnlocked(path)), cancellationToken);
+        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path)), cancellationToken);
     }
 
     /// <summary>
@@ -131,51 +124,6 @@ public static class QueueStore
                 return updated;
             }),
             cancellationToken);
-    }
-
-    /// <summary>
-    /// Applies a short synchronous mutation under queue then claim locks. The current claim remains
-    /// locked through the durable queue replacement, so authority cutover cannot split validation
-    /// from persistence. The callback must perform no remote I/O or session-lock waits.
-    /// </summary>
-    public static Task<QueueSnapshot> MutateWithCurrentClaimAsync(
-        string path, RepositoryIdentity identity, string batonRoot,
-        Func<QueueSnapshot, ConductorClaimRecord?, QueueSnapshot> mutate,
-        CancellationToken cancellationToken = default, TimeSpan? lockTimeout = null)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(path);
-        ArgumentNullException.ThrowIfNull(identity);
-        ArgumentException.ThrowIfNullOrEmpty(batonRoot);
-        ArgumentNullException.ThrowIfNull(mutate);
-
-        EnsureParentDirectory(path);
-        return Task.Run(
-            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, lockTimeout ?? LockTimeout, () =>
-                ConductorClaimStore.WithCurrentClaim(identity, batonRoot, claim =>
-                {
-                    var updated = mutate(ReadUnlocked(path), claim);
-                    WriteUnlocked(path, updated);
-                    return updated;
-                }, lockTimeout)),
-            cancellationToken);
-    }
-
-    /// <summary>
-    /// Reads queue then claim under their admission locks without rewriting the queue. The short synchronous
-    /// callback may fence another local durable register, but must not perform remote I/O or wait on a session.
-    /// </summary>
-    public static Task<TResult> ReadWithCurrentClaimAsync<TResult>(
-        string path, RepositoryIdentity identity, string batonRoot,
-        Func<QueueSnapshot, ConductorClaimRecord?, TResult> read,
-        CancellationToken cancellationToken = default, TimeSpan? lockTimeout = null)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(path);
-        ArgumentNullException.ThrowIfNull(identity);
-        ArgumentException.ThrowIfNullOrEmpty(batonRoot);
-        ArgumentNullException.ThrowIfNull(read);
-        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, lockTimeout ?? LockTimeout,
-            () => ConductorClaimStore.WithCurrentClaim(identity, batonRoot,
-                claim => read(ReadUnlocked(path), claim), lockTimeout)), cancellationToken);
     }
 
     /// <summary>
@@ -534,7 +482,7 @@ public static class QueueStore
         {
             File.WriteAllText(tempPath, JsonSerializer.Serialize(snapshot, SerializerOptions));
             operation = "queue replacement";
-            MoveOverwriting(tempPath, path);
+            File.Move(tempPath, path, overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -564,8 +512,6 @@ public static class QueueStore
         // row, which the declaration's JSON converter cannot see while reading that property.
         foreach (var item in snapshot.Items)
         {
-            if (!QueueStageSelections.HasConsistentTransportDeclaration(item))
-                throw new JsonException($"Queue item '{item.Tag}' has a missing or contradictory retained AGY correction declaration.");
             if (item.DeclaredTaskSize is { Size: Baton.Domain.DeclaredTaskSize.Unknown, Rationale: not null }
                 && (item.OwnedTask is null || string.IsNullOrWhiteSpace(item.DeclaredTaskSize.Rationale)))
                 throw new JsonException($"Queue item '{item.Tag}' has an invalid explicit unknown task-size declaration.");

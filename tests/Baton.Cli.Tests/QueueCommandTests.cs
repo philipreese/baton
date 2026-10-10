@@ -4694,6 +4694,7 @@ public sealed class QueueCommandTests
     [Theory]
     [InlineData("field")]
     [InlineData("list")]
+    [InlineData("transport")]
     public async Task Explicit_merged_pr_retirement_refuses_envelope_drift_at_the_queue_CAS(string driftKind)
     {
         var home = CreateTempHome();
@@ -4713,9 +4714,15 @@ public sealed class QueueCommandTests
                     Items = state.Items.Select(item => item.Tag == tag
                         ? item with
                         {
-                            AttemptEnvelope = driftKind == "field"
-                                ? item.AttemptEnvelope! with { Model = "changed-model" }
-                                : item.AttemptEnvelope! with { EffectiveGrant = ["repository-read", "changed-grant"] },
+                            AttemptEnvelope = driftKind switch
+                            {
+                                "field" => item.AttemptEnvelope! with { Model = "changed-model" },
+                                "transport" => item.AttemptEnvelope! with { EnableAgyCorrection = true },
+                                _ => item.AttemptEnvelope! with { EffectiveGrant = ["repository-read", "changed-grant"] },
+                            },
+                            StageSelections = driftKind == "transport"
+                                ? [new QueueStageSelection { Stage = WorkStage.Continue, EnableAgyCorrection = true }]
+                                : item.StageSelections,
                         }
                         : item).ToList(),
                 }, Ct));

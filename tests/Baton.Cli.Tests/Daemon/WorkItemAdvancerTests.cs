@@ -1,3 +1,5 @@
+extern alias old068;
+
 using Baton.Cli;
 using Baton.Cli.Daemon;
 using Baton.Accounting;
@@ -894,8 +896,10 @@ public sealed class WorkItemAdvancerTests
         }
     }
 
-    [Fact]
-    public async Task A_succeeded_implement_lane_with_an_open_pr_is_queued_for_review()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_succeeded_implement_lane_with_an_open_pr_is_queued_for_review(bool enableAgyCorrection)
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -915,6 +919,11 @@ public sealed class WorkItemAdvancerTests
                 room,
                 stageSelections:
                 [
+                    new QueueStageSelection
+                    {
+                        Stage = WorkStage.Implement,
+                        EnableAgyCorrection = enableAgyCorrection,
+                    },
                     new QueueStageSelection
                     {
                         Stage = WorkStage.Review,
@@ -973,6 +982,18 @@ public sealed class WorkItemAdvancerTests
                 new QueueLaunchRequest(item, reviewTier, Path.Combine(home, "review-room")));
             Assert.Equal("agy", reviewOptions.Adapter);
             Assert.Equal("gemini-3.8-flash-high", reviewOptions.Model);
+            Assert.False(reviewOptions.EnableAgyCorrection);
+            Assert.Equal(enableAgyCorrection, item.StageSelections!.Single(selection => selection.Stage == WorkStage.Implement)
+                .EnableAgyCorrection);
+            if (enableAgyCorrection)
+            {
+                var bytes = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+                Assert.True(await old068::Baton.Compatibility068.IsolatedQueueProbe.ReadRefusedAsync(BatonPaths.QueueFile));
+                Assert.False(await old068::Baton.Compatibility068.IsolatedQueueProbe.MutateAndLaunchAsync(BatonPaths.QueueFile,
+                    () => throw new InvalidOperationException("old mutation entered"),
+                    () => throw new InvalidOperationException("old launch entered")));
+                Assert.Equal(bytes, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+            }
 
             var fact = Assert.Single(facts);
             Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);

@@ -141,7 +141,8 @@ public static class TaskCommand
         IReadOnlyList<QueueStageSelection>? stageSelections = null,
         int? timeoutMinutes = null, int? maxToolSteps = null, long? tokenBudget = null)
     {
-        if (stageSelections is not null || timeoutMinutes is not null || maxToolSteps is not null || tokenBudget is not null)
+        if (stageSelections is not null || timeoutMinutes is not null || maxToolSteps is not null || tokenBudget is not null
+            || selection?.EnableAgyCorrection == true)
         {
             return ComputeNewInputDigest(
                 repository, issue, size, specBytes, selection, scopeClass, reason, stageSelections,
@@ -201,6 +202,8 @@ public static class TaskCommand
 
     private const string StageAndCapsInputDomain = "baton-task-stage-caps-input-v1";
 
+    private const string TransportInputDomain = "baton-task-stage-transport-input-v1";
+
     private static readonly WorkStage[] DigestStages =
     [
         WorkStage.Implement,
@@ -245,6 +248,7 @@ public static class TaskCommand
                     Model = MergeDigestAxis(named.Model, selection.Model, "model"),
                     Effort = MergeDigestAxis(named.Effort, selection.Effort, "effort"),
                     Reason = MergeDigestAxis(named.Reason, selection.Reason, "reason"),
+                    EnableAgyCorrection = named.EnableAgyCorrection || selection.EnableAgyCorrection,
                 };
             }
             else
@@ -254,7 +258,8 @@ public static class TaskCommand
         }
 
         var buffer = new List<byte>();
-        AppendField(buffer, Encoding.UTF8.GetBytes(StageAndCapsInputDomain));
+        var hasTransport = stages.Values.Any(stage => stage.EnableAgyCorrection);
+        AppendField(buffer, Encoding.UTF8.GetBytes(hasTransport ? TransportInputDomain : StageAndCapsInputDomain));
         AppendField(buffer, Encoding.UTF8.GetBytes(repository));
         AppendInt32Field(buffer, issue);
         AppendField(buffer, Encoding.UTF8.GetBytes(size.Size.ToString()));
@@ -276,6 +281,19 @@ public static class TaskCommand
             AppendOptionalField(stageBuffer, value.Model is null ? null : Encoding.UTF8.GetBytes(value.Model));
             AppendOptionalField(stageBuffer, value.Effort is null ? null : Encoding.UTF8.GetBytes(value.Effort));
             AppendOptionalField(stageBuffer, value.Reason is null ? null : Encoding.UTF8.GetBytes(value.Reason));
+            if (hasTransport)
+            {
+                AppendField(stageBuffer, [value.EnableAgyCorrection ? (byte)1 : (byte)0]);
+                if (value.Requirements is null)
+                    AppendOptionalField(stageBuffer, null);
+                else
+                {
+                    var requirementsBuffer = new List<byte>();
+                    foreach (var requirement in value.Requirements)
+                        AppendField(requirementsBuffer, Encoding.UTF8.GetBytes(requirement));
+                    AppendOptionalField(stageBuffer, requirementsBuffer.ToArray());
+                }
+            }
             AppendOptionalField(buffer, stageBuffer.ToArray());
         }
 

@@ -16,11 +16,6 @@ public sealed record QueueStageSelection
 
     public string? Effort { get; init; }
 
-    // Opted-in transport never changes permissions, deadline, caps, recipient identity,
-    // retry/replay, or receipt/settlement semantics.
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public bool EnableAgyCorrection { get; init; }
-
     /// <summary>
     /// Explicit capabilities required by this stage in addition to the destination role's grant.
     /// Requirements belong to the stage selection so a completed stage's declaration cannot be
@@ -30,19 +25,6 @@ public sealed record QueueStageSelection
 
     /// <summary>Why this stage departs from its role/scope tier, when it does.</summary>
     public string? Reason { get; init; }
-}
-
-public static class QueueStageSelections
-{
-    public static bool EnablesAgyCorrection(QueueItem item, WorkStage? stage) =>
-        stage is not null && item.StageSelections?.SingleOrDefault(selection => selection?.Stage == stage)
-            ?.EnableAgyCorrection == true;
-
-    public static bool HasConsistentTransportDeclaration(QueueItem item) =>
-        (!(item.StageSelections?.Any(selection => selection is not null && selection.EnableAgyCorrection) == true)
-            || item.Stage is not null && !item.LifecyclePin)
-        && (item.AttemptEnvelope is not { } envelope
-            || envelope.EnableAgyCorrection == EnablesAgyCorrection(item, envelope.Stage));
 }
 
 /// <summary>

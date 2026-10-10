@@ -14,7 +14,7 @@ public static class QueueOptionsParser
 {
     public const string Usage =
         "Usage: baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) " +
-        "[--lifecycle [--stage implement|review|fix|re-review|continue] | --lifecycle-pin] " +
+        "[--lifecycle [--stage implement|review|fix|re-review|continue] [--enable-agy-correction (after explicit stage only)] | --lifecycle-pin] " +
         $"[--declared-size <{TaskSizeDeclaration.Usage}>] [--size-rationale <clause>] " +
         "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
@@ -310,6 +310,15 @@ public static class QueueOptionsParser
                     selectedStage = ParseStage(TakeValue(args, ref i, "--stage"));
                     stageSelections.TryAdd(selectedStage.Value, new QueueStageSelection { Stage = selectedStage.Value });
                     continue;
+                case "--enable-agy-correction":
+                    if (selectedStage is not { } transportStage)
+                        throw new CliArgumentException("'--enable-agy-correction' requires an explicit preceding '--stage'.");
+                    var transportSelection = stageSelections[transportStage];
+                    if (transportSelection.EnableAgyCorrection)
+                        throw new CliArgumentException("'--enable-agy-correction' may be supplied only once per stage.");
+                    stageSelections[transportStage] = transportSelection with { EnableAgyCorrection = true };
+                    i++;
+                    continue;
                 case "--override-runway":
                     overrideRunway = TakeValue(args, ref i, "--override-runway");
                     continue;
@@ -444,6 +453,7 @@ public static class QueueOptionsParser
                 stageSelections[WorkStage.Implement] = new QueueStageSelection
                 {
                     Stage = WorkStage.Implement,
+                    EnableAgyCorrection = existing?.EnableAgyCorrection == true,
                     Adapter = adapter,
                     Model = model,
                     Effort = effort,
@@ -542,7 +552,7 @@ public static class QueueOptionsParser
         foreach (var selection in normalizedStageSelections)
         {
             if (selection.Adapter is null && selection.Model is null && selection.Effort is null
-                && selection.Requirements is null)
+                && selection.Requirements is null && !selection.EnableAgyCorrection)
             {
                 throw new CliArgumentException(
                     $"'--stage {WorkStages.Token(selection.Stage)}' needs at least one of '--adapter', '--model' or '--effort'.");

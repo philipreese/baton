@@ -29,7 +29,7 @@ public static class TaskOptionsParser
         "baton task submit --issue <number> --project <repository-directory> "
         + "--declared-size <small|medium|large|unknown> --size-rationale <clause> [--spec <file>] "
         + "[--scope <engine|tooling|docs>] [--adapter <name>] [--model <name>] [--effort <name>] [--reason <why>] "
-        + "[--stage <implement|review|fix|re-review|continue>] [--timeout <minutes>] "
+        + "[--stage <implement|review|fix|re-review|continue>] [--enable-agy-correction (after explicit stage only)] [--timeout <minutes>] "
         + "[--max-tool-steps <n>] [--token-budget <n>]\n"
         + "       baton task status <task-id> [--json]";
 
@@ -59,6 +59,17 @@ public static class TaskOptionsParser
         for (var i = 1; i < args.Count; i++)
         {
             var flag = args[i];
+            if (flag == "--enable-agy-correction")
+            {
+                if (selectedStage is not { } transportStage)
+                    throw new CliArgumentException("'--enable-agy-correction' requires an explicit preceding '--stage'.");
+                var selection = stageSelections[transportStage];
+                if (selection.EnableAgyCorrection)
+                    throw new CliArgumentException("'--enable-agy-correction' may be supplied only once per stage.");
+                stageSelections[transportStage] = selection with { EnableAgyCorrection = true };
+                stageSectionHasInput = true;
+                continue;
+            }
             if (flag == "--stage")
             {
                 if (i + 1 == args.Count || string.IsNullOrWhiteSpace(args[i + 1]))
@@ -301,11 +312,11 @@ internal static class TaskSubmissionInput
         var seen = new HashSet<WorkStage>();
         foreach (var selection in selections)
         {
-            if (!seen.Add(selection.Stage) || WorkStages.IsTerminal(selection.Stage))
+            if (!Enum.IsDefined(selection.Stage) || !seen.Add(selection.Stage) || WorkStages.IsTerminal(selection.Stage))
                 throw new CliArgumentException($"Stage '{WorkStages.Token(selection.Stage)}' was selected more than once.");
 
             var hasAxis = selection.Adapter is not null || selection.Model is not null || selection.Effort is not null;
-            if (!hasAxis)
+            if (!hasAxis && !selection.EnableAgyCorrection)
                 throw new CliArgumentException(
                     $"'--stage {WorkStages.Token(selection.Stage)}' needs at least one of '--adapter', '--model' or '--effort'.");
             ValidateScopeAndReason(scopeClass, selection.Adapter, selection.Model, selection.Effort, selection.Reason);
