@@ -19,6 +19,10 @@ FLOW = PurePosixPath("tests/Baton.Tests/Baton.Tests.csproj")
 CLI = PurePosixPath("tests/Baton.Cli.Tests/Baton.Cli.Tests.csproj")
 FLOW_COMMAND = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py flow"
 OTHER_COMMAND = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py other"
+SHARD_JOB_BOUNDS = {
+    "windows-shard-flow": ("test-flow", 18),
+    "windows-shard-other": ("test-other", 34),
+}
 
 
 def refused(action, diagnostic: str) -> None:
@@ -28,6 +32,31 @@ def refused(action, diagnostic: str) -> None:
         assert diagnostic in str(error), error
         return
     raise AssertionError("invalid fixture was accepted")
+
+
+def refused_assertion(action) -> None:
+    try:
+        action()
+    except AssertionError:
+        return
+    raise AssertionError("invalid test-job timeout wiring was accepted")
+
+
+def check_shard_timeout_wiring(workflow: str) -> None:
+    test_job_source = workflow.split("  test:\n", 1)[1]
+    test_job = re.split(
+        r"\n  [A-Za-z0-9_-]+:\n",
+        test_job_source,
+        maxsplit=1,
+    )[0]
+    assert re.search(r"(?m)^    timeout-minutes: \$\{\{ matrix\.timeout-minutes \}\}$", test_job)
+    matrix = test_job.split("      matrix:\n", 1)[1].split("    runs-on:", 1)[0]
+    rows = re.findall(
+        r'name: "([^"]+)", task: "([^"]+)", timeout-minutes: (\d+)',
+        matrix,
+    )
+    expected = [(name, task, str(minutes)) for name, (task, minutes) in SHARD_JOB_BOUNDS.items()]
+    assert rows == expected
 
 
 def write_solution(root: Path, projects: list[str]) -> Path:
@@ -150,8 +179,23 @@ def check_pixi_and_workflow() -> None:
 
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     matrix = workflow.split("      matrix:\n", 1)[1].split("    runs-on:", 1)[0]
-    legs = re.findall(r'name: "([^"]+)", task: "([^"]+)"', matrix)
+    legs = re.findall(r'name: "([^"]+)", task: "([^"]+)", timeout-minutes: \d+', matrix)
     assert legs == [("windows-shard-flow", "test-flow"), ("windows-shard-other", "test-other")]
+    check_shard_timeout_wiring(workflow)
+    refused_assertion(
+        lambda: check_shard_timeout_wiring(
+            workflow.replace("    timeout-minutes: ${{ matrix.timeout-minutes }}\n", "", 1)
+        )
+    )
+    refused_assertion(
+        lambda: check_shard_timeout_wiring(
+            workflow.replace(
+                'task: "test-flow", timeout-minutes: 18',
+                'task: "test-flow", timeout-minutes: 34',
+                1,
+            )
+        )
+    )
     assert workflow.count("name: Snapshot ~/.baton before tests") == 1
     diagnostics = workflow.split("name: Report long-running test identities", 1)[1].split("- name:", 1)[0]
     assert "if: always()" in diagnostics
