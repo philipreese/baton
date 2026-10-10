@@ -70,7 +70,9 @@ internal sealed partial class ConductorFollowSession
                     {
                         AttachmentId = registration.Id,
                         State = !registration.Attached ? "detached" : state.Frozen ? "frozen" : "attached",
-                        Adapter = state.Adapter, Model = state.Model, Effort = state.Effort,
+                        Adapter = state.Adapter,
+                        Model = state.Model,
+                        Effort = state.Effort,
                         Permissions = "File reads only; no writes, shell, network, escalation, or merge authority.",
                         Diagnostic = state.Frozen ? "Session frozen; automatic launches refused." :
                             "Registration snapshot; not evidence of a running or healthy turn.",

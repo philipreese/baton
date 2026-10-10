@@ -804,7 +804,8 @@ internal sealed partial class ConductorFollowSession
     private static string ReadText(string path, int bound)
     {
         RejectLinks(path);
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        // Glass may read while a running turn atomically replaces its retained state.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
         if (stream.Length > bound) throw new IOException("Evidence exceeds its bound.");
         using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
         var text = reader.ReadToEnd();
