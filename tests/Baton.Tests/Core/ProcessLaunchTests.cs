@@ -233,9 +233,7 @@ public class ProcessLaunchTests
         Assert.True(SpinWait.SpinUntil(() => !job.IsTreeAlive(), TimeSpan.FromSeconds(5)));
         foreach (nint handle in handles) Assert.False(GetHandleInformation(handle, out _));
         // Must be a different thread: Monitor is reentrant and same-thread recovery is vacuous.
-        using Process recovered = (await Task.Run(() => ProcessLaunch.Start(ExitChild()))
-            // wait-ok: detects leaked launch exclusion, not an allowance for child work or scheduling throughput.
-            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))!;
+        using Process recovered = (await Task.Run(() => ProcessLaunch.Start(ExitChild())).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))!; // wait-ok: detects leaked launch exclusion, not child work duration.
         await BoundedProcessWait.WaitForExitAsync(recovered, TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.Equal("out", await recovered.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken));
         Assert.Equal("err", await recovered.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken));
