@@ -80,7 +80,7 @@ public static class WorkstreamJunctionLinker
             startInfo.ArgumentList.Add(linkPath);
             startInfo.ArgumentList.Add(fullRoomPath);
 
-            using var process = Process.Start(startInfo)
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
                 ?? throw new Win32Exception("could not start 'cmd.exe'");
             var stderrTask = process.StandardError.ReadToEndAsync();
             process.WaitForExit();

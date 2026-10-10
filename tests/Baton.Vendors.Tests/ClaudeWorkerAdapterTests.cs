@@ -1235,7 +1235,7 @@ public class ClaudeWorkerAdapterTests
             startInfo.Environment[name] = value;
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         process.StandardInput.Write(stdin);
         process.StandardInput.Close();
         var stderr = process.StandardError.ReadToEnd();

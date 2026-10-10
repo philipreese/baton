@@ -21,7 +21,7 @@ public class JobAssignmentRaceTests
     [Fact]
     public void Assigning_an_exited_process_to_a_job_fails_with_access_denied()
     {
-        using Process process = Process.Start(new ProcessStartInfo("cmd", "/c exit 0")
+        using Process process = global::Baton.Core.ProcessLaunch.Start(new ProcessStartInfo("cmd", "/c exit 0")
         {
             UseShellExecute = false,
             CreateNoWindow = true,

@@ -18,7 +18,7 @@ public static class ProcessIdentityFixture
     {
         var psi = new ProcessStartInfo("ping.exe", "-n 30 127.0.0.1") { CreateNoWindow = true };
 
-        using var process = Process.Start(psi)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(psi)!;
         try
         {
             return (process.Id, new DateTimeOffset(process.StartTime).ToUniversalTime());

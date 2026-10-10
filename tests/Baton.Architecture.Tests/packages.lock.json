@@ -48,6 +48,11 @@
           "xunit.v3.mtp-v2": "[4.0.0]"
         }
       },
+      "coverlet.collector": {
+        "type": "Transitive",
+        "resolved": "6.0.4",
+        "contentHash": "lkhqpF8Pu2Y7IiN7OntbsTtdbpR1syMsm2F3IgX6ootA4ffRqWL5jF7XipHuZQTdVuWG/gVAAcf8mjk8Tz0xPg=="
+      },
       "Microsoft.ApplicationInsights": {
         "type": "Transitive",
         "resolved": "2.23.0",
@@ -352,6 +357,11 @@
         "resolved": "10.0.0",
         "contentHash": "inRnbpCS0nwO/RuoZIAqxQUuyjaknOOnCEZB55KSMMjRhl0RQDttSmLSGsUJN3RQ3ocf5NDLFd2mOQViHqMK5w=="
       },
+      "Microsoft.Extensions.TimeProvider.Testing": {
+        "type": "Transitive",
+        "resolved": "10.8.0",
+        "contentHash": "xXcxGfXSO/8o7IfYK36r3eZTl9RMKAl5K6x3x6o/QQBolI0t8vsLIGmhc3HJBTd11u1uPLHz61VnOTSTmY7ZVA=="
+      },
       "Microsoft.Testing.Extensions.Telemetry": {
         "type": "Transitive",
         "resolved": "2.3.3",
@@ -487,24 +497,103 @@
       "baton": {
         "type": "Project",
         "dependencies": {
-          "Baton.Engine.RestoreGraphName": "[0.39.0, )",
-          "Baton.Vendors": "[0.39.0, )",
+          "Baton.Engine.RestoreGraphName": "[0.70.0, )",
+          "Baton.Vendors": "[0.70.0, )",
           "Microsoft.Extensions.Hosting": "[10.0.0, )"
+        }
+      },
+      "baton.cli.smoketests": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.Engine.RestoreGraphName": "[0.70.0, )",
+          "Baton.Vendors": "[0.70.0, )",
+          "Microsoft.NET.Test.Sdk": "[17.14.1, )",
+          "baton": "[0.70.0, )",
+          "coverlet.collector": "[6.0.4, )",
+          "xunit.runner.visualstudio": "[4.0.0, )",
+          "xunit.v3": "[4.0.0, )"
+        }
+      },
+      "baton.cli.tests": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.CrashTestHost": "[0.70.0, )",
+          "Baton.Engine.RestoreGraphName": "[0.70.0, )",
+          "Baton.Vendors": "[0.70.0, )",
+          "Microsoft.NET.Test.Sdk": "[17.14.1, )",
+          "Microsoft.Testing.Extensions.CodeCoverage": "[18.11.0, )",
+          "Microsoft.Testing.Extensions.TrxReport": "[2.4.0, )",
+          "baton": "[0.70.0, )",
+          "xunit.runner.visualstudio": "[4.0.0, )",
+          "xunit.v3": "[4.0.0, )"
+        }
+      },
+      "baton.crashtesthost": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.Engine.RestoreGraphName": "[0.70.0, )",
+          "baton": "[0.70.0, )"
         }
       },
       "Baton.Engine.RestoreGraphName": {
         "type": "Project"
       },
+      "baton.gateprobe": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.Vendors": "[0.70.0, )",
+          "baton": "[0.70.0, )"
+        }
+      },
+      "baton.tests": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.CrashTestHost": "[0.70.0, )",
+          "Baton.Engine.RestoreGraphName": "[0.70.0, )",
+          "Baton.Vendors": "[0.70.0, )",
+          "Microsoft.Extensions.TimeProvider.Testing": "[10.8.0, )",
+          "Microsoft.NET.Test.Sdk": "[17.14.1, )",
+          "Microsoft.Testing.Extensions.CodeCoverage": "[18.11.0, )",
+          "Microsoft.Testing.Extensions.TrxReport": "[2.4.0, )",
+          "baton": "[0.70.0, )",
+          "xunit.runner.visualstudio": "[4.0.0, )",
+          "xunit.v3": "[4.0.0, )"
+        }
+      },
       "baton.vendorprobe": {
         "type": "Project",
         "dependencies": {
-          "Baton.Vendors": "[0.39.0, )"
+          "Baton.Vendors": "[0.70.0, )"
+        }
+      },
+      "baton.vendorprobe.tests": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.VendorProbe": "[0.70.0, )",
+          "Microsoft.NET.Test.Sdk": "[17.14.1, )",
+          "Microsoft.Testing.Extensions.CodeCoverage": "[18.11.0, )",
+          "Microsoft.Testing.Extensions.TrxReport": "[2.4.0, )",
+          "xunit.runner.visualstudio": "[4.0.0, )",
+          "xunit.v3": "[4.0.0, )"
         }
       },
       "baton.vendors": {
         "type": "Project",
         "dependencies": {
-          "Baton.Engine.RestoreGraphName": "[0.39.0, )"
+          "Baton.Engine.RestoreGraphName": "[0.70.0, )"
+        }
+      },
+      "baton.vendors.tests": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.CrashTestHost": "[0.70.0, )",
+          "Baton.Vendors": "[0.70.0, )",
+          "Microsoft.NET.Test.Sdk": "[17.14.1, )",
+          "Microsoft.Testing.Extensions.CodeCoverage": "[18.11.0, )",
+          "Microsoft.Testing.Extensions.TrxReport": "[2.4.0, )",
+          "baton": "[0.70.0, )",
+          "xunit.runner.visualstudio": "[4.0.0, )",
+          "xunit.v3": "[4.0.0, )"
         }
       }
     }

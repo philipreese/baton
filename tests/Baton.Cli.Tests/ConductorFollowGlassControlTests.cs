@@ -690,7 +690,7 @@ public sealed partial class ConductorFollowDeliveryTests
         Directory.Move(directory, target);
         var start = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { "/c", "mklink", "/J", directory, target }) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
         await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(30), Ct);
         Assert.Equal(0, process.ExitCode);
         try

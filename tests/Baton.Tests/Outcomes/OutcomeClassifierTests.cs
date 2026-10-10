@@ -2160,7 +2160,7 @@ public class OutcomeClassifierTests
         {
             startInfo.ArgumentList.Add(arg);
         }
-        using var proc = System.Diagnostics.Process.Start(startInfo);
+        using var proc = global::Baton.Core.ProcessLaunch.Start(startInfo);
         proc?.WaitForExit();
     }
 

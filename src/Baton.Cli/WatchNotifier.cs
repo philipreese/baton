@@ -171,7 +171,7 @@ public sealed class WatchNotifier : IWatchNotifier
 
         psi.Environment[NotifyEventEnvironmentVariable] = json;
 
-        using var process = Process.Start(psi);
+        using var process = global::Baton.Core.ProcessLaunch.Start(psi);
         if (process is null)
         {
             Console.Error.WriteLine($"baton watch: failed to spawn notify command '{command}'.");

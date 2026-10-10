@@ -127,7 +127,7 @@ internal static class WorkspaceHead
         Process? process;
         try
         {
-            process = Process.Start(startInfo);
+            process = global::Baton.Core.ProcessLaunch.Start(startInfo);
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {

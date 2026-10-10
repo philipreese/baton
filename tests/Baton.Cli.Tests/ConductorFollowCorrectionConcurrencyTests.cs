@@ -207,7 +207,7 @@ public sealed partial class ConductorFollowDeliveryTests
         start.ArgumentList.Add("*Issue2666_Correction_process_fixture");
         start.Environment["BATON_CORRECTION_FIXTURE_ROOT"] = root;
         start.Environment["BATON_CORRECTION_FIXTURE_MODE"] = mode;
-        return Process.Start(start)!;
+        return global::Baton.Core.ProcessLaunch.Start(start)!;
     }
 
     [Fact]

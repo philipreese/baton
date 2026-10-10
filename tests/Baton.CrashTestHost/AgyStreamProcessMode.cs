@@ -97,7 +97,7 @@ public static class AgyStreamProcessMode
             var info = new ProcessStartInfo("dotnet") { UseShellExecute = false, CreateNoWindow = true };
             foreach (var arg in new[] { "exec", typeof(AgyStreamProcessMode).Assembly.Location, "agy-stream-fixture", "descendant", output, "none" })
                 info.ArgumentList.Add(arg);
-            using var descendant = Process.Start(info)!;
+            using var descendant = global::Baton.Core.ProcessLaunch.Start(info)!;
             using var readyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             while (!File.Exists(Path.Combine(output, "descendant.json")))
                 await Task.Delay(20, readyTimeout.Token); // wait-ok: bounded descendant rendezvous
@@ -213,7 +213,7 @@ public static class AgyStreamProcessMode
             StandardErrorEncoding = Encoding.UTF8
         };
         foreach (var argument in arguments) info.ArgumentList.Add(argument);
-        using var process = Process.Start(info)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(info)!;
         var (_, error) = await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(60));
         if (process.ExitCode != 0) throw new InvalidOperationException(error);
     }

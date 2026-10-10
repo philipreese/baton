@@ -176,7 +176,7 @@ internal sealed class ProcessAgyHookLivenessProbe : IAgyHookLivenessProbe
                 startInfo.Environment.Remove(name);
             }
 
-            using var process = Process.Start(startInfo);
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 return new AgyHookLivenessResult(false, "the hook process did not start");

@@ -874,7 +874,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo)
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start git — is it on PATH? These tests need git.");
         var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
             process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);

@@ -292,8 +292,8 @@ public sealed class ConductorCommandTests
 
             using var first = StartClaimProcess(workspace, batonRoot, "conductor-alpha");
             using var second = StartClaimProcess(workspace, batonRoot, "conductor-beta");
-            first.Start();
-            second.Start();
+            global::Baton.Core.ProcessLaunch.Start(first);
+            global::Baton.Core.ProcessLaunch.Start(second);
             var outputs = await Task.WhenAll(
                 BoundedProcessWait.RunToExitAsync(first, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken),
                 BoundedProcessWait.RunToExitAsync(second, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
@@ -362,7 +362,7 @@ public sealed class ConductorCommandTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo)
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start git — is it on PATH? These tests need git.");
         var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
             process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);

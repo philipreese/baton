@@ -1439,7 +1439,7 @@ public class AgyWorkerAdapterTests
             startInfo.Environment[name] = target.Environment!.First(e => e.Name == name).Value;
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         process.StandardInput.Write(stdin);
         process.StandardInput.Close();
         var stdout = process.StandardOutput.ReadToEnd();

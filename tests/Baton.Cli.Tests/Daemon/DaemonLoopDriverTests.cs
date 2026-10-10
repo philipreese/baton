@@ -22,7 +22,7 @@ public sealed class DaemonLoopDriverTests
         start.ArgumentList.Add(host);
         start.ArgumentList.Add("daemon-loop-threadpool-control");
 
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start control host.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(start) ?? throw new InvalidOperationException("Could not start control host.");
         // wait-ok: failure ceiling only; the isolated virtual-time control contains no production-cadence wait.
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
@@ -277,7 +277,7 @@ public sealed class DaemonLoopDriverTests
         start.ArgumentList.Add(host);
         start.ArgumentList.Add(mode);
 
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start control host.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(start) ?? throw new InvalidOperationException("Could not start control host.");
         // wait-ok: failure ceiling only; both controls synchronize by signals rather than elapsed wall time.
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);

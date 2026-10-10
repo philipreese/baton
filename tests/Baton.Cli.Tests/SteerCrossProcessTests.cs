@@ -54,7 +54,7 @@ public sealed class SteerCrossProcessTests
         start.ArgumentList.Add(typeof(Baton.CrashTestHost.Scenarios).Assembly.Location);
         foreach (var arg in new[] { "steering-reserve", room, gate, "message-1", payload })
             start.ArgumentList.Add(arg);
-        return Process.Start(start) ?? throw new InvalidOperationException("Could not start steering reservation probe.");
+        return global::Baton.Core.ProcessLaunch.Start(start) ?? throw new InvalidOperationException("Could not start steering reservation probe.");
     }
 
     private static async Task WaitReadyAsync(string gate, int count)

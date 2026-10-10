@@ -62,7 +62,7 @@ public sealed class GhCliRunner : IGhCliRunner
         Process process;
         try
         {
-            process = Process.Start(startInfo)
+            process = global::Baton.Core.ProcessLaunch.Start(startInfo)
                 ?? throw new InvalidOperationException("gh did not start.");
         }
         catch (Win32Exception)

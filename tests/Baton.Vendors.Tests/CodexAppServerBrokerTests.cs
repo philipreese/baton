@@ -817,7 +817,7 @@ public sealed class CodexAppServerBrokerTests
             startInfo.ArgumentList.Add("sleep 30");
         }
 
-        return Process.Start(startInfo)
+        return global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start the cleanup test process.");
     }
 

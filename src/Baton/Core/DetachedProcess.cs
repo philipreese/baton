@@ -107,7 +107,7 @@ public static class DetachedProcess
 
         StandardHandleInheritance.Disable();
 
-        return Process.Start(startInfo)
+        return global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new InvalidOperationException($"Failed to start '{startInfo.FileName}': the OS returned no process.");
     }
 

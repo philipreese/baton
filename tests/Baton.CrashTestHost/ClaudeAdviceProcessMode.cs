@@ -73,7 +73,7 @@ internal static class ClaudeAdviceProcessMode
         {
             var start = new ProcessStartInfo("ping.exe") { UseShellExecute = false, CreateNoWindow = true };
             foreach (var argument in new[] { "-n", "9999", "127.0.0.1" }) start.ArgumentList.Add(argument);
-            using var descendant = Process.Start(start)!;
+            using var descendant = global::Baton.Core.ProcessLaunch.Start(start)!;
             Console.Error.WriteLine("child-pid:" + descendant.Id);
             Console.Error.Flush();
         }

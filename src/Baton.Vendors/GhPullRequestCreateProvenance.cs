@@ -179,7 +179,7 @@ public static class GhPullRequestCreateProvenanceResolver
         try
         {
             using var timeout = new CancellationTokenSource(GitProbeTimeout);
-            using var process = Process.Start(startInfo);
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 return null;

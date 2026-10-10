@@ -716,7 +716,7 @@ public static class WorktreeProvisioner
             {
                 startInfo.ArgumentList.Add(argument);
             }
-            process = Process.Start(startInfo);
+            process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 return null;
@@ -1341,7 +1341,7 @@ public static class WorktreeProvisioner
         Process process;
         try
         {
-            process = Process.Start(startInfo)
+            process = global::Baton.Core.ProcessLaunch.Start(startInfo)
                 ?? throw new WorktreeProvisioningException("could not start 'git' — is it installed and on PATH?");
         }
         catch (Win32Exception ex)

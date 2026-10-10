@@ -131,7 +131,7 @@ public sealed class DispatchDeliveryBranchTests : IDisposable
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         var (_, stderr) = await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(30));
         Assert.True(process.ExitCode == 0, $"git {string.Join(' ', args)} failed: {stderr}");
     }

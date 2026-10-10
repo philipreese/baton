@@ -597,7 +597,7 @@ public static class IssueWorktreeProvisioner
         using var process = new Process { StartInfo = startInfo };
         try
         {
-            process.Start();
+            global::Baton.Core.ProcessLaunch.Start(process);
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
         {

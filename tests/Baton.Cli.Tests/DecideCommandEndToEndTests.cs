@@ -283,7 +283,7 @@ public class DecideCommandEndToEndTests
             startInfo.ArgumentList.Add("--bindings");
             startInfo.ArgumentList.Add(bindingsFilePath);
 
-            using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton decide'.");
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton decide'.");
             var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
                 process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 

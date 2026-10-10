@@ -155,7 +155,7 @@ public sealed class CancelCommandArrestTests : IDisposable
     {
         var roomDir = NewRoomDir();
         var psi = new ProcessStartInfo("ping.exe", "-t 127.0.0.1") { CreateNoWindow = true };
-        using var worker = Process.Start(psi)!;
+        using var worker = global::Baton.Core.ProcessLaunch.Start(psi)!;
         try
         {
             var workerStartUtc = worker.StartTime.ToUniversalTime();
@@ -194,7 +194,7 @@ public sealed class CancelCommandArrestTests : IDisposable
         Assert.Equal(WorkerKillOutcome.AlreadyExited, WorkerProcessArrest.Kill((uint)deadPid, deadStart).Outcome);
 
         var psi = new ProcessStartInfo("ping.exe", "-t 127.0.0.1") { CreateNoWindow = true };
-        using var bystander = Process.Start(psi)!;
+        using var bystander = global::Baton.Core.ProcessLaunch.Start(psi)!;
         try
         {
             var realStart = new DateTimeOffset(bystander.StartTime).ToUniversalTime();

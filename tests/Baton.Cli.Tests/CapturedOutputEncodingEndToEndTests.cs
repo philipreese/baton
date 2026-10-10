@@ -80,7 +80,7 @@ public class CapturedOutputEncodingEndToEndTests
     {
         try
         {
-            using var process = Process.Start(new ProcessStartInfo
+            using var process = global::Baton.Core.ProcessLaunch.Start(new ProcessStartInfo
             {
                 FileName = "python",
                 Arguments = "--version",

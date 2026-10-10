@@ -180,7 +180,7 @@ public class CrashRecoveredTimeoutMutationBaseTests
             RedirectStandardOutput = true,
             UseShellExecute = false,
         };
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
         var sha = process.StandardOutput.ReadToEnd().Trim();
         process.WaitForExit();
         return sha;
@@ -200,7 +200,7 @@ public class CrashRecoveredTimeoutMutationBaseTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
         process.WaitForExit();
         if (process.ExitCode != 0)
         {

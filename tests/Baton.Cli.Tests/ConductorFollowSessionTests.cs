@@ -279,7 +279,7 @@ public sealed class ConductorFollowSessionTests
             start.Environment["BATON_FOLLOW_FIXTURE_TAG"] = tag;
             start.Environment["BATON_INPUT_FOREIGN"] = Path.Combine(fixture.Root, "ambient-input.txt");
             start.Environment["BATON_OUTPUT_DIR"] = Path.Combine(fixture.Root, "ambient-output");
-            return Process.Start(start)!;
+            return global::Baton.Core.ProcessLaunch.Start(start)!;
         }).ToArray();
         try
         {

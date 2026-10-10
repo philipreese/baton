@@ -422,7 +422,7 @@ public sealed class OwnedTaskAccountingJourneyTests
             "--execution", before.Execution!, "--reject", "--reason", "Fixture output was absent." })
             start.ArgumentList.Add(argument);
         start.Environment[BatonPaths.HomeEnvironmentVariable] = Path.Combine(fixture.Root, "home");
-        using var process = Process.Start(start)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
         var (_, error) = await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(30), Ct);
         Assert.True(process.ExitCode is 0 or 1, error);
         var after = await CostLedgerStore.ReadAllAsync(fixture.Ledger, Ct);

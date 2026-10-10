@@ -99,8 +99,9 @@ test = { cmd = "python tools/buildlock.py dotnet build --no-incremental && pytho
 # shard instead invokes its member projects directly by `--project` -- there is no filter for a
 # zero-match assembly to hit, because every project actually named here has tests of its own.
 # tools/ci/test_shards.py evaluates every Baton.slnx project's MSBuild test identity once per
-# invocation, keeps Baton.Tests as the stable flow anchor, and assigns every other test to other.
-# Missing/ambiguous identity, a missing anchor, or an empty shard fails before any test starts.
+# invocation, keeps Baton.Tests in flow, and assigns Baton.Cli.Tests alone to other. New test
+# projects join flow automatically. Missing/ambiguous identity or either missing/non-test anchor
+# fails before any test starts; both direct project legs keep the nonzero test floor.
 test-flow = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py flow" }
 test-other = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py other" }
 # The gates-only test leg (#986): `gates` sequences this after `lint`, whose forced

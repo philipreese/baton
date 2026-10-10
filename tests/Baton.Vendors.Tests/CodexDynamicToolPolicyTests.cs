@@ -529,7 +529,7 @@ public sealed class CodexDynamicToolPolicyTests
         // A junction rather than a symbolic link: `mklink /J` needs no Developer Mode or elevation.
         // Same shape as VendorMemoryRootTests' reparse-point arm, including its host skip.
         var junction = Path.Combine(fixture.Workspace, "vendor");
-        var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+        var mklink = global::Baton.Core.ProcessLaunch.Start(new System.Diagnostics.ProcessStartInfo(
             "cmd.exe", $"/c mklink /J \"{junction}\" \"{target}\"")
         {
             RedirectStandardOutput = true,
@@ -3042,7 +3042,7 @@ public sealed class CodexDynamicToolPolicyTests
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = System.Diagnostics.Process.Start(startInfo)
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new IOException("Could not start git while preparing the synthetic diff fixture.");
         var stdout = process.StandardOutput.ReadToEnd();
         var stderr = process.StandardError.ReadToEnd();

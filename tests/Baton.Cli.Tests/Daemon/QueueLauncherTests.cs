@@ -139,7 +139,7 @@ public sealed class QueueLauncherTests : IDisposable
             start.Environment["BATON_FIXTURE_STARTED"] = writeFlowLedger ? "true" : "false";
             start.Environment["BATON_FIXTURE_SUCCESS"] = caseName == "started-success" ? "true" : "false";
             start.Environment["BATON_FIXTURE_REASON"] = reason;
-            using var child = Process.Start(start)!;
+            using var child = global::Baton.Core.ProcessLaunch.Start(start)!;
             if (writeFlowLedger)
             {
                 // The started controls exercise the already-exited branch, so no detached

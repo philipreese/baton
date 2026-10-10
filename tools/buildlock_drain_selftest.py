@@ -27,6 +27,23 @@ INDEPENDENT_TIMEOUT_S = 2.5
 MAIN_HOLD_TIMEOUT_S = DRIVER_TIMEOUT_S + INDEPENDENT_TIMEOUT_S + 0.5
 
 
+# These two Windows fixtures transfer the Popen-owned child handle to the observer while both
+# processes are live. Waiting on this exact handle cannot accidentally observe a reused PID.
+REGISTER_OWNED_CHILD = r'''
+import _winapi
+import os
+def register_owned_child(child, result_path):
+    observer = _winapi.OpenProcess(_winapi.PROCESS_DUP_HANDLE, False,
+                                  int(os.environ["BUILDLOCK_SELFTEST_OBSERVER_PID"]))
+    try:
+        handle = _winapi.DuplicateHandle(_winapi.GetCurrentProcess(), int(child._handle),
+                                        observer, _winapi.SYNCHRONIZE, False, 0)
+        pathlib.Path(result_path).with_suffix(".process.json").write_text(json.dumps({"handle": handle}))
+    finally:
+        _winapi.CloseHandle(observer)
+'''
+
+
 FIXTURE = r'''
 import os
 import subprocess
@@ -175,6 +192,7 @@ def _run_driver(
     root: Path,
     mode: str,
     timeout_s: float = DRIVER_TIMEOUT_S,
+    owned_child: bool = False,
 ) -> tuple[subprocess.CompletedProcess[bytes] | None, dict[str, Any] | None, float]:
     result = root / f"{mode}.result.json"
     receipt = root / f"{mode}.receipt.json"
@@ -189,32 +207,52 @@ def _run_driver(
         str(HOLDER_LIFETIME_S),
     ]
     started = time.monotonic()
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    env = dict(os.environ)
+    if owned_child:
+        env["BUILDLOCK_SELFTEST_OBSERVER_PID"] = str(os.getpid())
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    child_handle = None
     try:
-        stdout, stderr = process.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        # A timeout is still refusal, but its owned descendants must not retain fixture files.
-        # Kill only this Popen's tree before reaping it; never search for unrelated processes.
         try:
-            # The root can exit naturally while an inherited writer still holds our capture pipe.
-            # Its PID is no longer a safe kill target (it may be reused); bounded EOF is the only
-            # safe proof that inherited writers have closed in this state.
-            root_exited = process.poll() is not None
-            if os.name == "nt" and not root_exited:
-                cleanup = subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    capture_output=True, check=False, timeout=5,
-                )
-                # If it exited between poll and taskkill, do not treat the stale PID as a cleanup
-                # refusal. The communicate barrier below still has to establish EOF.
-                if cleanup.returncode != 0 and process.poll() is None:
-                    raise RuntimeError(f"driver tree cleanup failed: {cleanup.stderr!r}")
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=5)
-            process.communicate(timeout=5)
-        return None, None, time.monotonic() - started
+            stdout, stderr = process.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            # A timeout is still refusal, but its owned descendants must not retain fixture files.
+            # Kill only this Popen's tree before reaping it; never search for unrelated processes.
+            try:
+                # The root can exit naturally while an inherited writer still holds our capture
+                # pipe. Its PID is no longer a safe kill target (it may be reused); bounded EOF
+                # is the only safe proof that inherited writers have closed in this state.
+                root_exited = process.poll() is not None
+                if os.name == "nt" and not root_exited:
+                    cleanup = subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True, check=False, timeout=5,
+                    )
+                    # If it exited between poll and taskkill, do not treat the stale PID as a
+                    # cleanup refusal. The communicate barrier still has to establish EOF.
+                    if cleanup.returncode != 0 and process.poll() is None:
+                        raise RuntimeError(f"driver tree cleanup failed: {cleanup.stderr!r}")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+                process.communicate(timeout=5)
+                # EOF proves the writers closed, not that Windows finished releasing every
+                # resource of a terminated child (#2681). Keep both barriers before unlink.
+                if owned_child:
+                    import _winapi
+
+                    child_handle = _load_result(result.with_suffix(".process.json"))["handle"]
+                    if _winapi.WaitForSingleObject(child_handle, 5000) != _winapi.WAIT_OBJECT_0:
+                        raise RuntimeError("driver owned child did not terminate within 5s")
+            return None, None, time.monotonic() - started
+    finally:
+        if owned_child and child_handle is None and result.with_suffix(".process.json").is_file():
+            import _winapi
+
+            child_handle = _load_result(result.with_suffix(".process.json"))["handle"]
+        if child_handle is not None:
+            _winapi.CloseHandle(child_handle)
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     return completed, _load_result(result) if result.is_file() else None, time.monotonic() - started
 
@@ -327,18 +365,21 @@ def _check_driver_timeout_cleanup(module_path: Path, root: Path) -> list[str]:
         "time.sleep(30)\n"
     )
     driver.write_text(
-        "import subprocess,sys,time\n"
+        "import json,pathlib,subprocess,sys,time\n"
+        + REGISTER_OWNED_CHILD +
         f"child_code={child_code!r}\n"
-        "subprocess.Popen([sys.executable,'-c',child_code,"
+        "child=subprocess.Popen([sys.executable,'-c',child_code,"
         "sys.argv[4].replace('.json','.lock'),sys.argv[3]],"
-        # Deliberately inherit the wrapper's captured pipes: communicate() is the bounded EOF
-        # barrier that proves this file-owning descendant has closed before unlink is attempted.
+        # Inherit the captured pipes and separately register the exact child termination handle.
         "close_fds=True)\n"
+        "register_owned_child(child,sys.argv[3])\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
     started = time.monotonic()
-    completed, result, _ = _run_driver(driver, module_path, driver, root, "timeout-cleanup")
+    completed, result, _ = _run_driver(
+        driver, module_path, driver, root, "timeout-cleanup", owned_child=True
+    )
     if completed is not None or result is not None:
         return ["timeout-cleanup: forced driver timeout was not refused"]
     if not marker.is_file() or not _load_result(marker).get("file_owned"):
@@ -371,29 +412,37 @@ def _check_tree_cleanup_waits_for_descendant_eof(module_path: Path, root: Path) 
         "while not pathlib.Path(sys.argv[3]).exists() and time.monotonic()<deadline: time.sleep(.01)\n"
         "if not pathlib.Path(sys.argv[3]).exists(): raise SystemExit('cleanup marker unavailable')\n"
         "pathlib.Path(sys.argv[4]).write_text('observed')\n"
+        # Reproduce termination ordering: inherited pipes can close before the file handle.
+        "import os\n"
+        "os.close(1)\n"
+        "os.close(2)\n"
         "while not pathlib.Path(sys.argv[5]).exists() and time.monotonic()<deadline: time.sleep(.01)\n"
         "if not pathlib.Path(sys.argv[5]).exists(): raise SystemExit('release marker unavailable')\n"
         "handle.close()\n"
         "pathlib.Path(sys.argv[6]).write_text('closed')\n"
     )
     driver.write_text(
-        "import pathlib,subprocess,sys,time\n"
+        "import json,pathlib,subprocess,sys,time\n"
+        + REGISTER_OWNED_CHILD +
         f"child_code={child_code!r}\n"
         "result=pathlib.Path(sys.argv[3])\n"
         "base=result.parent\n"
-        "subprocess.Popen([sys.executable,'-c',child_code,"
+        "child=subprocess.Popen([sys.executable,'-c',child_code,"
         "str(pathlib.Path(sys.argv[4]).with_suffix('.lock')),str(result),"
         "str(base/'tree-cleanup.returned'),str(base/'tree-cleanup.observed'),"
         "str(base/'tree-cleanup.release'),str(base/'tree-cleanup.closed')],"
-        # Inherit only stdout/stderr: communicate() then proves child EOF after root reaping.
+        # Keep inherited stdout/stderr, then close them early to distinguish EOF from termination.
         "close_fds=True)\n"
+        "register_owned_child(child,result)\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
     real_run = subprocess.run
     failures: list[str] = []
+    release_timer: threading.Timer | None = None
 
     def return_before_descendant_exit(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        nonlocal release_timer
         if isinstance(args, (list, tuple)) and args and args[0] == "taskkill":
             cleanup_returned.write_text("returned", encoding="utf-8")
             deadline = time.monotonic() + 2
@@ -401,15 +450,18 @@ def _check_tree_cleanup_waits_for_descendant_eof(module_path: Path, root: Path) 
                 time.sleep(0.01)
             if not child_observed.exists():
                 raise RuntimeError("tree-cleanup: child did not observe cleanup return")
-            threading.Timer(
+            release_timer = threading.Timer(
                 1.5, lambda: release_child.write_text("release", encoding="utf-8")
-            ).start()
+            )
+            release_timer.start()
             return subprocess.CompletedProcess(args, 0, b"", b"")
         return real_run(args, **kwargs)
 
     try:
         with patch.object(subprocess, "run", side_effect=return_before_descendant_exit):
-            completed, result, _ = _run_driver(driver, module_path, driver, root, "tree-cleanup")
+            completed, result, _ = _run_driver(
+                driver, module_path, driver, root, "tree-cleanup", owned_child=True
+            )
         if completed is not None or result is not None:
             failures.append("tree-cleanup: refused driver was not reported as a timeout")
         if not child_closed.is_file():
@@ -419,6 +471,9 @@ def _check_tree_cleanup_waits_for_descendant_eof(module_path: Path, root: Path) 
         except OSError as error:
             failures.append(f"tree-cleanup: descendant file remained open after wrapper returned: {error}")
     finally:
+        if release_timer is not None:
+            release_timer.cancel()
+            release_timer.join(timeout=2)
         release_child.touch(exist_ok=True)
         deadline = time.monotonic() + 5
         while not child_closed.exists() and time.monotonic() < deadline:
@@ -448,6 +503,42 @@ def _check_root_exit_before_pipe_eof(module_path: Path, root: Path) -> list[str]
         return ["natural-root-exit: wrapper did not report its bounded timeout"]
     if not marker.is_file() or not child_closed.is_file():
         return ["natural-root-exit: root/descendant EOF barrier was not observed"]
+    return []
+
+
+def _check_owned_child_wait_failure(module_path: Path, root: Path) -> list[str]:
+    """A missing child termination signal stays loud and closes the transferred handle."""
+    if os.name != "nt":
+        return []
+    import _winapi
+
+    real_wait = _winapi.WaitForSingleObject
+    real_close = _winapi.CloseHandle
+    refused: list[int] = []
+    closed: list[int] = []
+    marker = root / "timeout-cleanup.result.process.json"
+
+    def refuse_owned_wait(handle: int, timeout_ms: int) -> int:
+        if marker.is_file() and handle == _load_result(marker)["handle"] and timeout_ms == 5000:
+            refused.append(handle)
+            return _winapi.WAIT_TIMEOUT
+        return real_wait(handle, timeout_ms)
+
+    def close_handle(handle: int) -> None:
+        closed.append(handle)
+        real_close(handle)
+
+    with patch.object(_winapi, "WaitForSingleObject", side_effect=refuse_owned_wait), \
+            patch.object(_winapi, "CloseHandle", side_effect=close_handle):
+        try:
+            _check_driver_timeout_cleanup(module_path, root)
+        except RuntimeError as error:
+            if str(error) != "driver owned child did not terminate within 5s":
+                return [f"owned-child-wait: unexpected refusal: {error}"]
+        else:
+            return ["owned-child-wait: missing termination signal was accepted"]
+    if len(refused) != 1 or refused[0] not in closed:
+        return ["owned-child-wait: transferred handle was not waited on and closed"]
     return []
 
 
@@ -508,6 +599,7 @@ def selftest(module_path: str | os.PathLike[str] | None = None) -> bool:
         failures += _check_driver_timeout_cleanup(production, root)
         failures += _check_tree_cleanup_waits_for_descendant_eof(production, root)
         failures += _check_root_exit_before_pipe_eof(production, root)
+        failures += _check_owned_child_wait_failure(production, root)
         failures += _check_driver_cleanup_failure_reaps_root(production, root)
     if failures:
         print("buildlock drain selftest: FAIL", file=sys.stderr)

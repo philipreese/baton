@@ -817,7 +817,7 @@ public static class CodexAppServerBroker
         {
             startInfo.Environment.Remove(name);
         }
-        return Process.Start(startInfo);
+        return global::Baton.Core.ProcessLaunch.Start(startInfo);
     }
 
     internal static IReadOnlyList<string> DisabledFeatures(bool allowsSubagents)

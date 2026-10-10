@@ -52,7 +52,7 @@ internal static class OriginatingPullRequestVerifier
             "pr", "view", number.ToString(), "--repo", repository, "--json",
             "state,headRefName,headRefOid,isCrossRepository",
         }) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new CliArgumentException("Could not start gh to verify '--originating-pr'.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(start) ?? throw new CliArgumentException("Could not start gh to verify '--originating-pr'.");
         using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         bound.CancelAfter(GhVerificationTimeout);
         using var killOnCancellation = bound.Token.Register(() =>
@@ -609,7 +609,7 @@ internal static class OriginatingPullRequestVerifier
         Process? process;
         try
         {
-            process = Process.Start(start);
+            process = global::Baton.Core.ProcessLaunch.Start(start);
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
         {

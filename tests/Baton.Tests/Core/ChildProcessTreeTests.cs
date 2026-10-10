@@ -102,7 +102,7 @@ public class ChildProcessTreeTests
         var helperPidPath = Path.Combine(testRoot, "helper.pid");
         try
         {
-            using var root = Process.Start(ChildProcessStartInfo.Create("powershell", startInfo =>
+            using var root = global::Baton.Core.ProcessLaunch.Start(ChildProcessStartInfo.Create("powershell", startInfo =>
             {
                 startInfo.ArgumentList.Add("-NoProfile");
                 startInfo.ArgumentList.Add("-NonInteractive");

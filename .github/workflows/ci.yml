@@ -87,17 +87,17 @@ jobs:
     # does not skip this job on push.
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.page-only != 'true' || needs.changes.outputs.dotnet != 'false') }}
     name: test (${{ matrix.name }})
-    timeout-minutes: 17
+    timeout-minutes: ${{ matrix.timeout-minutes }}
     strategy:
       fail-fast: false
       matrix:
         # Windows-only (#1405): one matrix, both events.
         #
-        # Sharding the long-pole Windows test leg (#1363): Flow suite vs remaining
-        # test projects cuts test duration from ~3:49 to ~1:55.
+        # Sharding the long-pole Windows test leg (#1363): Baton.Cli.Tests runs alone in `other`
+        # (#2680). Per-shard bounds follow complete-suite measurements under C-16 (#2682).
         include:
-          - { os: "windows-latest", name: "windows-shard-flow", task: "test-flow" }
-          - { os: "windows-latest", name: "windows-shard-other", task: "test-other" }
+          - { os: "windows-latest", name: "windows-shard-flow", task: "test-flow", timeout-minutes: 18 }
+          - { os: "windows-latest", name: "windows-shard-other", task: "test-other", timeout-minutes: 34 }
     runs-on: ${{ matrix.os }}
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
@@ -164,6 +164,10 @@ jobs:
 
       - name: Test
         run: pixi run ${{ matrix.task }}
+
+      - name: Report long-running test identities
+        if: always()
+        run: pixi run python tools/ci/print_long_running.py
 
       # Diagnostic for the #398 file-lock flake class. On a Windows test failure, capture whether
       # Defender real-time protection is actually on (PR #922 measured that windows-latest excludes

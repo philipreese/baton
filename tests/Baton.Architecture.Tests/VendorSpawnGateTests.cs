@@ -39,6 +39,7 @@ public class VendorSpawnGateTests
     /// </summary>
     private static readonly Dictionary<string, string> ApprovedSpawnSites = new()
     {
+        ["src/Baton/Core/ProcessLaunch.cs"] = "#2677: the shared managed launch exclusion. Callers retain their reviewed containment and vendor policy; this seam only prevents inheritance of another launch's transient handles.",
         ["src/Baton/Dispatch/CoreDispatcher.cs"] = "The gated dispatch path. Adapters build the gate into the target.",
         ["src/Baton/Core/ChildProcessStartInfo.cs"] = "The shared construction seam for every ProcessStartInfo Baton owns. It only constructs start information; every direct spawn remains separately enumerated here.",
         ["src/Baton/Core/Internal/BatonProcessRunner.cs"] = "The managed spawn primitive BatonTask.Run/RunAsync bottoms out into (#1474). Previously invisible to this scan -- the same spawn happened across the FFI boundary inside native/core's Rust Command::new -- now visible because the port is plain C#. Gating happens upstream: an adapter builds the PreToolUse gate into the CoreDispatchTarget before CoreDispatcher ever constructs a BatonTask, so this file spawns whatever CoreDispatcher hands it, already gated.",
@@ -76,8 +77,8 @@ public class VendorSpawnGateTests
     };
 
     private static readonly string[] SpawnMarkers =
-        ["new ProcessStartInfo", "ChildProcessStartInfo.Create", "ChildProcessTree.Start", "CreateProcessW", "Process.Start", "new BatonTask"];
-    private static readonly string[] DirectSpawnMarkers = ["Process.Start", ".Start()"];
+        ["new ProcessStartInfo", "ChildProcessStartInfo.Create", "ChildProcessTree.Start", "CreateProcessW", "Process.Start", "ProcessLaunch.Start", "new BatonTask"];
+    private static readonly string[] DirectSpawnMarkers = ["Process.Start", "ProcessLaunch.Start", ".Start()"];
     private const string SharedStartInfoFactoryCall = "ChildProcessStartInfo.Create";
 
     [Fact]
@@ -113,6 +114,7 @@ public class VendorSpawnGateTests
     {
         var root = RepoRoot();
         var bypasses = ApprovedSpawnSites.Keys
+            .Where(path => path != "src/Baton/Core/ProcessLaunch.cs")
             .Where(path =>
             {
                 var source = File.ReadAllText(Path.Combine(root, path));

@@ -90,6 +90,6 @@ public sealed class BoundedProcessWaitTests
         startInfo.ArgumentList.Add("-NonInteractive");
         startInfo.ArgumentList.Add("-Command");
         startInfo.ArgumentList.Add("Start-Sleep -Seconds 30");
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The sleeper process did not start.");
+        return global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("The sleeper process did not start.");
     }
 }
