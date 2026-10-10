@@ -37,7 +37,7 @@ internal sealed partial class ConductorFollowSession
             var claims = await ConductorClaimStore.ListHeldClaimsAsync(root, token, GlassLockTimeout).ConfigureAwait(false);
             foreach (var summary in claims.Take(100))
             {
-                token.ThrowIfCancellationRequested();
+                callerToken.ThrowIfCancellationRequested();
                 // Local common-directory identities contain absolute paths; never send those to Glass.
                 var identity = summary.Repository.StartsWith("gitdir:", StringComparison.Ordinal)
                     ? null : RepositoryIdentity.From("https://" + summary.Repository, null);
@@ -49,6 +49,11 @@ internal sealed partial class ConductorFollowSession
                 }
                 GlassConductorStatus status = new(identity.Value, SafeLabel(summary.Holder), null, null, "unavailable",
                     Diagnostic: "Claim or attachment is unreadable, stale, or mismatched.");
+                if (token.IsCancellationRequested)
+                {
+                    rows.Add(status with { Diagnostic = "Status inspection budget exhausted; refresh to inspect this conductor." });
+                    continue;
+                }
                 try
                 {
                     var claim = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
@@ -70,6 +75,7 @@ internal sealed partial class ConductorFollowSession
                     var state = Read<ConductorFollowState>(session.StatePath);
                     session.ValidateState(state);
                     var resumeEligible = false;
+                    string? resumeDiagnostic = null;
                     if (!registration.Attached && !state.Frozen)
                     {
                         try
@@ -81,6 +87,7 @@ internal sealed partial class ConductorFollowSession
                                     return true;
                                 }), token).ConfigureAwait(false);
                         }
+                        catch (RetainedInspectionBoundException ex) { resumeDiagnostic = ex.Message; }
                         catch (Exception ex) when (IsRefusal(ex)) { resumeEligible = false; }
                     }
                     var current = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
@@ -97,9 +104,13 @@ internal sealed partial class ConductorFollowSession
                         ResumeEligible = resumeEligible,
                         Permissions = "File reads only; no writes, shell, network, escalation, or merge authority.",
                         Diagnostic = state.Frozen ? "Session frozen; automatic launches refused." :
-                            !registration.Attached && !resumeEligible ? "Resume unavailable: session busy or retained delivery evidence could not be verified." :
+                            !registration.Attached && !resumeEligible ? resumeDiagnostic ?? "Resume unavailable: session busy or retained delivery evidence could not be verified." :
                             "Registration snapshot; not evidence of a running or healthy turn.",
                     };
+                }
+                catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+                {
+                    status = status with { State = "unavailable", Diagnostic = "Status inspection budget exhausted; refresh to inspect this conductor." };
                 }
                 catch (Exception ex) when (IsRefusal(ex))
                 {
@@ -112,7 +123,6 @@ internal sealed partial class ConductorFollowSession
         }
         catch (Exception ex) when (IsRefusal(ex) || ex is OperationCanceledException && !callerToken.IsCancellationRequested)
         {
-            rows.Clear();
             rows.Add(new("Conductor registry", null, null, null, "unavailable", Diagnostic: "Registry could not be verified."));
         }
         return new(DateTimeOffset.UtcNow, rows);

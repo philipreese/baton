@@ -205,7 +205,8 @@ public sealed partial class ConductorFollowDeliveryTests
             return await reader.ReadLineAsync(Ct).AsTask().WaitAsync(TimeSpan.FromMinutes(1), Ct) ?? "";
         }
 
-        public static async Task<GlassFixture> StartAsync(Fixture fixture)
+        public static async Task<GlassFixture> StartAsync(Fixture fixture,
+            Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
         {
             var probe = new TcpListener(IPAddress.Loopback, 0);
             probe.Start();
@@ -216,7 +217,7 @@ public sealed partial class ConductorFollowDeliveryTests
             {
                 Glass = new GlassListenerSettings { Listen = true, Port = port, OperatorLogin = "operator@example.test" },
             }, Path.Combine(fixture.Root, "fleet", "projection.json"), null, log,
-                conductorRoot: fixture.Root, conductorResolver: (_, _) => Task.FromResult<RepositoryIdentity?>(Identity));
+                conductorRoot: fixture.Root, conductorResolver: resolver ?? ((_, _) => Task.FromResult<RepositoryIdentity?>(Identity)));
             await service.StartAsync(Ct);
             await log.Started.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
             Assert.Contains($"http://127.0.0.1:{port}/", service.BoundPrefixes);
@@ -224,13 +225,16 @@ public sealed partial class ConductorFollowDeliveryTests
         }
 
         public async Task<JsonElement> StatusAsync()
+            => Assert.Single((await SnapshotAsync()).EnumerateArray()).Clone();
+
+        public async Task<JsonElement> SnapshotAsync()
         {
             var text = await client.GetStringAsync("conductors", Ct);
             Assert.DoesNotContain("initialInstructions", text);
             Assert.DoesNotContain("sessionDirectory", text);
             using var document = JsonDocument.Parse(text);
             Assert.True(document.RootElement.GetProperty("observedAt").TryGetDateTimeOffset(out _));
-            return Assert.Single(document.RootElement.GetProperty("conductors").EnumerateArray()).Clone();
+            return document.RootElement.GetProperty("conductors").Clone();
         }
 
         public async Task<HttpResponseMessage> DetachAsync(string body, string? login = "operator@example.test")

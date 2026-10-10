@@ -2,15 +2,178 @@ using System.Net;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Baton.Accounting;
 using Baton.Conductor;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Tests.Shared;
+using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
 
 public sealed partial class ConductorFollowDeliveryTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData("launch.json")]
+    [InlineData("response.json")]
+    [InlineData("receipt.txt")]
+    [InlineData("decision.json")]
+    [InlineData("partial-transcript.jsonl")]
+    [InlineData("broker-error.txt")]
+    [InlineData("output")]
+    [InlineData("journal")]
+    [InlineData("foreign-thread")]
+    [InlineData("source.json")]
+    public async Task Glass_resume_after_ordered_started_session_detach_accepts_only_complete_marker_free_refusal(string? corruption)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        await fixture.HaltAsync("completed");
+        await fixture.HaltAsync("refused", notify: false);
+        await fixture.Scheduler().ReconcileStoppedWorkAdviceAsync(Ct);
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var body = DetachBody(await glass.StatusAsync());
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delivery = fixture.FollowWithAdmissionAsync("refused", (_, _) => Task.CompletedTask, async token =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+        });
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+            var identity = JsonNode.Parse(File.ReadAllText(fixture.EventEvidencePath("refused", "identity.json")))!;
+            Assert.Equal("retained-thread", identity["sessionId"]!.GetValue<string>());
+            Assert.False(File.Exists(fixture.EventEvidencePath("refused", "launch.json")));
+            using var detach = await glass.DetachAsync(body);
+            Assert.Equal(HttpStatusCode.OK, detach.StatusCode);
+        }
+        finally { release.TrySetResult(); }
+        Assert.Equal("refused", (await delivery).Status);
+        var directory = Path.GetDirectoryName(fixture.EventEvidencePath("refused", "identity.json"))!;
+        Assert.Equal(new[] { "identity.json", "source.json" }, Directory.GetFileSystemEntries(directory).Select(Path.GetFileName).Order());
+        if (corruption == "output") Directory.CreateDirectory(Path.Combine(directory, "output"));
+        else if (corruption == "foreign-thread")
+        {
+            var path = Path.Combine(directory, "identity.json");
+            var identity = JsonNode.Parse(File.ReadAllText(path))!;
+            identity["sessionId"] = "foreign-thread";
+            File.WriteAllText(path, identity.ToJsonString());
+        }
+        else if (corruption == "journal")
+        {
+            var path = Path.Combine(SessionDirectory(fixture), "delivery.jsonl");
+            var entry = JsonNode.Parse(File.ReadAllLines(path).Single())!;
+            entry["obligationId"] = JsonNode.Parse(File.ReadAllText(Path.Combine(directory, "identity.json")))!["obligationId"]!.DeepClone();
+            File.AppendAllText(path, entry.ToJsonString() + "\n");
+        }
+        else if (corruption is not null) File.WriteAllText(Path.Combine(directory, corruption), "{}");
+        var evidence = RetainedBytes(fixture);
+        var registration = File.ReadAllBytes(fixture.RegistrationPath);
+        var status = await glass.StatusAsync();
+        Assert.Equal(corruption is null, status.GetProperty("resumeEligible").GetBoolean());
+        using var resume = await glass.ResumeAsync(body);
+        Assert.Equal(corruption is null ? HttpStatusCode.OK : HttpStatusCode.Conflict, resume.StatusCode);
+        if (corruption is not null) Assert.Equal(registration, File.ReadAllBytes(fixture.RegistrationPath));
+        AssertRetainedBytes(evidence);
+        Assert.Equal(evidence.Keys.Order(), RetainedBytes(fixture).Keys.Order());
+        Assert.Single(fixture.Calls);
+        var replay = await fixture.FollowAsync("completed");
+        Assert.Equal(corruption is null ? "replayed" : "uncertain", replay.GetProperty("status").GetString());
+        Assert.Equal(corruption is not null, JsonNode.Parse(File.ReadAllText(Path.Combine(SessionDirectory(fixture), "session.json")))!["frozen"]!.GetValue<bool>());
+        Assert.Single(fixture.Calls);
+        Assert.Equal(0, fixture.LegacyCalls);
+    }
+
+    [Fact]
+    public async Task Glass_resume_journal_count_bound_is_explicit_and_read_only()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        await fixture.HaltAsync("completed");
+        await fixture.CommandAsync("detach");
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var body = DetachBody(await glass.StatusAsync());
+        var path = Path.Combine(SessionDirectory(fixture), "delivery.jsonl");
+        var entry = JsonNode.Parse(File.ReadAllLines(path).Single())!;
+        for (var i = 0; i < 100; i++)
+        {
+            entry["obligationId"] = "additional-" + i;
+            File.AppendAllText(path, entry.ToJsonString() + "\n");
+        }
+        Assert.Equal(101, File.ReadAllLines(path).Length);
+        Assert.True(new FileInfo(path).Length < ConductorFollowSession.MaxResponseBytes);
+        var evidence = RetainedBytes(fixture);
+        var registration = File.ReadAllBytes(fixture.RegistrationPath);
+        var status = await glass.StatusAsync();
+        Assert.False(status.GetProperty("resumeEligible").GetBoolean());
+        Assert.Contains("100 journal entries", status.GetProperty("diagnostic").GetString());
+        using var response = await glass.ResumeAsync(body);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(registration, File.ReadAllBytes(fixture.RegistrationPath));
+        AssertRetainedBytes(evidence);
+        Assert.Single(fixture.Calls);
+    }
+
+    [Fact]
+    public async Task Glass_status_budget_keeps_completed_attached_control_and_marks_remaining_rows_unavailable()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        var identities = new Dictionary<string, RepositoryIdentity> { [fixture.Workspace] = Identity };
+        var blockers = new List<Task>();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            for (var i = 0; i < 7; i++)
+            {
+                var identity = RepositoryIdentity.From($"https://github.com/philipreese/zz-busy-{i}", null)!;
+                var workspace = Path.Combine(fixture.Root, "workspace-" + i);
+                Directory.CreateDirectory(workspace);
+                identities.Add(workspace, identity);
+                await ConductorClaimStore.ClaimAsync(identity, "holder", fixture.Root, cancellationToken: Ct);
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, fixture.CeilingPath);
+                var request = JsonNode.Parse(File.ReadAllText(Path.Combine(SessionDirectory(fixture), "request.json")))!;
+                request["repository"] = identity.Value;
+                request["workspace"] = workspace;
+                var requestPath = Path.Combine(fixture.Root, "request-" + i + ".json");
+                File.WriteAllText(requestPath, request.ToJsonString());
+                foreach (var attached in new[] { true, false })
+                    Assert.Equal(0, await ConductorFollowSession.SetAttachmentAsync(requestPath, attached, TextWriter.Null,
+                        fixture.Root, (_, _) => Task.FromResult<RepositoryIdentity?>(identity), Ct));
+                var registration = JsonNode.Parse(File.ReadAllText(Path.Combine(fixture.Root, "conductor-follow", identity.FileSlug, "registration.json")))!;
+                var statePath = Path.Combine(registration["sessionDirectory"]!.GetValue<string>(), "session.json");
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                blockers.Add(Task.Run(() => MutexGuardedFileLock.RunUnderLock(statePath, "baton-conductor-follow",
+                    TimeSpan.FromSeconds(1), () =>
+                    {
+                        entered.TrySetResult();
+                        release.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct).GetAwaiter().GetResult();
+                    }), Ct));
+                await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+            }
+            await using var glass = await GlassFixture.StartAsync(fixture,
+                (workspace, _) => Task.FromResult<RepositoryIdentity?>(identities[workspace]));
+            var timer = Stopwatch.StartNew();
+            var rows = (await glass.SnapshotAsync()).EnumerateArray().ToArray();
+            Assert.InRange(timer.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(7));
+            Assert.Equal(8, rows.Length);
+            var attachedRow = Assert.Single(rows, row => row.GetProperty("repository").GetString() == Repository);
+            Assert.Equal("attached", attachedRow.GetProperty("state").GetString());
+            Assert.NotNull(attachedRow.GetProperty("attachmentId").GetString());
+            Assert.Contains(rows, row => row.GetProperty("state").GetString() == "detached");
+            Assert.Contains(rows, row => row.GetProperty("state").GetString() == "unavailable"
+                && row.GetProperty("diagnostic").GetString()!.Contains("budget", StringComparison.Ordinal));
+            Assert.All(rows.Skip(1), row => Assert.False(row.GetProperty("resumeEligible").GetBoolean()));
+            using var detach = await glass.DetachAsync(DetachBody(attachedRow));
+            Assert.Equal(HttpStatusCode.OK, detach.StatusCode);
+            Assert.Empty(fixture.Calls);
+        }
+        finally { release.TrySetResult(); await Task.WhenAll(blockers); }
+    }
+
     [Fact]
     public async Task Glass_resume_never_started_preserves_null_thread_and_hold_and_allocates_one_cutover()
     {
@@ -386,8 +549,28 @@ public sealed partial class ConductorFollowDeliveryTests
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+            var admissionTimer = Stopwatch.StartNew();
             var resume = glass.ResumeAsync(body);
+            // Observe the real session lock from a different thread: CreateAsync's early claim
+            // read has completed, while the held queue lock prevents the final comparison.
+            await Task.Run(() =>
+            {
+                var timer = Stopwatch.StartNew();
+                while (true)
+                {
+                    try
+                    {
+                        MutexGuardedFileLock.RunUnderLock(Path.Combine(SessionDirectory(fixture), "session.json"),
+                            "baton-conductor-follow", TimeSpan.Zero, () => { });
+                    }
+                    catch (IOException) { return; }
+                    Assert.True(timer.Elapsed < TimeSpan.FromSeconds(1), "Resume never acquired the session lock.");
+                    Thread.Yield();
+                }
+            }, Ct);
             await ConductorClaimStore.TakeoverAsync(Identity, "replacement", "racing control", fixture.Root, cancellationToken: Ct);
+            // A queue-lock timeout must not masquerade as evidence of the final claim comparison.
+            Assert.InRange(admissionTimer.Elapsed, TimeSpan.Zero, TimeSpan.FromMilliseconds(750));
             release.TrySetResult();
             using var response = await resume.WaitAsync(TimeSpan.FromSeconds(4), Ct); // wait-ok: Verify bounded refusal after a concurrent claim change.
             Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);

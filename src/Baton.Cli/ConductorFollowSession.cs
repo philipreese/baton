@@ -231,7 +231,8 @@ internal sealed partial class ConductorFollowSession
     }
 
     internal async Task<ConductorFollowResult> DeliverAsync(string key, CancellationToken cancellationToken,
-        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission = null)
+        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission = null,
+        Func<CancellationToken, Task>? beforeLaunchAdmission = null)
     {
         try
         {
@@ -239,7 +240,7 @@ internal sealed partial class ConductorFollowSession
             // that same thread. Passing an async delegate to RunUnderLock would release too early.
             return await Task.Run(() => MutexGuardedFileLock.RunUnderLock(StatePath, LockPrefix,
                 TimeSpan.FromMinutes(6), () => _obligations.WithStoppedWorkDeliveryExclusiveAsync(key,
-                    () => DeliverUnderLockAsync(key, cancellationToken, requiredAdmission), cancellationToken).GetAwaiter().GetResult()),
+                    () => DeliverUnderLockAsync(key, cancellationToken, requiredAdmission, beforeLaunchAdmission), cancellationToken).GetAwaiter().GetResult()),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsRefusal(ex))
@@ -249,7 +250,8 @@ internal sealed partial class ConductorFollowSession
     }
 
     private async Task<ConductorFollowResult> DeliverUnderLockAsync(string key, CancellationToken cancellationToken,
-        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission)
+        Func<ConductorObligation, CancellationToken, Task>? requiredAdmission,
+        Func<CancellationToken, Task>? beforeLaunchAdmission)
     {
         ConductorObligation? obligation = null;
         ConductorFollowState? state = null;
@@ -355,6 +357,8 @@ internal sealed partial class ConductorFollowSession
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
             _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
+            if (beforeLaunchAdmission is not null)
+                await beforeLaunchAdmission(cancellationToken).ConfigureAwait(false);
             // Detach and launch admission serialize at the same cutover; a detached registration
             // must never acquire a later launch marker. A marker already committed is an issued turn.
             await Task.Run(() => MutexGuardedFileLock.RunUnderLock(Path.Combine(_root, "queue", "queue.json"),
@@ -496,13 +500,18 @@ internal sealed partial class ConductorFollowSession
     private void RecoverSession(ConductorFollowState state)
         => InspectRetainedSession(state, repair: true);
 
+    private sealed class RetainedInspectionBoundException(string message) : IOException(message);
+
     private void InspectRetainedSession(ConductorFollowState state, bool repair)
     {
         var timer = System.Diagnostics.Stopwatch.StartNew();
-        void CheckBound(int count)
+        void CheckBound(int count, string population)
         {
-            if (!repair && (count > 100 || timer.Elapsed > TimeSpan.FromSeconds(1)))
-                throw new IOException("Retained session inspection exceeds its bound.");
+            if (repair) return;
+            if (count > 100)
+                throw new RetainedInspectionBoundException($"Resume inspection exceeds 100 {population}; inspect and attach from the desktop CLI.");
+            if (timer.Elapsed > TimeSpan.FromSeconds(1))
+                throw new RetainedInspectionBoundException("Resume inspection exceeds the one-second time budget; inspect and attach from the desktop CLI.");
         }
         if (!repair)
             foreach (var path in Directory.EnumerateFileSystemEntries(_directory)) RejectLinks(path);
@@ -518,7 +527,7 @@ internal sealed partial class ConductorFollowSession
                 if (entry.SchemaVersion != SchemaVersion || string.IsNullOrWhiteSpace(entry.ObligationId)
                     || !journal.TryAdd(entry.ObligationId, entry))
                     throw new IOException("Invalid delivery journal.");
-                CheckBound(journal.Count);
+                CheckBound(journal.Count, "journal entries");
             }
         }
         var events = Path.Combine(_directory, "events");
@@ -534,7 +543,7 @@ internal sealed partial class ConductorFollowSession
         if (Directory.EnumerateFiles(events).Any()) throw new IOException("Malformed event directory.");
         foreach (var directory in Directory.EnumerateDirectories(events))
         {
-            CheckBound(retained.Count + 1);
+            CheckBound(retained.Count + 1, "retained events");
             RejectLinks(directory);
             if (!repair)
             {
@@ -544,7 +553,7 @@ internal sealed partial class ConductorFollowSession
                 while (pending.TryPop(out var parent))
                     foreach (var path in Directory.EnumerateFileSystemEntries(parent))
                     {
-                        CheckBound(++entries);
+                        CheckBound(++entries, "entries within one event");
                         RejectLinks(path);
                         if (Directory.Exists(path)) pending.Push(path);
                     }
@@ -562,14 +571,16 @@ internal sealed partial class ConductorFollowSession
             var decisionPath = Path.Combine(directory, "decision.json");
             var markerFree = !File.Exists(launchPath) && !File.Exists(responsePath)
                 && !journal.ContainsKey(identity.ObligationId);
-            if (!repair && (File.Exists(Path.Combine(directory, "partial-transcript.jsonl"))
+            // A pre-launch refusal is safe only when there is no possible launch/output evidence.
+            // This invariant applies to recovery as well as read-only eligibility.
+            if ((!repair && File.Exists(Path.Combine(directory, "partial-transcript.jsonl")))
                 || markerFree && Directory.EnumerateFileSystemEntries(directory)
-                    .Any(path => Path.GetFileName(path) is not ("identity.json" or "source.json"))))
+                    .Any(path => Path.GetFileName(path) is not ("identity.json" or "source.json")))
                 throw new IOException("Partial retained delivery evidence.");
             if (File.Exists(decisionPath) && !File.Exists(responsePath))
                 throw new IOException("Follow decision exists without a complete response.");
             ValidateRetainedSource(directory, identity, state);
-            if (markerFree && identity.SessionId is null) continue;
+            if (markerFree && (identity.SessionId is null || identity.SessionId == state.SessionId)) continue;
             if (identity.SessionId != state.SessionId) throw new IOException("Incomplete event identity.");
             var launch = Read<ConductorFollowLaunch>(launchPath);
             if (launch.SchemaVersion != SchemaVersion || launch.ObligationId != identity.ObligationId
@@ -590,7 +601,7 @@ internal sealed partial class ConductorFollowSession
             else throw new IOException("Missing retained delivery journal entry.");
         }
         if (journal.Keys.Any(id => !retained.Contains(id))) throw new IOException("Missing journal response.");
-        CheckBound(retained.Count);
+        CheckBound(retained.Count, "retained events");
     }
 
     private void ValidateRetainedDecision(string directory, ConductorFollowEventIdentity identity,
