@@ -326,6 +326,8 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
 .conductor-control article{border-top:1px solid var(--line);padding:.5rem 0}
 .conductor-control p{margin:.25rem 0}
 .conductor-control button{font:inherit;min-height:44px;padding:.5rem .8rem;max-width:100%;white-space:normal;cursor:pointer}
+.conductor-control label{display:block;margin:.5rem 0;overflow-wrap:anywhere}
+.conductor-control input{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:44px;font:inherit}
 .conductor-control .control-note{color:var(--ink-soft);font-size:.8125rem}
 </style>
 <main>
@@ -3280,7 +3282,7 @@ function createGlassWriteController(fetchImpl, applySnapshot, banner, renderQueu
 
 // >>> CONDUCTOR-CONTROL-BEGIN
 function conductorControlHtml(snapshot, message, busy, escape){
-  const states = {attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor stopped on uncertain delivery"};
+  const states = {attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor frozen on uncertain delivery",stopped:"Hosted acquisition stopped",released:"Claim released; retained history", "taken-over":"Ownership transferred; no replacement hosted session started"};
   let cards = "";
   if(snapshot){
     cards = snapshot.conductors.map((row, index) => {
@@ -3288,11 +3290,18 @@ function conductorControlHtml(snapshot, message, busy, escape){
       const resumable = row.state === "detached" && row.resumeEligible === true && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
       return `<article><strong>${escape(row.repository || "Unknown repository")}</strong>`
         + `<p>Owner: ${escape(row.holder || "Unknown")}</p><p>${escape(states[row.state] || states.unavailable)}</p>`
-        + (row.adapter ? `<p>${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
+        + (row.destinationAddress ? `<p>Owner address: ${escape(row.destinationAddress)}</p>` : "")
+        + (row.retainedHolder ? `<p>Retained session owner: ${escape(row.retainedHolder)}</p>` : "")
+        + (row.adapter ? `<p>${row.historicalProvider ? "Historical provider: " : "Provider: "}${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
         + `<p>Permissions: ${escape(typeof row.permissions === "string" ? row.permissions : "Unavailable")}</p>`
         + (row.diagnostic && ["unavailable","frozen","detached"].includes(row.state) ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
         + (detachable ? `<button type="button" data-conductor-detach="${index}"${busy ? " disabled" : ""}>Detach automatic delivery</button>` : "")
         + (resumable ? `<button type="button" data-conductor-resume="${index}"${busy ? " disabled" : ""}>Resume automatic delivery</button><p class="control-note">Future handoffs only. Work halted while detached is not replayed.</p>` : "")
+        + (row.stopEligible === true || row.takeoverEligible === true ? `<label>Control reason <input type="text" data-conductor-reason="${index}" maxlength="1024"${busy ? " disabled" : ""}></label>` : "")
+        + (row.stopEligible === true ? `<button type="button" data-conductor-stop="${index}"${busy ? " disabled" : ""}>Stop hosted conductor</button>` : "")
+        + (row.takeoverEligible === true ? `<label>Destination owner <input type="text" data-conductor-owner="${index}" maxlength="256"${busy ? " disabled" : ""}></label><label>Owner address (display text) <input type="text" data-conductor-address="${index}" maxlength="512"${busy ? " disabled" : ""}></label><button type="button" data-conductor-takeover="${index}"${busy ? " disabled" : ""}>Take Over</button>` : "")
+        + (Array.isArray(row.controls) ? row.controls.map(result => `<p class="control-note">${escape(result.receipt?.operation || "Control")} applied · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("") : "")
+        + (Array.isArray(row.actions) ? row.actions.map(action => `<p class="control-note">Action ${escape(action.tag)}: ${escape(action.state)}. Owner: ${escape(action.holder || "unknown")}. ${escape(action.reason || "")} ${escape(action.nextTrigger || "")}</p>`).join("") : "")
         + `</article>`;
     }).join("");
     if(!snapshot.conductors.length) cards = "<p>No conductor ownership records were returned.</p>";
@@ -3301,13 +3310,18 @@ function conductorControlHtml(snapshot, message, busy, escape){
     + (snapshot ? `<p class="control-note">Checked ${escape(new Date(snapshot.observedAt).toLocaleString())}. Refresh for changes.</p>` : "")
     + `<p role="status" aria-live="polite">${escape(message)}</p>${cards}`
     + `<button type="button" data-conductor-refresh${busy ? " disabled" : ""}>Refresh conductor</button>`
-    + `<p class="control-note">Detach blocks new handoffs, not work already in flight. Steering, stop and takeover are not available here yet.</p>`;
+    + `<p class="control-note">Stop is terminal for this acquisition. Take Over transfers ownership only. Issued work may finish. Steering is not available here yet.</p>`;
 }
 
-function createConductorControl(fetchImpl, renderPanel, confirmAction){
+function createConductorControl(fetchImpl, renderPanel, confirmAction, newRequestId = () => globalThis.crypto.randomUUID()){
   let snapshot = null;
   let busy = false;
   let message = "Loading conductor settings…";
+  let pendingControl = null;
+  const sameIdentity = (a,b) => ["repository","holder","claimGeneration","attachmentId"].every(key => a?.[key] === b?.[key]);
+  const exactReceipt = result => result?.receipt?.operation === pendingControl?.operation
+    && ["repository","holder","claimGeneration","attachmentId","requestId","reason","destinationHolder","destinationAddress"]
+      .every(key => (result.receipt.request?.[key] ?? null) === (pendingControl.body[key] ?? null));
   const draw = () => renderPanel(snapshot, message, busy);
   const request = async (path, options) => {
     const controller = new AbortController();
@@ -3327,22 +3341,46 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction){
   const refresh = async () => {
     if(busy) return;
     busy = true; draw();
-    try { await read(); message = ""; }
+    try {
+      await read(); message = "";
+      if(pendingControl){
+        const found = snapshot.conductors.flatMap(row => row.controls || []).find(exactReceipt);
+        message = found ? `Exact ${pendingControl.operation} receipt found: authority revocation applied; cleanup ${found.cleanup}.`
+          : `No exact receipt for request ${pendingControl.body.requestId} in this snapshot; outcome remains unknown. Do not infer failure or repeat automatically.`;
+      }
+    }
     catch { snapshot = null; message = "Cannot read conductor settings. No controls are available until a fresh read succeeds."; }
     finally { busy = false; draw(); }
   };
-  const changeDelivery = async (index, resuming) => {
+  const changeDelivery = async (index, resuming, operation = null, inputs = {}) => {
     if(busy || !Number.isInteger(index)) return;
     const row = snapshot?.conductors[index];
-    if(!row || !(resuming ? row.state === "detached" && row.resumeEligible === true : ["attached","frozen"].includes(row.state)) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
-    const action = resuming ? "Resume" : "Detach";
-    if(!confirmAction(resuming ? `Resume automatic delivery for ${row.repository}? Only future handoffs will be accepted. Work halted while detached and old handoffs will not be replayed.`
+    const eligible = item => operation ? item?.[operation === "stop" ? "stopEligible" : "takeoverEligible"] === true
+      : resuming ? item?.state === "detached" && item.resumeEligible === true : ["attached","frozen"].includes(item?.state);
+    if(!row || !eligible(row) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
+    const action = operation === "stop" ? "Stop" : operation === "takeover" ? "Take Over" : resuming ? "Resume" : "Detach";
+    const bounded = (value,bound) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= bound && !/[\x00-\x1f\x7f]/.test(value);
+    if(operation && (!bounded(inputs.reason,1024) || operation === "takeover"
+      && (!bounded(inputs.destinationHolder,256) || inputs.destinationHolder.trim() === row.holder || !bounded(inputs.destinationAddress,512)))){
+      message = "Enter a reason and, for Take Over, a different named owner and address."; draw(); return;
+    }
+    if(!operation && !confirmAction(resuming ? `Resume automatic delivery for ${row.repository}? Only future handoffs will be accepted. Work halted while detached and old handoffs will not be replayed.`
       : `Detach automatic delivery for ${row.repository}? Running turns and actions already sent will not be cancelled.`)) return;
     busy = true; message = `Requesting ${action.toLowerCase()}…`; draw();
     let accepted = false;
     try {
-      const response = await request(resuming ? "/conductor/resume" : "/conductor/detach", {method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({repository:row.repository,holder:row.holder,claimGeneration:row.claimGeneration,attachmentId:row.attachmentId})});
+      const body = {repository:row.repository,holder:row.holder,claimGeneration:row.claimGeneration,attachmentId:row.attachmentId};
+      if(operation){
+        await read();
+        const fresh = snapshot.conductors.find(item => item.repository === row.repository);
+        if(!sameIdentity(fresh,row) || !eligible(fresh)){ message = "Control refused locally: ownership changed. Inspect the fresh snapshot."; return; }
+        if(!confirmAction(`${action} ${row.repository}, owner ${row.holder}, acquisition ${row.claimGeneration}? ${operation === "stop" ? "This acquisition cannot Resume." : `Transfer ownership to ${inputs.destinationHolder.trim()} at ${inputs.destinationAddress.trim()}. No replacement hosted session will start.`} Issued work may still finish.`)) return;
+        Object.assign(body,{requestId:newRequestId(),reason:inputs.reason.trim()});
+        if(operation === "takeover") Object.assign(body,{destinationHolder:inputs.destinationHolder.trim(),destinationAddress:inputs.destinationAddress.trim()});
+        pendingControl = {operation,body};
+      }
+      const route = operation === "stop" ? "/conductor/stop" : operation === "takeover" ? "/conductor/takeover" : resuming ? "/conductor/resume" : "/conductor/detach";
+      const response = await request(route, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       if(!response.ok){
         snapshot = null;
         message = response.status === 403 ? `${action} refused: this connection is not authorized to control Baton.`
@@ -3351,6 +3389,19 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction){
         return;
       }
       accepted = true;
+      if(operation){
+        const result = await response.json();
+        if(!exactReceipt(result)) throw new Error("Control receipt differs from the exact request.");
+        message = `${action} applied; cleanup ${result.cleanup}. Checking fresh authority…`; draw();
+        await read();
+        const current = snapshot.conductors.find(item => item.repository === row.repository);
+        const agrees = current?.holder === result.receipt.resultHolder && current?.claimGeneration === result.receipt.resultGeneration
+          && current?.state === (operation === "stop" ? "stopped" : "taken-over")
+          && current.controls?.some(exactReceipt);
+        message = agrees ? `${action} applied and confirmed by fresh authority. Cleanup ${result.cleanup}. ${operation === "takeover" ? "No replacement hosted session started." : "This acquisition cannot Resume."}`
+          : `${action} applied, but fresh authority differs or is unavailable. Inspect the exact retained receipt.`;
+        return;
+      }
       const receipt = resuming ? await response.json() : row;
       if(resuming && (!receipt || receipt.repository !== row.repository || receipt.holder !== row.holder
         || receipt.claimGeneration !== row.claimGeneration || typeof receipt.attachmentId !== "string"
@@ -3369,7 +3420,8 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction){
         : `The ${action.toLowerCase()} result is unknown. It may have succeeded. Refresh before deciding whether to try again.`;
     } finally { busy = false; draw(); }
   };
-  return {refresh,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true)};
+  return {refresh,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true),
+    stop:(index,inputs)=>changeDelivery(index,false,"stop",inputs),takeover:(index,inputs)=>changeDelivery(index,false,"takeover",inputs)};
 }
 
 function wireConductorControl(panel, control){
@@ -3377,9 +3429,16 @@ function wireConductorControl(panel, control){
     const refresh = event.target.closest?.("[data-conductor-refresh]");
     const detach = event.target.closest?.("[data-conductor-detach]");
     const resume = event.target.closest?.("[data-conductor-resume]");
+    const stop = event.target.closest?.("[data-conductor-stop]");
+    const takeover = event.target.closest?.("[data-conductor-takeover]");
     if(refresh) void control.refresh();
     else if(detach) void control.detach(Number(detach.dataset.conductorDetach));
     else if(resume) void control.resume(Number(resume.dataset.conductorResume));
+    else if(stop || takeover){
+      const index = Number(stop ? stop.dataset.conductorStop : takeover.dataset.conductorTakeover);
+      const value = name => panel.querySelector(`[data-conductor-${name}="${index}"]`)?.value || "";
+      void control[stop ? "stop" : "takeover"](index,{reason:value("reason"),destinationHolder:value("owner"),destinationAddress:value("address")});
+    }
   });
 }
 // <<< CONDUCTOR-CONTROL-END

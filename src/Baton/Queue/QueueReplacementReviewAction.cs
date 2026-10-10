@@ -10,6 +10,13 @@ public enum QueueReplacementReviewOrigin
     Automatic,
 }
 
+/// <summary>Historical admission evidence written with the worker marker; never reusable permission.</summary>
+public sealed record QueueHostedIssuedAuthority(
+    int SchemaVersion, string Repository, string Holder, string ClaimGeneration, string AttachmentId,
+    string ObligationKey, FleetAttemptId SourceAttemptId, string HeadSha,
+    string RequestSha256, string ConfigurationSha256, string SessionId, string ResponseSha256,
+    FleetAttemptId AttemptId, string RoomDirectory, DateTimeOffset IssuedAt);
+
 /// <summary>
 /// Queue-owned, single-use action slot for one missing-verdict source. The mutable current attempt
 /// fields on QueueItem are never used to reconstruct the replacement after advancement.
@@ -38,4 +45,8 @@ public sealed record QueueReplacementReviewAction(
     string? PausedReason = null,
     string? EvidenceProvenance = null,
     string? EvidenceDigest = null,
-    string? EvidenceDirectory = null);
+    string? EvidenceDirectory = null,
+    QueueHostedIssuedAuthority? IssuedAuthority = null,
+    string? TerminalObservation = null,
+    DateTimeOffset? TerminalObservedAt = null,
+    DateTimeOffset? ActionObservedAt = null);

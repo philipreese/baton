@@ -19,7 +19,17 @@ public enum ConductorClaimTransitionKind
     Claim,
     Takeover,
     Release,
+    Stop,
 }
+
+/// <summary>Exact operator input and its durable, atomic authority result (spec/baton.md §14).</summary>
+public sealed record ConductorHostedControlRequest(
+    string Repository, string Holder, string ClaimGeneration, string AttachmentId,
+    string RequestId, string Reason, string? DestinationHolder = null, string? DestinationAddress = null);
+
+public sealed record ConductorHostedControlReceipt(
+    ConductorHostedControlRequest Request, string Issuer, string Operation,
+    string ResultHolder, string ResultGeneration, DateTime AppliedAt);
 
 /// <summary>
 /// One transition in a repository's claim audit trail (#2296).
@@ -33,7 +43,9 @@ public sealed record ConductorClaimTransition(
     [property: JsonPropertyName("reason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Reason,
-    [property: JsonPropertyName("timestamp")] DateTime Timestamp);
+    [property: JsonPropertyName("timestamp")] DateTime Timestamp,
+    [property: JsonPropertyName("generation")] string? Generation = null,
+    [property: JsonPropertyName("control")] ConductorHostedControlReceipt? Control = null);
 
 /// <summary>
 /// The durable, per-repository conductor claim document stored at
@@ -56,7 +68,9 @@ public sealed record ConductorClaimRecord(
     IReadOnlyList<ConductorClaimTransition>? Transitions = null,
     [property: JsonPropertyName("claimGeneration")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ClaimGeneration = null);
+    string? ClaimGeneration = null,
+    [property: JsonPropertyName("stopped")] bool Stopped = false,
+    [property: JsonPropertyName("destinationAddress")] string? DestinationAddress = null);
 
 /// <summary>
 /// The public projection of an actively held repository claim for <c>baton conductor list</c>
@@ -69,4 +83,6 @@ public sealed record ConductorClaimSummary(
     [property: JsonPropertyName("acquiredAt")] DateTime AcquiredAt,
     [property: JsonPropertyName("takeover")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ConductorTakeoverProvenance? Takeover = null);
+    ConductorTakeoverProvenance? Takeover = null,
+    [property: JsonPropertyName("stopped")] bool Stopped = false,
+    [property: JsonPropertyName("destinationAddress")] string? DestinationAddress = null);

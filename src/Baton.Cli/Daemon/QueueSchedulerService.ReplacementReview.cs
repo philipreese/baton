@@ -56,8 +56,8 @@ public sealed partial class QueueSchedulerService
             ReplacementReviewConductorCommand.ValidateAutomaticAuthority(current, action.Repository);
         if (ReplacementReviewEvidenceProvenance.For(action)
             == ReplacementReviewEvidenceProvenance.CompletedFollow)
-            ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
-                obligation, current, action, ConductorClaimStore.GetClaimGeneration(claim));
+            ReplacementReviewEvidenceValidator.ValidateCompletedFollowActionAdmission(
+                obligation, current, action, claim);
         else if (obligation.Status != ConductorObligationStatus.TransportAcknowledged
             || obligation.TransportReceipt != action.AdviceDigest)
             throw new ConductorObligationStoreException("The retained legacy advice digest changed.");
@@ -109,12 +109,41 @@ public sealed partial class QueueSchedulerService
     internal async Task ReconcileReplacementReviewActionsAsync(CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        foreach (var item in snapshot.Items.Where(item => item.ReplacementReviewAction is not null))
+        foreach (var retainedItem in snapshot.Items.Where(item => item.ReplacementReviewAction is not null))
         {
+            var item = retainedItem;
             var action = item.ReplacementReviewAction!;
             string provenance;
             try { provenance = ReplacementReviewEvidenceProvenance.For(action); }
             catch (ConductorObligationStoreException) { continue; }
+            if (action.ReplacementAttemptId is not null && action.CompletionProof is null)
+            {
+                var observed = await _advancer.ObserveIssuedReplacementReviewResultAsync(item, cancellationToken).ConfigureAwait(false);
+                if (observed is null) continue;
+                item = observed;
+                action = item.ReplacementReviewAction!;
+            }
+            if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow
+                && action.ReplacementAttemptId is null && item.LaunchMayHaveBegunAt is null
+                && item.State == QueueItemState.Queued && action.BlockedReason is null)
+            {
+                try
+                {
+                    var decision = ConductorFollowSession.ReadDecisionEvidence(action.EvidenceDirectory!)
+                        ?? throw new ConductorObligationStoreException("Retained follow decision is missing.");
+                    var identity = RepositoryIdentity.From("https://" + action.Repository, null)!;
+                    var claim = await ConductorClaimStore.GetClaimAsync(identity, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    ConductorFollowSession.ValidateCurrentHostedAuthority(claim, action.Repository, action.Holder,
+                        decision.ClaimGeneration, item.StoppedWorkJudgment?.FollowAttachmentId, BatonPaths.Root);
+                }
+                catch (Exception ex) when (ex is ConductorObligationStoreException or ConductorClaimException
+                    or IOException or UnauthorizedAccessException or System.Text.Json.JsonException or CliArgumentException)
+                {
+                    await BlockReplacementReviewAsync(action, "Hosted action authority revoked or unverifiable.",
+                        "Inspect the retained source and control receipt; this slot cannot launch or retry.").ConfigureAwait(false);
+                    continue;
+                }
+            }
             if (action.Origin == QueueReplacementReviewOrigin.Automatic
                 && action.ReplacementAttemptId is null && item.State == QueueItemState.Queued)
             {
@@ -148,19 +177,21 @@ public sealed partial class QueueSchedulerService
                 {
                     try
                     {
-                        if (snapshot.Held) continue;
-                        if (action.Origin == QueueReplacementReviewOrigin.Automatic)
-                            ReplacementReviewConductorCommand.ValidateAutomaticAuthority(item, action.Repository);
-                        var identity = RepositoryIdentity.From("https://" + action.Repository, null);
-                        var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-                        if (claim?.Holder != action.Holder) continue;
+                        if (provenance != ReplacementReviewEvidenceProvenance.CompletedFollow)
+                        {
+                            if (snapshot.Held) continue;
+                            if (action.Origin == QueueReplacementReviewOrigin.Automatic)
+                                ReplacementReviewConductorCommand.ValidateAutomaticAuthority(item, action.Repository);
+                            var identity = RepositoryIdentity.From("https://" + action.Repository, null);
+                            var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,
+                                cancellationToken: cancellationToken).ConfigureAwait(false);
+                            if (claim?.Holder != action.Holder) continue;
+                        }
                         await _advancer.ValidateReplacementReviewCompletionAsync(item, action, cancellationToken)
                             .ConfigureAwait(false);
                         if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow)
                         {
-                            ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
-                                obligation, item, action, ConductorClaimStore.GetClaimGeneration(claim));
+                            ReplacementReviewEvidenceValidator.ValidateIssuedCompletedFollowCompletion(obligation, item, action);
                             authentic = obligation.Status is ConductorObligationStatus.Pending
                                 or ConductorObligationStatus.Submitted
                                 or ConductorObligationStatus.ActionObserved;
@@ -179,8 +210,37 @@ public sealed partial class QueueSchedulerService
                     }
                 }
                 if (authentic)
+                {
                     await _conductorObligations.ObserveActionAsync(action.ObligationKey, proof, cancellationToken)
                         .ConfigureAwait(false);
+                    if (action.ActionObservedAt is null || action.BlockedReason is not null)
+                        await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                        {
+                            Items = current.Items.Select(candidate => candidate.Tag == item.Tag && candidate.ReplacementReviewAction == action
+                                ? candidate with
+                                {
+                                    ReplacementReviewAction = action with
+                                    {
+                                        ActionObservedAt = DateTimeOffset.UtcNow,
+                                        BlockedReason = null,
+                                        NextTrigger = null,
+                                    },
+                                } : candidate).ToList(),
+                        }, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                    {
+                        Items = current.Items.Select(candidate => candidate.Tag == item.Tag && candidate.ReplacementReviewAction == action
+                            ? candidate with
+                            {
+                                ReplacementReviewAction = action with
+                                {
+                                    BlockedReason = "Issued result unresolved: retained admission or exact completion proof could not be verified.",
+                                    NextTrigger = "Owner must inspect retained issued authority and exact-head verdict; next trusted reconciliation rechecks proof.",
+                                },
+                            } : candidate).ToList(),
+                    }, cancellationToken).ConfigureAwait(false);
                 continue;
             }
 

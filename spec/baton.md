@@ -6827,7 +6827,7 @@ peers fail closed. This rests on the measured `tailscale serve` path stripping c
 identity headers and injecting the authenticated tailnet login before proxying to loopback. A
 refusal appends one `glassWriteRefused` fleet fact with route plus only `<redacted>`/`<missing>` for
 the login. The route table admits `POST /queue/hold`, `POST /queue/resume`,
-`POST /rooms/<id>/cancel`, and exact conductor detach/resume in §14 (#2653, #2655); unknown POST routes,
+`POST /rooms/<id>/cancel`, and exact conductor detach/resume/stop/takeover in §14 (#2653, #2655, #2661); unknown POST routes,
 including resolve and redispatch, are 404. The page
 renders these controls only under `DAEMON_SERVED`, confirms cancel explicitly, and refreshes the
 projection after the server receipt rather than changing displayed state optimistically.
@@ -8897,7 +8897,8 @@ to one line.
 
 Two external conductor sessions may use the same Baton daemon only when they own disjoint repositories. Baton previously had no durable register for that ownership, so agreement existed only in operator chat and one conductor could not distinguish an unheld repository from one actively conducted elsewhere.
 
-This section defines the first bounded slice: a durable, auditable repository-claim register and CLI. This slice deliberately does **not** enforce claims on queue or room mutations yet; it creates the single authoritative seam that the enforcement slice will consume.
+This section defines the durable, auditable repository-claim register and CLI. Hosted follow and
+replacement admission consume this authority; ordinary queue and room mutations retain their own contracts.
 
 ### Protected invariant
 
@@ -8920,16 +8921,20 @@ This section defines the first bounded slice: a durable, auditable repository-cl
 - **`{Root}/<repository-slug>/conductor-claim.json`** (`BatonPaths.ConductorClaimFile(repositorySlug)`) — the per-repository claim document stored in the per-repository directory under Baton root (`~/.baton/<repository-slug>/`).
 - Writes are serialized with `MutexGuardedFileLock` using the `baton-conductor-claim` mutex prefix.
 - Writes use atomic replacement (`.tmp` file written then replaced via `File.Move(..., overwrite: true)`).
-- The durable record maintains full audit history in `transitions[]`, tracking every `Claim`, `Takeover`, and `Release` transition with timestamps, holders, displaced holders, and reasons.
+- The durable record maintains full audit history in `transitions[]`, tracking every `Claim`, `Takeover`, `Release`, and hosted `Stop` transition with timestamps, holders, displaced holders, reasons and exact operator receipts.
 
-### Glass conductor visibility and automatic delivery control (#2653, #2655)
+### Glass conductor visibility and automatic delivery control (#2653, #2655, #2661)
 
 `GET /conductors` returns an as-of registration snapshot: canonical remote repository, current
 claim holder/generation, matching attachment ID/state, adapter/model/effort and the accepted file-read-only
 permission description. Missing attachment is `unattached`; revoked registration is `detached`;
 an attached frozen session is `frozen`. Separate `resumeEligible` is true only for a verified detached,
 non-frozen session with complete retained delivery evidence; detached frozen rows remain detached
-with eligibility false. Corrupt, stale, mismatched, unsafe-to-display or unreadable state is
+with eligibility false. A terminal stopped acquisition is `stopped`; an operator takeover projects
+the new holder/address separately from the retained session as `taken-over`, with provider/model
+labeled historical and no replacement hosted session. Released claims retain readable receipts as
+`released`. Separate Stop/Take Over eligibility depends on bounded exact claim/registration/session
+identity, independent of healthy historical delivery evidence. Corrupt, stale, mismatched, unsafe-to-display or unreadable state is
 explicitly `unavailable`. `attached` proves registration, not health or a currently running turn.
 The projection omits instructions, request files, native session IDs and local absolute paths;
 local-only repository identities are unavailable on this surface. The display is bounded to 100
@@ -8948,8 +8953,8 @@ marker write. Completed-follow provenance requires the retained holder, acquisit
 attached registration ID at that cutoff, including after manual promotion; legacy advice retains
 its holder requirement. Refusal durably blocks the exact still-unlaunched action after releasing
 the locks, retaining evidence. Remote head validation precedes this short local cutoff. A marker
-that wins first remains one issued attempt; late completion reconciliation after revocation belongs
-to the later Stop/Take Over slice.
+that wins first remains one issued attempt; its historical completion uses the retained admission
+binding described below.
 Detach does not cancel an already admitted turn or already issued action. The page immediately
 shows the server receipt, then reconciles the authoritative status; unavailable reads disable control.
 
@@ -8973,9 +8978,53 @@ requires a fresh uncached GET to agree on repository, holder, generation, new at
 state. Only explicitly eligible detached rows offer Resume, with future-handoffs-only confirmation.
 Denied, busy/stale and unknown outcomes require refresh; the client never automatically repeats a POST.
 
-The broader operator-approved hosted conductor direction (#2091) requires visible task, decision,
-next action, permissions and correction state, plus hold/stop/takeover. Those remain planned beyond
-this bounded increment; it introduces no unattended merge authority or general remote steering.
+The broader operator-approved hosted conductor direction (#2091) still requires correction delivery,
+hold-new-actions, useful task/decision/next-action visibility, a separately revocable one-use exact-task/head
+merge grant and an observed useful installed outcome. This increment introduces no unattended merge authority
+or general remote steering.
+
+### Exact hosted Stop / Take Over (#2661)
+
+Authenticated bounded `POST /conductor/stop` and `POST /conductor/takeover` bind canonical repository,
+holder, claim generation, attachment ID, client request ID and nonblank reason. Take Over additionally
+requires a different explicitly named destination holder and bounded human-readable address. The
+server records its configured authenticated operator as issuer; requests cannot supply issuer or grants.
+Addresses are inert escaped display text, never executable or verified endpoints.
+
+Both controls acquire queue then claim locks without waiting for the running session, forge or vendor.
+The atomic claim write accepts and applies together, retaining the exact request/issuer and result in
+ownership history before registration cleanup. Stop keeps the holder/acquisition and marks it terminal;
+same-holder claim idempotency, follow, attach and Resume cannot clear it. Explicit release/new acquisition
+or takeover is required for future hosted authority. Take Over may transfer a stopped acquisition and
+creates one new generation without copying the conversation, changing tasks, replaying events or
+starting another hosted provider. Legacy derived generations are pinned before non-acquisition history
+is appended; incompatible stopped projections or receipts fail closed.
+
+Identical issuer/request-ID/input replays the retained result before checking today's target. Changed
+input under that ID or a new request against a stale generation refuses. Receipts survive release,
+takeover and reacquisition. Cleanup writes only the displaced registration tuple; a newer attachment is
+never disabled by a historical duplicate. A fence-before-cleanup failure reports durable revocation and
+pending/uncertain cleanup; restart or exact retry finishes only cleanup. No receipt claims process
+cancellation or model acknowledgement. A lost response remains unknown until a fresh read finds the exact
+receipt. The card takes a fresh uncached confirmation snapshot and reconciles the result against a fresh
+GET without automatically repeating POSTs; stopped acquisitions never offer Resume.
+
+All hosted consumers recheck stopped state, holder/generation and registration identity. Follow's final
+`launch.json` write shares queue→claim cutover. Attachment/Resume, delayed and startup decisions, retained
+manual promotion/unpause and final replacement-worker persistence use the same fence. Completed-follow
+provenance remains completed-follow after promotion to Manual. Unlaunched revoked slots retain exact
+blocked disposition, reason and next trigger without retry or launch markers.
+
+At the same durable write as replacement `LaunchMayHaveBegunAt`, attempt and room, the existing action
+retains immutable issued authority: source/obligation/head, holder/generation/attachment, request and
+configuration/response digests, native session and issued attempt/room/time. This is historical admission
+evidence, never reusable permission. Already-issued completion validates that binding and original
+request/source/response evidence independently of today's holder, attachment, trust, queue hold or
+opt-in. Independent full-head verdict, attempt/room and digest checks remain required. Exact proof
+observes the original obligation once; terminal observations without sufficient proof retain an owner,
+unresolved reason and reconciliation trigger. No result restores authority, retries a worker or reuses
+the slot. Legacy records lacking issued hosted proof remain unresolved; current authority cannot
+manufacture historical permission. Independent legacy advice completion keeps its existing checks.
 
 ### Continuing conductor follow (#2628)
 

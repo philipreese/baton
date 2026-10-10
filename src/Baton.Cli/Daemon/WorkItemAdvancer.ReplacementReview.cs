@@ -14,6 +14,29 @@ public sealed partial class WorkItemAdvancer
 {
     internal Action? ReplacementReviewAfterProofPersisted { get; set; }
 
+    internal async Task<QueueItem?> ObserveIssuedReplacementReviewResultAsync(QueueItem item, CancellationToken token)
+    {
+        if (item.ReplacementReviewAction is not { ReplacementAttemptId: not null, ReplacementRoomDirectory: not null } action)
+            return item;
+        var terminal = await TerminalSentinelWriter.TryReadAsync(action.ReplacementRoomDirectory, token).ConfigureAwait(false);
+        if (terminal is not null && action.TerminalObservation is null
+            && (action.ReplacementAttemptId != item.AttemptId || action.ReplacementRoomDirectory != item.RoomDirectory
+                || action.SourceStage != item.Stage))
+        {
+            var unresolved = action with
+            {
+                TerminalObservation = terminal.State,
+                TerminalObservedAt = DateTimeOffset.UtcNow,
+                BlockedReason = "Issued terminal result unresolved: current queue attempt, room or stage differs from issued identity.",
+                NextTrigger = "Owner must reconcile the retained issued identity and terminal room; no replacement call is authorized.",
+            };
+            return await TryMarkAsync(item, current => current with { ReplacementReviewAction = unresolved }).ConfigureAwait(false)
+                ? item with { ReplacementReviewAction = unresolved } : null;
+        }
+        return await TryPersistReplacementReviewProofAsync(item, terminal, terminal is null ? null : FindVerdict(terminal), token)
+            .ConfigureAwait(false);
+    }
+
     internal async Task ValidateReplacementReviewSourceAsync(
         QueueItem source, QueueReplacementReviewAction action, CancellationToken cancellationToken)
     {
@@ -127,9 +150,25 @@ public sealed partial class WorkItemAdvancer
         if (action is null || action.CompletionProof is not null
             || action.ReplacementAttemptId is null || action.ReplacementAttemptId != item.AttemptId
             || action.ReplacementRoomDirectory != item.RoomDirectory
-            || item.Stage != action.SourceStage || item.State is not (QueueItemState.Done or QueueItemState.Failed)
-            || sentinel is null || verdictPath is null)
+            || item.Stage != action.SourceStage
+            || sentinel is null)
             return item;
+
+        if (action.TerminalObservation is null)
+        {
+            var observedAction = action with
+            {
+                TerminalObservation = sentinel.State,
+                TerminalObservedAt = DateTimeOffset.UtcNow,
+                BlockedReason = "Issued worker terminated; exact-head completion remains unresolved.",
+                NextTrigger = "Owner must inspect the retained replacement room; trusted reconciliation requires exact-head completion proof.",
+            };
+            if (!await TryMarkAsync(item, current => current with { ReplacementReviewAction = observedAction }).ConfigureAwait(false))
+                return null;
+            item = item with { ReplacementReviewAction = observedAction };
+            action = observedAction;
+        }
+        if (verdictPath is null) return item;
 
         byte[] verdictBytes;
         ReviewVerdict? verdict;
@@ -153,7 +192,7 @@ public sealed partial class WorkItemAdvancer
         }
 
         var proof = CompletionProof(action, verdictBytes, verdict);
-        var updatedAction = action with { CompletionProof = proof };
+        var updatedAction = action with { CompletionProof = proof, BlockedReason = null, NextTrigger = null };
         var changed = await TryMarkAsync(item, current => current with
         {
             ReplacementReviewAction = updatedAction,

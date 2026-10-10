@@ -192,6 +192,7 @@ public sealed partial class ConductorFollowDeliveryTests
 
     private sealed class GlassFixture(GlassHttpService service, HttpClient client) : IAsyncDisposable
     {
+        public void DropControlAcknowledgement() => service.DropHostedControlAcknowledgementForTest = true;
         public async Task<string> SlowDetachStatusLineAsync(string verb = "detach")
         {
             using var socket = new TcpClient();
@@ -242,6 +243,9 @@ public sealed partial class ConductorFollowDeliveryTests
 
         public async Task<HttpResponseMessage> ResumeAsync(string body, string? login = "operator@example.test")
             => await WriteAsync("resume", body, login);
+
+        public async Task<HttpResponseMessage> ControlAsync(string verb, string body, string? login = "operator@example.test")
+            => await WriteAsync(verb, body, login);
 
         private async Task<HttpResponseMessage> WriteAsync(string verb, string body, string? login)
         {

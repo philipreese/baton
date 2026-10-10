@@ -359,7 +359,9 @@ internal sealed class GlassHttpService : BackgroundService
         var isQueueResume = string.Equals(route, "/queue/resume", StringComparison.Ordinal);
         var isConductorDetach = string.Equals(route, "/conductor/detach", StringComparison.Ordinal);
         var isConductorResume = string.Equals(route, "/conductor/resume", StringComparison.Ordinal);
-        var isConductorControl = isConductorDetach || isConductorResume;
+        var isConductorStop = string.Equals(route, "/conductor/stop", StringComparison.Ordinal);
+        var isConductorTakeover = string.Equals(route, "/conductor/takeover", StringComparison.Ordinal);
+        var isConductorControl = isConductorDetach || isConductorResume || isConductorStop || isConductorTakeover;
         const string cancelPrefix = "/rooms/";
         const string cancelSuffix = "/cancel";
         var isCancelShape = route.StartsWith(cancelPrefix, StringComparison.Ordinal)
@@ -429,6 +431,19 @@ internal sealed class GlassHttpService : BackgroundService
                     length += count;
                 }
                 if (length > 4096) throw new CliArgumentException("Detach request exceeds its bound.");
+                if (isConductorStop || isConductorTakeover)
+                {
+                    var result = await ConductorFollowSession.ControlFromGlassAsync(new string(chars, 0, length),
+                        _conductorRoot, _settings.Glass.OperatorLogin!, isConductorTakeover, cancellationToken).ConfigureAwait(false);
+                    if (DropHostedControlAcknowledgementForTest)
+                    {
+                        context.Response.Abort();
+                        return;
+                    }
+                    await WriteTextAsync(context, HttpStatusCode.OK, "application/json; charset=utf-8",
+                        JsonSerializer.Serialize(result, WebJson)).ConfigureAwait(false);
+                    return;
+                }
                 if (isConductorResume)
                 {
                     var resumed = await ConductorFollowSession.ResumeFromGlassAsync(new string(chars, 0, length),
@@ -457,14 +472,16 @@ internal sealed class GlassHttpService : BackgroundService
         {
             await WriteTextAsync(context, HttpStatusCode.RequestTimeout, "text/plain; charset=utf-8",
                 isConductorDetach ? "Detach request timed out before acceptance; automatic delivery was not changed."
-                    : "Resume request timed out before acceptance; automatic delivery was not changed.").ConfigureAwait(false);
+                    : isConductorResume ? "Resume request timed out before acceptance; automatic delivery was not changed."
+                    : "Control outcome unknown; refresh to inspect the exact retained request receipt.").ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is BatonFlowException or ArgumentException or UriFormatException
             || isConductorControl && ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
         {
             await WriteTextAsync(context, HttpStatusCode.Conflict, "text/plain; charset=utf-8",
                 isConductorDetach ? "Detach refused: conductor identity or retained state could not be verified. Refresh before retrying."
-                    : isConductorResume ? "Resume refused: session busy, conductor identity or retained state could not be verified. Refresh before retrying." : ex.Message)
+                    : isConductorResume ? "Resume refused: session busy, conductor identity or retained state could not be verified. Refresh before retrying."
+                    : isConductorControl ? "Control refused: exact identity, request ID, reason or destination could not be verified. Refresh before retrying." : ex.Message)
                 .ConfigureAwait(false);
         }
     }
@@ -488,6 +505,8 @@ internal sealed class GlassHttpService : BackgroundService
     /// contract <c>spec/baton.md</c> §7 states.
     /// </para>
     /// </summary>
+    internal bool DropHostedControlAcknowledgementForTest { get; set; }
+
     internal const FileShare ProjectionShare = FileShare.ReadWrite | FileShare.Delete;
 
     /// <summary>
