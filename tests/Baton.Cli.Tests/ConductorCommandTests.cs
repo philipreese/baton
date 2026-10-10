@@ -292,8 +292,8 @@ public sealed class ConductorCommandTests
 
             using var first = StartClaimProcess(workspace, batonRoot, "conductor-alpha");
             using var second = StartClaimProcess(workspace, batonRoot, "conductor-beta");
-            first.Start();
-            second.Start();
+            global::Baton.Core.ProcessLaunch.Start(first);
+            global::Baton.Core.ProcessLaunch.Start(second);
             var outputs = await Task.WhenAll(
                 BoundedProcessWait.RunToExitAsync(first, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken),
                 BoundedProcessWait.RunToExitAsync(second, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
