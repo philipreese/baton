@@ -47,7 +47,13 @@ public sealed partial class ConductorFollowDeliveryTests
         await ApplyHoldAsync(glass, "hold", "fair-hold");
         await fixture.HaltAsync("stale-first", notify: false, pullRequest: 78);
         var valid = await fixture.HaltAsync("valid-later", notify: false);
-        fixture.PullRequestHeadForNumber = number => number == 78 ? new string('f', 40) : Head;
+        var staleHeadChecks = 0;
+        fixture.PullRequestHeadForNumber = number =>
+        {
+            if (number != 78) return Head;
+            staleHeadChecks++;
+            return new string('f', 40);
+        };
         await ApplyHoldAsync(glass, "unhold", "fair-unhold");
         for (var pass = 0; pass < 3; pass++)
         {
@@ -67,6 +73,16 @@ public sealed partial class ConductorFollowDeliveryTests
         Assert.Equal("Owner must inspect retained evidence and current eligibility; uncertain launches have no retry path.", refused.StoppedWorkJudgment.FollowContinuationTrigger);
         Assert.Null(refused.ReplacementReviewAction);
         Assert.Equal(valid.AutomaticFixUsed, continued.AutomaticFixUsed);
+        Assert.True(staleHeadChecks >= 2, "Retained mutable-head refusal is rechecked on later scheduler passes.");
+        fixture.PullRequestHeadForNumber = _ => Head;
+        using var recovered = fixture.Scheduler();
+        await recovered.TickOnceAsync(Ct);
+        await WaitForAdvicePassAsync(recovered);
+        var newlyEligible = await fixture.RowAsync("stale-first");
+        Assert.NotNull(newlyEligible.ReplacementReviewAction);
+        Assert.False(newlyEligible.StoppedWorkJudgment!.FollowContinuationPending);
+        Assert.Equal(refused.AutomaticFixUsed, newlyEligible.AutomaticFixUsed);
+        Assert.Equal(2, fixture.Calls.Count);
     }
 
     [Fact]

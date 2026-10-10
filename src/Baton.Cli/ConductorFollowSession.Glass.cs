@@ -413,6 +413,7 @@ internal sealed partial class ConductorFollowSession
         var actions = snapshot.Items.Where(i => i.Repository == repository && i.ReplacementReviewAction is not null).Take(100)
             .Select(i => new GlassIssuedActionStatus(SafeLabel(i.Tag),
                 i.ReplacementReviewAction!.ActionObservedAt is not null ? "observed" :
+                i.ReplacementReviewAction.ReplacementAttemptId is null && i.ReplacementReviewAction.BlockedReason is not null ? "refused" :
                 i.ReplacementReviewAction.ReplacementAttemptId is null && Revoked(i.ReplacementReviewAction.Holder) ? "revoked-pending" :
                 i.ReplacementReviewAction.HeldPending ? "held-pending-marker" :
                 i.ReplacementReviewAction.BlockedReason is not null
@@ -422,7 +423,9 @@ internal sealed partial class ConductorFollowSession
                 i.ReplacementReviewAction.ReplacementAttemptId is not null
                     ? i.AttemptStartedFactDurable ? "in-flight" : "issued" : "pending",
                 i.ReplacementReviewAction.BlockedReason ?? i.ReplacementReviewAction.PausedReason,
-                i.ReplacementReviewAction.ReplacementAttemptId is null && Revoked(i.ReplacementReviewAction.Holder)
+                i.ReplacementReviewAction.ReplacementAttemptId is null && i.ReplacementReviewAction.BlockedReason is not null
+                    ? i.ReplacementReviewAction.NextTrigger
+                    : i.ReplacementReviewAction.ReplacementAttemptId is null && Revoked(i.ReplacementReviewAction.Holder)
                     ? "Owner must inspect retained evidence; Stop or displaced ownership cannot be undone by Unhold."
                     : i.ReplacementReviewAction.HeldPending
                         ? "Unhold this acquisition; the scheduler rechecks source, head, grants, opt-in and runway before launch."

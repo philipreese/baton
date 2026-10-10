@@ -104,7 +104,7 @@ public sealed partial class QueueSchedulerService
                         State = QueueItemState.Failed,
                         Halted = true,
                         Error = reason,
-                        ReplacementReviewAction = action with { BlockedReason = reason, NextTrigger = trigger },
+                        ReplacementReviewAction = action with { BlockedReason = reason, NextTrigger = trigger, HeldPending = false },
                     }
                     : item).ToList(),
         }, CancellationToken.None);

@@ -360,6 +360,25 @@ public sealed partial class ConductorFollowDeliveryTests
         Assert.Equal(original.AutomaticFixUsed, blocked.AutomaticFixUsed);
         Assert.Single(fixture.Calls);
         if (blocker == "held") Assert.True((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Held);
+        if (blocker == "detach")
+        {
+            Assert.False(blocked.ReplacementReviewAction.HeldPending);
+            foreach (var retainedHeld in new[] { false, true })
+            {
+                // Include a row persisted by the earlier scheduler, before stale Hold was cleared on block.
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = snapshot.Items.Select(item => item.Tag == "blocked-held"
+                        ? item with { ReplacementReviewAction = item.ReplacementReviewAction! with { HeldPending = retainedHeld } }
+                        : item).ToList(),
+                }, Ct);
+                var displayed = (await glass.StatusAsync()).GetProperty("actions").EnumerateArray()
+                    .Single(action => action.GetProperty("tag").GetString() == "blocked-held");
+                Assert.Equal("refused", displayed.GetProperty("state").GetString());
+                Assert.Equal("Hosted action authority revoked or unverifiable.", displayed.GetProperty("reason").GetString());
+                Assert.Equal("Inspect the retained source and control receipt; this slot cannot launch or retry.", displayed.GetProperty("nextTrigger").GetString());
+            }
+        }
         if (blocker == "opt-in")
         {
             Assert.NotNull(blocked.ReplacementReviewAction.PausedReason);
