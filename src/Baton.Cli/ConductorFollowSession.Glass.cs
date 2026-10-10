@@ -424,6 +424,8 @@ internal sealed partial class ConductorFollowSession
                 i.ReplacementReviewAction.BlockedReason ?? i.ReplacementReviewAction.PausedReason,
                 i.ReplacementReviewAction.ReplacementAttemptId is null && Revoked(i.ReplacementReviewAction.Holder)
                     ? "Owner must inspect retained evidence; Stop or displaced ownership cannot be undone by Unhold."
+                    : i.ReplacementReviewAction.HeldPending
+                        ? "Unhold this acquisition; the scheduler rechecks source, head, grants, opt-in and runway before launch."
                     : i.ReplacementReviewAction.NextTrigger, SafeLabel(i.ReplacementReviewAction.Holder))).ToList();
         foreach (var source in snapshot.Items.Where(i => i.Repository == repository && i.ReplacementReviewAction is null
             && i.StoppedWorkJudgment is { FollowAttachmentId: not null, FollowContinuationPending: true }).Take(100 - actions.Count))

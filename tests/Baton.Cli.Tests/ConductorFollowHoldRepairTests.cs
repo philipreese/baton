@@ -199,6 +199,43 @@ public sealed partial class ConductorFollowDeliveryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Issue2662_Repair_Hold_preserves_the_prior_marker_free_action_trigger(bool paused)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        await AdmitControlFollowAsync(fixture, "retained-trigger");
+        using var scheduler = fixture.Scheduler();
+        if (paused)
+        {
+            await fixture.ChangeAsync("retained-trigger", "opt-in");
+            await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        }
+        var original = (await fixture.RowAsync("retained-trigger")).ReplacementReviewAction!;
+        Assert.Equal(paused, original.PausedReason is not null);
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        await ApplyHoldAsync(glass, "hold", "trigger-hold");
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        var held = (await fixture.RowAsync("retained-trigger")).ReplacementReviewAction!;
+        Assert.True(held.HeldPending);
+        Assert.Equal(original.NextTrigger, held.NextTrigger);
+        var displayed = (await glass.StatusAsync()).GetProperty("actions").EnumerateArray()
+            .Single(action => action.GetProperty("tag").GetString() == "retained-trigger");
+        Assert.Equal("Unhold this acquisition; the scheduler rechecks source, head, grants, opt-in and runway before launch.",
+            displayed.GetProperty("nextTrigger").GetString());
+        await ApplyHoldAsync(glass, "unhold", "trigger-unhold");
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        var continued = (await fixture.RowAsync("retained-trigger")).ReplacementReviewAction!;
+        Assert.False(continued.HeldPending);
+        Assert.Equal(original.NextTrigger, continued.NextTrigger);
+        Assert.Equal(original.PausedReason, continued.PausedReason);
+        Assert.Single(fixture.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Issue2662_Repair_unattached_halts_have_no_hosted_pending_flag(bool owned)
     {
         using var fixture = await Fixture.CreateAsync();

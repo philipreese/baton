@@ -169,8 +169,8 @@ public sealed partial class ConductorFollowDeliveryTests
         await fixture.Scheduler().ReconcileStoppedWorkAdviceAsync(Ct);
         Assert.Equal("delivered", (await fixture.FollowAsync("saved-held")).GetProperty("status").GetString());
         var receipt = fixture.Receipt("saved-held");
-        if (seam == "response-before-decision") File.Delete(fixture.EventEvidencePath("saved-held", "decision.json"));
-        if (seam != "complete") File.Delete(Path.Combine(SessionDirectory(fixture), "delivery.jsonl"));
+        if (seam == "response-before-decision") FileCleanup.EnsureDeleted(fixture.EventEvidencePath("saved-held", "decision.json"));
+        if (seam != "complete") FileCleanup.EnsureDeleted(Path.Combine(SessionDirectory(fixture), "delivery.jsonl"));
         await using var glass = await GlassFixture.StartAsync(fixture);
         await ApplyHoldAsync(glass, "hold", "saved-hold");
         using (var heldScheduler = fixture.Scheduler()) await heldScheduler.RecoverAttachedFollowAsync(Ct);
@@ -214,7 +214,11 @@ public sealed partial class ConductorFollowDeliveryTests
         var pending = await fixture.RowAsync("slot");
         Assert.Equal(0, launches);
         Assert.True(pending.ReplacementReviewAction!.HeldPending);
-        Assert.Equal("Unhold this acquisition; the scheduler rechecks source, head, grants, opt-in and runway before launch.", pending.ReplacementReviewAction.NextTrigger);
+        Assert.Equal(admitted.ReplacementReviewAction!.NextTrigger, pending.ReplacementReviewAction.NextTrigger);
+        var displayed = (await glass.StatusAsync()).GetProperty("actions").EnumerateArray()
+            .Single(action => action.GetProperty("tag").GetString() == "slot");
+        Assert.Equal("Unhold this acquisition; the scheduler rechecks source, head, grants, opt-in and runway before launch.",
+            displayed.GetProperty("nextTrigger").GetString());
         Assert.Null(pending.ReplacementReviewAction.BlockedReason);
         Assert.Null(pending.LaunchMayHaveBegunAt);
         Assert.Equal(admitted.Round, pending.Round);

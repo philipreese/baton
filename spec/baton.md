@@ -9054,7 +9054,8 @@ events outside control locks; startup also reconciles these identities. Unhold r
 event, a complete response awaiting decision admission, or an admitted marker-free action. Response
 recovery repairs decision/journal persistence from retained source and response without a model call.
 An action's independent Held-pending flag preserves its reserved round, envelope and provenance;
-opt-in unpause and manual promotion cannot erase Hold. Source/head, grants, opt-in and runway are
+its prior trigger survives Hold/Unhold, with Unhold guidance derived for display while Held.
+Opt-in unpause and manual promotion cannot erase Hold. Source/head, grants, opt-in and runway are
 rechecked before final serialized admission. Stale proof and uncertain launches retain an owner,
 reason and concrete reconciliation trigger; no history is reconstructed or uncertain work retried.
 Detach, revoked grants and global queue Hold remain independent blockers. Frozen state blocks new

@@ -121,8 +121,6 @@ public sealed partial class QueueSchedulerService
                     ReplacementReviewAction = expected with
                     {
                         HeldPending = held,
-                        NextTrigger = held ? "Unhold this acquisition; the scheduler rechecks source, head, grants, opt-in and runway before launch."
-                            : expected.PausedReason is null ? null : "Re-enable repository opt-in or explicitly promote this exact action.",
                     }
                 } : item).ToList(),
         }, CancellationToken.None);
