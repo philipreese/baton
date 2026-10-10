@@ -48,10 +48,7 @@ internal sealed partial class ConductorFollowSession
                     if (old is not null) session.ValidateAttachment(old);
                     if (old?.Attached == attached) return snapshot;
                     var registration = attached
-                        ? new ConductorFollowAttachment(SchemaVersion, Guid.NewGuid().ToString("N"),
-                            session._identity.Value, session._generation, session._request.Holder,
-                            session._directory, Digest(JsonSerializer.Serialize(session._request, Json)),
-                            DateTimeOffset.UtcNow, true)
+                        ? session.NewAttachment()
                         : old is not null ? old with { Attached = false }
                         : throw new CliArgumentException("No explicit follow attachment exists.");
                     Write(Path.Combine(session._directory, "request.json"), session._request);
@@ -73,6 +70,10 @@ internal sealed partial class ConductorFollowSession
             || registration.RequestSha256 != Digest(JsonSerializer.Serialize(_request, Json)))
             throw new CliArgumentException("Retained follow attachment drifted.");
     }
+
+    private ConductorFollowAttachment NewAttachment() =>
+        new(SchemaVersion, Guid.NewGuid().ToString("N"), _identity.Value, _generation, _request.Holder,
+            _directory, Digest(JsonSerializer.Serialize(_request, Json)), DateTimeOffset.UtcNow, true);
 
     // Called only inside the successful halt CAS, after the attachment cutover has committed.
     internal static string? AttachmentAtHalt(QueueItem source)

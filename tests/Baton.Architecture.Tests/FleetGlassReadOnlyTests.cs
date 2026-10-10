@@ -4,7 +4,7 @@ namespace Baton.Architecture.Tests;
 
 /// <summary>
 /// #1602/#2078: Fleet Glass's artifact delivery and MCP dependencies remain read-only. The daemon
-/// delivery admits identity-gated same-origin queue hold/resume, cancel, and exact conductor detach.
+/// delivery admits identity-gated same-origin queue hold/resume, cancel, and exact conductor detach/resume.
 /// <para>
 /// <b>What this checks:</b>
 /// <list type="number">
@@ -210,7 +210,7 @@ public class FleetGlassReadOnlyTests
         var rawHtml = File.ReadAllText(glassPath);
         var violations = new List<string>();
 
-        // 1. Keep two auditable POST sinks: queue/room controls and exact conductor detach, all
+        // 1. Keep two auditable POST sinks: queue/room controls and exact conductor detach/resume, all
         // rendered behind DAEMON_SERVED; the artifact cannot paint them.
         var forbiddenNetworkSinks = new[]
         {
@@ -233,7 +233,7 @@ public class FleetGlassReadOnlyTests
 
         violations.AddRange(SameOriginReadViolations(htmlWithoutComments));
         Assert.Equal(2, Regex.Matches(htmlWithoutComments, @"\bmethod\s*:\s*[""']POST[""']").Count);
-        Assert.Contains("request(\"/conductor/detach\", {method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("request(resuming ? \"/conductor/resume\" : \"/conductor/detach\", {method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("data-glass-route=\"/queue/${q.held ? \"resume\" : \"hold\"}\"", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("data-glass-route=\"/rooms/${encodeURIComponent(room.name)}/cancel\"", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("if(DAEMON_SERVED)", htmlWithoutComments, StringComparison.Ordinal);

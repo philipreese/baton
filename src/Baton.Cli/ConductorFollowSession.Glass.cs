@@ -8,7 +8,7 @@ namespace Baton.Cli;
 
 internal sealed record GlassConductorStatus(string Repository, string? Holder, string? ClaimGeneration,
     string? AttachmentId, string State, string? Adapter = null, string? Model = null,
-    string? Effort = null, string? Permissions = null, string? Diagnostic = null);
+    string? Effort = null, string? Permissions = null, string? Diagnostic = null, bool ResumeEligible = false);
 
 internal sealed record GlassConductorsSnapshot(DateTimeOffset ObservedAt, IReadOnlyList<GlassConductorStatus> Conductors);
 
@@ -21,16 +21,23 @@ internal sealed record GlassConductorDetachRequest(
 
 internal sealed partial class ConductorFollowSession
 {
+    private static readonly TimeSpan GlassLockTimeout = TimeSpan.FromSeconds(1);
+
     internal static async Task<GlassConductorsSnapshot> ReadGlassStatusAsync(string root,
         CancellationToken token, Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
     {
         var rows = new List<GlassConductorStatus>();
+        var callerToken = token;
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(token);
+        budget.CancelAfter(TimeSpan.FromSeconds(5));
+        token = budget.Token;
         try
         {
             RejectLinks(root);
-            var claims = await ConductorClaimStore.ListHeldClaimsAsync(root, token).ConfigureAwait(false);
+            var claims = await ConductorClaimStore.ListHeldClaimsAsync(root, token, GlassLockTimeout).ConfigureAwait(false);
             foreach (var summary in claims.Take(100))
             {
+                callerToken.ThrowIfCancellationRequested();
                 // Local common-directory identities contain absolute paths; never send those to Glass.
                 var identity = summary.Repository.StartsWith("gitdir:", StringComparison.Ordinal)
                     ? null : RepositoryIdentity.From("https://" + summary.Repository, null);
@@ -42,9 +49,14 @@ internal sealed partial class ConductorFollowSession
                 }
                 GlassConductorStatus status = new(identity.Value, SafeLabel(summary.Holder), null, null, "unavailable",
                     Diagnostic: "Claim or attachment is unreadable, stale, or mismatched.");
+                if (token.IsCancellationRequested)
+                {
+                    rows.Add(status with { Diagnostic = "Status inspection budget exhausted; refresh to inspect this conductor." });
+                    continue;
+                }
                 try
                 {
-                    var claim = await ConductorClaimStore.GetClaimAsync(identity, root, token).ConfigureAwait(false);
+                    var claim = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
                     if (claim?.Holder != summary.Holder) throw new CliArgumentException("Claim changed.");
                     var generation = ConductorClaimStore.GetClaimGeneration(claim);
                     if (SafeLabel(claim.Holder) != claim.Holder || SafeLabel(generation) != generation)
@@ -62,7 +74,23 @@ internal sealed partial class ConductorFollowSession
                         resolver, token).ConfigureAwait(false);
                     var state = Read<ConductorFollowState>(session.StatePath);
                     session.ValidateState(state);
-                    var current = await ConductorClaimStore.GetClaimAsync(identity, root, token).ConfigureAwait(false);
+                    var resumeEligible = false;
+                    string? resumeDiagnostic = null;
+                    if (!registration.Attached && !state.Frozen)
+                    {
+                        try
+                        {
+                            resumeEligible = await Task.Run(() => MutexGuardedFileLock.RunUnderLock(
+                                session.StatePath, LockPrefix, GlassLockTimeout, () =>
+                                {
+                                    session.ValidateResumeEvidence();
+                                    return true;
+                                }), token).ConfigureAwait(false);
+                        }
+                        catch (RetainedInspectionBoundException ex) { resumeDiagnostic = ex.Message; }
+                        catch (Exception ex) when (IsRefusal(ex)) { resumeEligible = false; }
+                    }
+                    var current = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
                     if (current?.Holder != claim.Holder || ConductorClaimStore.GetClaimGeneration(current) != generation
                         || Read<ConductorFollowAttachment>(registrationPath) != registration)
                         throw new CliArgumentException("Conductor changed during status read.");
@@ -73,10 +101,16 @@ internal sealed partial class ConductorFollowSession
                         Adapter = state.Adapter,
                         Model = state.Model,
                         Effort = state.Effort,
+                        ResumeEligible = resumeEligible,
                         Permissions = "File reads only; no writes, shell, network, escalation, or merge authority.",
                         Diagnostic = state.Frozen ? "Session frozen; automatic launches refused." :
+                            !registration.Attached && !resumeEligible ? resumeDiagnostic ?? "Resume unavailable: session busy or retained delivery evidence could not be verified." :
                             "Registration snapshot; not evidence of a running or healthy turn.",
                     };
+                }
+                catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+                {
+                    status = status with { State = "unavailable", Diagnostic = "Status inspection budget exhausted; refresh to inspect this conductor." };
                 }
                 catch (Exception ex) when (IsRefusal(ex))
                 {
@@ -87,9 +121,8 @@ internal sealed partial class ConductorFollowSession
             if (claims.Count > 100)
                 rows.Add(new("Additional claims", null, null, null, "unavailable", Diagnostic: "Display limit reached."));
         }
-        catch (Exception ex) when (IsRefusal(ex))
+        catch (Exception ex) when (IsRefusal(ex) || ex is OperationCanceledException && !callerToken.IsCancellationRequested)
         {
-            rows.Clear();
             rows.Add(new("Conductor registry", null, null, null, "unavailable", Diagnostic: "Registry could not be verified."));
         }
         return new(DateTimeOffset.UtcNow, rows);
@@ -108,14 +141,67 @@ internal sealed partial class ConductorFollowSession
         if (registration.SessionDirectory != directory || registration.Repository != identity.Value
             || registration.ClaimGeneration != generation)
             throw new CliArgumentException("Attachment identity drifted.");
-        var session = await CreateAsync(Path.Combine(directory, "request.json"), root,
-            resolver ?? RepositoryIdentityResolver.TryResolveAsync, token).ConfigureAwait(false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        ConductorFollowSession session;
+        try
+        {
+            session = await CreateAsync(Path.Combine(directory, "request.json"), root,
+                resolver ?? RepositoryIdentityResolver.TryResolveAsync, timeout.Token,
+                claimLockTimeout: GlassLockTimeout).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            throw new CliArgumentException("Conductor verification is busy; refresh before retrying.");
+        }
         session.ValidateAttachment(registration);
         return session;
     }
 
-    internal static async Task DetachFromGlassAsync(string body, string root, CancellationToken token,
-        Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
+    private void ValidateResumeEvidence()
+    {
+        var state = Read<ConductorFollowState>(StatePath);
+        ValidateState(state);
+        if (state.Frozen) throw new CliArgumentException("Frozen session cannot resume automatic delivery.");
+        InspectRetainedSession(state, repair: false);
+    }
+
+    internal static async Task<GlassConductorStatus> ResumeFromGlassAsync(string body, string root,
+        CancellationToken token, Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
+    {
+        var (request, identity) = ParseGlassIdentity(body);
+        var path = Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json");
+        var registration = Read<ConductorFollowAttachment>(path);
+        var session = await ReadGlassSessionAsync(identity, request.ClaimGeneration, root, registration,
+            resolver, token).ConfigureAwait(false);
+        return await Task.Run(() => MutexGuardedFileLock.RunUnderLock(session.StatePath, LockPrefix,
+            GlassLockTimeout, () =>
+            {
+                // Never wait for a vendor turn while holding queue admission. Keep the session
+                // exclusive through validation and the queue/claim cutover.
+                return MutexGuardedFileLock.RunUnderLock(Path.Combine(root, "queue", "queue.json"),
+                    QueueStore.LockNamePrefix, GlassLockTimeout, () =>
+                        ConductorClaimStore.WithCurrentClaim(identity, root, claim =>
+                        {
+                            token.ThrowIfCancellationRequested();
+                            RejectLinks(Path.Combine(root, identity.FileSlug, BatonPaths.ConductorClaimFileName));
+                            var current = Read<ConductorFollowAttachment>(path);
+                            session.ValidateAttachment(current);
+                            if (claim?.Holder != request.Holder || ConductorClaimStore.GetClaimGeneration(claim) != request.ClaimGeneration
+                                || current.Holder != request.Holder || current.Id != request.AttachmentId || current.Attached)
+                                throw new CliArgumentException("Conductor identity changed; refresh before resuming.");
+                            if (Read<ConductorFollowRequest>(Path.Combine(session._directory, "request.json")) != session._request
+                                || ReadCeiling(root, session._request.Workspace) != session._ceiling)
+                                throw new CliArgumentException("Follow attachment authority changed.");
+                            session.ValidateResumeEvidence();
+                            var next = session.NewAttachment();
+                            Write(path, next);
+                            return new GlassConductorStatus(identity.Value, next.Holder, next.ClaimGeneration, next.Id, "attached");
+                        }, GlassLockTimeout));
+            }), token).ConfigureAwait(false);
+    }
+
+    private static (GlassConductorDetachRequest Request, RepositoryIdentity Identity) ParseGlassIdentity(string body)
     {
         var request = Deserialize<GlassConductorDetachRequest>(body);
         if (new[] { request.Repository, request.Holder, request.ClaimGeneration, request.AttachmentId }
@@ -124,6 +210,13 @@ internal sealed partial class ConductorFollowSession
         var identity = RepositoryIdentity.From("https://" + request.Repository, null);
         if (identity is null || identity.Value != request.Repository || request.Repository.StartsWith("gitdir:", StringComparison.Ordinal))
             throw new CliArgumentException("Invalid repository identity.");
+        return (request, identity);
+    }
+
+    internal static async Task DetachFromGlassAsync(string body, string root, CancellationToken token,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
+    {
+        var (request, identity) = ParseGlassIdentity(body);
         var path = Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json");
         var registration = Read<ConductorFollowAttachment>(path);
         var session = await ReadGlassSessionAsync(identity, request.ClaimGeneration, root, registration,

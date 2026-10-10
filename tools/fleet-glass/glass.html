@@ -3285,12 +3285,14 @@ function conductorControlHtml(snapshot, message, busy, escape){
   if(snapshot){
     cards = snapshot.conductors.map((row, index) => {
       const detachable = ["attached","frozen"].includes(row.state) && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
+      const resumable = row.state === "detached" && row.resumeEligible === true && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
       return `<article><strong>${escape(row.repository || "Unknown repository")}</strong>`
         + `<p>Owner: ${escape(row.holder || "Unknown")}</p><p>${escape(states[row.state] || states.unavailable)}</p>`
         + (row.adapter ? `<p>${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
         + `<p>Permissions: ${escape(typeof row.permissions === "string" ? row.permissions : "Unavailable")}</p>`
-        + (row.diagnostic && ["unavailable","frozen"].includes(row.state) ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
+        + (row.diagnostic && ["unavailable","frozen","detached"].includes(row.state) ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
         + (detachable ? `<button type="button" data-conductor-detach="${index}"${busy ? " disabled" : ""}>Detach automatic delivery</button>` : "")
+        + (resumable ? `<button type="button" data-conductor-resume="${index}"${busy ? " disabled" : ""}>Resume automatic delivery</button><p class="control-note">Future handoffs only. Work halted while detached is not replayed.</p>` : "")
         + `</article>`;
     }).join("");
     if(!snapshot.conductors.length) cards = "<p>No conductor ownership records were returned.</p>";
@@ -3329,45 +3331,55 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction){
     catch { snapshot = null; message = "Cannot read conductor settings. No controls are available until a fresh read succeeds."; }
     finally { busy = false; draw(); }
   };
-  const detach = async (index) => {
+  const changeDelivery = async (index, resuming) => {
     if(busy || !Number.isInteger(index)) return;
     const row = snapshot?.conductors[index];
-    if(!row || !["attached","frozen"].includes(row.state) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
-    if(!confirmAction(`Detach automatic delivery for ${row.repository}? Running turns and actions already sent will not be cancelled.`)) return;
-    busy = true; message = "Requesting detach…"; draw();
+    if(!row || !(resuming ? row.state === "detached" && row.resumeEligible === true : ["attached","frozen"].includes(row.state)) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
+    const action = resuming ? "Resume" : "Detach";
+    if(!confirmAction(resuming ? `Resume automatic delivery for ${row.repository}? Only future handoffs will be accepted. Work halted while detached and old handoffs will not be replayed.`
+      : `Detach automatic delivery for ${row.repository}? Running turns and actions already sent will not be cancelled.`)) return;
+    busy = true; message = `Requesting ${action.toLowerCase()}…`; draw();
     let accepted = false;
     try {
-      const response = await request("/conductor/detach", {method:"POST",headers:{"Content-Type":"application/json"},
+      const response = await request(resuming ? "/conductor/resume" : "/conductor/detach", {method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({repository:row.repository,holder:row.holder,claimGeneration:row.claimGeneration,attachmentId:row.attachmentId})});
       if(!response.ok){
         snapshot = null;
-        message = response.status === 403 ? "Detach refused: this connection is not authorized to control Baton."
-          : response.status === 409 ? "Detach was refused. Refresh conductor settings before trying again."
-          : "The detach result is unknown. Refresh before deciding whether to try again.";
+        message = response.status === 403 ? `${action} refused: this connection is not authorized to control Baton.`
+          : response.status === 409 ? `${action} was refused: busy, stale identity, or ineligible session. Refresh conductor settings before trying again.`
+          : `The ${action.toLowerCase()} result is unknown. Refresh before deciding whether to try again.`;
         return;
       }
       accepted = true;
-      message = "Detach accepted. Checking the stored settings…"; draw();
+      const receipt = resuming ? await response.json() : row;
+      if(resuming && (!receipt || receipt.repository !== row.repository || receipt.holder !== row.holder
+        || receipt.claimGeneration !== row.claimGeneration || typeof receipt.attachmentId !== "string"
+        || !/^[a-f0-9]{32}$/i.test(receipt.attachmentId) || receipt.attachmentId === row.attachmentId || receipt.state !== "attached"))
+        throw new Error("Resume receipt does not identify a fresh cutover.");
+      message = `${action} accepted. Checking the stored settings…`; draw();
       await read();
       const current = snapshot.conductors.find(item => item.repository === row.repository);
-      const matched = current?.holder === row.holder && current?.claimGeneration === row.claimGeneration && current?.attachmentId === row.attachmentId && current?.state === "detached";
-      message = matched ? "Automatic delivery is detached. Running turns and already issued actions are not cancelled."
-        : "Detach was accepted, but the current ownership/settings differ. Check the new state below.";
+      const matched = current?.holder === row.holder && current?.claimGeneration === row.claimGeneration && current?.attachmentId === receipt.attachmentId && current?.state === (resuming ? "attached" : "detached");
+      message = matched ? (resuming ? "Automatic delivery is resumed for future handoffs only. Work halted while detached is not replayed."
+        : "Automatic delivery is detached. Running turns and already issued actions are not cancelled.")
+        : `${action} was accepted, but the current ownership/settings differ. Check the new state below.`;
     } catch {
       snapshot = null;
-      message = accepted ? "Detach was accepted, but the fresh state could not be read. Refresh to verify."
-        : "The detach result is unknown. It may have succeeded. Refresh before deciding whether to try again.";
+      message = accepted ? `${action} was accepted, but the receipt or fresh state could not be verified. Refresh to verify.`
+        : `The ${action.toLowerCase()} result is unknown. It may have succeeded. Refresh before deciding whether to try again.`;
     } finally { busy = false; draw(); }
   };
-  return {refresh,detach};
+  return {refresh,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true)};
 }
 
 function wireConductorControl(panel, control){
   panel.addEventListener("click", event => {
     const refresh = event.target.closest?.("[data-conductor-refresh]");
     const detach = event.target.closest?.("[data-conductor-detach]");
+    const resume = event.target.closest?.("[data-conductor-resume]");
     if(refresh) void control.refresh();
     else if(detach) void control.detach(Number(detach.dataset.conductorDetach));
+    else if(resume) void control.resume(Number(resume.dataset.conductorResume));
   });
 }
 // <<< CONDUCTOR-CONTROL-END

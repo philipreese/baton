@@ -930,15 +930,17 @@ public sealed partial class ConductorFollowDeliveryTests
         }
 
         public Task<ConductorFollowResult> FollowWithAdmissionAsync(string tag,
-            Func<ConductorObligation, CancellationToken, Task> admission) => DeliverWithAdmissionAsync(
-                Key(tag), admission);
+            Func<ConductorObligation, CancellationToken, Task> admission,
+            Func<CancellationToken, Task>? beforeLaunchAdmission = null) => DeliverWithAdmissionAsync(
+                Key(tag), admission, beforeLaunchAdmission);
 
         private async Task<ConductorFollowResult> DeliverWithAdmissionAsync(string key,
-            Func<ConductorObligation, CancellationToken, Task> admission)
+            Func<ConductorObligation, CancellationToken, Task> admission,
+            Func<CancellationToken, Task>? beforeLaunchAdmission)
         {
             var session = await ConductorFollowSession.CreateAsync(RequestPath, Root,
                 (_, _) => Task.FromResult<RepositoryIdentity?>(Identity), Ct, Broker);
-            return await session.DeliverAsync(key, Ct, admission);
+            return await session.DeliverAsync(key, Ct, admission, beforeLaunchAdmission);
         }
 
         public string EventEvidencePath(string tag, string file)

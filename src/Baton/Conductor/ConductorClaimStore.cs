@@ -258,14 +258,15 @@ public static class ConductorClaimStore
     public static Task<ConductorClaimRecord?> GetClaimAsync(
         RepositoryIdentity identity,
         string? batonRoot = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? lockTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(identity);
         var root = batonRoot ?? BatonPaths.Root;
         var path = GetClaimFilePath(root, identity.FileSlug);
 
         return Task.Run(
-            () => RunUnderClaimLock(path, () => ReadUnlocked(path)),
+            () => RunUnderClaimLock(path, () => ReadUnlocked(path), lockTimeout),
             cancellationToken);
     }
 
@@ -287,16 +288,17 @@ public static class ConductorClaimStore
 
     /// <summary>Runs a short synchronous operation while the current claim cannot be replaced.</summary>
     public static T WithCurrentClaim<T>(RepositoryIdentity identity, string batonRoot,
-        Func<ConductorClaimRecord?, T> operation) =>
+        Func<ConductorClaimRecord?, T> operation, TimeSpan? lockTimeout = null) =>
         RunUnderClaimLock(GetClaimFilePath(batonRoot, identity.FileSlug),
-            () => operation(ReadUnlocked(GetClaimFilePath(batonRoot, identity.FileSlug))));
+            () => operation(ReadUnlocked(GetClaimFilePath(batonRoot, identity.FileSlug))), lockTimeout);
 
     /// <summary>
     /// Lists all currently held repository claims under <paramref name="batonRoot"/> (spec/baton.md §14).
     /// </summary>
     public static Task<IReadOnlyList<ConductorClaimSummary>> ListHeldClaimsAsync(
         string? batonRoot = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? lockTimeout = null)
     {
         var root = batonRoot ?? BatonPaths.Root;
 
@@ -307,11 +309,12 @@ public static class ConductorClaimStore
 
                 foreach (var directory in EnumerateClaimDirectories(root))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var path = Path.Combine(directory, BatonPaths.ConductorClaimFileName);
 
                     // The read itself classifies absence under lock, so an inaccessible claim can
                     // never be projected as absent between an existence probe and the read.
-                    var record = RunUnderClaimLock(path, () => ReadUnlocked(path));
+                    var record = RunUnderClaimLock(path, () => ReadUnlocked(path), lockTimeout);
 
                     if (record is not null && !string.IsNullOrWhiteSpace(record.Holder) && record.AcquiredAt.HasValue)
                     {
@@ -414,11 +417,11 @@ public static class ConductorClaimStore
         }
     }
 
-    private static T RunUnderClaimLock<T>(string path, Func<T> operation)
+    private static T RunUnderClaimLock<T>(string path, Func<T> operation, TimeSpan? lockTimeout = null)
     {
         try
         {
-            return MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, operation);
+            return MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, lockTimeout ?? LockTimeout, operation);
         }
         catch (ConductorClaimException)
         {

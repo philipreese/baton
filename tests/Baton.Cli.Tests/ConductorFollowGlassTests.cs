@@ -192,12 +192,12 @@ public sealed partial class ConductorFollowDeliveryTests
 
     private sealed class GlassFixture(GlassHttpService service, HttpClient client) : IAsyncDisposable
     {
-        public async Task<string> SlowDetachStatusLineAsync()
+        public async Task<string> SlowDetachStatusLineAsync(string verb = "detach")
         {
             using var socket = new TcpClient();
             await socket.ConnectAsync(IPAddress.Loopback, client.BaseAddress!.Port, Ct);
             await using var stream = socket.GetStream();
-            var headers = $"POST /conductor/detach HTTP/1.1\r\nHost: 127.0.0.1:{client.BaseAddress.Port}\r\n"
+            var headers = $"POST /conductor/{verb} HTTP/1.1\r\nHost: 127.0.0.1:{client.BaseAddress.Port}\r\n"
                 + "Tailscale-User-Login: operator@example.test\r\nTransfer-Encoding: chunked\r\n"
                 + "Content-Type: application/json\r\n\r\n1\r\n{\r\n";
             await stream.WriteAsync(Encoding.UTF8.GetBytes(headers), Ct);
@@ -205,7 +205,8 @@ public sealed partial class ConductorFollowDeliveryTests
             return await reader.ReadLineAsync(Ct).AsTask().WaitAsync(TimeSpan.FromMinutes(1), Ct) ?? "";
         }
 
-        public static async Task<GlassFixture> StartAsync(Fixture fixture)
+        public static async Task<GlassFixture> StartAsync(Fixture fixture,
+            Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
         {
             var probe = new TcpListener(IPAddress.Loopback, 0);
             probe.Start();
@@ -216,7 +217,7 @@ public sealed partial class ConductorFollowDeliveryTests
             {
                 Glass = new GlassListenerSettings { Listen = true, Port = port, OperatorLogin = "operator@example.test" },
             }, Path.Combine(fixture.Root, "fleet", "projection.json"), null, log,
-                conductorRoot: fixture.Root, conductorResolver: (_, _) => Task.FromResult<RepositoryIdentity?>(Identity));
+                conductorRoot: fixture.Root, conductorResolver: resolver ?? ((_, _) => Task.FromResult<RepositoryIdentity?>(Identity)));
             await service.StartAsync(Ct);
             await log.Started.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
             Assert.Contains($"http://127.0.0.1:{port}/", service.BoundPrefixes);
@@ -224,18 +225,27 @@ public sealed partial class ConductorFollowDeliveryTests
         }
 
         public async Task<JsonElement> StatusAsync()
+            => Assert.Single((await SnapshotAsync()).EnumerateArray()).Clone();
+
+        public async Task<JsonElement> SnapshotAsync()
         {
             var text = await client.GetStringAsync("conductors", Ct);
             Assert.DoesNotContain("initialInstructions", text);
             Assert.DoesNotContain("sessionDirectory", text);
             using var document = JsonDocument.Parse(text);
             Assert.True(document.RootElement.GetProperty("observedAt").TryGetDateTimeOffset(out _));
-            return Assert.Single(document.RootElement.GetProperty("conductors").EnumerateArray()).Clone();
+            return document.RootElement.GetProperty("conductors").Clone();
         }
 
         public async Task<HttpResponseMessage> DetachAsync(string body, string? login = "operator@example.test")
+            => await WriteAsync("detach", body, login);
+
+        public async Task<HttpResponseMessage> ResumeAsync(string body, string? login = "operator@example.test")
+            => await WriteAsync("resume", body, login);
+
+        private async Task<HttpResponseMessage> WriteAsync(string verb, string body, string? login)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "conductor/detach")
+            using var request = new HttpRequestMessage(HttpMethod.Post, "conductor/" + verb)
             { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             if (login is not null) request.Headers.Add(GlassWriteGate.IdentityHeader, login);
             return await client.SendAsync(request, Ct);

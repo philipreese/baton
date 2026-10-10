@@ -16,6 +16,8 @@ const snapshot = (state='attached') => ({observedAt:'2026-10-10T00:00:00Z',condu
 const ok = value => ({ok:true,status:200,json:async()=>value});
 const esc = value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const card = conductorControlHtml(snapshot(),'',false,esc);
+assert.ok(conductorControlHtml({...snapshot('detached'),conductors:[{...row,state:'detached',resumeEligible:true}]},'',false,esc).includes('data-conductor-resume="0"'));
+assert.ok(!conductorControlHtml(snapshot('detached'),'',false,esc).includes('data-conductor-resume'));
 assert.ok(card.includes('data-conductor-detach="0"'));
 assert.ok(conductorControlHtml(snapshot('frozen'),'',false,esc).includes('data-conductor-detach="0"'));
 assert.ok(card.includes('not live activity'));
@@ -92,6 +94,63 @@ const clicked=[];
 wireConductorControl({addEventListener:(_,fn)=>handler=fn},{refresh:async()=>clicked.push('refresh'),detach:async n=>clicked.push(n)});
 handler({target:{closest:selector=>selector==='[data-conductor-detach]'?{dataset:{conductorDetach:'0'}}:null}});
 assert.deepEqual(clicked,[0]);
+const newId='a'.repeat(32);
+const detachedSnapshot=(eligible=true)=>({...snapshot('detached'),conductors:[{...row,state:'detached',resumeEligible:eligible}]});
+assert.ok(!conductorControlHtml(detachedSnapshot(false),'',false,esc).includes('data-conductor-resume'));
+assert.ok(!conductorControlHtml({...snapshot('frozen'),conductors:[{...row,state:'frozen',resumeEligible:true}]},'',false,esc).includes('data-conductor-resume'));
+assert.ok(conductorControlHtml(detachedSnapshot(),'',true,esc).includes('data-conductor-resume="0" disabled'));
+let confirmation, resumeReads=0, resumeWrites=0;
+const resumedRow={...row,attachmentId:newId,state:'attached'};
+const resumeControl=createConductorControl(async(path,options)=>{
+  if(path==='/conductors') return ok(resumeReads++ ? {...snapshot(),conductors:[resumedRow]} : detachedSnapshot());
+  resumeWrites++;
+  assert.equal(path,'/conductor/resume');
+  assert.deepEqual(JSON.parse(options.body),{repository:row.repository,holder:row.holder,claimGeneration:row.claimGeneration,attachmentId:row.attachmentId});
+  assert.equal(options.cache,'no-store');
+  return ok(resumedRow);
+},render,text=>{confirmation=text;return true;});
+await resumeControl.refresh(); await resumeControl.resume(0);
+assert.equal(resumeWrites,1);
+assert.equal(resumeReads,2);
+assert.match(confirmation,/Only future handoffs/);
+assert.match(confirmation,/not be replayed/);
+assert.match(latest.message,/resumed for future handoffs only/);
+for(const change of ['attachmentId','holder','claimGeneration','repository','state','unreadable','receipt']){
+  let count=0;
+  const mismatch=createConductorControl(async path=>{
+    if(path!=='/conductors') return ok(change==='receipt'?{...resumedRow,attachmentId:row.attachmentId}:resumedRow);
+    if(!count++) return ok(detachedSnapshot());
+    if(change==='unreadable') throw new Error('offline');
+    return ok({...snapshot(),conductors:[{...resumedRow,[change]:'foreign'}]});
+  },render,()=>true);
+  await mismatch.refresh(); await mismatch.resume(0);
+  assert.doesNotMatch(latest.message,/delivery is resumed/,'success requires the new receipt and fresh GET to agree exactly');
+  assert.match(latest.message,/accepted, but/);
+}
+for(const failure of [403,409,500,'lost']){
+  let writes=0;
+  const refused=createConductorControl(async path=>{
+    if(path==='/conductors') return ok(detachedSnapshot());
+    writes++;
+    if(failure==='lost') throw new Error('lost after possible commit');
+    return {ok:false,status:failure};
+  },render,()=>true);
+  await refused.refresh(); await refused.resume(0); await refused.resume(0);
+  assert.equal(writes,1,'unknown/refused requests are never automatically replayed');
+  assert.equal(latest.snapshot,null);
+  assert.match(latest.message,failure===403?/not authorized/:failure===409?/busy, stale/:/unknown/);
+}
+let blockedWrites=0;
+const ineligible=createConductorControl(async path=>{
+  if(path==='/conductors') return ok(detachedSnapshot(false));
+  blockedWrites++; return ok(resumedRow);
+},render,()=>true);
+await ineligible.refresh(); await ineligible.resume(0);
+assert.equal(blockedWrites,0);
+let resumeHandler;
+wireConductorControl({addEventListener:(_,fn)=>resumeHandler=fn},{resume:async n=>clicked.push(`resume-${n}`)});
+resumeHandler({target:{closest:selector=>selector==='[data-conductor-resume]'?{dataset:{conductorResume:'0'}}:null}});
+assert.deepEqual(clicked,[0,'resume-0']);
 assert.ok(html.includes('wireConductorControl(conductorPanel, conductorControl);'));
 assert.ok(html.includes('void conductorControl.refresh();'));
 console.log('Conductor controls: shipped render, exact mutation, refusal, uncertainty, refresh and click wiring passed.');
