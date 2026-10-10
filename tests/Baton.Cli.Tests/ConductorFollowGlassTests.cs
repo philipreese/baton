@@ -247,6 +247,15 @@ public sealed partial class ConductorFollowDeliveryTests
         public async Task<HttpResponseMessage> ControlAsync(string verb, string body, string? login = "operator@example.test")
             => await WriteAsync(verb, body, login);
 
+        public bool LoseCorrectionReply { set => service.DropCorrectionAcknowledgementForTest = value; }
+
+        public async Task<HttpResponseMessage> CorrectionReceiptAsync(string requestId, string? login = "operator@example.test")
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "conductor/corrections/receipt?requestId=" + Uri.EscapeDataString(requestId));
+            if (login is not null) request.Headers.Add(GlassWriteGate.IdentityHeader, login);
+            return await client.SendAsync(request, Ct);
+        }
+
         private async Task<HttpResponseMessage> WriteAsync(string verb, string body, string? login)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, "conductor/" + verb)

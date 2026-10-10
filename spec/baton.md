@@ -6819,7 +6819,8 @@ entry rather than extending it. At slice 1 landing the tripwire was structurally
 `FleetGlassReadOnlyTests` pinned that the page performed no non-GET request and read no origin but
 the one that served it. #2078's slice below replaces that historical route predicate.
 
-**Slice 2 write gate landed 2026-09-12 (#2078).** Reads remain ungated. `GlassWriteGate` accepts a
+**Slice 2 write gate landed 2026-09-12 (#2078).** Ordinary reads remain ungated; §14's exact correction
+receipt lookup uses operator authentication. `GlassWriteGate` accepts a
 mutating request only when the backend peer is loopback, exactly one nonblank
 `Tailscale-User-Login` is present, and it equals `Glass.OperatorLogin` ordinally; missing/blank
 configuration, missing/multiple identity values, tagged-device traffic, mismatch, and non-loopback
@@ -9049,7 +9050,7 @@ Stop supersedes Hold; Take Over and release/new acquisition never inherit it. Al
 and workers retain their historical outcomes and exact issued proof without current permission.
 
 Real attached halt commits retain pending continuation on the existing queue intent, including
-events arriving during Hold. The normal scheduler's existing advisory task slot selects valid pending
+events arriving during Hold. The normal scheduler's acquisition-scoped hosted tasks select valid pending
 events outside control locks; startup also reconciles these identities. Unhold resumes an unlaunched
 event, a complete response awaiting decision admission, or an admitted marker-free action. Response
 recovery repairs decision/journal persistence from retained source and response without a model call.
@@ -9078,7 +9079,7 @@ policy. Unknown, missing, duplicate, or aliased fields refuse; `stateDirectory` 
 
 The controller accepts newline JSON `{ "obligationKey": "..." }`, bounded to 8192 characters per
 event and 2048 per key. It blocks on idle stdin; EOF finishes without creating a turn. Each event
-returns one JSON result with `status` (`delivered`, `replayed`, `held-pending`, `refused`, or `uncertain`), original
+returns one JSON result with `status` (`delivered`, `replayed`, `held-pending`, `admission-pending`, `refused`, or `uncertain`), original
 `obligationKey` and `obligationId` when identifiable, `evidenceLocation`, and a safe `diagnostic`.
 Delivered/replayed results include the complete retained `response` and transport `receipt`.
 Malformed, empty, unknown, foreign, terminal, unsupported, or inconsistent events launch nothing.
@@ -9102,7 +9103,8 @@ All event keys, including distinct keys handled by concurrent controller process
 that session. The first event starts one Codex app-server thread; every later event resumes the
 retained vendor thread with `SessionId` and `ResumeSession: true`. The app-server's actual
 `thread.started` id is durably retained before `turn/start`; failed persistence or a mismatched
-resumed id prevents `turn/start`. No timer-generated turns, fresh conversation per event, model
+resumed id prevents `turn/start`. Existing ticks may execute committed correction input as described
+below; they never generate input. No fresh conversation per event, model
 switch, failover, or root Desktop-task takeover exists.
 
 The session delivery journal is keyed by original obligation ID and correlates its key, identity, launch marker, validated complete
@@ -9133,7 +9135,7 @@ outside queue locks through the same single-event delivery entry as manual follo
 startup pass recovers attachment-stamped commit/enqueue/notification gaps from the existing queue;
 repeated starts and notifications replay complete receipts without new turns. Historical rows never
 cross automatic admission. Timer reconciliation may enqueue obligations and reconcile complete
-legacy evidence, but cannot launch a model turn. New legacy advice is triggered by a committed halt
+legacy evidence and execute already-accepted corrections, but cannot manufacture model work. New legacy advice is triggered by a committed halt
 notification retained with its obligation ID and context digest; provider completion and startup
 drain accepted notifications without spending on unnotified backlog. Legacy and follow use the
 obligation store's existing cross-process per-key admission serialization and persist one
@@ -9161,6 +9163,73 @@ reservation policy and admission ledger. Missing, stale, unreadable or refused r
 means no launch marker and no call. It never harvests a vendor on notification or idle ticks, and
 does not add a quota framework. Explicit manual follow retains its existing budget behavior;
 detached registered sessions refuse new turns while complete evidence remains replayable.
+
+### Retained operator corrections (#2666)
+
+Authenticated `POST /conductor/correct` accepts exactly canonical `repository`, `holder`,
+`claimGeneration`, `attachmentId`, client `requestId` and nonblank `text`. The complete body is bounded
+to 4096 characters; excess, unknown, duplicate and aliased fields refuse rather than truncate.
+Authentication supplies issuer. Corrections use the existing conversation and exact file-read-only
+grant, without preemption or new action authority. Receipt, issued turn and complete delivery are
+distinct; application remains **not verified**, regardless of response prose.
+
+One slot per retained acquisition holds one unresolved correction and at most one waiting ordinary
+predecessor. Busy and Held acquisitions accept without waiting for their session mutex; Hold prevents
+launch. Detached, stopped, displaced and known-frozen targets refuse new input. Identical authenticated
+issuer/request-ID/input replay returns its original acceptance before target or capacity checks and
+does not wake delivery. Changed input conflicts across targets. Another request while queued, issued
+or uncertain receives capacity refusal naming safe existing identity and status. Only complete delivery
+or durable proven-unissued revocation permits slot reuse; uncertainty never frees it.
+
+Immutable bounded input under the acquisition binds exact target, authenticated issuer/request identity,
+text and payload digests, request/configuration digests and a distinct correction event ID. Acceptance
+serializes queue→claim→short correction lock, rechecks identity and capacity, selects the predecessor,
+atomically prepares the slot, then publishes an immutable receipt without replacement. The receipt
+commits acceptance and binds source/slot identity and original acceptance time. Its deterministic path
+under the follow root hashes an unambiguous issuer/request-ID tuple independently of acquisition.
+Cross-target publishers share queue serialization. No session mutex, vendor, remote check or history
+scan crosses acceptance locks. Links and conflicting retained identity refuse. Only demonstrably
+uncommitted, marker-free preparation may be discarded; source or slot without receipt cannot launch.
+Failure after possible publication reports unknown pending exact lookup, never definitive rejection.
+
+`GET /conductor/corrections/receipt?requestId=<id>` uses the same operator authentication as writes and
+`Cache-Control:no-store`. It derives issuer identity from authentication and reads only the deterministic
+receipt and its exact bounded source/session/event proof. It does not create a current-holder session
+or scan cards, history or obligations. Historical lookup survives authority changes and display
+truncation. Safe projections contain identity, time, disposition and reason; they contain no correction
+text, output, paths or native IDs. Contradictory/missing proof is unknown. The phone retains request
+identity after a lost reply, looks up the exact receipt separately from current settings and never
+automatically repeats POST. It shows Received/queued, Waiting with the actual blocker, Issued/outcome
+pending, Delivered/turn completed, Uncertain, or Not delivered/reason, always with unverified application.
+
+The local predecessor selector orders existing candidates by retained observation time, then exact
+judgment key. Acquisition/attachment and immutable source eligibility select it even while Held;
+permission to launch is separately revalidated outside acceptance locks, including current head and
+runway. Already-issued turns finish. The predecessor gets one admission opportunity before correction
+priority over new ordinary input. Its exact disposition lives only in the slot: completion or invalid
+source resolves, uncertain launch freezes, and reversible acquisition/queue/trust/runway restrictions
+preserve pending work. Every final hosted launch cutoff, including direct follow, rechecks this guard.
+Each later correction selects a predecessor again. This bounded fairness creates no global order,
+backlog, ordinary payload mutation or obligation schema/lifecycle change.
+
+Existing notifications, completion drain, startup and scheduler ticks reselect committed input.
+Hosted operations and cancellation are keyed by repository/acquisition, independent of the legacy
+advice task; bounded busy-session admission cannot consume another acquisition's capacity. Vendor and
+runway restrictions remain. No task is created per POST and no poller is added. Shutdown cancels and
+joins hosted operations. Refused snapshot entries do not monopolize selection, and hosted completion
+preserves the legacy notification drain without recursively selecting more hosted work.
+
+Correction delivery shares session serialization, native thread persistence, final queue→claim launch
+fence, complete-response validation and receipt repair with ordinary follow. Exact input/thread/configuration
+proof and complete response plus delivery receipt close delivery; complete response with missing receipt
+repairs without another call. An unresolved marker freezes the conversation and retains capacity.
+Late complete issued evidence stays Delivered after Hold, detach, Stop or transfer; only proven-unissued
+revocation is Not delivered. Correction kind is explicit at fresh/replay, scanner, decision/source readers,
+Resume, startup and Unhold. A correction `decision.json` is corruption, never action evidence. Absent
+kind remains compatible only with exact original halted-task source; null, unknown or conflicting kinds
+refuse. Ordinary decision recovery remains intact. Corrections never submit/observe an obligation or
+change permissions. Deterministic fixtures prove host behavior; live consumption and installed phone
+or useful-task acceptance remain separate under #2091.
 
 ### One-shot owned readiness advice (#2484)
 

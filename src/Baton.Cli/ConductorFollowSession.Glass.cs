@@ -14,7 +14,8 @@ internal sealed record GlassConductorStatus(string Repository, string? Holder, s
     string? RetainedHolder = null, string? RetainedGeneration = null, bool HistoricalProvider = false,
     IReadOnlyList<GlassHostedControlResult>? Controls = null, IReadOnlyList<GlassIssuedActionStatus>? Actions = null,
     bool Held = false, long ControlRevision = 0, bool HoldEligible = false, bool UnholdEligible = false,
-    string? AdmissionWait = null, bool QueueHeld = false, ConductorHostedControlReceipt? HoldControl = null);
+    string? AdmissionWait = null, bool QueueHeld = false, ConductorHostedControlReceipt? HoldControl = null,
+    bool CorrectionEligible = false, GlassCorrectionStatus? Correction = null);
 
 internal sealed record GlassHostedControlResult(ConductorHostedControlReceipt Receipt, string Cleanup);
 internal sealed record GlassIssuedActionStatus(string Tag, string State, string? Reason, string? NextTrigger, string Holder);
@@ -166,7 +167,7 @@ internal sealed partial class ConductorFollowSession
                     if (current?.Holder != claim.Holder || current.Stopped != claim.Stopped || current.ControlRevision != claim.ControlRevision || ConductorClaimStore.GetClaimGeneration(current) != generation
                         || Read<ConductorFollowAttachment>(registrationPath) != registration)
                     {
-                        status = status with { StopEligible = false, TakeoverEligible = false, HoldEligible = false, UnholdEligible = false };
+                        status = status with { StopEligible = false, TakeoverEligible = false, HoldEligible = false, UnholdEligible = false, CorrectionEligible = false };
                         throw new CliArgumentException("Conductor changed during status read.");
                     }
                     status = status with
@@ -177,6 +178,8 @@ internal sealed partial class ConductorFollowSession
                         Model = state.Model,
                         Effort = state.Effort,
                         ResumeEligible = resumeEligible,
+                        CorrectionEligible = registration.Attached && !state.Frozen,
+                        Correction = ReadGlassCorrection(root, session._directory),
                         Permissions = "File reads only; no writes, shell, network, escalation, or merge authority.",
                         Diagnostic = state.Frozen ? "Session frozen; automatic launches refused." :
                             !registration.Attached && !resumeEligible ? resumeDiagnostic ?? "Resume unavailable: session busy or retained delivery evidence could not be verified." :
@@ -201,6 +204,15 @@ internal sealed partial class ConductorFollowSession
             rows.Add(new("Conductor registry", null, null, null, "unavailable", Diagnostic: "Registry could not be verified."));
         }
         return new(DateTimeOffset.UtcNow, rows);
+    }
+
+    private static GlassCorrectionStatus? ReadGlassCorrection(string root, string directory)
+    {
+        var path = Path.Combine(directory, "correction.json");
+        if (!File.Exists(path)) return null;
+        var slot = ReadCorrectionSlot(path);
+        var receiptPath = CorrectionReceiptPath(root, slot.ReceiptId);
+        return File.Exists(receiptPath) ? ReadCorrectionStatus(root, Read<ConductorCorrectionReceipt>(receiptPath)) : null;
     }
 
     private static string SafeLabel(string value) => ConductorClaimStore.IsSafeHostedHolderLabel(value) ? value : "<redacted>";

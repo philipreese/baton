@@ -210,7 +210,7 @@ public class FleetGlassReadOnlyTests
         var rawHtml = File.ReadAllText(glassPath);
         var violations = new List<string>();
 
-        // 1. Keep two auditable POST sinks: queue/room controls and exact conductor detach/resume, all
+        // 1. Keep three auditable POST sinks: queue/room controls, hosted controls and corrections, all
         // rendered behind DAEMON_SERVED; the artifact cannot paint them.
         var forbiddenNetworkSinks = new[]
         {
@@ -232,7 +232,9 @@ public class FleetGlassReadOnlyTests
         }
 
         violations.AddRange(SameOriginReadViolations(htmlWithoutComments));
-        Assert.Equal(2, Regex.Matches(htmlWithoutComments, @"\bmethod\s*:\s*[""']POST[""']").Count);
+        Assert.Equal(3, Regex.Matches(htmlWithoutComments, @"\bmethod\s*:\s*[""']POST[""']").Count);
+        Assert.Contains("request(\"/conductor/correct\", {method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("/conductor/corrections/receipt?requestId=${encodeURIComponent(pendingCorrection.body.requestId)}", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("request(route, {method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("const routes = {stop:\"/conductor/stop\",takeover:\"/conductor/takeover\",hold:\"/conductor/hold\",unhold:\"/conductor/unhold\"};", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("const route = operation ? routes[operation] : resuming ? \"/conductor/resume\" : \"/conductor/detach\";", htmlWithoutComments, StringComparison.Ordinal);

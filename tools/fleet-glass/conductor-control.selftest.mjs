@@ -21,7 +21,7 @@ assert.ok(!conductorControlHtml(snapshot('detached'),'',false,esc).includes('dat
 assert.ok(card.includes('data-conductor-detach="0"'));
 assert.ok(conductorControlHtml(snapshot('frozen'),'',false,esc).includes('data-conductor-detach="0"'));
 assert.ok(card.includes('not live activity'));
-assert.ok(card.includes('not available here yet'));
+assert.ok(card.includes('application is not verified'));
 assert.ok(!conductorControlHtml(snapshot('unavailable'),'',false,esc).includes('data-conductor-detach'));
 assert.ok(conductorControlHtml({...snapshot(),conductors:[{...row,holder:'<img src=x onerror=alert(1)>'}]},'',false,esc).includes('&lt;img'));
 
@@ -285,4 +285,58 @@ assert.ok(pendingVsIssued.includes('Action issued: in-flight'));
 assert.ok(pendingVsIssued.includes('2026-10-10T07:00:00Z'));
 assert.ok(pendingVsIssued.includes('operator@example.test'));
 assert.ok(pendingVsIssued.includes('wait for source'));
-console.log(`Conductor controls: shipped render, exact mutation, refusal, uncertainty, refresh and click wiring passed; ${holdCases} additional Hold/Unhold scenarios passed.`);
+const correctionRow={...row,correctionEligible:true};
+const correctionSnapshot=()=>({...snapshot(),conductors:[correctionRow]});
+const correctionReceipt=(state='queued')=>({...row,receiptId:'safe-receipt',requestId:'correction-1',acceptedAt:'2026-10-10T09:00:00Z',state,reason:'Safe actual blocker',application:'not verified'});
+for(const [state,label] of [['queued','Received / queued'],['waiting','Waiting'],['issued','Issued / outcome pending'],['delivered','Delivered / turn completed'],['uncertain','Uncertain'],['not-delivered','Not delivered']]){
+  const rendered=conductorControlHtml({...snapshot(),conductors:[{...correctionRow,correction:correctionReceipt(state)}]},'',false,esc);
+  assert.ok(rendered.includes(label));
+  assert.ok(rendered.includes('Application: not verified.'));
+  assert.ok(rendered.includes('Safe actual blocker'));
+}
+for(const state of ['detached','frozen','unavailable','stopped','taken-over'])
+  assert.ok(!conductorControlHtml({...snapshot(),conductors:[{...correctionRow,state}]},'',false,esc).includes('data-conductor-correct='));
+assert.ok(conductorControlHtml({...snapshot(),conductors:[{...correctionRow,state:'held'}]},'',false,esc).includes('data-conductor-correct="0"'));
+let correctionLatest, correctionPosts=0, correctionGets=0, savedRequest;
+globalThis.sessionStorage={getItem:()=>savedRequest || null,setItem:(_,value)=>{savedRequest=value;}};
+const correctionRender=(snapshot,message,busy,pending)=>{correctionLatest={snapshot,message,busy,pending};};
+const lostCorrection=createConductorControl(async(path,options)=>{
+  if(path==='/conductors') return ok(correctionSnapshot());
+  if(path==='/conductor/correct'){
+    correctionPosts++;
+    const body=JSON.parse(options.body);
+    assert.equal(body.requestId,'correction-1');
+    assert.equal(body.text,'private explicit correction');
+    assert.equal(body.issuer,undefined);
+    throw new Error('lost after acceptance');
+  }
+  assert.equal(path,'/conductor/corrections/receipt?requestId=correction-1');
+  assert.equal(options.cache,'no-store');
+  correctionGets++;
+  return ok({outcome:'accepted',receipt:correctionReceipt()});
+},correctionRender,()=>true,()=> 'correction-1');
+await lostCorrection.refresh(); await lostCorrection.correct(0,'private explicit correction');
+assert.match(correctionLatest.message,/outcome unknown/);
+assert.equal(correctionLatest.pending.body.requestId,'correction-1');
+assert.ok(!savedRequest.includes('private explicit correction'),'storage retains request identity without text');
+await lostCorrection.lookupCorrection(); await lostCorrection.refresh();
+assert.equal(correctionPosts,1,'neither lookup nor refresh may repeat POST');
+assert.equal(correctionGets,2);
+assert.match(correctionLatest.message,/Exact acceptance receipt found/);
+const restoredCorrection=createConductorControl(async path=>path==='/conductors'?ok(correctionSnapshot()):ok({outcome:'accepted',receipt:correctionReceipt('delivered')}),correctionRender,()=>true);
+await restoredCorrection.refresh();
+assert.equal(correctionLatest.pending.body.requestId,'correction-1','reload retains exact lookup identity');
+assert.equal(correctionLatest.pending.receipt.state,'delivered');
+delete globalThis.sessionStorage;
+let independentPosts=0;
+const independentRows=[correctionRow,{...correctionRow,repository:'github.com/test/independent'}];
+const independent=createConductorControl(async(path,options)=>{
+  if(path==='/conductors') return ok({...snapshot(),conductors:independentRows});
+  if(path==='/conductor/correct'){ independentPosts++; throw new Error('lost after acceptance'); }
+  return ok({outcome:'unknown',receipt:null});
+},correctionRender,()=>true,()=> 'request-' + independentPosts);
+await independent.refresh(); await independent.correct(0,'A correction');
+await independent.refresh(); await independent.correct(1,'B correction');
+assert.equal(independentPosts,2,'one acquisition cannot consume another card correction capacity');
+assert.equal(correctionLatest.pending.requests.length,2,'both lost-reply identities remain available for exact lookup');
+console.log(`Conductor controls: existing scenarios, ${holdCases} Hold/Unhold scenarios, six correction states and lost-reply/reload exact lookup passed.`);

@@ -328,6 +328,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
 .conductor-control button{font:inherit;min-height:44px;padding:.5rem .8rem;max-width:100%;white-space:normal;cursor:pointer}
 .conductor-control label{display:block;margin:.5rem 0;overflow-wrap:anywhere}
 .conductor-control input{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:44px;font:inherit}
+.conductor-control textarea{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:96px;font:inherit;resize:vertical}
 .conductor-control .control-note{color:var(--ink-soft);font-size:.8125rem}
 </style>
 <main>
@@ -3281,7 +3282,12 @@ function createGlassWriteController(fetchImpl, applySnapshot, banner, renderQueu
 }
 
 // >>> CONDUCTOR-CONTROL-BEGIN
-function conductorControlHtml(snapshot, message, busy, escape){
+function correctionStatusHtml(receipt, escape){
+  const labels = {queued:"Received / queued",waiting:"Waiting",issued:"Issued / outcome pending",delivered:"Delivered / turn completed",uncertain:"Uncertain", "not-delivered":"Not delivered"};
+  return receipt ? `<p>Correction: ${escape(labels[receipt.state] || "Unknown outcome")}</p><p class="control-note">Request ${escape(receipt.requestId)} · received ${escape(receipt.acceptedAt || "unknown time")}. ${escape(receipt.reason || "Evidence unavailable.")} Application: not verified.</p>` : "";
+}
+
+function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection = null){
   const states = {held:"Hosted acquisition Held",attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor frozen on uncertain delivery",stopped:"Hosted acquisition stopped",released:"Claim released; retained history", "taken-over":"Ownership transferred; no replacement hosted session started", "prior-acquisition":"Retained provider from a prior acquisition; no current hosted session"};
   let cards = "";
   if(snapshot){
@@ -3301,6 +3307,8 @@ function conductorControlHtml(snapshot, message, busy, escape){
         + (row.held === true && row.holdControl ? `<p class="control-note">Current Hold: ${escape(row.holdControl.request?.reason || "unknown reason")} · ${escape(row.holdControl.issuer || "unknown issuer")} · ${escape(row.holdControl.appliedAt || "unknown time")}</p>` : "")
         + (row.admissionWait ? `<p class="control-note">${escape(row.admissionWait)}</p>` : "")
         + (row.queueHeld === true ? `<p class="control-note">Global worker queue is Held; Unhold does not resume it.</p>` : "")
+        + correctionStatusHtml(row.correction,escape)
+        + (row.correctionEligible === true && ["attached","held"].includes(row.state) ? `<label>Correction for this retained conversation <textarea data-conductor-correction-text="${index}" maxlength="4096"${busy ? " disabled" : ""}></textarea></label><button type="button" data-conductor-correct="${index}"${busy ? " disabled" : ""}>Send correction</button><p class="control-note">Current work may finish. This uses the existing read-only grant; application is not verified.</p>` : "")
         + (row.stopEligible === true || row.takeoverEligible === true || row.holdEligible === true || row.unholdEligible === true ? `<label>Control reason <input type="text" data-conductor-reason="${index}" maxlength="1024"${busy ? " disabled" : ""}></label>` : "")
         + (row.holdEligible === true ? `<button type="button" data-conductor-hold="${index}"${busy ? " disabled" : ""}>Hold new conductor work</button>` : "")
         + (row.unholdEligible === true ? `<button type="button" data-conductor-unhold="${index}"${busy ? " disabled" : ""}>Unhold conductor</button>` : "")
@@ -3315,8 +3323,9 @@ function conductorControlHtml(snapshot, message, busy, escape){
   return `<h2>Conductor</h2><p class="control-note">Ownership and settings, not live activity.</p>`
     + (snapshot ? `<p class="control-note">Checked ${escape(new Date(snapshot.observedAt).toLocaleString())}. Refresh for changes.</p>` : "")
     + `<p role="status" aria-live="polite">${escape(message)}</p>${cards}`
+    + (pendingCorrection ? (pendingCorrection.requests || [pendingCorrection]).map(pending => `<p class="control-note">${escape(pending.body.repository)} · exact correction request ${escape(pending.body.requestId)}. Acceptance receipt and current conductor state are checked separately.</p>${correctionStatusHtml(pending.receipt,escape)}<button type="button" data-conductor-correction-lookup="${escape(pending.body.requestId)}"${busy ? " disabled" : ""}>Look up exact correction receipt</button>`).join("") : "")
     + `<button type="button" data-conductor-refresh${busy ? " disabled" : ""}>Refresh conductor</button>`
-    + `<p class="control-note">Stop is terminal for this acquisition. Take Over transfers ownership only. Issued work may finish. Steering is not available here yet.</p>`;
+    + `<p class="control-note">Stop is terminal for this acquisition. Take Over transfers ownership only. Issued work may finish. Correction application is not verified.</p>`;
 }
 
 function createConductorControl(fetchImpl, renderPanel, confirmAction, newRequestId = () => globalThis.crypto.randomUUID()){
@@ -3324,11 +3333,31 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
   let busy = false;
   let message = "Loading conductor settings…";
   let pendingControl = null;
+  let pendingCorrection = null;
+  const pendingCorrections = new Map();
+  const correctionKey = target => JSON.stringify([target.repository,target.claimGeneration]);
+  try {
+    const saved = globalThis.sessionStorage?.getItem("baton-correction-request");
+    if(saved){
+      const value = JSON.parse(saved);
+      for(const retained of value?.requests || [value]){
+        if(retained?.body && ["repository","holder","claimGeneration","attachmentId","requestId"].every(key => typeof retained.body[key] === "string" && retained.body[key].length <= 256)){
+          pendingCorrections.set(correctionKey(retained.body),retained);
+          if(!pendingCorrection || retained.body.requestId === value.activeRequestId) pendingCorrection = retained;
+        }
+      }
+    }
+  } catch { /* A denied browser storage operation leaves the in-memory request available. */ }
   const sameIdentity = (a,b) => ["repository","holder","claimGeneration","attachmentId"].every(key => a?.[key] === b?.[key]);
   const exactReceipt = result => result?.receipt?.operation === pendingControl?.operation
     && ["repository","holder","claimGeneration","attachmentId","requestId","reason","destinationHolder","destinationAddress","expectedControlRevision"]
       .every(key => (result.receipt.request?.[key] ?? null) === (pendingControl.body[key] ?? null));
-  const draw = () => renderPanel(snapshot, message, busy);
+  const draw = () => renderPanel(snapshot, message, busy, pendingCorrection ? {...pendingCorrection,requests:[...pendingCorrections.values()]} : null);
+  const saveCorrection = () => {
+    if(pendingCorrection) pendingCorrections.set(correctionKey(pendingCorrection.body),pendingCorrection);
+    try { globalThis.sessionStorage?.setItem("baton-correction-request",JSON.stringify({requests:[...pendingCorrections.values()],activeRequestId:pendingCorrection?.body.requestId})); }
+    catch { /* Receipt lookup still uses the visible exact request ID. */ }
+  };
   const request = async (path, options) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -3354,9 +3383,73 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
         message = found ? `Exact historical ${pendingControl.operation} receipt found; cleanup ${found.cleanup}. Current state is shown separately; this receipt does not establish current eligibility.`
           : `No exact receipt for request ${pendingControl.body.requestId} in this snapshot; outcome remains unknown. Do not infer failure or repeat automatically.`;
       }
+      if(pendingCorrection) await readCorrectionReceipt();
     }
     catch { snapshot = null; message = "Cannot read conductor settings. No controls are available until a fresh read succeeds."; }
     finally { busy = false; draw(); }
+  };
+  const readCorrectionReceipt = async () => {
+    if(!pendingCorrection) return;
+    const response = await request(`/conductor/corrections/receipt?requestId=${encodeURIComponent(pendingCorrection.body.requestId)}`, {});
+    if(!response.ok) throw new Error("Exact correction lookup unavailable.");
+    const result = await response.json();
+    const receipt = result?.receipt;
+    if(result?.outcome === "accepted" && (!receipt || !sameIdentity(receipt,pendingCorrection.body) || receipt.requestId !== pendingCorrection.body.requestId || receipt.application !== "not verified"))
+      throw new Error("Correction receipt does not match the retained request.");
+    pendingCorrection = {...pendingCorrection,receipt:receipt || null,outcome:result?.outcome || "unknown"}; saveCorrection();
+    message = result?.outcome === "accepted" ? "Exact acceptance receipt found. Delivery and current conductor state are shown separately; application is not verified."
+      : result?.outcome === "absent" ? "No committed acceptance receipt found for this exact request. No POST was repeated."
+      : "Correction outcome remains unknown; inspect the exact request receipt. No POST was repeated.";
+  };
+  const lookupCorrection = async (requestId = null) => {
+    if(busy || !pendingCorrection) return;
+    if(requestId){
+      const retained = [...pendingCorrections.values()].find(item => item.body.requestId === requestId);
+      if(!retained) return;
+      pendingCorrection = retained;
+    }
+    busy = true; draw();
+    try { await readCorrectionReceipt(); }
+    catch { message = "Exact correction lookup unavailable. Keep this request ID; do not repeat POST automatically."; }
+    finally { busy = false; draw(); }
+  };
+  const correct = async (index, text) => {
+    if(busy || !Number.isInteger(index)) return;
+    const row = snapshot?.conductors[index];
+    if(!row || row.correctionEligible !== true || !["attached","held"].includes(row.state) || typeof text !== "string" || !text.trim()) return;
+    const retained = pendingCorrections.get(correctionKey(row));
+    if(retained && retained.outcome !== "absent" && retained.outcome !== "refused"
+      && !["delivered","not-delivered"].includes(retained.receipt?.state)){
+      message = "Look up the retained correction request before submitting new input."; draw(); return;
+    }
+    const body = {repository:row.repository,holder:row.holder,claimGeneration:row.claimGeneration,attachmentId:row.attachmentId,requestId:newRequestId(),text};
+    const encoded = JSON.stringify(body);
+    if(encoded.length > 4096){ message = "Correction and target exceed the 4096-character request limit. Shorten the text."; draw(); return; }
+    if(!confirmAction("Send one correction to this retained conversation? Current work may finish. The existing read-only grant remains in force; application is not verified.")) return;
+    const {text:omitted,...identity} = body;
+    pendingCorrection = {body:identity,outcome:"unknown",receipt:null}; saveCorrection();
+    busy = true; message = `Sending correction request ${body.requestId}…`; draw();
+    try {
+      const response = await request("/conductor/correct", {method:"POST",headers:{"Content-Type":"application/json"},body:encoded});
+      if(!response.ok && response.status !== 409){
+        if(response.status === 403) pendingCorrection.outcome = "refused";
+        throw new Error("Correction response unavailable.");
+      }
+      let result;
+      try { result = await response.json(); } catch { result = null; }
+      if(result?.outcome === "capacity"){
+        pendingCorrection.outcome = "refused"; saveCorrection();
+        message = `Correction capacity refused. Existing request ${result.receipt?.requestId || "unknown"}: ${result.receipt?.state || "unknown"}.`; draw();
+        await read(); return;
+      }
+      if(response.status === 409){ pendingCorrection.outcome = "refused"; saveCorrection(); message = "Correction refused: exact target or request conflicts. Refresh before entering new input."; snapshot = null; return; }
+      await readCorrectionReceipt();
+      await read();
+    } catch {
+      snapshot = null;
+      message = pendingCorrection.outcome === "refused" ? "Correction was refused or not authorized. Keep the exact request ID and refresh."
+        : "Correction acceptance outcome unknown. Keep this request ID and look up its exact receipt; no POST will be repeated automatically.";
+    } finally { saveCorrection(); busy = false; draw(); }
   };
   const changeDelivery = async (index, resuming, operation = null, inputs = {}) => {
     if(busy || !Number.isInteger(index)) return;
@@ -3432,7 +3525,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
         : `The ${action.toLowerCase()} result is unknown. It may have succeeded. Refresh before deciding whether to try again.`;
     } finally { busy = false; draw(); }
   };
-  return {refresh,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true),
+  return {refresh,correct,lookupCorrection,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true),
     hold:(index,inputs)=>changeDelivery(index,false,"hold",inputs),unhold:(index,inputs)=>changeDelivery(index,false,"unhold",inputs),
     stop:(index,inputs)=>changeDelivery(index,false,"stop",inputs),takeover:(index,inputs)=>changeDelivery(index,false,"takeover",inputs)};
 }
@@ -3446,7 +3539,14 @@ function wireConductorControl(panel, control){
     const takeover = event.target.closest?.("[data-conductor-takeover]");
     const hold = event.target.closest?.("[data-conductor-hold]");
     const unhold = event.target.closest?.("[data-conductor-unhold]");
+    const correct = event.target.closest?.("[data-conductor-correct]");
+    const lookup = event.target.closest?.("[data-conductor-correction-lookup]");
     if(refresh) void control.refresh();
+    else if(lookup) void control.lookupCorrection(lookup.dataset.conductorCorrectionLookup || null);
+    else if(correct){
+      const index = Number(correct.dataset.conductorCorrect);
+      void control.correct(index,panel.querySelector(`[data-conductor-correction-text="${index}"]`)?.value || "");
+    }
     else if(detach) void control.detach(Number(detach.dataset.conductorDetach));
     else if(resume) void control.resume(Number(resume.dataset.conductorResume));
     else if(stop || takeover || hold || unhold){
@@ -3690,7 +3790,7 @@ function wireGlassWriteClicks(documentRef, glassWrites, confirmAction){
     const conductorPanel = $("conductor-control");
     conductorPanel.hidden = false;
     const conductorControl = createConductorControl(fetch,
-      (snapshot, message, busy) => { conductorPanel.innerHTML = conductorControlHtml(snapshot, message, busy, esc); },
+      (snapshot, message, busy, pendingCorrection) => { conductorPanel.innerHTML = conductorControlHtml(snapshot, message, busy, esc, pendingCorrection); },
       window.confirm.bind(window));
     wireConductorControl(conductorPanel, conductorControl);
     void conductorControl.refresh();
