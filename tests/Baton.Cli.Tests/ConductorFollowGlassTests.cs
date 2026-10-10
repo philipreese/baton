@@ -6,12 +6,94 @@ using System.Text.Json.Nodes;
 using Baton.Accounting;
 using Baton.Cli.Daemon;
 using Baton.Conductor;
+using Baton.Queue;
+using Baton.Status;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
 
 public sealed partial class ConductorFollowDeliveryTests
 {
+    [Fact]
+    public async Task Glass_status_projects_exact_nonretired_owned_tasks_as_recorded_evidence()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var now = DateTimeOffset.UtcNow;
+        QueueItem Owned(string tag, string id, string taskRepository, QueueItemState state, QueueIssuePreparation? preparation = null) => new()
+        {
+            Tag = tag,
+            Role = "implement",
+            Workspace = fixture.Workspace,
+            SpecFile = Path.Combine(fixture.Root, tag + ".md"),
+            Repository = Repository,
+            Issue = 2683,
+            Stage = WorkStage.Implement,
+            State = state,
+            IssuePreparation = preparation,
+            OwnedTask = new OwnedTaskSubmission(id, taskRepository, 2683, "digest", "prior-holder", now,
+                Ready: new TaskReadyReceipt("ready-ref", id, taskRepository, 2683, 42, new string('a', 40),
+                    "attempt", "digest", "checks", "observation", now, now)),
+        };
+        var blocked = Owned("blocked", "task-a", Repository, QueueItemState.Queued,
+            new QueueIssuePreparation(TaskPreparationState.Blocked, now, "private detail"));
+        var cancelled = Owned("cancelled", "task-b", Repository, QueueItemState.Cancelled);
+        var launched = Owned("launched", "task-c", Repository, QueueItemState.Launched,
+            new QueueIssuePreparation(TaskPreparationState.Prepared, now));
+        var retired = Owned("retired", "task-retired", Repository, QueueItemState.Queued) with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, now, "retained history"),
+        };
+        var mismatch = Owned("mismatch", "task-c", "github.com/other/repository", QueueItemState.Queued);
+        var overflow = Enumerable.Range(0, 18)
+            .Select(index => Owned("overflow-" + index, "task-" + (char)('d' + index), Repository, QueueItemState.Queued))
+            .ToArray();
+        var legacy = new QueueItem
+        {
+            Tag = "legacy",
+            Role = "implement",
+            Workspace = fixture.Workspace,
+            SpecFile = Path.Combine(fixture.Root, "legacy.md"),
+            Repository = Repository,
+            Issue = 2683,
+        };
+        await QueueStore.MutateAsync(BatonPaths.QueueFile,
+            queue => queue with { Items = [blocked, cancelled, launched, retired, mismatch, legacy, .. overflow] }, Ct);
+
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var status = await glass.StatusAsync();
+        var summary = status.GetProperty("recordedTasks");
+        Assert.Equal("available", summary.GetProperty("availability").GetString());
+        Assert.True(summary.GetProperty("observedAt").TryGetDateTimeOffset(out _));
+        var rows = summary.GetProperty("items").EnumerateArray().ToArray();
+        Assert.DoesNotContain(rows, row => row.GetProperty("task").GetProperty("id").GetString() == "task-retired");
+        Assert.Equal(1, summary.GetProperty("omitted").GetInt32());
+        Assert.Equal(20, rows.Length);
+        Assert.Equal(new[] { "task-a", "task-b" },
+            rows.Take(2).Select(row => row.GetProperty("task").GetProperty("id").GetString()));
+        Assert.All(rows, row => Assert.Equal("prior-holder", row.GetProperty("task").GetProperty("conductorHolder").GetString()));
+        Assert.Equal("Queued", rows[0].GetProperty("state").GetString());
+        Assert.Equal("blocked", rows[0].GetProperty("task").GetProperty("preparation").GetString());
+        Assert.Equal("ready-ref", rows[0].GetProperty("task").GetProperty("readyReceiptId").GetString());
+        Assert.True(rows[1].GetProperty("cancelled").GetBoolean());
+        Assert.Equal("Launched", rows[2].GetProperty("state").GetString());
+        Assert.DoesNotContain("private detail", status.ToString());
+    }
+
+    [Fact]
+    public async Task Glass_malformed_queue_marks_task_summary_unavailable_without_losing_hosted_controls()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        await File.WriteAllTextAsync(BatonPaths.QueueFile, "{", Ct);
+        await using var glass = await GlassFixture.StartAsync(fixture);
+
+        var status = await glass.StatusAsync();
+
+        Assert.Equal("unavailable", status.GetProperty("recordedTasks").GetProperty("availability").GetString());
+        Assert.True(status.GetProperty("stopEligible").GetBoolean());
+        Assert.True(status.GetProperty("takeoverEligible").GetBoolean());
+    }
+
     [Fact]
     public async Task Glass_incomplete_chunked_detach_returns_timeout_without_acknowledging_or_mutating()
     {

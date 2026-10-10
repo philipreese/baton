@@ -3288,6 +3288,26 @@ function correctionStatusHtml(receipt, escape){
   return receipt ? `<p>Correction: ${escape(labels[receipt.state] || "Unknown outcome")}</p><p class="control-note">Request ${escape(receipt.requestId)} · received ${escape(receipt.acceptedAt || "unknown time")}. ${escape(receipt.reason || "Evidence unavailable.")} Application: not verified.</p>` : "";
 }
 
+function recordedTasksHtml(summary, escape){
+  if(!summary || summary.availability !== "available")
+    return `<section aria-label="Recorded repository tasks"><h3>Recorded repository tasks</h3><p class="control-note">Queue records unavailable. Refresh conductor to try again.</p><a href="#queue">Queue</a> · <a href="#stream">Stream</a></section>`;
+  const rows = Array.isArray(summary.items) ? summary.items.slice(0,20) : [];
+  const body = rows.length ? rows.map(row => {
+    const task = row && row.task || {};
+    return `<div class="control-note"><strong>${escape(task.id || "Unavailable identifier")}</strong> · #${escape(String(task.issue || "unknown"))}<br>`
+      + `Recorded conductor holder: ${escape(task.conductorHolder || "Unknown holder")}<br>`
+      + `Recorded stage/state: ${escape(row.stage || "unknown")} / ${escape(row.cancelled ? "cancelled (retained record)" : row.state || "unknown")}<br>`
+      + `Recorded preparation: ${escape(task.preparation || "unknown")}`
+      + (task.readyReceiptId ? `<br>Historical ready reference: ${escape(task.readyReceiptId)}${task.readyHeadSha ? ` · head ${escape(task.readyHeadSha)}` : ""}` : "")
+      + (task.blocker ? `<br>Recorded blocker: ${escape(task.blocker)}` : "")
+      + `<br>Next trigger not shown here.</div>`;
+  }).join("") : `<p class="control-note">No matching recorded task rows.</p>`;
+  return `<section aria-label="Recorded repository tasks"><h3>Recorded repository tasks</h3>`
+    + `<p class="control-note">Queue observed ${escape(new Date(summary.observedAt).toLocaleString())}. This is read time. Task ownership does not record acquisition generation.</p>`
+    + body + (summary.omitted > 0 ? `<p class="control-note">${escape(String(summary.omitted))} additional task record(s) omitted.</p>` : "")
+    + `<p><a href="#queue">Queue</a> · <a href="#stream">Stream</a></p></section>`;
+}
+
 function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection = null){
   const states = {held:"Hosted acquisition Held",attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor frozen on uncertain delivery",stopped:"Hosted acquisition stopped",released:"Claim released; retained history", "taken-over":"Ownership transferred; no replacement hosted session started", "prior-acquisition":"Retained provider from a prior acquisition; no current hosted session"};
   let cards = "";
@@ -3317,6 +3337,7 @@ function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection
         + (row.takeoverEligible === true ? `<label>Destination owner <input type="text" data-conductor-owner="${index}" maxlength="256"${busy ? " disabled" : ""}></label><label>Owner address (display text) <input type="text" data-conductor-address="${index}" maxlength="512"${busy ? " disabled" : ""}></label><button type="button" data-conductor-takeover="${index}"${busy ? " disabled" : ""}>Take Over</button>` : "")
         + (Array.isArray(row.controls) ? row.controls.map(result => `<p class="control-note">Historical ${escape(result.receipt?.operation || "Control")} receipt · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.appliedAt || "unknown time")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("") : "")
         + (Array.isArray(row.actions) ? row.actions.map(action => `<p class="control-note">Action ${escape(action.tag)}: ${escape(action.state)}. Owner: ${escape(action.holder || "unknown")}. ${escape(action.reason || "")} ${escape(action.nextTrigger || "")}</p>`).join("") : "")
+        + recordedTasksHtml(row.recordedTasks, escape)
         + exactMergeHtml(row,index,busy,escape)
         + retainedJudgmentsHtml(row.history, escape)
         + `</article>`;

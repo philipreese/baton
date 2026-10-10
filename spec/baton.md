@@ -9103,6 +9103,29 @@ and correction/prose events have bounded diagnostic counts. These are defensive 
 capacity claims or a global obligation-store limit. This increment does not complete broader live
 task/decision/reason/next-action visibility.
 
+### Recorded repository tasks beside the conductor card (#2683)
+
+The existing conductor-card GET may include a bounded Recorded repository tasks summary derived
+from its already-loaded queue snapshot. It includes only non-retired rows whose task repository and
+row repository exactly agree with the displayed canonical repository and whose owned-task identity
+is present. Rows sort by task ID, display at most 20, and report the omitted count. Missing legacy
+ownership is not inferred. The shared QueueBoard public task projection supplies task identity,
+issue, recorded holder, preparation and historical readiness/blocker references; recorded queue stage
+and state remain recorded fields, including explicitly cancelled retained rows.
+
+The summary labels the holder as recorded and states that task ownership has no acquisition
+generation. A matching current or prior holder never proves ownership by this hosted session, and
+Take Over, Stop, Unhold, release/reacquire or same-holder reacquisition never transfers or relabels
+task rows. A readiness reference is historical and does not assert current readiness, merge authority
+or completion. Launched does not prove a live worker. No next step is manufactured; absent a scoped
+structured source, the card says “Next trigger not shown here” and links to existing Queue and Stream
+surfaces. Queue observation time is read time. Available empty results, unavailable queue evidence
+and truncation are distinct. GET remains read-only and makes no provider calls; refresh obtains a new
+snapshot without rewriting the timestamp of an already-rendered page. Public strings are bounded and
+escaped, unsafe identifiers and unknown blocker tokens use neutral labels, and private paths, errors,
+prompts, native identities and correction text are excluded. This summary does not change the
+eligibility of existing conductor controls.
+
 ### Reversible acquisition Hold / Unhold (#2662)
 
 Authenticated bounded `POST /conductor/hold` and `/conductor/unhold` reuse the exact hosted control
