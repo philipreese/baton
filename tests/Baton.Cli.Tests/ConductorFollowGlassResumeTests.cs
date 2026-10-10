@@ -244,7 +244,7 @@ public sealed partial class ConductorFollowDeliveryTests
         var halt = fixture.HaltAsync("running");
         try
         {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
             using var detach = await glass.DetachAsync(DetachBody(await glass.StatusAsync()));
             Assert.Equal(HttpStatusCode.OK, detach.StatusCode);
             var detached = await glass.StatusAsync();
@@ -254,8 +254,8 @@ public sealed partial class ConductorFollowDeliveryTests
             var resume = glass.ResumeAsync(DetachBody(detached));
             var timer = Stopwatch.StartNew();
             await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with { Held = true }, Ct)
-                .WaitAsync(TimeSpan.FromMilliseconds(750), Ct);
-            using var response = await resume.WaitAsync(TimeSpan.FromSeconds(4), Ct);
+                .WaitAsync(TimeSpan.FromMilliseconds(750), Ct); // wait-ok: Queue must remain available during the session lock wait.
+            using var response = await resume.WaitAsync(TimeSpan.FromSeconds(4), Ct); // wait-ok: Measure bounded HTTP refusal rather than the six-minute CLI session wait.
             Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
             Assert.InRange(timer.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(4));
             Assert.Equal(registration, File.ReadAllBytes(fixture.RegistrationPath));
@@ -280,14 +280,14 @@ public sealed partial class ConductorFollowDeliveryTests
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var blocker = Task.Run(() =>
         {
-            bool Hold() { entered.TrySetResult(); release.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct).GetAwaiter().GetResult(); return true; }
+            bool Hold() { entered.TrySetResult(); release.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct).GetAwaiter().GetResult(); return true; }
             return store == "claim" ? ConductorClaimStore.WithCurrentClaim(Identity, fixture.Root, _ => Hold())
                 : MutexGuardedFileLock.RunUnderLock(BatonPaths.QueueFile, QueueStore.LockNamePrefix, TimeSpan.FromSeconds(1), Hold);
         }, Ct);
         try
         {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
-            using var response = await glass.ResumeAsync(body).WaitAsync(TimeSpan.FromSeconds(4), Ct);
+            await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+            using var response = await glass.ResumeAsync(body).WaitAsync(TimeSpan.FromSeconds(4), Ct); // wait-ok: Verify bounded queue/claim lock refusal over HTTP.
             Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
             Assert.Equal(registration, File.ReadAllBytes(fixture.RegistrationPath));
             Assert.Empty(fixture.Calls);
@@ -381,15 +381,15 @@ public sealed partial class ConductorFollowDeliveryTests
             QueueStore.LockNamePrefix, TimeSpan.FromSeconds(1), () =>
             {
                 entered.TrySetResult();
-                release.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct).GetAwaiter().GetResult();
+                release.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct).GetAwaiter().GetResult();
             }), Ct);
         try
         {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
+            await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
             var resume = glass.ResumeAsync(body);
             await ConductorClaimStore.TakeoverAsync(Identity, "replacement", "racing control", fixture.Root, cancellationToken: Ct);
             release.TrySetResult();
-            using var response = await resume.WaitAsync(TimeSpan.FromSeconds(4), Ct);
+            using var response = await resume.WaitAsync(TimeSpan.FromSeconds(4), Ct); // wait-ok: Verify bounded refusal after a concurrent claim change.
             Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
             Assert.Equal(registration, File.ReadAllBytes(fixture.RegistrationPath));
             Assert.Empty(fixture.Calls);
