@@ -11,6 +11,7 @@ const ok = value => ({ok:true,status:200,json:async()=>value});
 const esc = value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const card = conductorControlHtml(snapshot(),'',false,esc);
 assert.ok(card.includes('data-conductor-detach="0"'));
+assert.ok(conductorControlHtml(snapshot('frozen'),'',false,esc).includes('data-conductor-detach="0"'));
 assert.ok(card.includes('not proof that a model is working'));
 assert.ok(card.includes('not available here yet'));
 assert.ok(!conductorControlHtml(snapshot('unavailable'),'',false,esc).includes('data-conductor-detach'));

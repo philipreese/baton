@@ -3284,7 +3284,7 @@ function conductorControlHtml(snapshot, message, busy, escape){
   let cards = "";
   if(snapshot){
     cards = snapshot.conductors.map((row, index) => {
-      const detachable = row.state === "attached" && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
+      const detachable = ["attached","frozen"].includes(row.state) && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
       return `<article><strong>${escape(row.repository || "Unknown repository")}</strong>`
         + `<p>Owner: ${escape(row.holder || "Unknown")}</p><p>${escape(states[row.state] || states.unavailable)}</p>`
         + (row.adapter ? `<p>${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
@@ -3332,7 +3332,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction){
   const detach = async (index) => {
     if(busy || !Number.isInteger(index)) return;
     const row = snapshot?.conductors[index];
-    if(!row || row.state !== "attached" || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
+    if(!row || !["attached","frozen"].includes(row.state) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
     if(!confirmAction(`Detach automatic delivery for ${row.repository}? Running turns and actions already sent will not be cancelled.`)) return;
     busy = true; message = "Requesting detach…"; draw();
     let accepted = false;
