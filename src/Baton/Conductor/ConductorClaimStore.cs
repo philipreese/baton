@@ -298,18 +298,31 @@ public static class ConductorClaimStore
 
     /// <summary>Current permission to consume a hosted acquisition; retained evidence is separate.</summary>
     public static bool IsCurrentHostedAuthority(ConductorClaimRecord? claim, string holder, string generation) =>
+        IsCurrentHostedAcquisition(claim, holder, generation) && !claim!.Held;
+
+    public static bool IsCurrentHostedAcquisition(ConductorClaimRecord? claim, string holder, string generation) =>
         claim is { Stopped: false } && claim.Holder == holder && GetClaimGeneration(claim) == generation;
 
     /// <summary>Caller owns queue admission. Replay precedes stale-target validation, under one claim lock.</summary>
     public static ConductorHostedControlReceipt ApplyHostedControl(
         RepositoryIdentity identity, string batonRoot, ConductorHostedControlRequest request,
         string issuer, bool takeover, Action<ConductorClaimRecord> validateTarget,
+        TimeSpan? lockTimeout = null) => ApplyHostedControl(identity, batonRoot, request, issuer,
+            takeover ? "takeover" : "stop", validateTarget, lockTimeout);
+
+    public static ConductorHostedControlReceipt ApplyHostedControl(
+        RepositoryIdentity identity, string batonRoot, ConductorHostedControlRequest request,
+        string issuer, string operation, Action<ConductorClaimRecord> validateTarget,
         TimeSpan? lockTimeout = null) => RunUnderClaimLock(GetClaimFilePath(batonRoot, identity.FileSlug), () =>
     {
+        var takeover = operation == "takeover";
+        var reversible = operation is "hold" or "unhold";
+        if (operation is not ("stop" or "takeover" or "hold" or "unhold")
+            || reversible && request.ExpectedControlRevision is null)
+            throw new ConductorClaimException("Exact control revision is required for Hold or Unhold.");
         ValidateControlInput(request, issuer, takeover, identity.Value);
         var path = GetClaimFilePath(batonRoot, identity.FileSlug);
         var claim = ReadUnlocked(path) ?? throw new ConductorClaimException("Conductor claim is absent.");
-        var operation = takeover ? "takeover" : "stop";
         var previous = claim.Transitions!.Select(t => t.Control).FirstOrDefault(c =>
             c is not null && c.Issuer == issuer && c.Request.RequestId == request.RequestId);
         if (previous is not null)
@@ -320,7 +333,9 @@ public static class ConductorClaimStore
         }
         var generation = GetClaimGeneration(claim);
         if (claim.Holder != request.Holder || generation != request.ClaimGeneration
-            || !takeover && claim.Stopped)
+            || !takeover && claim.Stopped
+            || request.ExpectedControlRevision is { } expected && expected != claim.ControlRevision
+            || reversible && claim.Held != (operation == "unhold"))
             throw new ConductorClaimException("Conductor identity changed; refresh before controlling it.");
         validateTarget(claim);
         // Pin the legacy acquisition before appending history: its derived identity must not move.
@@ -332,14 +347,22 @@ public static class ConductorClaimStore
         var resultGeneration = takeover ? Guid.NewGuid().ToString("N") : generation;
         var resultHolder = takeover ? request.DestinationHolder! : request.Holder;
         var receipt = new ConductorHostedControlReceipt(request, issuer, operation, resultHolder, resultGeneration, timestamp);
-        transitions.Add(new(takeover ? ConductorClaimTransitionKind.Takeover : ConductorClaimTransitionKind.Stop,
+        var kind = operation switch
+        {
+            "takeover" => ConductorClaimTransitionKind.Takeover,
+            "hold" => ConductorClaimTransitionKind.Hold,
+            "unhold" => ConductorClaimTransitionKind.Unhold,
+            _ => ConductorClaimTransitionKind.Stop,
+        };
+        transitions.Add(new(kind,
             resultHolder, takeover ? claim.Holder : null, request.Reason, timestamp,
             takeover ? resultGeneration : null, receipt));
         WriteUnlocked(path, claim with
         {
             Holder = resultHolder,
             ClaimGeneration = resultGeneration,
-            Stopped = !takeover,
+            Stopped = operation == "stop",
+            Held = operation == "hold",
             AcquiredAt = takeover ? timestamp : claim.AcquiredAt,
             Takeover = takeover ? new(claim.Holder!, request.Reason, timestamp) : claim.Takeover,
             DestinationAddress = takeover ? request.DestinationAddress : claim.DestinationAddress,
@@ -357,6 +380,7 @@ public static class ConductorClaimStore
             || !Label(request.ClaimGeneration, 256) || !Label(request.AttachmentId, 32)
             || request.AttachmentId.Length != 32 || !request.AttachmentId.All(Uri.IsHexDigit)
             || !Label(request.RequestId, 128) || !Label(request.Reason, 1024) || !Label(issuer, 256)
+            || request.ExpectedControlRevision is < 0
             || takeover && (!Label(request.DestinationHolder, 256) || !IsSafeHostedHolderLabel(request.DestinationHolder!)
                 || !Label(request.DestinationAddress, 512)
                 || request.DestinationHolder == request.Holder)
@@ -399,7 +423,7 @@ public static class ConductorClaimStore
                             RepositorySlug: record.RepositorySlug,
                             Holder: record.Holder,
                             AcquiredAt: record.AcquiredAt.Value,
-                            Takeover: record.Takeover, Stopped: record.Stopped, DestinationAddress: record.DestinationAddress));
+                            Takeover: record.Takeover, Stopped: record.Stopped, DestinationAddress: record.DestinationAddress, Held: record.Held));
                     }
                 }
 
@@ -598,6 +622,8 @@ public static class ConductorClaimStore
         ConductorTakeoverProvenance? takeover = null;
         DateTime? previousTimestamp = null;
         var stopped = false;
+        var held = false;
+        long controlRevision = 0;
         string? generation = null;
         string? destinationAddress = null;
         var requests = new HashSet<(string, string)>();
@@ -621,6 +647,7 @@ public static class ConductorClaimStore
                     acquiredAt = transition.Timestamp;
                     takeover = null;
                     stopped = false;
+                    held = false;
                     generation = transition.Generation;
                     destinationAddress = null;
                     break;
@@ -633,6 +660,7 @@ public static class ConductorClaimStore
                     acquiredAt = transition.Timestamp;
                     takeover = new ConductorTakeoverProvenance(transition.DisplacedHolder!, transition.Reason!, transition.Timestamp);
                     stopped = false;
+                    held = false;
                     generation = transition.Generation;
                     destinationAddress = transition.Control?.Request?.DestinationAddress;
                     break;
@@ -643,6 +671,7 @@ public static class ConductorClaimStore
                     acquiredAt = null;
                     takeover = null;
                     stopped = false;
+                    held = false;
                     destinationAddress = null;
                     break;
                 case ConductorClaimTransitionKind.Stop when holder is not null && !stopped
@@ -650,6 +679,14 @@ public static class ConductorClaimStore
                     && !string.IsNullOrWhiteSpace(transition.Reason) && transition.Control is not null
                     && transition.Generation is null:
                     stopped = true;
+                    held = false;
+                    break;
+                case ConductorClaimTransitionKind.Hold or ConductorClaimTransitionKind.Unhold
+                    when holder is not null && !stopped && transition.Holder == holder
+                    && transition.DisplacedHolder is null && !string.IsNullOrWhiteSpace(transition.Reason)
+                    && transition.Control is not null && transition.Generation is null
+                    && held == (transition.Kind == ConductorClaimTransitionKind.Unhold):
+                    held = transition.Kind == ConductorClaimTransitionKind.Hold;
                     break;
                 default:
                     throw Corrupt(path, "its audit transition history is malformed or impossible");
@@ -664,16 +701,21 @@ public static class ConductorClaimStore
                         transition.Kind == ConductorClaimTransitionKind.Takeover, record.Repository);
                 }
                 catch (ConductorClaimException) { throw Corrupt(path, "its control receipt is malformed"); }
-                if (transition.Kind is not (ConductorClaimTransitionKind.Stop or ConductorClaimTransitionKind.Takeover)
-                    || control.Operation != (transition.Kind == ConductorClaimTransitionKind.Stop ? "stop" : "takeover")
+                if (transition.Kind is not (ConductorClaimTransitionKind.Stop or ConductorClaimTransitionKind.Takeover
+                        or ConductorClaimTransitionKind.Hold or ConductorClaimTransitionKind.Unhold)
+                    || control.Operation != transition.Kind.ToString().ToLowerInvariant()
+                    || control.Request.ExpectedControlRevision is { } revision && revision != controlRevision
+                    || transition.Kind is ConductorClaimTransitionKind.Hold or ConductorClaimTransitionKind.Unhold
+                        && control.Request.ExpectedControlRevision is null
                     || control.AppliedAt != transition.Timestamp || control.ResultHolder != holder
                     || control.ResultGeneration != generation || control.Request.Reason != transition.Reason
                     || previousGeneration is null || control.Request.ClaimGeneration != previousGeneration
-                    || transition.Kind == ConductorClaimTransitionKind.Stop && control.Request.Holder != holder
+                    || transition.Kind != ConductorClaimTransitionKind.Takeover && control.Request.Holder != holder
                     || transition.Kind == ConductorClaimTransitionKind.Takeover
                         && (control.Request.Holder != transition.DisplacedHolder || control.Request.DestinationHolder != holder)
                     || !requests.Add((control.Issuer, control.Request.RequestId)))
                     throw Corrupt(path, "its control receipt conflicts with authority history");
+                controlRevision++;
             }
             if (transition.Generation is not null && (transition.Generation.Length > 256
                 || string.IsNullOrWhiteSpace(transition.Generation) || transition.Generation.Any(char.IsControl)
@@ -685,7 +727,7 @@ public static class ConductorClaimStore
 
         if (!string.Equals(holder, record.Holder, StringComparison.Ordinal)
             || acquiredAt != record.AcquiredAt || !Equals(takeover, record.Takeover)
-            || stopped != record.Stopped || destinationAddress != record.DestinationAddress
+            || stopped != record.Stopped || held != record.Held || destinationAddress != record.DestinationAddress
             || generation is not null && generation != record.ClaimGeneration)
         {
             throw Corrupt(path, "its current claim projection does not match its audit transition history");

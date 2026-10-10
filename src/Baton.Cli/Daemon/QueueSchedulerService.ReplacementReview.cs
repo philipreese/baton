@@ -9,6 +9,7 @@ namespace Baton.Cli.Daemon;
 public sealed partial class QueueSchedulerService
 {
     internal Action? ReplacementReviewAfterActionObserved { get; set; }
+    internal Func<CancellationToken, Task>? ReplacementReviewBeforeLaunchMarker { get; set; }
 
     private async Task<ConductorObligation?> ValidateReplacementReviewLaunchAsync(
         QueueItem selected, QueueReplacementReviewAction action, CancellationToken cancellationToken)
@@ -103,9 +104,25 @@ public sealed partial class QueueSchedulerService
                         State = QueueItemState.Failed,
                         Halted = true,
                         Error = reason,
-                        ReplacementReviewAction = action with { BlockedReason = reason, NextTrigger = trigger },
+                        ReplacementReviewAction = action with { BlockedReason = reason, NextTrigger = trigger, HeldPending = false },
                     }
                     : item).ToList(),
+        }, CancellationToken.None);
+
+    private static Task SetHeldReplacementReviewAsync(QueueReplacementReviewAction expected, bool held) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+        {
+            Items = snapshot.Items.Select(item => item.ReplacementReviewAction == expected
+                && item.Tag == expected.Tag && item.State == QueueItemState.Queued
+                && item.LaunchMayHaveBegunAt is null && expected.ReplacementAttemptId is null
+                && expected.BlockedReason is null
+                ? item with
+                {
+                    ReplacementReviewAction = expected with
+                    {
+                        HeldPending = held,
+                    }
+                } : item).ToList(),
         }, CancellationToken.None);
 
     private static async Task ValidateObservedReplacementReviewAsync(
@@ -158,6 +175,16 @@ public sealed partial class QueueSchedulerService
                     var claim = await ConductorClaimStore.GetClaimAsync(identity, cancellationToken: cancellationToken).ConfigureAwait(false);
                     ConductorFollowSession.ValidateCurrentHostedAuthority(claim, action.Repository, action.Holder,
                         decision.ClaimGeneration, item.StoppedWorkJudgment?.FollowAttachmentId, BatonPaths.Root);
+                    if (action.HeldPending)
+                    {
+                        await SetHeldReplacementReviewAsync(action, false).ConfigureAwait(false);
+                        continue;
+                    }
+                }
+                catch (HostedConductorHeldException)
+                {
+                    if (!action.HeldPending) await SetHeldReplacementReviewAsync(action, true).ConfigureAwait(false);
+                    continue;
                 }
                 catch (Exception ex) when (ex is ConductorObligationStoreException or ConductorClaimException
                     or IOException or UnauthorizedAccessException or System.Text.Json.JsonException or CliArgumentException)

@@ -161,8 +161,8 @@ const controlledSnapshot=(operation,body)=>({observedAt:snapshot().observedAt,co
   controls:[controlResult(operation,body)],actions:[{tag:'issued',state:'issued'}]
 }]});
 const controlResult=(operation,body)=>({receipt:{operation,request:body,issuer:'operator@example.test',
-  resultHolder:operation==='stop'?body.holder:body.destinationHolder,
-  resultGeneration:operation==='stop'?body.claimGeneration:'successor'},cleanup:'complete'});
+  resultHolder:operation==='takeover'?body.destinationHolder:body.holder,
+  resultGeneration:operation==='takeover'?'successor':body.claimGeneration},cleanup:'complete'});
 for(const operation of ['stop','takeover']){
   let body,reads=0,writes=0;
   const tested=createConductorControl(async(path,options)=>{
@@ -210,7 +210,7 @@ for(const failure of ['lost',403,409,500,'stale-get','bad-receipt','bad-final-ge
   if(failure==='lost'){
     assert.match(latest.message,/unknown/);
     await tested.refresh();
-    assert.match(latest.message,/Exact stop receipt found/);
+    assert.match(latest.message,/Exact historical stop receipt found/);
     assert.equal(writes,1,'lost response reconciliation must never repeat a POST');
   }
 }
@@ -229,4 +229,60 @@ const priorAcquisition=conductorControlHtml({...snapshot(),conductors:[{...contr
 assert.ok(priorAcquisition.includes('Retained provider from a prior acquisition'));
 assert.ok(!priorAcquisition.includes('Ownership transferred'));
 assert.ok(!priorAcquisition.includes('data-conductor-resume'));
-console.log('Conductor controls: shipped render, exact mutation, refusal, uncertainty, refresh and click wiring passed.');
+let holdCases=0;
+for(const operation of ['hold','unhold']){
+  for(const state of ['attached','frozen','detached']){
+    let body,writes=0;
+    const initial={...controllable,state,held:operation==='unhold',controlRevision:7,holdEligible:operation==='hold',unholdEligible:operation==='unhold'};
+    const current=()=>({...initial,held:operation==='hold',controlRevision:8,controls:[controlResult(operation,body)],admissionWait:'Next scheduler reconciliation; independent blockers remain.'});
+    const tested=createConductorControl(async(path,options)=>{
+      if(path==='/conductors') return ok({...snapshot(),conductors:[body?current():initial]});
+      writes++;body=JSON.parse(options.body);
+      assert.equal(path,`/conductor/${operation}`);
+      assert.equal(body.expectedControlRevision,7);
+      assert.ok(!('issuer' in body));
+      return ok(controlResult(operation,body));
+    },render,text=>{confirmation=text;return true;},()=> 'hold-request');
+    await tested.refresh();await tested[operation](0,{reason:'operator reason'});
+    assert.equal(writes,1);
+    assert.match(latest.message,/applied and confirmed/);
+    assert.equal(latest.snapshot.conductors[0].state,state,'Unhold cannot imply restored conversation health or attachment');
+    const rendered=conductorControlHtml(latest.snapshot,'',false,esc);
+    assert.ok(rendered.includes(`Historical ${operation} receipt`));
+    assert.match(confirmation,operation==='hold'?/retain ownership and conversation/:/Detached, frozen, grants/);
+    holdCases++;
+  }
+}
+for(const failure of ['lost','newer-hold','stale-revision','changed-attachment']){
+  let body,reads=0,writes=0;
+  const initial={...controllable,state:'held',held:true,controlRevision:1,unholdEligible:true};
+  const tested=createConductorControl(async(path,options)=>{
+    if(path==='/conductors'){
+      reads++;
+      const changed=failure==='stale-revision' && reads===2?{controlRevision:3}:failure==='changed-attachment' && reads===2?{attachmentId:'new'}:{};
+      return ok({...snapshot(),conductors:[body?{...initial,controlRevision:3,controls:[controlResult('unhold',body)]}:{...initial,...changed}]});
+    }
+    writes++;body=JSON.parse(options.body);
+    if(failure==='lost') throw new Error('lost after durable receipt');
+    return ok(controlResult('unhold',body));
+  },render,()=>true,()=> 'unhold-B');
+  await tested.refresh();await tested.unhold(0,{reason:'reason'});
+  assert.equal(writes,['stale-revision','changed-attachment'].includes(failure)?0:1);
+  assert.doesNotMatch(latest.message,/applied and confirmed/,'receipt B does not establish state after Hold C');
+  if(failure==='lost'){
+    await tested.refresh();
+    assert.match(latest.message,/historical unhold receipt/);
+    assert.equal(latest.snapshot.conductors[0].held,true);
+    assert.equal(writes,1,'refresh must never automatically repeat the POST');
+  }
+  holdCases++;
+}
+const pendingVsIssued=conductorControlHtml({...snapshot(),conductors:[{...controllable,state:'held',held:true,unholdEligible:true,
+  controls:[{receipt:{operation:'hold',appliedAt:'2026-10-10T07:00:00Z',issuer:'operator@example.test',request:{reason:'wait for source'}}}],
+  actions:[{tag:'received',state:'received-response-pending-decision',holder:'owner',nextTrigger:'Unhold'}, {tag:'issued',state:'in-flight',holder:'owner'}]}]},'',false,esc);
+assert.ok(pendingVsIssued.includes('received-response-pending-decision'));
+assert.ok(pendingVsIssued.includes('Action issued: in-flight'));
+assert.ok(pendingVsIssued.includes('2026-10-10T07:00:00Z'));
+assert.ok(pendingVsIssued.includes('operator@example.test'));
+assert.ok(pendingVsIssued.includes('wait for source'));
+console.log(`Conductor controls: shipped render, exact mutation, refusal, uncertainty, refresh and click wiring passed; ${holdCases} additional Hold/Unhold scenarios passed.`);

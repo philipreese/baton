@@ -20,12 +20,15 @@ public enum ConductorClaimTransitionKind
     Takeover,
     Release,
     Stop,
+    Hold,
+    Unhold,
 }
 
 /// <summary>Exact operator input and its durable, atomic authority result (spec/baton.md §14).</summary>
 public sealed record ConductorHostedControlRequest(
     string Repository, string Holder, string ClaimGeneration, string AttachmentId,
-    string RequestId, string Reason, string? DestinationHolder = null, string? DestinationAddress = null);
+    string RequestId, string Reason, string? DestinationHolder = null, string? DestinationAddress = null,
+    long? ExpectedControlRevision = null);
 
 public sealed record ConductorHostedControlReceipt(
     ConductorHostedControlRequest Request, string Issuer, string Operation,
@@ -70,7 +73,12 @@ public sealed record ConductorClaimRecord(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? ClaimGeneration = null,
     [property: JsonPropertyName("stopped")] bool Stopped = false,
-    [property: JsonPropertyName("destinationAddress")] string? DestinationAddress = null);
+    [property: JsonPropertyName("destinationAddress")] string? DestinationAddress = null,
+    [property: JsonPropertyName("held")] bool Held = false)
+{
+    [JsonIgnore]
+    public long ControlRevision => Transitions?.LongCount(t => t.Control is not null) ?? 0;
+}
 
 /// <summary>
 /// The public projection of an actively held repository claim for <c>baton conductor list</c>
@@ -85,4 +93,5 @@ public sealed record ConductorClaimSummary(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     ConductorTakeoverProvenance? Takeover = null,
     [property: JsonPropertyName("stopped")] bool Stopped = false,
-    [property: JsonPropertyName("destinationAddress")] string? DestinationAddress = null);
+    [property: JsonPropertyName("destinationAddress")] string? DestinationAddress = null,
+    [property: JsonPropertyName("held")] bool Held = false);

@@ -3282,11 +3282,11 @@ function createGlassWriteController(fetchImpl, applySnapshot, banner, renderQueu
 
 // >>> CONDUCTOR-CONTROL-BEGIN
 function conductorControlHtml(snapshot, message, busy, escape){
-  const states = {attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor frozen on uncertain delivery",stopped:"Hosted acquisition stopped",released:"Claim released; retained history", "taken-over":"Ownership transferred; no replacement hosted session started", "prior-acquisition":"Retained provider from a prior acquisition; no current hosted session"};
+  const states = {held:"Hosted acquisition Held",attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor frozen on uncertain delivery",stopped:"Hosted acquisition stopped",released:"Claim released; retained history", "taken-over":"Ownership transferred; no replacement hosted session started", "prior-acquisition":"Retained provider from a prior acquisition; no current hosted session"};
   let cards = "";
   if(snapshot){
     cards = snapshot.conductors.map((row, index) => {
-      const detachable = ["attached","frozen"].includes(row.state) && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
+      const detachable = ["attached","frozen","held"].includes(row.state) && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
       const resumable = row.state === "detached" && row.resumeEligible === true && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
       return `<article><strong>${escape(row.repository || "Unknown repository")}</strong>`
         + `<p>Owner: ${escape(row.holder || "Unknown")}</p><p>${escape(states[row.state] || states.unavailable)}</p>`
@@ -3297,10 +3297,16 @@ function conductorControlHtml(snapshot, message, busy, escape){
         + (row.diagnostic && ["unavailable","frozen","detached"].includes(row.state) ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
         + (detachable ? `<button type="button" data-conductor-detach="${index}"${busy ? " disabled" : ""}>Detach automatic delivery</button>` : "")
         + (resumable ? `<button type="button" data-conductor-resume="${index}"${busy ? " disabled" : ""}>Resume automatic delivery</button><p class="control-note">Future handoffs only. Work halted while detached is not replayed.</p>` : "")
-        + (row.stopEligible === true || row.takeoverEligible === true ? `<label>Control reason <input type="text" data-conductor-reason="${index}" maxlength="1024"${busy ? " disabled" : ""}></label>` : "")
+        + (row.held === true ? `<p>Held: new turns and action admissions wait. Unhold eligible: ${row.unholdEligible === true ? "yes" : "no"}.</p>` : "")
+        + (row.held === true && row.holdControl ? `<p class="control-note">Current Hold: ${escape(row.holdControl.request?.reason || "unknown reason")} · ${escape(row.holdControl.issuer || "unknown issuer")} · ${escape(row.holdControl.appliedAt || "unknown time")}</p>` : "")
+        + (row.admissionWait ? `<p class="control-note">${escape(row.admissionWait)}</p>` : "")
+        + (row.queueHeld === true ? `<p class="control-note">Global worker queue is Held; Unhold does not resume it.</p>` : "")
+        + (row.stopEligible === true || row.takeoverEligible === true || row.holdEligible === true || row.unholdEligible === true ? `<label>Control reason <input type="text" data-conductor-reason="${index}" maxlength="1024"${busy ? " disabled" : ""}></label>` : "")
+        + (row.holdEligible === true ? `<button type="button" data-conductor-hold="${index}"${busy ? " disabled" : ""}>Hold new conductor work</button>` : "")
+        + (row.unholdEligible === true ? `<button type="button" data-conductor-unhold="${index}"${busy ? " disabled" : ""}>Unhold conductor</button>` : "")
         + (row.stopEligible === true ? `<button type="button" data-conductor-stop="${index}"${busy ? " disabled" : ""}>Stop hosted conductor</button>` : "")
         + (row.takeoverEligible === true ? `<label>Destination owner <input type="text" data-conductor-owner="${index}" maxlength="256"${busy ? " disabled" : ""}></label><label>Owner address (display text) <input type="text" data-conductor-address="${index}" maxlength="512"${busy ? " disabled" : ""}></label><button type="button" data-conductor-takeover="${index}"${busy ? " disabled" : ""}>Take Over</button>` : "")
-        + (Array.isArray(row.controls) ? row.controls.map(result => `<p class="control-note">${escape(result.receipt?.operation || "Control")} applied · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("") : "")
+        + (Array.isArray(row.controls) ? row.controls.map(result => `<p class="control-note">Historical ${escape(result.receipt?.operation || "Control")} receipt · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.appliedAt || "unknown time")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("") : "")
         + (Array.isArray(row.actions) ? row.actions.map(action => `<p class="control-note">Action ${escape(action.tag)}: ${escape(action.state)}. Owner: ${escape(action.holder || "unknown")}. ${escape(action.reason || "")} ${escape(action.nextTrigger || "")}</p>`).join("") : "")
         + `</article>`;
     }).join("");
@@ -3320,7 +3326,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
   let pendingControl = null;
   const sameIdentity = (a,b) => ["repository","holder","claimGeneration","attachmentId"].every(key => a?.[key] === b?.[key]);
   const exactReceipt = result => result?.receipt?.operation === pendingControl?.operation
-    && ["repository","holder","claimGeneration","attachmentId","requestId","reason","destinationHolder","destinationAddress"]
+    && ["repository","holder","claimGeneration","attachmentId","requestId","reason","destinationHolder","destinationAddress","expectedControlRevision"]
       .every(key => (result.receipt.request?.[key] ?? null) === (pendingControl.body[key] ?? null));
   const draw = () => renderPanel(snapshot, message, busy);
   const request = async (path, options) => {
@@ -3345,7 +3351,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
       await read(); message = "";
       if(pendingControl){
         const found = snapshot.conductors.flatMap(row => row.controls || []).find(exactReceipt);
-        message = found ? `Exact ${pendingControl.operation} receipt found: authority revocation applied; cleanup ${found.cleanup}.`
+        message = found ? `Exact historical ${pendingControl.operation} receipt found; cleanup ${found.cleanup}. Current state is shown separately; this receipt does not establish current eligibility.`
           : `No exact receipt for request ${pendingControl.body.requestId} in this snapshot; outcome remains unknown. Do not infer failure or repeat automatically.`;
       }
     }
@@ -3355,10 +3361,10 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
   const changeDelivery = async (index, resuming, operation = null, inputs = {}) => {
     if(busy || !Number.isInteger(index)) return;
     const row = snapshot?.conductors[index];
-    const eligible = item => operation ? item?.[operation === "stop" ? "stopEligible" : "takeoverEligible"] === true
-      : resuming ? item?.state === "detached" && item.resumeEligible === true : ["attached","frozen"].includes(item?.state);
+    const eligible = item => operation ? item?.[`${operation}Eligible`] === true
+      : resuming ? item?.state === "detached" && item.resumeEligible === true : ["attached","frozen","held"].includes(item?.state);
     if(!row || !eligible(row) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
-    const action = operation === "stop" ? "Stop" : operation === "takeover" ? "Take Over" : resuming ? "Resume" : "Detach";
+    const action = operation === "stop" ? "Stop" : operation === "takeover" ? "Take Over" : operation === "hold" ? "Hold" : operation === "unhold" ? "Unhold" : resuming ? "Resume" : "Detach";
     const bounded = (value,bound) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= bound && !/[\x00-\x1f\x7f]/.test(value);
     const safeOwner = value => bounded(value,256) && !/[\\\x80-\x9f]/.test(value) && !value.includes(":/") && !value.trim().startsWith("/");
     if(operation && (!bounded(inputs.reason,1024) || operation === "takeover"
@@ -3374,13 +3380,16 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
       if(operation){
         await read();
         const fresh = snapshot.conductors.find(item => item.repository === row.repository);
-        if(!sameIdentity(fresh,row) || !eligible(fresh)){ message = "Control refused locally: ownership changed. Inspect the fresh snapshot."; return; }
-        if(!confirmAction(`${action} ${row.repository}, owner ${row.holder}, acquisition ${row.claimGeneration}? ${operation === "stop" ? "This acquisition cannot Resume." : `Transfer ownership to ${inputs.destinationHolder.trim()} at ${inputs.destinationAddress.trim()}. No replacement hosted session will start.`} Issued work may still finish.`)) return;
+        if(!sameIdentity(fresh,row) || !eligible(fresh) || ["hold","unhold"].includes(operation) && (!Number.isSafeInteger(row.controlRevision) || fresh.controlRevision !== row.controlRevision)){ message = "Control refused locally: ownership or control revision changed. Inspect the fresh snapshot."; return; }
+        const consequence = operation === "stop" ? "This acquisition cannot Resume." : operation === "hold" ? "Pause new turns and action admissions; retain ownership and conversation." : operation === "unhold" ? "Continue valid pending work on scheduler reconciliation. Detached, frozen, grants, queue and opt-in blockers remain independent." : `Transfer ownership to ${inputs.destinationHolder.trim()} at ${inputs.destinationAddress.trim()}. No replacement hosted session will start.`;
+        if(!confirmAction(`${action} ${row.repository}, owner ${row.holder}, acquisition ${row.claimGeneration}? ${consequence} Issued work may still finish.`)) return;
         Object.assign(body,{requestId:newRequestId(),reason:inputs.reason.trim()});
+        if(["hold","unhold"].includes(operation)) body.expectedControlRevision = row.controlRevision;
         if(operation === "takeover") Object.assign(body,{destinationHolder:inputs.destinationHolder.trim(),destinationAddress:inputs.destinationAddress.trim()});
         pendingControl = {operation,body};
       }
-      const route = operation === "stop" ? "/conductor/stop" : operation === "takeover" ? "/conductor/takeover" : resuming ? "/conductor/resume" : "/conductor/detach";
+      const routes = {stop:"/conductor/stop",takeover:"/conductor/takeover",hold:"/conductor/hold",unhold:"/conductor/unhold"};
+      const route = operation ? routes[operation] : resuming ? "/conductor/resume" : "/conductor/detach";
       const response = await request(route, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       if(!response.ok){
         snapshot = null;
@@ -3397,9 +3406,11 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
         await read();
         const current = snapshot.conductors.find(item => item.repository === row.repository);
         const agrees = current?.holder === result.receipt.resultHolder && current?.claimGeneration === result.receipt.resultGeneration
-          && current?.state === (operation === "stop" ? "stopped" : "taken-over")
+          && (["hold","unhold"].includes(operation)
+            ? sameIdentity(current,row) && current.held === (operation === "hold") && current.controlRevision === body.expectedControlRevision + 1
+            : current?.state === (operation === "stop" ? "stopped" : "taken-over"))
           && current.controls?.some(exactReceipt);
-        message = agrees ? `${action} applied and confirmed by fresh authority. Cleanup ${result.cleanup}. ${operation === "takeover" ? "No replacement hosted session started." : "This acquisition cannot Resume."}`
+        message = agrees ? `${action} applied and confirmed by fresh authority. Cleanup ${result.cleanup}. ${["hold","unhold"].includes(operation) ? current.admissionWait || "Independent blockers remain visible below." : operation === "takeover" ? "No replacement hosted session started." : "This acquisition cannot Resume."}`
           : `${action} applied, but fresh authority differs or is unavailable. Inspect the exact retained receipt.`;
         return;
       }
@@ -3422,6 +3433,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
     } finally { busy = false; draw(); }
   };
   return {refresh,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true),
+    hold:(index,inputs)=>changeDelivery(index,false,"hold",inputs),unhold:(index,inputs)=>changeDelivery(index,false,"unhold",inputs),
     stop:(index,inputs)=>changeDelivery(index,false,"stop",inputs),takeover:(index,inputs)=>changeDelivery(index,false,"takeover",inputs)};
 }
 
@@ -3432,13 +3444,16 @@ function wireConductorControl(panel, control){
     const resume = event.target.closest?.("[data-conductor-resume]");
     const stop = event.target.closest?.("[data-conductor-stop]");
     const takeover = event.target.closest?.("[data-conductor-takeover]");
+    const hold = event.target.closest?.("[data-conductor-hold]");
+    const unhold = event.target.closest?.("[data-conductor-unhold]");
     if(refresh) void control.refresh();
     else if(detach) void control.detach(Number(detach.dataset.conductorDetach));
     else if(resume) void control.resume(Number(resume.dataset.conductorResume));
-    else if(stop || takeover){
-      const index = Number(stop ? stop.dataset.conductorStop : takeover.dataset.conductorTakeover);
+    else if(stop || takeover || hold || unhold){
+      const operation = stop ? "stop" : takeover ? "takeover" : hold ? "hold" : "unhold";
+      const index = Number((stop || takeover || hold || unhold).dataset[`conductor${operation[0].toUpperCase()}${operation.slice(1)}`]);
       const value = name => panel.querySelector(`[data-conductor-${name}="${index}"]`)?.value || "";
-      void control[stop ? "stop" : "takeover"](index,{reason:value("reason"),destinationHolder:value("owner"),destinationAddress:value("address")});
+      void control[operation](index,{reason:value("reason"),destinationHolder:value("owner"),destinationAddress:value("address")});
     }
   });
 }

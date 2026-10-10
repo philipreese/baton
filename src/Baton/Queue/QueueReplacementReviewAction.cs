@@ -49,4 +49,5 @@ public sealed record QueueReplacementReviewAction(
     QueueHostedIssuedAuthority? IssuedAuthority = null,
     string? TerminalObservation = null,
     DateTimeOffset? TerminalObservedAt = null,
-    DateTimeOffset? ActionObservedAt = null);
+    DateTimeOffset? ActionObservedAt = null,
+    bool HeldPending = false);

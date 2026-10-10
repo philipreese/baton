@@ -79,7 +79,11 @@ internal sealed partial class ConductorFollowSession
         string? attachmentId, string root)
     {
         if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, holder, generation))
+        {
+            if (ConductorClaimStore.IsCurrentHostedAcquisition(claim, holder, generation) && claim!.Held)
+                throw new HostedConductorHeldException();
             throw new ConductorObligationStoreException("Hosted acquisition is stopped or displaced.");
+        }
         var identity = RepositoryIdentity.From("https://" + repository, null)
             ?? throw new ConductorObligationStoreException("Hosted repository identity is invalid.");
         var registration = Read<ConductorFollowAttachment>(Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json"));
@@ -100,7 +104,7 @@ internal sealed partial class ConductorFollowSession
         {
             var registration = Read<ConductorFollowAttachment>(path);
             return ConductorClaimStore.WithCurrentClaim(identity, BatonPaths.Root, claim =>
-                ConductorClaimStore.IsCurrentHostedAuthority(claim, registration.Holder, registration.ClaimGeneration)
+                ConductorClaimStore.IsCurrentHostedAcquisition(claim, registration.Holder, registration.ClaimGeneration)
                 && registration.SchemaVersion == SchemaVersion && registration.Attached
                 && registration.Id is { Length: 32 } && registration.Id.All(Uri.IsHexDigit)
                 && registration.Repository == source.Repository && registration.Holder == source.OwnedTask.ConductorHolder
@@ -122,7 +126,8 @@ internal sealed partial class ConductorFollowSession
 
     internal static async Task<ConductorFollowResult?> NotifyAttachedAsync(QueueItem source,
         CancellationToken token, ConductorFollowBroker? broker = null,
-        Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null,
+        Func<QueueItem, CancellationToken, Task>? validateSource = null)
     {
         var identity = RepositoryIdentity.From("https://" + source.Repository, null);
         if (identity is null || source.StoppedWorkJudgment is not { Key: { } key, FollowAttachmentId: { } id }) return null;
@@ -143,6 +148,7 @@ internal sealed partial class ConductorFollowSession
             var row = queue.Items.SingleOrDefault(item => item.StoppedWorkJudgment?.Key == key);
             if (queue.Held || row?.StoppedWorkJudgment?.FollowAttachmentId != id)
                 throw new CliArgumentException("Follow source admission changed.");
+            if (validateSource is not null) await validateSource(row!, ct).ConfigureAwait(false);
             await session.AdmitDaemonTurnAsync(obligation, ct).ConfigureAwait(false);
         }).ConfigureAwait(false);
         if (result.Status is "delivered" or "replayed")
@@ -157,6 +163,28 @@ internal sealed partial class ConductorFollowSession
                 throw new CliArgumentException("Follow source admission changed after delivery.");
         }
         return result;
+    }
+
+    internal static async Task<bool> CanContinueAttachedAsync(QueueItem source, CancellationToken token)
+    {
+        var identity = RepositoryIdentity.From("https://" + source.Repository, null);
+        if (identity is null || source.StoppedWorkJudgment?.FollowAttachmentId is not { } id) return false;
+        try
+        {
+            var registration = Read<ConductorFollowAttachment>(Path.Combine(BatonPaths.Root,
+                "conductor-follow", identity.FileSlug, "registration.json"));
+            var claim = await ConductorClaimStore.GetClaimAsync(identity, cancellationToken: token,
+                lockTimeout: GlassLockTimeout).ConfigureAwait(false);
+            if (!registration.Attached || registration.Id != id
+                || !ConductorClaimStore.IsCurrentHostedAuthority(claim, registration.Holder, registration.ClaimGeneration)) return false;
+            ValidateControlRegistration(identity, BatonPaths.Root, registration, registration.Holder, registration.ClaimGeneration, id);
+            return !Read<ConductorFollowState>(Path.Combine(registration.SessionDirectory, "session.json")).Frozen;
+        }
+        catch (Exception ex) when (IsRefusal(ex))
+        {
+            Console.Error.WriteLine("Pending hosted continuation authority unavailable; owner must inspect retained source and registration.");
+            return false;
+        }
     }
 
     private async Task AdmitDaemonTurnAsync(ConductorObligation obligation, CancellationToken token)

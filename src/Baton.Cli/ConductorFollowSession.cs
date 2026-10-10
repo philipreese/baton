@@ -119,6 +119,9 @@ internal delegate Task<int> ConductorFollowBroker(
     IEnumerable<string> inputPaths, TextWriter output, TextWriter error,
     CancellationToken cancellationToken, Func<string, CancellationToken, Task>? threadStarted);
 
+internal sealed class HostedConductorHeldException() : ConductorObligationStoreException(
+    "Hosted acquisition is Held; Unhold continues valid pending work on scheduler reconciliation.");
+
 /// <summary>Claim-bound transport evidence. The original obligation and queue lifecycle remain authoritative.</summary>
 internal sealed partial class ConductorFollowSession
 {
@@ -268,7 +271,11 @@ internal sealed partial class ConductorFollowSession
             RejectLinks(Path.Combine(_root, BatonPaths.FleetDirectoryName, BatonPaths.FleetEventsRolloverFileName));
             var claim = await ConductorClaimStore.GetClaimAsync(_identity, _root, cancellationToken).ConfigureAwait(false);
             if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, _request.Holder, _generation))
+            {
+                if (ConductorClaimStore.IsCurrentHostedAcquisition(claim, _request.Holder, _generation) && claim!.Held)
+                    throw new HostedConductorHeldException();
                 throw new CliArgumentException("Claim changed.");
+            }
             var ceiling = ReadCeiling(_root, _request.Workspace);
             if (ceiling != _ceiling || ceiling is null || ceiling.Cap(_request.PermissionGrant) != _request.PermissionGrant)
                 throw new CliArgumentException("Recorded project trust changed.");
@@ -326,7 +333,7 @@ internal sealed partial class ConductorFollowSession
                     || identity.SourceCapability != obligation.AdapterCapability)
                     throw new CliArgumentException("Replay source drifted.");
                 var response = ReadResponse(responsePath, identity, state);
-                var replayDecision = ReadDecisionEvidence(evidence);
+                var replayDecision = TryCreateDecisionEvidence(response.OutputLines, evidence, identity, state);
                 return new("replayed", key, obligation.ObligationId, evidence, "Retained complete response; no vendor call.",
                     EnsureReceipt(evidence), response, DecisionEvidence: replayDecision);
             }
@@ -354,6 +361,9 @@ internal sealed partial class ConductorFollowSession
             // Re-read authority immediately before the irreversible launch marker, after source I/O.
             claim = await ConductorClaimStore.GetClaimAsync(_identity, _root, cancellationToken).ConfigureAwait(false);
             if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, _request.Holder, _generation)
+                && ConductorClaimStore.IsCurrentHostedAcquisition(claim, _request.Holder, _generation) && claim!.Held)
+                throw new HostedConductorHeldException();
+            if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, _request.Holder, _generation)
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
             _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
@@ -361,12 +371,20 @@ internal sealed partial class ConductorFollowSession
                 await beforeLaunchAdmission(cancellationToken).ConfigureAwait(false);
             // Detach and launch admission serialize at the same cutover; a detached registration
             // must never acquire a later launch marker. A marker already committed is an issued turn.
-            await Task.Run(() => MutexGuardedFileLock.RunUnderLock(Path.Combine(_root, "queue", "queue.json"),
-                QueueStore.LockNamePrefix, TimeSpan.FromSeconds(30), () =>
-                    ConductorClaimStore.WithCurrentClaim(_identity, _root, currentClaim =>
+            await QueueStore.MutateWithCurrentClaimAsync(Path.Combine(_root, "queue", "queue.json"),
+                _identity, _root, (queue, currentClaim) =>
                 {
+                    if (!ConductorClaimStore.IsCurrentHostedAuthority(currentClaim, _request.Holder, _generation)
+                        && ConductorClaimStore.IsCurrentHostedAcquisition(currentClaim, _request.Holder, _generation) && currentClaim!.Held)
+                        throw new HostedConductorHeldException();
                     if (!ConductorClaimStore.IsCurrentHostedAuthority(currentClaim, _request.Holder, _generation))
                         throw new CliArgumentException("Hosted authority revoked before launch.");
+                    var sources = queue.Items.Where(item => item.StoppedWorkJudgment?.Key == key).ToArray();
+                    if (requiredAdmission is not null && queue.Held || ReadCeiling(_root, _request.Workspace) != _ceiling
+                        || sources.Length != 1 || !sources[0].Halted || sources[0].Retirement is not null
+                        || sources[0].CancelledAt is not null || sources[0].StoppedWorkJudgment!.ContextSha256 != obligation.ContextSha256
+                        || StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(sources[0].StoppedWorkJudgment!)) != obligation.ContextSha256)
+                        throw new CliArgumentException("Follow source or grant changed before launch.");
                     if (File.Exists(AttachmentPath))
                     {
                         var current = Read<ConductorFollowAttachment>(AttachmentPath);
@@ -378,8 +396,8 @@ internal sealed partial class ConductorFollowSession
                         throw new CliArgumentException("Follow attachment missing before launch.");
                     Write(Path.Combine(evidence, "launch.json"),
                         new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
-                    return true;
-                })), cancellationToken).ConfigureAwait(false);
+                    return queue;
+                }, cancellationToken).ConfigureAwait(false);
             launched = true;
             var configuration = new CodexBrokerConfiguration(_request.Workspace, state.Model, state.Effort,
                 state.SessionId, state.SessionId is not null, state.EffectiveGrant, ["response.txt"], false);
@@ -411,13 +429,18 @@ internal sealed partial class ConductorFollowSession
             var decision = TryCreateDecisionEvidence(retained.OutputLines, evidence, identityEvidence with
             {
                 SessionId = state.SessionId,
-            }, state, obligation);
+            }, state);
             AppendJournal(new(SchemaVersion, key, obligation.ObligationId, state.SessionId!, FileDigest(responsePath), receipt));
             return new("delivered", key, obligation.ObligationId, evidence,
                 decision is null
                     ? "Complete turn and transport receipt retained without an eligible typed decision."
                     : "Complete turn, typed decision and transport receipt retained.",
                 receipt, retained, DecisionEvidence: decision);
+        }
+        catch (HostedConductorHeldException)
+        {
+            return new("held-pending", key, obligation?.ObligationId, evidence,
+                "Hosted acquisition is Held; Unhold continues this pending event without resetting its allowance.");
         }
         catch (Exception ex) when (IsRefusal(ex) || ex is OperationCanceledException)
         {
@@ -593,7 +616,7 @@ internal sealed partial class ConductorFollowSession
                 throw new IOException("Incomplete launch identity.");
             var response = ReadResponse(responsePath, identity, state);
             var receipt = EnsureReceipt(directory, repair);
-            if (repair) _ = ReadDecisionEvidence(directory);
+            if (repair) _ = TryCreateDecisionEvidence(response.OutputLines, directory, identity, state);
             else ValidateRetainedDecision(directory, identity, state, response, receipt);
             var entry = new ConductorFollowJournalEntry(SchemaVersion, response.ObligationKey, response.ObligationId,
                 response.SessionId, FileDigest(responsePath), receipt);
@@ -667,14 +690,14 @@ internal sealed partial class ConductorFollowSession
 
     private ConductorFollowDecisionEvidence? TryCreateDecisionEvidence(
         IReadOnlyList<string> lines, string evidenceDirectory,
-        ConductorFollowEventIdentity identity, ConductorFollowState state,
-        ConductorObligation obligation)
+        ConductorFollowEventIdentity identity, ConductorFollowState state)
     {
+        var source = Read<ConductorFollowRetainedSource>(Path.Combine(evidenceDirectory, "source.json"), 64 * 1024);
         var typed = TryParseTypedDecision(lines);
         if (typed is null || typed.SchemaVersion != SchemaVersion
             || typed.ObligationKey != identity.ObligationKey
-            || typed.ObligationId != obligation.ObligationId
-            || typed.SourceHeadSha != obligation.PullRequestHead
+            || typed.ObligationId != identity.ObligationId
+            || typed.SourceHeadSha != source.Context.PullRequestHead
             || typed.Decision is not ("Hold" or "ReplaceReview"))
             return null;
 
@@ -682,7 +705,7 @@ internal sealed partial class ConductorFollowSession
         var receipt = EnsureReceipt(evidenceDirectory);
         var evidence = new ConductorFollowDecisionEvidence(
             SchemaVersion, typed.ObligationKey, typed.ObligationId, typed.SourceHeadSha, typed.Decision,
-            obligation.TargetProject, obligation.ContextSha256!, FileDigest(Path.Combine(evidenceDirectory, "source.json")),
+            identity.Repository, identity.ContextSha256, FileDigest(Path.Combine(evidenceDirectory, "source.json")),
             Digest(JsonSerializer.Serialize(_request, Json)), identity.ClaimGeneration, state.SessionId!,
             identity.ConfigurationSha256, responseDigest, receipt);
         var path = Path.Combine(evidenceDirectory, "decision.json");

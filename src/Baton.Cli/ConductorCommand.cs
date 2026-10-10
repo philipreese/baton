@@ -150,6 +150,7 @@ public static class ConductorCommand
             stdout.WriteLine(claim.Repository);
             stdout.WriteLine($"  holder: {claim.Holder}");
             if (claim.Stopped) stdout.WriteLine("  hosted acquisition: stopped (terminal; release or take over before new hosted work)");
+            if (claim.Held) stdout.WriteLine("  hosted acquisition: Held (Unhold from Fleet Glass to continue valid pending work)");
             if (claim.DestinationAddress is not null) stdout.WriteLine($"  owner address: {claim.DestinationAddress}");
             stdout.WriteLine($"  acquired: {claim.AcquiredAt:yyyy-MM-ddTHH:mm:ssZ}");
             if (claim.Takeover is not null)

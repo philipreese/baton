@@ -6827,7 +6827,7 @@ peers fail closed. This rests on the measured `tailscale serve` path stripping c
 identity headers and injecting the authenticated tailnet login before proxying to loopback. A
 refusal appends one `glassWriteRefused` fleet fact with route plus only `<redacted>`/`<missing>` for
 the login. The route table admits `POST /queue/hold`, `POST /queue/resume`,
-`POST /rooms/<id>/cancel`, and exact conductor detach/resume/stop/takeover in §14 (#2653, #2655, #2661); unknown POST routes,
+`POST /rooms/<id>/cancel`, and exact conductor detach/resume/stop/takeover/hold/unhold in §14 (#2653, #2655, #2661, #2662); unknown POST routes,
 including resolve and redispatch, are 404. The page
 renders these controls only under `DAEMON_SERVED`, confirms cancel explicitly, and refreshes the
 projection after the server receipt rather than changing displayed state optimistically.
@@ -8982,7 +8982,7 @@ state. Only explicitly eligible detached rows offer Resume, with future-handoffs
 Denied, busy/stale and unknown outcomes require refresh; the client never automatically repeats a POST.
 
 The broader operator-approved hosted conductor direction (#2091) still requires correction delivery,
-hold-new-actions, useful task/decision/next-action visibility, a separately revocable one-use exact-task/head
+useful task/decision/next-action visibility, a separately revocable one-use exact-task/head
 merge grant and an observed useful installed outcome. This increment introduces no unattended merge authority
 or general remote steering.
 
@@ -9032,6 +9032,37 @@ No result restores authority, retries a worker or reuses
 the slot. Legacy records lacking issued hosted proof remain unresolved; current authority cannot
 manufacture historical permission. Independent legacy advice completion keeps its existing checks.
 
+### Reversible acquisition Hold / Unhold (#2662)
+
+Authenticated bounded `POST /conductor/hold` and `/conductor/unhold` reuse the exact hosted control
+request and durable receipt above, additionally requiring the displayed `expectedControlRevision`.
+The revision counts persisted control transitions across retained history; identical issuer/request-ID
+replay returns its historical receipt before current-target checks and never reapplies a transition.
+A fresh stale Unhold cannot clear a newer Hold, including within one acquisition. Glass confirms
+current Held state, exact identity and the resulting revision separately from historical receipts;
+lost replies require an uncached read, never an automatic POST retry.
+
+Hold preserves acquisition, attachment and conversation while denying new hosted turns and action
+admissions through the same queue→claim fence. It requires valid authority, independent of a busy or
+frozen conversation. Attach, Resume and same-holder claim idempotency cannot clear or bypass it.
+Stop supersedes Hold; Take Over and release/new acquisition never inherit it. Already-issued turns
+and workers retain their historical outcomes and exact issued proof without current permission.
+
+Real attached halt commits retain pending continuation on the existing queue intent, including
+events arriving during Hold. The normal scheduler's existing advisory task slot selects valid pending
+events outside control locks; startup also reconciles these identities. Unhold resumes an unlaunched
+event, a complete response awaiting decision admission, or an admitted marker-free action. Response
+recovery repairs decision/journal persistence from retained source and response without a model call.
+An action's independent Held-pending flag preserves its reserved round, envelope and provenance;
+its prior trigger survives Hold/Unhold, with Unhold guidance derived for display while Held.
+Opt-in unpause and manual promotion cannot erase Hold. Source/head, grants, opt-in and runway are
+rechecked before final serialized admission. Stale proof and uncertain launches retain an owner,
+reason and concrete reconciliation trigger; no history is reconstructed or uncertain work retried.
+Detach, revoked grants and global queue Hold remain independent blockers. Frozen state blocks new
+conversation turns; it does not invalidate an earlier admitted action's exact completed decision. Glass shows
+pending events, received responses, marker-free actions and issued outcomes separately, with control
+reason/issuer/time, eligibility and next trigger. Source fixtures do not establish installed acceptance.
+
 ### Continuing conductor follow (#2628)
 
 `baton conductor follow --request <file>` is the explicitly invoked, repository-scoped front door
@@ -9047,7 +9078,7 @@ policy. Unknown, missing, duplicate, or aliased fields refuse; `stateDirectory` 
 
 The controller accepts newline JSON `{ "obligationKey": "..." }`, bounded to 8192 characters per
 event and 2048 per key. It blocks on idle stdin; EOF finishes without creating a turn. Each event
-returns one JSON result with `status` (`delivered`, `replayed`, `refused`, or `uncertain`), original
+returns one JSON result with `status` (`delivered`, `replayed`, `held-pending`, `refused`, or `uncertain`), original
 `obligationKey` and `obligationId` when identifiable, `evidenceLocation`, and a safe `diagnostic`.
 Delivered/replayed results include the complete retained `response` and transport `receipt`.
 Malformed, empty, unknown, foreign, terminal, unsupported, or inconsistent events launch nothing.

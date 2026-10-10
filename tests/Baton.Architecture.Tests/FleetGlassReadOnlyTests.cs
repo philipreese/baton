@@ -234,7 +234,8 @@ public class FleetGlassReadOnlyTests
         violations.AddRange(SameOriginReadViolations(htmlWithoutComments));
         Assert.Equal(2, Regex.Matches(htmlWithoutComments, @"\bmethod\s*:\s*[""']POST[""']").Count);
         Assert.Contains("request(route, {method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
-        Assert.Contains("const route = operation === \"stop\" ? \"/conductor/stop\" : operation === \"takeover\" ? \"/conductor/takeover\" : resuming ? \"/conductor/resume\" : \"/conductor/detach\";", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("const routes = {stop:\"/conductor/stop\",takeover:\"/conductor/takeover\",hold:\"/conductor/hold\",unhold:\"/conductor/unhold\"};", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("const route = operation ? routes[operation] : resuming ? \"/conductor/resume\" : \"/conductor/detach\";", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("data-glass-route=\"/queue/${q.held ? \"resume\" : \"hold\"}\"", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("data-glass-route=\"/rooms/${encodeURIComponent(room.name)}/cancel\"", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("if(DAEMON_SERVED)", htmlWithoutComments, StringComparison.Ordinal);
