@@ -134,7 +134,7 @@ public sealed class ReadinessCrashRecoveryTests : IDisposable
         foreach (var argument in new[] { typeof(Scenarios).Assembly.Location, "readiness-decide",
             _root, Key, cut, signal, release, launches })
             start.ArgumentList.Add(argument);
-        return Process.Start(start) ?? throw new InvalidOperationException("Could not start readiness crash host.");
+        return global::Baton.Core.ProcessLaunch.Start(start) ?? throw new InvalidOperationException("Could not start readiness crash host.");
     }
 
     private static async Task WaitForFileAsync(string path)

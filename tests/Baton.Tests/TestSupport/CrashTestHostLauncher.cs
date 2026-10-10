@@ -43,7 +43,7 @@ internal static class CrashTestHostLauncher
         startInfo.ArgumentList.Add(pauseSignalPath);
         startInfo.ArgumentList.Add(cancelSignalPath);
 
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the crash test host process.");
+        return global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the crash test host process.");
     }
 
     /// <summary>

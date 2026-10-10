@@ -676,7 +676,7 @@ public sealed partial class ConductorFollowDeliveryTests
                 start.ArgumentList.Add("*Delivery_process_fixture");
                 start.Environment["BATON_DELIVERY_FIXTURE_ROOT"] = fixture.Root;
                 start.Environment["BATON_DELIVERY_FIXTURE_MODE"] = mode;
-                processes.Add(Process.Start(start)!);
+                processes.Add(global::Baton.Core.ProcessLaunch.Start(start)!);
             }
             var watch = Stopwatch.StartNew();
             while (Directory.EnumerateFiles(fixture.Root, "ready-*").Count() != 3)

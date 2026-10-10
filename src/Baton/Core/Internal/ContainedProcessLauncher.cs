@@ -22,18 +22,20 @@ internal static class ContainedProcessLauncher
         ProcessStartInfo startInfo,
         SafeJobObjectHandle job,
         Action<SafeJobObjectHandle, Process, nint>? beforeResume,
-        Action? beforeCreateProcess = null)
+        Action? beforeCreateProcess = null,
+        Func<nint, (bool Success, int Error)?>? clearInheritanceForTest = null)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         ArgumentNullException.ThrowIfNull(job);
-        return StartWindows(startInfo, job, beforeResume, beforeCreateProcess);
+        return StartWindows(startInfo, job, beforeResume, beforeCreateProcess, clearInheritanceForTest);
     }
 
     private static ContainedProcessLaunch StartWindows(
         ProcessStartInfo startInfo,
         SafeJobObjectHandle job,
         Action<SafeJobObjectHandle, Process, nint>? beforeResume,
-        Action? beforeCreateProcess)
+        Action? beforeCreateProcess,
+        Func<nint, (bool Success, int Error)?>? clearInheritanceForTest)
     {
         AnonymousPipeServerStream? stdoutPipe = null;
         AnonymousPipeServerStream? stderrPipe = null;
@@ -45,9 +47,11 @@ internal static class ContainedProcessLauncher
         PROCESS_INFORMATION processInformation = default;
         Process? process = null;
         bool processCreated = false;
+        bool gateHeld = false;
 
         try
         {
+            Monitor.Enter(ProcessLaunch.WindowsInheritanceGate, ref gateHeld);
             stdoutPipe = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
             stderrPipe = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
             stdin = OpenInheritedNullInput();
@@ -106,7 +110,17 @@ internal static class ContainedProcessLauncher
             processCreated = true;
             process = Process.GetProcessById(checked((int)processInformation.DwProcessId));
 
+            ClearParentInheritance(stdoutPipe, clearInheritanceForTest);
+            ClearParentInheritance(stderrPipe, clearInheritanceForTest);
+            stdoutPipe.DisposeLocalCopyOfClientHandle();
+            stderrPipe.DisposeLocalCopyOfClientHandle();
+            stdin.Dispose();
+            stdin = null;
+            Monitor.Exit(ProcessLaunch.WindowsInheritanceGate);
+            gateHeld = false;
+
             // Test observation point: the process is suspended and in the Job; no user code ran.
+            // Outside the Monitor: it is reentrant, so a callback inside it could launch a sibling.
             beforeResume?.Invoke(job, process, processInformation.HThread);
 
             if (ResumeThread(processInformation.HThread) == uint.MaxValue)
@@ -114,8 +128,6 @@ internal static class ContainedProcessLauncher
                 throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not resume contained process '{startInfo.FileName}'.");
             }
 
-            stdoutPipe.DisposeLocalCopyOfClientHandle();
-            stderrPipe.DisposeLocalCopyOfClientHandle();
             var stdout = new StreamReader(stdoutPipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             var stderr = new StreamReader(stderrPipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             stdoutPipe = null;
@@ -134,11 +146,21 @@ internal static class ContainedProcessLauncher
         }
         finally
         {
-            stdin?.Dispose();
-            TryDisposeClientHandle(stdoutPipe);
-            TryDisposeClientHandle(stderrPipe);
-            stdoutPipe?.Dispose();
-            stderrPipe?.Dispose();
+            try
+            {
+                stdin?.Dispose();
+                TryDisposeClientHandle(stdoutPipe);
+                TryDisposeClientHandle(stderrPipe);
+                stdoutPipe?.Dispose();
+                stderrPipe?.Dispose();
+            }
+            finally
+            {
+                if (gateHeld)
+                {
+                    Monitor.Exit(ProcessLaunch.WindowsInheritanceGate);
+                }
+            }
 
             if (processInformation.HThread != nint.Zero)
             {
@@ -193,6 +215,31 @@ internal static class ContainedProcessLauncher
         }
 
         return handle;
+    }
+
+    private static void ClearParentInheritance(
+        AnonymousPipeServerStream pipe,
+        Func<nint, (bool Success, int Error)?>? clearInheritanceForTest)
+    {
+        nint handle = pipe.SafePipeHandle.DangerousGetHandle();
+        bool success;
+        int error;
+        // A test may observe/prime the flag and return null to exercise the real OS clear,
+        // or override its result to force either fail-closed branch.
+        var forcedResult = clearInheritanceForTest?.Invoke(handle);
+        if (forcedResult is { } result)
+        {
+            (success, error) = result;
+        }
+        else
+        {
+            success = StandardHandleInheritance.DisableFor(handle, out error);
+        }
+
+        if (!success)
+        {
+            throw new Win32Exception(error, "Could not clear inheritance on a contained-process parent pipe.");
+        }
     }
 
     /// <summary>

@@ -933,7 +933,7 @@ public sealed class QueueWorktreeReportTests
             start.ArgumentList.Add("-c");
             start.ArgumentList.Add("import time; time.sleep(30)");
             start.Environment["BATON_BUILDLOCK_FILE"] = lockPath;
-            holder = Process.Start(start) ?? throw new InvalidOperationException("Could not start Python build-lock holder.");
+            holder = global::Baton.Core.ProcessLaunch.Start(start) ?? throw new InvalidOperationException("Could not start Python build-lock holder.");
 
             var heldDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
             while (DateTimeOffset.UtcNow < heldDeadline
@@ -1101,7 +1101,7 @@ public sealed class QueueWorktreeReportTests
         };
         start.Environment["GIT_OPTIONAL_LOCKS"] = "0";
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start git.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(start) ?? throw new InvalidOperationException("Could not start git.");
         var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(30), Ct);
         return (stdout, stderr, process.ExitCode);
     }

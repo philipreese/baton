@@ -339,7 +339,7 @@ public sealed class VendorMemoryRootTests : IDisposable
         Write(".gemini/antigravity-cli/brain/a-conversation/steps.jsonl", "steps");
         var brain = UnderHome(".gemini/antigravity-cli/brain");
 
-        var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+        var mklink = global::Baton.Core.ProcessLaunch.Start(new System.Diagnostics.ProcessStartInfo(
             "cmd.exe", $"/c mklink /J \"{Path.Combine(brain, "loop")}\" \"{brain}\"")
         {
             RedirectStandardOutput = true,

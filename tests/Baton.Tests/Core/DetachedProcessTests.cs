@@ -47,7 +47,7 @@ public sealed class DetachedProcessTests
             startInfo.ArgumentList.Add(CrashTestHostLauncher.HostDllPath);
             startInfo.ArgumentList.Add(mode);
             startInfo.ArgumentList.Add(pidFile);
-            host = Process.Start(startInfo) ?? throw new InvalidOperationException("the crash test host did not start");
+            host = global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("the crash test host did not start");
 
             sleeperPid = await ReadPidAsync(pidFile, host);
             Assert.True(ProcessIsAlive(sleeperPid), $"sleeper {sleeperPid} was not alive before the parent was killed — the harness cannot discriminate");

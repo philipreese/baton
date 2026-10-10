@@ -41,7 +41,7 @@ public static class Cli
 
         try
         {
-            process.Start();
+            global::Baton.Core.ProcessLaunch.Start(process);
         }
         catch (Exception ex)
         {
@@ -102,7 +102,7 @@ public static class Cli
 
         try
         {
-            process.Start();
+            global::Baton.Core.ProcessLaunch.Start(process);
         }
         catch (Exception ex)
         {

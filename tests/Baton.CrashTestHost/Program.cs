@@ -197,7 +197,7 @@ if (args is ["filter-helper"]
         };
         childStart.ArgumentList.Add("filter-descendant");
         childStart.ArgumentList.Add(childMarker);
-        using var child = Process.Start(childStart)
+        using var child = global::Baton.Core.ProcessLaunch.Start(childStart)
             ?? throw new InvalidOperationException("Could not start the controlled filter descendant.");
         await child.WaitForExitAsync();
     }
@@ -255,7 +255,7 @@ if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_OPEN_PR") == "1"
     };
     headStart.ArgumentList.Add("rev-parse");
     headStart.ArgumentList.Add("HEAD");
-    using var headProcess = Process.Start(headStart)
+    using var headProcess = global::Baton.Core.ProcessLaunch.Start(headStart)
         ?? throw new InvalidOperationException("Could not start git for the hermetic gh fixture.");
     var head = (await headProcess.StandardOutput.ReadToEndAsync()).Trim();
     await headProcess.WaitForExitAsync();
@@ -280,7 +280,7 @@ if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_DELIVERY_PROBE_SLEEPER"
     sleeperStart.ArgumentList.Add("-n");
     sleeperStart.ArgumentList.Add("9999");
     sleeperStart.ArgumentList.Add("127.0.0.1");
-    using var sleeper = Process.Start(sleeperStart)
+    using var sleeper = global::Baton.Core.ProcessLaunch.Start(sleeperStart)
         ?? throw new InvalidOperationException("Could not start the delivery-probe inherited-handle sleeper.");
     if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_SLEEPER_PID_FILE") is { Length: > 0 } pidFile)
     {
@@ -345,7 +345,7 @@ if (args.Contains("diff", StringComparer.Ordinal))
     sleeperStart.ArgumentList.Add("-n");
     sleeperStart.ArgumentList.Add("9999");
     sleeperStart.ArgumentList.Add("127.0.0.1");
-    using var sleeper = Process.Start(sleeperStart)
+    using var sleeper = global::Baton.Core.ProcessLaunch.Start(sleeperStart)
         ?? throw new InvalidOperationException("Could not start the inherited-handle sleeper.");
     if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_SLEEPER_PID_FILE") is { Length: > 0 } pidFile)
     {
@@ -678,7 +678,7 @@ static async Task<int> RunDaemonLoopChildControlAsync()
                 };
                 start.ArgumentList.Add(typeof(Scenarios).Assembly.Location);
                 start.ArgumentList.Add("daemon-loop-child-wait");
-                using var child = Process.Start(start)
+                using var child = global::Baton.Core.ProcessLaunch.Start(start)
                     ?? throw new InvalidOperationException("Could not start child-process control.");
                 var ready = await child.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);
                 if (ready != "ready")

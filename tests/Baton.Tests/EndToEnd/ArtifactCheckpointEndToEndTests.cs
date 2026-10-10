@@ -406,7 +406,7 @@ public sealed class ArtifactCheckpointEndToEndTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         var stderr = process.StandardError.ReadToEndAsync();
         _ = process.StandardOutput.ReadToEndAsync();
         process.WaitForExit();

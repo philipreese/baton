@@ -267,7 +267,7 @@ public class CommandWorkerAdapterTests
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        using var proc = Process.Start(psi);
+        using var proc = global::Baton.Core.ProcessLaunch.Start(psi);
         proc!.WaitForExit();
         Assert.Equal(0, proc.ExitCode);
     }

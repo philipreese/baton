@@ -771,7 +771,7 @@ public class MutationInterfaceCrashRecoveryTests
     private static (int Pid, DateTimeOffset StartTime) SpawnAndKillProcess()
     {
         var psi = new System.Diagnostics.ProcessStartInfo("ping.exe", "-n 30 127.0.0.1") { CreateNoWindow = true };
-        using var process = System.Diagnostics.Process.Start(psi)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(psi)!;
         try
         {
             return (process.Id, new DateTimeOffset(process.StartTime).ToUniversalTime());

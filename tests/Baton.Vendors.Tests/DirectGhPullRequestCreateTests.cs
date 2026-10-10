@@ -416,7 +416,7 @@ public sealed class DirectGhPullRequestCreateTests
             RedirectStandardError = true,
             Arguments = $"/d /c mklink /J \"{junction}\" \"{target}\"",
         };
-        using var process = System.Diagnostics.Process.Start(startInfo);
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
         Assert.NotNull(process);
         var stdout = process.StandardOutput.ReadToEnd();
         var stderr = process.StandardError.ReadToEnd();

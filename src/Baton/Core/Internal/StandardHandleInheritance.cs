@@ -102,9 +102,9 @@ public static class StandardHandleInheritance
     }
 
     /// <summary>
-    /// Test-only seam (Baton.Tests, via <c>InternalsVisibleTo</c>): clears the inherit flag on one
-    /// arbitrary handle, so the two-arm test can prove the mechanism against a pipe it owns instead
-    /// of mutating the test host's real standard streams. Returns false when the call failed.
+    /// Clears the inherit flag on one handle. The contained launcher uses the error-reporting
+    /// overload for retained parent pipes; tests use owned pipes instead of mutating the host's
+    /// real standard streams. Returns false when the call failed.
     /// </summary>
     internal static bool DisableFor(nint handle) => DisableFor(handle, out _);
 

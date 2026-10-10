@@ -162,7 +162,7 @@ public class StandardHandleInheritanceTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        Process? process = Process.Start(startInfo);
+        Process? process = global::Baton.Core.ProcessLaunch.Start(startInfo);
         Assert.NotNull(process);
         return process;
     }
