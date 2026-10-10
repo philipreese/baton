@@ -21,6 +21,10 @@ from unittest.mock import patch
 PAYLOAD = b"stdout-diagnostic\x00\xff\n" + b"stderr-diagnostic\x01\xfe\n"
 HOLDER_LIFETIME_S = 4.5
 DRIVER_TIMEOUT_S = 3.5
+INDEPENDENT_TIMEOUT_S = 2.5
+# The main-hold driver deliberately observes two sequential phases while keeping the same
+# process alive.  Give the outer observer both phase budgets plus only startup/serialization slack.
+MAIN_HOLD_TIMEOUT_S = DRIVER_TIMEOUT_S + INDEPENDENT_TIMEOUT_S + 0.5
 
 
 FIXTURE = r'''
@@ -30,6 +34,12 @@ import sys
 
 mode = sys.argv[1]
 if mode == "complete":
+    os.write(1, b"stdout-diagnostic\x00\xff\n")
+    os.write(2, b"stderr-diagnostic\x01\xfe\n")
+    raise SystemExit(0)
+if mode == "complete-slow":
+    import time
+    time.sleep(1.75)
     os.write(1, b"stdout-diagnostic\x00\xff\n")
     os.write(2, b"stderr-diagnostic\x01\xfe\n")
     raise SystemExit(0)
@@ -73,6 +83,7 @@ import subprocess
 import sys
 import time
 
+INDEPENDENT_TIMEOUT_S = 2.5
 module_path, fixture_path, result_path, receipt_path, mode, holder_lifetime = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("buildlock_under_test", module_path)
 if spec is None or spec.loader is None:
@@ -83,13 +94,15 @@ spec.loader.exec_module(module)
 receipt = Path(receipt_path)
 inputs = (receipt, "fixture-fingerprint")
 module.replay_inputs = lambda command, priority_class: inputs
-fixture_mode = "complete" if mode == "receipt" else ("hold-stdout" if mode == "main-hold" else mode)
+fixture_mode = "complete" if mode == "receipt" else (
+    "hold-stdout" if mode in ("main-hold", "main-hold-retained") else mode
+)
 command = [sys.executable, fixture_path, fixture_mode]
-if mode in ("hold-stdout", "hold-stderr", "hold-child75", "main-hold"):
+if mode in ("hold-stdout", "hold-stderr", "hold-child75", "main-hold", "main-hold-retained"):
     command.append(holder_lifetime)
 env = dict(os.environ)
 
-if mode == "main-hold":
+if mode in ("main-hold", "main-hold-retained"):
     lock_path = str(Path(receipt_path).with_suffix(".lock"))
     for name in ("BATON_BUILDLOCK_HELD", "BATON_BUILDLOCK_WAIT_LOG", "BATON_LOCK_WAIT_LOG"):
         os.environ.pop(name, None)
@@ -99,15 +112,19 @@ if mode == "main-hold":
     started = time.monotonic()
     code = module.main()
     elapsed = time.monotonic() - started
+    retained_handle = None
+    if mode == "main-hold-retained":
+        retained_handle = module.acquire(lock_path, ["negative-control"], 2)
     independent_env = dict(os.environ)
     for name in ("BATON_BUILDLOCK_HELD", "BATON_BUILDLOCK_WAIT_LOG", "BATON_LOCK_WAIT_LOG"):
         independent_env.pop(name, None)
+    independent_env["BATON_BUILDLOCK_FILE"] = lock_path
     independent = subprocess.Popen(
-        [sys.executable, module_path, sys.executable, fixture_path, "complete"],
+        [sys.executable, module_path, sys.executable, fixture_path, "complete-slow"],
         env=independent_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
-        independent_stdout, independent_stderr = independent.communicate(timeout=2.5)
+        independent_stdout, independent_stderr = independent.communicate(timeout=INDEPENDENT_TIMEOUT_S)
         independent_code = independent.returncode
     except subprocess.TimeoutExpired:
         independent.kill()
@@ -124,6 +141,12 @@ if mode == "main-hold":
         "independent_stdout": independent_stdout.decode("latin-1"),
         "independent_stderr": independent_stderr.decode("latin-1"),
     }), encoding="utf-8")
+    if retained_handle is not None:
+        import msvcrt
+
+        retained_handle.seek(0)
+        msvcrt.locking(retained_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        retained_handle.close()
     raise SystemExit(0)
 
 started = time.monotonic()
@@ -246,16 +269,31 @@ def _check_eof_while_child_lives(
 def _check_main_lock_release(
     driver: Path, module_path: Path, fixture: Path, root: Path
 ) -> list[str]:
-    completed, result, _ = _run_driver(driver, module_path, fixture, root, "main-hold")
+    completed, result, _ = _run_driver(
+        driver, module_path, fixture, root, "main-hold", timeout_s=MAIN_HOLD_TIMEOUT_S
+    )
     if completed is None or result is None:
-        return [f"main-hold: driver exceeded {DRIVER_TIMEOUT_S}s"]
+        return [f"main-hold: driver exceeded {MAIN_HOLD_TIMEOUT_S}s"]
     failures: list[str] = []
     if result["code"] != 1 or result["receipt"]:
         failures.append(f"main-hold: drain failure/receipt polarity was {result['code']}/{result['receipt']}")
+    if result["elapsed"] >= DRIVER_TIMEOUT_S:
+        failures.append(f"main-hold: production drain exceeded {DRIVER_TIMEOUT_S}s: {result['elapsed']:.2f}s")
     if result["independent_code"] != 0:
         failures.append(f"main-hold: independent command could not acquire released lock: {result['independent_code']}")
     if b"drain" not in completed.stderr.lower() and b"capture" not in completed.stderr.lower():
         failures.append(f"main-hold: no actionable drain diagnostic: {completed.stderr!r}")
+
+    retained, retained_result, _ = _run_driver(
+        driver, module_path, fixture, root, "main-hold-retained", timeout_s=MAIN_HOLD_TIMEOUT_S
+    )
+    if retained is None or retained_result is None:
+        failures.append(f"main-hold-retained: driver exceeded {MAIN_HOLD_TIMEOUT_S}s")
+    elif retained_result["independent_code"] != 75:
+        failures.append(
+            "main-hold-retained: retained-lock probe did not remain blocked: "
+            f"{retained_result['independent_code']}"
+        )
     return failures
 
 
