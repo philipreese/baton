@@ -44,7 +44,7 @@ public class ProcessLaunchTests
         ContainedProcessLaunch? launch = null;
         try
         {
-            launch = ContainedProcessLauncher.Start(ExitChild(), job, beforeResume: null, beforeCreateProcess: () =>
+            launch = ContainedProcessLauncher.Start(ExitChild(), job, beforeResume: null, beforeCreateProcess: _ =>
             {
                 thread.Start();
                 Assert.True(attempting.Wait(TimeSpan.FromSeconds(5)));
@@ -98,7 +98,7 @@ public class ProcessLaunchTests
         ContainedProcessLaunch? root = null;
         try
         {
-            root = ContainedProcessLauncher.Start(ExitChild(), rootJob, null, beforeCreateProcess: () =>
+            root = ContainedProcessLauncher.Start(ExitChild(), rootJob, null, beforeCreateProcess: _ =>
             {
                 if (contained && OperatingSystem.IsWindows())
                 {
@@ -213,6 +213,7 @@ public class ProcessLaunchTests
         if (!OperatingSystem.IsWindows()) return;
         using var job = SafeJobObjectHandle.Create();
         var handles = new List<nint>();
+        int clearAttempts = 0;
         var start = ExitChild();
         if (failurePoint == 0) start.FileName = "baton-nonexistent-2677-" + Guid.NewGuid().ToString("N");
         bool resumed = false;
@@ -221,16 +222,22 @@ public class ProcessLaunchTests
             if (!OperatingSystem.IsWindows()) throw new InvalidOperationException();
             ContainedProcessLauncher.Start(start, job,
                 beforeResume: (_, _, _) => resumed = true,
+                beforeCreateProcess: createdHandles =>
+                {
+                    handles.AddRange(createdHandles);
+                    Assert.Equal(5, handles.Distinct().Count());
+                    foreach (nint handle in handles) Assert.True(GetHandleInformation(handle, out _));
+                },
                 clearInheritanceForTest: handle =>
                 {
-                    handles.Add(handle);
-                    if (handles.Count == failurePoint) return (false, 5);
+                    if (++clearAttempts == failurePoint) return (false, 5);
                     return null;
                 });
         });
         if (failurePoint != 0) Assert.Equal(5, error.NativeErrorCode);
         Assert.False(resumed);
         Assert.True(SpinWait.SpinUntil(() => !job.IsTreeAlive(), TimeSpan.FromSeconds(5)));
+        Assert.Equal(5, handles.Count);
         foreach (nint handle in handles) Assert.False(GetHandleInformation(handle, out _));
         // Must be a different thread: Monitor is reentrant and same-thread recovery is vacuous.
         using Process recovered = (await Task.Run(() => ProcessLaunch.Start(ExitChild())).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))!; // wait-ok: detects leaked launch exclusion, not child work duration.

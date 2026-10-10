@@ -22,7 +22,7 @@ internal static class ContainedProcessLauncher
         ProcessStartInfo startInfo,
         SafeJobObjectHandle job,
         Action<SafeJobObjectHandle, Process, nint>? beforeResume,
-        Action? beforeCreateProcess = null,
+        Action<IReadOnlyList<nint>>? beforeCreateProcess = null,
         Func<nint, (bool Success, int Error)?>? clearInheritanceForTest = null)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
@@ -34,7 +34,7 @@ internal static class ContainedProcessLauncher
         ProcessStartInfo startInfo,
         SafeJobObjectHandle job,
         Action<SafeJobObjectHandle, Process, nint>? beforeResume,
-        Action? beforeCreateProcess,
+        Action<IReadOnlyList<nint>>? beforeCreateProcess,
         Func<nint, (bool Success, int Error)?>? clearInheritanceForTest)
     {
         AnonymousPipeServerStream? stdoutPipe = null;
@@ -91,7 +91,12 @@ internal static class ContainedProcessLauncher
                 creationFlags |= CreateNoWindow;
             }
 
-            beforeCreateProcess?.Invoke();
+            // Test snapshot includes both retained servers and all local inherited copies.
+            beforeCreateProcess?.Invoke([
+                stdoutPipe.SafePipeHandle.DangerousGetHandle(), stdoutClient,
+                stderrPipe.SafePipeHandle.DangerousGetHandle(), stderrClient,
+                stdin.DangerousGetHandle(),
+            ]);
             if (!CreateProcessW(
                 applicationName: null,
                 commandLine,
