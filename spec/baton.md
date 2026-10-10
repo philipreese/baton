@@ -8943,6 +8943,13 @@ repeating the same completed detach succeeds. It only persists `attached: false`
 registration, preserving claim ownership, request, session identity, journal and evidence.
 Launch-marker admission shares that queue cutover: a detached or replaced registration cannot
 admit a subsequent follow launch. Existing action admission revalidates the same registration.
+Replacement-review launch admission (#2656) holds queue then claim locks through the durable launch
+marker write. Completed-follow provenance requires the retained holder, acquisition generation and
+attached registration ID at that cutoff, including after manual promotion; legacy advice retains
+its holder requirement. Refusal durably blocks the exact still-unlaunched action after releasing
+the locks, retaining evidence. Remote head validation precedes this short local cutoff. A marker
+that wins first remains one issued attempt; late completion reconciliation after revocation belongs
+to the later Stop/Take Over slice.
 Detach does not cancel an already admitted turn or already issued action. The page immediately
 shows the server receipt, then reconciles the authoritative status; unavailable reads disable control.
 

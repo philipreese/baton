@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Baton.Accounting;
+using Baton.Conductor;
 using Baton.Status;
 
 namespace Baton.Queue;
@@ -85,6 +87,10 @@ public static class QueueStore
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
     private const string CleanupOperationLockDirectorySuffix = ".cleanup-operations";
 
+    // Test-only persistence seam; production always replaces the temporary sibling atomically.
+    internal static Action<string, string> MoveOverwriting { get; set; } =
+        (source, destination) => File.Move(source, destination, overwrite: true);
+
     internal static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
@@ -123,6 +129,33 @@ public static class QueueStore
                 WriteUnlocked(path, updated);
                 return updated;
             }),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Applies a short synchronous mutation under queue then claim locks. The current claim remains
+    /// locked through the durable queue replacement, so authority cutover cannot split validation
+    /// from persistence. The callback must perform no remote I/O or session-lock waits.
+    /// </summary>
+    public static Task<QueueSnapshot> MutateWithCurrentClaimAsync(
+        string path, RepositoryIdentity identity, string batonRoot,
+        Func<QueueSnapshot, ConductorClaimRecord?, QueueSnapshot> mutate,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        ArgumentNullException.ThrowIfNull(identity);
+        ArgumentException.ThrowIfNullOrEmpty(batonRoot);
+        ArgumentNullException.ThrowIfNull(mutate);
+
+        EnsureParentDirectory(path);
+        return Task.Run(
+            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+                ConductorClaimStore.WithCurrentClaim(identity, batonRoot, claim =>
+                {
+                    var updated = mutate(ReadUnlocked(path), claim);
+                    WriteUnlocked(path, updated);
+                    return updated;
+                })),
             cancellationToken);
     }
 
@@ -482,7 +515,7 @@ public static class QueueStore
         {
             File.WriteAllText(tempPath, JsonSerializer.Serialize(snapshot, SerializerOptions));
             operation = "queue replacement";
-            File.Move(tempPath, path, overwrite: true);
+            MoveOverwriting(tempPath, path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

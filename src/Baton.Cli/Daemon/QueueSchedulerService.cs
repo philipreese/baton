@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Baton.Accounting;
 using Baton.Conductor;
 using Baton.Domain;
 using Baton.Core.Internal;
@@ -624,19 +625,21 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 }
             }
 
+            ConductorObligation? replacementObligation = null;
             if (item.ReplacementReviewAction is { } replacement)
             {
                 try
                 {
-                    if (!await ValidateReplacementReviewLaunchAsync(item, replacement, cancellationToken)
-                        .ConfigureAwait(false))
+                    replacementObligation = await ValidateReplacementReviewLaunchAsync(item, replacement, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (replacementObligation is null)
                     {
                         continue;
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
                 {
-                    await BlockReplacementReviewAsync(item.Tag, replacement.ObligationKey,
+                    await BlockReplacementReviewAsync(replacement,
                         "replacement launch evidence changed or is unavailable: " + ex.Message,
                         "Re-establish owner, workspace and exact open PR head; inspect retained action.")
                         .ConfigureAwait(false);
@@ -648,14 +651,18 @@ public sealed partial class QueueSchedulerService : BackgroundService
             // tick read above: `baton queue cancel` owns the same seam. A cancellation that gets there
             // first wins and this scheduler never starts a lane from its stale candidate.
             var launchClaimed = false;
+            string? authorityRefusal = null;
             IReadOnlyList<QueueItem>? claimedItems = null;
             using (DaemonLoopDriver.EnterPhase("queue-store"))
             {
-                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+                QueueSnapshot ClaimLaunch(QueueSnapshot snapshot, ConductorClaimRecord? claim)
                 {
                     var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                     if (current?.State != QueueItemState.Queued
                         || current.Retirement is not null || snapshot.Held
+                        || current.CancelledAt is not null || current.LaunchMayHaveBegunAt is not null
+                        || current.AttemptEnvelope?.AttemptId != attemptId
+                        || current.ReplacementReviewAction != item.ReplacementReviewAction
                         || reviewPreparationRow is not null
                             && JsonSerializer.Serialize(current) != JsonSerializer.Serialize(reviewPreparationRow)
                         || current.ReplacementReviewAction is { } currentAction
@@ -700,6 +707,30 @@ public sealed partial class QueueSchedulerService : BackgroundService
                         return snapshot with { Items = claimedItems };
                     }
 
+                    if (current.ReplacementReviewAction is { } finalAction)
+                    {
+                        try
+                        {
+                            if (claim?.Holder != finalAction.Holder)
+                                throw new ConductorObligationStoreException("Conductor ownership changed.");
+                            if (ReplacementReviewEvidenceProvenance.For(finalAction)
+                                == ReplacementReviewEvidenceProvenance.CompletedFollow)
+                                ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
+                                    replacementObligation!, current, finalAction,
+                                    ConductorClaimStore.GetClaimGeneration(claim));
+                        }
+                        catch (Exception ex) when (ex is ConductorObligationStoreException or ConductorClaimException
+                            or IOException or UnauthorizedAccessException or JsonException
+                            or System.Text.DecoderFallbackException or ProjectCeilingStoreException)
+                        {
+                            // Refuse local evidence failures here, before the claim-lock boundary can
+                            // label their IO as claim access. Unexpected defects still escape; no
+                            // launch marker is written, and the exact action is blocked after unlock.
+                            authorityRefusal = "replacement launch evidence changed or is unavailable: " + ex.Message;
+                            return snapshot;
+                        }
+                    }
+
                     // The exact row observed before PR I/O still owns this spec. A failed write must
                     // not claim a worker launch; held, replaced and cancelled rows never write it.
                     if (refreshedReviewBrief is not null)
@@ -728,8 +759,28 @@ public sealed partial class QueueSchedulerService : BackgroundService
                     {
                         Items = claimedItems,
                     };
-                }, CancellationToken.None).ConfigureAwait(false);
+                }
+
+                try
+                {
+                    if (item.ReplacementReviewAction is { } action)
+                        await QueueStore.MutateWithCurrentClaimAsync(BatonPaths.QueueFile,
+                            RepositoryIdentity.From("https://" + action.Repository, null)!, BatonPaths.Root,
+                            ClaimLaunch, CancellationToken.None).ConfigureAwait(false);
+                    else
+                        await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                            snapshot => ClaimLaunch(snapshot, null), CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (ConductorClaimException ex) when (item.ReplacementReviewAction is not null)
+                {
+                    authorityRefusal = "replacement launch evidence changed or is unavailable: " + ex.Message;
+                }
             }
+
+            if (authorityRefusal is not null)
+                await BlockReplacementReviewAsync(item.ReplacementReviewAction!, authorityRefusal,
+                    "Re-establish owner, workspace and exact open PR head; inspect retained action.")
+                    .ConfigureAwait(false);
 
             if (!launchClaimed)
             {

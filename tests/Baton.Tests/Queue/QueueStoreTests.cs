@@ -1,5 +1,8 @@
 using Baton.Queue;
 using Baton.Domain;
+using Baton.Accounting;
+using Baton.Conductor;
+using Baton.Status;
 
 namespace Baton.Tests.Queue;
 
@@ -24,6 +27,82 @@ public sealed class QueueStoreTests
         ScopeClass = "engine",
         AddedAt = new DateTimeOffset(2026, 9, 5, 23, 0, 0, TimeSpan.Zero),
     };
+
+    [Fact]
+    public async Task Current_claim_excludes_takeover_through_actual_queue_replacement()
+    {
+        var path = TempQueuePath();
+        var root = Path.GetDirectoryName(path)!;
+        var identity = RepositoryIdentity.From("https://github.com/example/claim-persistence", null)!;
+        var beforeReplace = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var afterReplace = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var allowReplace = new ManualResetEventSlim();
+        using var allowReturn = new ManualResetEventSlim();
+        var originalMove = QueueStore.MoveOverwriting;
+        Task<QueueSnapshot>? mutation = null;
+        Task<(ConductorClaimRecord Record, string DisplacedHolder)>? takeover = null;
+        try
+        {
+            var original = await ConductorClaimStore.ClaimAsync(identity, "holder", root, cancellationToken: Ct);
+            await QueueStore.MutateAsync(path, snapshot => snapshot with { Items = [Item("a")] }, Ct);
+            QueueStore.MoveOverwriting = (source, destination) =>
+            {
+                if (destination != path) { originalMove(source, destination); return; }
+                beforeReplace.TrySetResult();
+                Assert.True(allowReplace.Wait(TimeSpan.FromSeconds(60), Ct));
+                originalMove(source, destination);
+                afterReplace.TrySetResult();
+                Assert.True(allowReturn.Wait(TimeSpan.FromSeconds(60), Ct));
+            };
+            mutation = QueueStore.MutateWithCurrentClaimAsync(path, identity, root, (snapshot, claim) =>
+            {
+                Assert.NotNull(claim);
+                Assert.Equal(original.Holder, claim.Holder);
+                Assert.Equal(ConductorClaimStore.GetClaimGeneration(original), ConductorClaimStore.GetClaimGeneration(claim));
+                return snapshot with
+                {
+                    Items = [snapshot.Items[0] with { LaunchMayHaveBegunAt = DateTimeOffset.UtcNow }],
+                };
+            }, Ct);
+            await beforeReplace.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            Assert.DoesNotContain("LaunchMayHaveBegunAt", await File.ReadAllTextAsync(path, Ct), StringComparison.Ordinal);
+            var claimPath = Path.Combine(root, identity.FileSlug, BatonPaths.ConductorClaimFileName);
+            using var claimMutex = new Mutex(false,
+                MutexGuardedFileLock.BuildMutexName(claimPath, ConductorClaimStore.LockNamePrefix));
+            AssertClaimExcluded(claimMutex);
+            takeover = ConductorClaimStore.TakeoverAsync(identity, "other", "fixture cutover", root, cancellationToken: Ct);
+            allowReplace.Set();
+            await afterReplace.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            Assert.Contains("LaunchMayHaveBegunAt", await File.ReadAllTextAsync(path, Ct), StringComparison.Ordinal);
+            AssertClaimExcluded(claimMutex);
+            allowReturn.Set();
+            await mutation.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            Assert.Equal("other", (await takeover.WaitAsync(TimeSpan.FromSeconds(60), Ct)).Record.Holder);
+            Assert.NotNull(Assert.Single((await QueueStore.LoadAsync(path, Ct)).Items).LaunchMayHaveBegunAt);
+        }
+        finally
+        {
+            allowReplace.Set();
+            allowReturn.Set();
+            try
+            {
+                if (mutation is not null) await mutation.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                if (takeover is not null) await takeover.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            }
+            finally
+            {
+                QueueStore.MoveOverwriting = originalMove;
+                Cleanup(path);
+            }
+        }
+    }
+
+    private static void AssertClaimExcluded(Mutex mutex)
+    {
+        var acquired = mutex.WaitOne(TimeSpan.Zero);
+        if (acquired) mutex.ReleaseMutex();
+        Assert.False(acquired);
+    }
 
     [Fact]
     public async Task An_absent_file_reads_as_an_empty_queue()

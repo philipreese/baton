@@ -55,10 +55,10 @@ internal static class ReplacementReviewEvidenceValidator
             || evidence.Decision.SourceRepository != source.Repository
             || evidence.Decision.SourceContextSha256 != obligation.ContextSha256
             || evidence.Decision.SourceContextSha256 != source.StoppedWorkJudgment?.ContextSha256
-            || evidence.Decision.RequestSha256.Length != 64
+            || evidence.Decision.RequestSha256 is not { Length: 64 }
             || evidence.Decision.ClaimGeneration != claimGeneration && claimGeneration is not null
-            || evidence.Decision.SessionId.Length == 0
-            || evidence.Decision.ConfigurationSha256.Length != 64
+            || string.IsNullOrEmpty(evidence.Decision.SessionId)
+            || evidence.Decision.ConfigurationSha256 is not { Length: 64 }
             || evidence.Digest != evidence.Decision.ResponseSha256
             || obligation.Status is not (ConductorObligationStatus.Pending or ConductorObligationStatus.Submitted)
                 && (obligation.Status != ConductorObligationStatus.ActionObserved
@@ -112,6 +112,11 @@ internal static class ReplacementReviewEvidenceValidator
             var registration = JsonSerializer.Deserialize<ConductorFollowAttachment>(File.ReadAllText(
                 Path.Combine(directory, "..", "..", "..", "registration.json")), Json)
                 ?? throw new IOException("Missing follow attachment.");
+            // JsonRequired checks presence, not nullability. Refuse corrupt persisted fields
+            // before path, hash or ceiling operations, preserving an evidence refusal at admission.
+            if (string.IsNullOrEmpty(registration.SessionDirectory)
+                || request.InitialInstructions is null || state.ProjectCeiling is null)
+                throw new IOException("Completed follow evidence has missing required values.");
             if (identity.ObligationKey != decision.ObligationKey || identity.ObligationId != decision.ObligationId
                 || !registration.Attached || registration.Id != queueSource.StoppedWorkJudgment?.FollowAttachmentId
                 || registration.Repository != decision.SourceRepository || registration.Holder != holder
@@ -143,7 +148,7 @@ internal static class ReplacementReviewEvidenceValidator
                 throw new IOException("Completed follow evidence binding changed.");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-            or JsonException or InvalidOperationException)
+            or JsonException or InvalidOperationException or ArgumentException)
         {
             throw new ConductorObligationStoreException(
                 "Completed follow evidence is missing or inconsistent.", ex);

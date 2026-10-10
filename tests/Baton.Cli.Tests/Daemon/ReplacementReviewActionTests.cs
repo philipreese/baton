@@ -20,6 +20,286 @@ public sealed class ReplacementReviewActionTests
     private const string OtherHead = "ffffffffffffffffffffffffffffffffffffffff";
     private const string Holder = "conductor-one";
 
+    [Theory]
+    [InlineData("unchanged")]
+    [InlineData("detach")]
+    [InlineData("takeover")]
+    [InlineData("reacquire")]
+    [InlineData("promoted-detach")]
+    [InlineData("promoted-reacquire")]
+    [InlineData("registration")]
+    [InlineData("evidence")]
+    [InlineData("malformed-decision")]
+    [InlineData("duplicate-decision")]
+    [InlineData("invalid-encoding")]
+    [InlineData("missing-decision")]
+    [InlineData("locked-decision")]
+    [InlineData("malformed-ceiling")]
+    [InlineData("locked-claim")]
+    [InlineData("empty-session-directory")]
+    [InlineData("invalid-session-directory")]
+    [InlineData("null-instructions")]
+    [InlineData("null-ceiling")]
+    [InlineData("null-request-digest")]
+    [InlineData("null-session-id")]
+    [InlineData("null-configuration-digest")]
+    public async Task Completed_follow_authority_cutover_during_head_validation_refuses_launch(string change)
+    {
+        using var fixture = await ConductorFollowDeliveryTests.Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        await AdmitCompletedFollowAsync(fixture, "cutover");
+        var retained = await fixture.RowAsync("cutover");
+        var action = Assert.IsType<QueueReplacementReviewAction>(retained.ReplacementReviewAction);
+        if (change.StartsWith("promoted-", StringComparison.Ordinal))
+        {
+            await ReplacementReviewConductorCommand.ExecuteAsync(ConductorOptionsParser.Parse(
+                ["act", "--obligation", action.ObligationKey, "--holder", action.Holder,
+                    "--action", "replace-review", "--expected-head", action.HeadSha]),
+                TextWriter.Null, fixture.Root, fixture.Advancer(), fixture.Store, Ct);
+            action = (await fixture.RowAsync("cutover")).ReplacementReviewAction!;
+            Assert.Equal(QueueReplacementReviewOrigin.Manual, action.Origin);
+            Assert.Equal(ReplacementReviewEvidenceProvenance.CompletedFollow, action.EvidenceProvenance);
+        }
+
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var launches = 0;
+        var decisionPath = fixture.EventEvidencePath("cutover", "decision.json");
+        var responsePath = fixture.EventEvidencePath("cutover", "response.json");
+        var originalResponse = await File.ReadAllBytesAsync(responsePath, Ct);
+        byte[]? retainedDecision = null;
+        string? changedEvidencePath = null;
+        byte[]? changedEvidenceBytes = null;
+        FileStream? readLock = null;
+        var launchBoundaryReached = false;
+        using var scheduler = fixture.Scheduler(fixture.Advancer(async (_, token) =>
+        {
+            if (!launchBoundaryReached) return action.HeadSha;
+            entered.TrySetResult();
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(60), token);
+            return action.HeadSha;
+        }), launch: async (request, _) =>
+        {
+            Assert.NotNull((await fixture.RowAsync("cutover")).LaunchMayHaveBegunAt);
+            Interlocked.Increment(ref launches);
+            return new QueueLaunchOutcome(request.RoomDirectory);
+        }, beforeLaunchClaim: _ =>
+        {
+            launchBoundaryReached = true;
+            return Task.CompletedTask;
+        });
+        var tick = scheduler.TickOnceAsync(Ct);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            Assert.Null((await fixture.RowAsync("cutover")).LaunchMayHaveBegunAt);
+            var identity = RepositoryIdentity.From("https://" + action.Repository, null)!;
+            if (change.EndsWith("detach", StringComparison.Ordinal)) await fixture.CommandAsync("detach");
+            else if (change == "takeover")
+                await ConductorClaimStore.TakeoverAsync(identity, "other", "fixture cutover", fixture.Root, cancellationToken: Ct);
+            else if (change.EndsWith("reacquire", StringComparison.Ordinal))
+            {
+                await ConductorClaimStore.ReleaseAsync(identity, action.Holder, "fixture release", fixture.Root, cancellationToken: Ct);
+                await ConductorClaimStore.ClaimAsync(identity, action.Holder, fixture.Root, cancellationToken: Ct);
+            }
+            else if (change == "registration")
+            {
+                // Model the registration replacement written under detach's queue cutover.
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+                {
+                    var registration = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(fixture.RegistrationPath))!;
+                    registration["id"] = "replacement-registration";
+                    File.WriteAllText(fixture.RegistrationPath, registration.ToJsonString());
+                    return snapshot;
+                }, Ct);
+            }
+            else if (change == "evidence")
+                await File.WriteAllTextAsync(fixture.EventEvidencePath("cutover", "response.json"), "{}", Ct);
+            else if (change == "malformed-decision")
+                await File.WriteAllTextAsync(decisionPath, "{", Ct);
+            else if (change == "duplicate-decision")
+                await File.WriteAllTextAsync(decisionPath, "{\"decision\":\"ReplaceReview\",\"decision\":\"ReplaceReview\"}", Ct);
+            else if (change == "invalid-encoding")
+                await File.WriteAllBytesAsync(decisionPath, [0xff], Ct);
+            else if (change == "missing-decision")
+                File.Move(decisionPath, decisionPath + ".retained");
+            else if (change == "malformed-ceiling")
+                await File.WriteAllTextAsync(Path.Combine(fixture.Root, "project-ceilings.json"), "{", Ct);
+            else if (change is "empty-session-directory" or "invalid-session-directory"
+                or "null-instructions" or "null-ceiling" or "null-request-digest"
+                or "null-session-id" or "null-configuration-digest")
+            {
+                var (path, field) = change switch
+                {
+                    "empty-session-directory" or "invalid-session-directory" => (fixture.RegistrationPath, "sessionDirectory"),
+                    "null-instructions" => (Path.Combine(action.EvidenceDirectory!, "..", "..", "request.json"), "initialInstructions"),
+                    "null-ceiling" => (Path.Combine(action.EvidenceDirectory!, "..", "..", "session.json"), "projectCeiling"),
+                    "null-request-digest" => (decisionPath, "requestSha256"),
+                    "null-session-id" => (decisionPath, "sessionId"),
+                    _ => (decisionPath, "configurationSha256"),
+                };
+                var document = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path, Ct))!;
+                document[field] = change == "empty-session-directory" ? ""
+                    : change == "invalid-session-directory" ? "\0" : null;
+                await File.WriteAllTextAsync(path, document.ToJsonString(), Ct);
+                changedEvidencePath = path;
+                changedEvidenceBytes = await File.ReadAllBytesAsync(path, Ct);
+            }
+            retainedDecision = await File.ReadAllBytesAsync(
+                change == "missing-decision" ? decisionPath + ".retained" : decisionPath, Ct);
+            if (change == "locked-decision")
+                readLock = new FileStream(decisionPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            else if (change == "locked-claim")
+                readLock = new FileStream(Path.Combine(fixture.Root, identity.FileSlug, BatonPaths.ConductorClaimFileName),
+                    FileMode.Open, FileAccess.Read, FileShare.None);
+        }
+        finally
+        {
+            release.TrySetResult();
+            try { await tick.WaitAsync(TimeSpan.FromSeconds(60), Ct); }
+            finally { readLock?.Dispose(); }
+        }
+        var row = await fixture.RowAsync("cutover");
+        Assert.Equal(change == "unchanged" ? 1 : 0, launches);
+        if (change == "unchanged")
+        {
+            Assert.True(row.AttemptStartedFactDurable);
+            Assert.Equal(row.AttemptId, row.ReplacementReviewAction!.ReplacementAttemptId);
+        }
+        else
+        {
+            Assert.Null(row.LaunchMayHaveBegunAt);
+            Assert.Null(row.ReplacementReviewAction!.ReplacementAttemptId);
+            Assert.Null(row.ReplacementReviewAction.ReplacementRoomDirectory);
+            Assert.Equal(QueueItemState.Failed, row.State);
+            Assert.True(row.Halted);
+            Assert.NotNull(row.ReplacementReviewAction.BlockedReason);
+            Assert.Equal("Re-establish owner, workspace and exact open PR head; inspect retained action.",
+                row.ReplacementReviewAction.NextTrigger);
+            Assert.Equal(action.EvidenceDigest, row.ReplacementReviewAction.EvidenceDigest);
+            Assert.Equal(action.EvidenceDirectory, row.ReplacementReviewAction.EvidenceDirectory);
+            Assert.Equal(action, row.ReplacementReviewAction with { BlockedReason = null, NextTrigger = null });
+            if (change == "locked-claim")
+                Assert.Contains("conductor claim file", row.ReplacementReviewAction.BlockedReason,
+                    StringComparison.OrdinalIgnoreCase);
+            else
+                Assert.DoesNotContain("conductor claim file", row.ReplacementReviewAction.BlockedReason,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.Equal(retainedDecision, await File.ReadAllBytesAsync(
+            change == "missing-decision" ? decisionPath + ".retained" : decisionPath, Ct));
+        if (change != "evidence") Assert.Equal(originalResponse, await File.ReadAllBytesAsync(responsePath, Ct));
+        if (changedEvidencePath is not null)
+            Assert.Equal(changedEvidenceBytes, await File.ReadAllBytesAsync(changedEvidencePath, Ct));
+        await scheduler.TickOnceAsync(Ct);
+        Assert.Equal(change == "unchanged" ? 1 : 0, launches);
+        Assert.Single(fixture.Calls);
+        Assert.Equal(0, fixture.LegacyCalls);
+    }
+
+    [Fact]
+    public async Task Detach_after_durable_launch_marker_retains_the_one_issued_attempt()
+    {
+        using var fixture = await ConductorFollowDeliveryTests.Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        fixture.Reply = "ReplaceReview";
+        await AdmitCompletedFollowAsync(fixture, "issued");
+        QueueItem? issued = null;
+        var launches = 0;
+        using var scheduler = fixture.Scheduler(launch: async (request, _) =>
+        {
+            launches++;
+            issued = await fixture.RowAsync("issued");
+            Assert.NotNull(issued.LaunchMayHaveBegunAt);
+            await fixture.CommandAsync("detach");
+            return new QueueLaunchOutcome(request.RoomDirectory);
+        });
+        await scheduler.TickOnceAsync(Ct);
+        await scheduler.TickOnceAsync(Ct);
+        var retained = await fixture.RowAsync("issued");
+        Assert.Equal(1, launches);
+        Assert.True(retained.AttemptStartedFactDurable);
+        Assert.Equal(issued!.AttemptId, retained.AttemptId);
+        Assert.Equal(issued.RoomDirectory, retained.RoomDirectory);
+        Assert.Equal(issued.ReplacementReviewAction, retained.ReplacementReviewAction);
+        Assert.Equal(QueueItemState.Launched, retained.State);
+    }
+
+    private static async Task AdmitCompletedFollowAsync(ConductorFollowDeliveryTests.Fixture fixture, string tag)
+    {
+        await fixture.HaltAsync(tag, notify: false);
+        using var scheduler = fixture.Scheduler();
+        await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+        Assert.Equal("delivered", (await fixture.FollowAsync(tag)).GetProperty("status").GetString());
+        await scheduler.RecoverAttachedFollowAsync(Ct);
+        var row = await fixture.RowAsync(tag);
+        Assert.Equal(QueueItemState.Queued, row.State);
+        Assert.NotNull(row.ReplacementReviewAction);
+        Assert.Null(row.ReplacementReviewAction.ReplacementAttemptId);
+        Assert.Null(row.LaunchMayHaveBegunAt);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Legacy_launch_rechecks_holder_but_preserves_same_holder_reacquisition(bool reacquire)
+    {
+        var home = TempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var (source, store, advancer, gh) = await SeedAsync(home);
+            await ReplacementReviewConductorCommand.ExecuteAsync(
+                Options(source), TextWriter.Null, home, advancer, store, Ct);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var launches = 0;
+            using var scheduler = new QueueSchedulerService(async (request, _) =>
+            {
+                Assert.NotNull(Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).LaunchMayHaveBegunAt);
+                launches++;
+                return new QueueLaunchOutcome(request.RoomDirectory);
+            }, _ => Task.FromResult(0d), () => 16d, () => Now,
+                conductorObligations: store, advancer: new WorkItemAdvancer(gh, async (_, token) =>
+                {
+                    entered.TrySetResult();
+                    await release.Task.WaitAsync(TimeSpan.FromSeconds(60), token);
+                    return Head;
+                }));
+            var tick = scheduler.TickOnceAsync(Ct);
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+                var identity = RepositoryIdentity.From("https://" + Repository, null)!;
+                if (reacquire)
+                {
+                    await ConductorClaimStore.ReleaseAsync(identity, Holder, "fixture release", cancellationToken: Ct);
+                    await ConductorClaimStore.ClaimAsync(identity, Holder, cancellationToken: Ct);
+                }
+                else await ConductorClaimStore.TakeoverAsync(identity, "other", "fixture cutover", cancellationToken: Ct);
+            }
+            finally
+            {
+                release.TrySetResult();
+                await tick.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            }
+            var row = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(reacquire ? 1 : 0, launches);
+            Assert.Equal(reacquire, row.AttemptStartedFactDurable);
+            Assert.Equal(reacquire, row.ReplacementReviewAction!.ReplacementAttemptId is not null);
+            Assert.Equal(ReplacementReviewEvidenceProvenance.LegacyAdvice,
+                ReplacementReviewEvidenceProvenance.For(row.ReplacementReviewAction));
+            if (!reacquire) Assert.NotNull(row.ReplacementReviewAction.BlockedReason);
+            await scheduler.TickOnceAsync(Ct);
+            Assert.Equal(reacquire ? 1 : 0, launches);
+        }
+        finally { DirectoryCleanup.DeleteRecursively(home); }
+    }
+
     [Fact]
     public async Task Populated_old_action_json_remains_unambiguously_legacy_and_replays_the_same_slot()
     {
