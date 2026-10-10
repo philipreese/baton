@@ -39,6 +39,10 @@ public sealed partial class ConductorFollowDeliveryTests
         var cancelled = Owned("cancelled", "task-b", Repository, QueueItemState.Cancelled);
         var launched = Owned("launched", "task-c", Repository, QueueItemState.Launched,
             new QueueIssuePreparation(TaskPreparationState.Prepared, now));
+        var retired = Owned("retired", "task-retired", Repository, QueueItemState.Queued) with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, now, "retained history"),
+        };
         var mismatch = Owned("mismatch", "task-c", "github.com/other/repository", QueueItemState.Queued);
         var overflow = Enumerable.Range(0, 18)
             .Select(index => Owned("overflow-" + index, "task-" + (char)('d' + index), Repository, QueueItemState.Queued))
@@ -53,15 +57,16 @@ public sealed partial class ConductorFollowDeliveryTests
             Issue = 2683,
         };
         await QueueStore.MutateAsync(BatonPaths.QueueFile,
-            queue => queue with { Items = [blocked, cancelled, launched, mismatch, legacy, .. overflow] }, Ct);
+            queue => queue with { Items = [blocked, cancelled, launched, retired, mismatch, legacy, .. overflow] }, Ct);
 
         await using var glass = await GlassFixture.StartAsync(fixture);
         var status = await glass.StatusAsync();
         var summary = status.GetProperty("recordedTasks");
         Assert.Equal("available", summary.GetProperty("availability").GetString());
         Assert.True(summary.GetProperty("observedAt").TryGetDateTimeOffset(out _));
-        Assert.Equal(1, summary.GetProperty("omitted").GetInt32());
         var rows = summary.GetProperty("items").EnumerateArray().ToArray();
+        Assert.DoesNotContain(rows, row => row.GetProperty("task").GetProperty("id").GetString() == "task-retired");
+        Assert.Equal(1, summary.GetProperty("omitted").GetInt32());
         Assert.Equal(20, rows.Length);
         Assert.Equal(new[] { "task-a", "task-b" },
             rows.Take(2).Select(row => row.GetProperty("task").GetProperty("id").GetString()));
