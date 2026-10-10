@@ -416,6 +416,29 @@ await reloadedMerge.refresh(); assert.match(mergeLatest.message,/acceptance reta
 assert.equal(mergePosts,1,'refresh and reload only look up the original request');
 assert.equal(savedMerge,'null');
 delete globalThis.sessionStorage;
+const realMergeNow=Date.now;
+Date.now=()=>Date.parse('2026-10-10T12:00:00.000Z');
+try {
+  for(const [expiry,expectedPosts] of [
+    ['2026-10-11T13:00:00.000Z',0], // 25 hours must refuse before any POST.
+    ['',0],['not-a-date',0],['2026-10-10T11:59:59.999Z',0],['2026-10-10T12:00:00.000Z',0],
+    ['2026-10-11T12:00:00.001Z',0], // One millisecond beyond the inclusive ceiling.
+    ['2026-10-11T12:00:00.000Z',1],['2026-10-10T12:01:00.000Z',1],
+  ]){
+    let expiryPosts=0,expiryConfirmations=0,expiryLatest;
+    const expiryControl=createConductorControl(async(path,options)=>{
+      if(path==='/conductors') return ok(mergeSnapshot());
+      assert.equal(path,'/conductor/merge/grant'); assert.equal(options.method,'POST'); expiryPosts++;
+      assert.equal(JSON.parse(options.body).expiresAt,expiry,'explicit expiry is not clamped or replaced');
+      return {ok:false,status:403};
+    },(data,message,busy)=>{expiryLatest={data,message,busy};},()=>{expiryConfirmations++; return true;},()=> 'expiry-request');
+    await expiryControl.refresh(); await expiryControl.mergeControl(0,0,false,expiry);
+    assert.equal(expiryPosts,expectedPosts,`Expiry ${expiry || '<blank>'} POST count`);
+    assert.equal(expiryConfirmations,expectedPosts,'invalid expiry must not reach confirmation');
+    assert.match(expiryLatest.message,expectedPosts ? /Exact merge control refused/ : /Choose an explicit future expiry within 24 hours/);
+    assert.equal(expiryLatest.busy,false);
+  }
+} finally { Date.now=realMergeNow; }
 let staleMergeReads=0,staleMergePosts=0;
 const staleMerge=createConductorControl(async(path,options)=>{
   if(options.method==='POST'){staleMergePosts++; return ok({});}

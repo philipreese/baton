@@ -3585,7 +3585,9 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
     const selected = revoke ? row?.merge?.grants?.[slot] : row?.merge?.candidates?.[slot];
     if(!row || !selected) return;
     const expires = revoke ? null : new Date(expiry);
-    if(!revoke && (!expiry || !Number.isFinite(expires.getTime()) || expires.getTime() <= Date.now())){ message = "Choose an explicit future expiry within 24 hours."; draw(); return; }
+    const expiryMs = expires?.getTime();
+    const now = Date.now();
+    if(!revoke && (!expiry || !Number.isFinite(expiryMs) || expiryMs <= now || expiryMs > now + 24*60*60*1000)){ message = "Choose an explicit future expiry within 24 hours."; draw(); return; }
     busy = true; draw();
     try {
       await read();
