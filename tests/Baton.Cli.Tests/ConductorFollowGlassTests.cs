@@ -234,8 +234,14 @@ public sealed partial class ConductorFollowDeliveryTests
         }
 
         public async Task<HttpResponseMessage> DetachAsync(string body, string? login = "operator@example.test")
+            => await WriteAsync("detach", body, login);
+
+        public async Task<HttpResponseMessage> ResumeAsync(string body, string? login = "operator@example.test")
+            => await WriteAsync("resume", body, login);
+
+        private async Task<HttpResponseMessage> WriteAsync(string verb, string body, string? login)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "conductor/detach")
+            using var request = new HttpRequestMessage(HttpMethod.Post, "conductor/" + verb)
             { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             if (login is not null) request.Headers.Add(GlassWriteGate.IdentityHeader, login);
             return await client.SendAsync(request, Ct);

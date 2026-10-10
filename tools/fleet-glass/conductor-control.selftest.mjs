@@ -16,6 +16,8 @@ const snapshot = (state='attached') => ({observedAt:'2026-10-10T00:00:00Z',condu
 const ok = value => ({ok:true,status:200,json:async()=>value});
 const esc = value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const card = conductorControlHtml(snapshot(),'',false,esc);
+assert.ok(conductorControlHtml({...snapshot('detached'),conductors:[{...row,state:'detached',resumeEligible:true}]},'',false,esc).includes('data-conductor-resume="0"'));
+assert.ok(!conductorControlHtml(snapshot('detached'),'',false,esc).includes('data-conductor-resume'));
 assert.ok(card.includes('data-conductor-detach="0"'));
 assert.ok(conductorControlHtml(snapshot('frozen'),'',false,esc).includes('data-conductor-detach="0"'));
 assert.ok(card.includes('not live activity'));
