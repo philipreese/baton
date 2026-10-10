@@ -36,6 +36,13 @@ public sealed class ReplacementReviewActionTests
     [InlineData("locked-decision")]
     [InlineData("malformed-ceiling")]
     [InlineData("locked-claim")]
+    [InlineData("empty-session-directory")]
+    [InlineData("invalid-session-directory")]
+    [InlineData("null-instructions")]
+    [InlineData("null-ceiling")]
+    [InlineData("null-request-digest")]
+    [InlineData("null-session-id")]
+    [InlineData("null-configuration-digest")]
     public async Task Completed_follow_authority_cutover_during_head_validation_refuses_launch(string change)
     {
         using var fixture = await ConductorFollowDeliveryTests.Fixture.CreateAsync();
@@ -63,6 +70,8 @@ public sealed class ReplacementReviewActionTests
         var responsePath = fixture.EventEvidencePath("cutover", "response.json");
         var originalResponse = await File.ReadAllBytesAsync(responsePath, Ct);
         byte[]? retainedDecision = null;
+        string? changedEvidencePath = null;
+        byte[]? changedEvidenceBytes = null;
         FileStream? readLock = null;
         var launchBoundaryReached = false;
         using var scheduler = fixture.Scheduler(fixture.Advancer(async (_, token) =>
@@ -118,6 +127,26 @@ public sealed class ReplacementReviewActionTests
                 File.Move(decisionPath, decisionPath + ".retained");
             else if (change == "malformed-ceiling")
                 await File.WriteAllTextAsync(Path.Combine(fixture.Root, "project-ceilings.json"), "{", Ct);
+            else if (change is "empty-session-directory" or "invalid-session-directory"
+                or "null-instructions" or "null-ceiling" or "null-request-digest"
+                or "null-session-id" or "null-configuration-digest")
+            {
+                var (path, field) = change switch
+                {
+                    "empty-session-directory" or "invalid-session-directory" => (fixture.RegistrationPath, "sessionDirectory"),
+                    "null-instructions" => (Path.Combine(action.EvidenceDirectory!, "..", "..", "request.json"), "initialInstructions"),
+                    "null-ceiling" => (Path.Combine(action.EvidenceDirectory!, "..", "..", "session.json"), "projectCeiling"),
+                    "null-request-digest" => (decisionPath, "requestSha256"),
+                    "null-session-id" => (decisionPath, "sessionId"),
+                    _ => (decisionPath, "configurationSha256"),
+                };
+                var document = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path, Ct))!;
+                document[field] = change == "empty-session-directory" ? ""
+                    : change == "invalid-session-directory" ? "\0" : null;
+                await File.WriteAllTextAsync(path, document.ToJsonString(), Ct);
+                changedEvidencePath = path;
+                changedEvidenceBytes = await File.ReadAllBytesAsync(path, Ct);
+            }
             retainedDecision = await File.ReadAllBytesAsync(
                 change == "missing-decision" ? decisionPath + ".retained" : decisionPath, Ct);
             if (change == "locked-decision")
@@ -162,6 +191,8 @@ public sealed class ReplacementReviewActionTests
         Assert.Equal(retainedDecision, await File.ReadAllBytesAsync(
             change == "missing-decision" ? decisionPath + ".retained" : decisionPath, Ct));
         if (change != "evidence") Assert.Equal(originalResponse, await File.ReadAllBytesAsync(responsePath, Ct));
+        if (changedEvidencePath is not null)
+            Assert.Equal(changedEvidenceBytes, await File.ReadAllBytesAsync(changedEvidencePath, Ct));
         await scheduler.TickOnceAsync(Ct);
         Assert.Equal(change == "unchanged" ? 1 : 0, launches);
         Assert.Single(fixture.Calls);
