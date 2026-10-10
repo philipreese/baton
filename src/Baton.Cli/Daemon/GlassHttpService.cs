@@ -320,6 +320,10 @@ internal sealed class GlassHttpService : BackgroundService
                     await HandleCorrectionReceiptAsync(context, stoppingToken).ConfigureAwait(false);
                     return;
 
+                case "/conductor/merge/receipt":
+                    await HandleMergeReceiptAsync(context).ConfigureAwait(false);
+                    return;
+
                 case "/events":
                     await WriteEventStreamAsync(context, stoppingToken).ConfigureAwait(false);
                     return;
@@ -369,8 +373,10 @@ internal sealed class GlassHttpService : BackgroundService
         var isConductorHold = string.Equals(route, "/conductor/hold", StringComparison.Ordinal);
         var isConductorUnhold = string.Equals(route, "/conductor/unhold", StringComparison.Ordinal);
         var isConductorCorrection = string.Equals(route, "/conductor/correct", StringComparison.Ordinal);
+        var isMergeGrant = string.Equals(route, "/conductor/merge/grant", StringComparison.Ordinal);
+        var isMergeRevoke = string.Equals(route, "/conductor/merge/revoke", StringComparison.Ordinal);
         var isConductorControl = isConductorDetach || isConductorResume || isConductorStop || isConductorTakeover
-            || isConductorHold || isConductorUnhold || isConductorCorrection;
+            || isConductorHold || isConductorUnhold || isConductorCorrection || isMergeGrant || isMergeRevoke;
         const string cancelPrefix = "/rooms/";
         const string cancelSuffix = "/cancel";
         var isCancelShape = route.StartsWith(cancelPrefix, StringComparison.Ordinal)
@@ -440,6 +446,14 @@ internal sealed class GlassHttpService : BackgroundService
                     length += count;
                 }
                 if (length > 4096) throw new CliArgumentException("Conductor request exceeds its bound.");
+                if (isMergeGrant || isMergeRevoke)
+                {
+                    var result = await ConductorFollowSession.MergeControlFromGlassAsync(new string(chars, 0, length),
+                        _conductorRoot, _settings.Glass.OperatorLogin!, isMergeRevoke, cancellationToken).ConfigureAwait(false);
+                    await WriteTextAsync(context, HttpStatusCode.OK, "application/json; charset=utf-8",
+                        JsonSerializer.Serialize(result, WebJson)).ConfigureAwait(false);
+                    return;
+                }
                 if (isConductorCorrection)
                 {
                     var result = await ConductorFollowSession.CorrectFromGlassAsync(new string(chars, 0, length),
@@ -505,6 +519,31 @@ internal sealed class GlassHttpService : BackgroundService
                     : isConductorResume ? "Resume refused: session busy, conductor identity or retained state could not be verified. Refresh before retrying."
                     : isConductorControl ? "Control refused: exact identity, request ID, reason or destination could not be verified. Refresh before retrying." : ex.Message)
                 .ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleMergeReceiptAsync(HttpListenerContext context)
+    {
+        var headers = context.Request.Headers.GetValues(GlassWriteGate.IdentityHeader);
+        var decision = GlassWriteGate.Evaluate(_settings.Glass, context.Request.RemoteEndPoint?.Address, headers);
+        if (!decision.IsAllowed)
+        {
+            await WriteTextAsync(context, HttpStatusCode.Forbidden, "text/plain; charset=utf-8", decision.Refusal!).ConfigureAwait(false);
+            return;
+        }
+        try
+        {
+            var query = context.Request.QueryString;
+            if (query.Count != 2 || query.GetValues("repository") is not { Length: 1 } repositories
+                || query.GetValues("requestId") is not { Length: 1 } ids)
+                throw new CliArgumentException("Exact repository and request ID are required.");
+            var result = ConductorFollowSession.LookupMergeControl(_conductorRoot, repositories[0], _settings.Glass.OperatorLogin!, ids[0]);
+            await WriteTextAsync(context, HttpStatusCode.OK, "application/json; charset=utf-8",
+                JsonSerializer.Serialize(result, WebJson)).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or ArgumentException or JsonException or IOException)
+        {
+            await WriteTextAsync(context, HttpStatusCode.Conflict, "text/plain; charset=utf-8", "Exact merge receipt lookup unavailable; retain the request ID.").ConfigureAwait(false);
         }
     }
 

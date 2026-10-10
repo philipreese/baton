@@ -8982,10 +8982,49 @@ requires a fresh uncached GET to agree on repository, holder, generation, new at
 state. Only explicitly eligible detached rows offer Resume, with future-handoffs-only confirmation.
 Denied, busy/stale and unknown outcomes require refresh; the client never automatically repeats a POST.
 
-The broader operator-approved hosted conductor direction (#2091) still requires correction delivery,
-useful task/decision/next-action visibility, a separately revocable one-use exact-task/head
-merge grant and an observed useful installed outcome. This increment introduces no unattended merge authority
-or general remote steering.
+The broader operator-approved hosted conductor direction (#2091) still requires an observed useful
+installed outcome; the exact merge source contract below does not establish installed acceptance.
+
+### Exact one-use hosted squash control (#2671)
+
+Authenticated bounded `/conductor/merge/grant` and `/conductor/merge/revoke` POSTs reuse C-11.
+The server retains issuer, request ID, acceptance and the immutable repository/task/PR URL/full head,
+holder/acquisition/attachment, squash method and explicit expiry (within 24 hours). Changed input
+conflicts; duplicates replay. An already-ready grant requires the displayed ready ID and digest.
+A pending grant may bind only its subsequent exact eligible ready transition through reconciliation;
+the committed receipt survives a ready/notify crash. No historical backlog is selected. Unchanged
+review/head/policy/witnesses preserve the original ready identity. A separate bounded repository
+register retains supersession, revocation, judgment and issued attempt across queue retirement.
+
+One judgment binds grant, ready ID/digest and acquisition. It uses the existing serialized read-only
+conversation and complete request/configuration/source/launch/response/receipt/journal proof.
+Only its exact typed Hold/Merge reply and bounded reason are recognized; absent rationale is explicit.
+Hold or an ineligible complete reply resolves the judgment without spending allowance or another
+model call. Corrections, prose and ReplaceReview cannot authorize merge. §14's historical ordinary
+judgment projection retains its semantics and excludes ready-merge events.
+
+Fresh qualification requires the producer-retained independent review attempt and accepted execution,
+terminal/verdict bytes, exact reviewed head, open non-draft PR, complete required checks, unchanged
+required policy, unrestricted project action ceiling and protected prerequisites. The supported
+transport subset requires classic checks enforced for administrators, known write/admin actor roles,
+squash policy, complete effective rule collections without queue or bypass actors, and no
+operator-merge label. Other configurations refuse unsupported, including the October 10 administrator
+with enforce_admins:false and an active ruleset lacking required checks. No setting change is implied.
+
+After remote reads, queue -> claim -> grant serialization rechecks immutable proof and current
+authority, attachment, Hold, expiry, revocation and allowance before persisting one issued marker.
+No remote call holds these locks. Stop/takeover/Detach invalidate unissued authority; Resume's fresh
+attachment cannot inherit it. Hold/Unhold preserve expiry and allowance. Replacement supersedes only
+unissued grants; unresolved issued targets fence new acquisitions. Late revoke records audit only.
+
+The host issues at most one bounded argv `gh api` synchronous PUT to the validated PR merge endpoint,
+with exact sha, squash and API version; it never uses pr merge, queues, retries or fallback. The marker
+spends permission even on spawn crash. Positive HTTP 200 merged:true plus commit SHA confirms the
+executor; an independent exact-source-head/merged/merge-commit read establishes observation. Lost
+response may establish “merged observed; executor unconfirmed”; still-open is uncertain. Recovery
+observes once without repeating execution or restoring permission. Only a conclusive structured
+refusal permits a separately authorized future grant. Glass shows permission, delivery, attempt and
+outcome independently, including when session inspection fails. Root owns installed proof and merge.
 
 ### Exact hosted Stop / Take Over (#2661)
 

@@ -269,8 +269,10 @@ public sealed partial class QueueSchedulerService
         {
             if (repository is null) continue;
             var correction = await ConductorFollowSession.CorrectionTargetAsync(BatonPaths.Root, repository, token).ConfigureAwait(false);
+            var merge = repository.StartsWith("github.com/", StringComparison.Ordinal)
+                ? await ConductorFollowSession.MergeTargetAsync(BatonPaths.Root, repository, token).ConfigureAwait(false) : null;
             var rows = pending.Where(item => item.Repository == repository).ToArray();
-            var target = correction ?? rows.Select(row => ConductorFollowSession.HostedTargetFor(row, BatonPaths.Root)).FirstOrDefault(candidate => candidate is not null);
+            var target = correction ?? merge ?? rows.Select(row => ConductorFollowSession.HostedTargetFor(row, BatonPaths.Root)).FirstOrDefault(candidate => candidate is not null);
             if (target is null) continue;
             rows = rows.Where(row => row.StoppedWorkJudgment?.FollowAttachmentId == target.AttachmentId).ToArray();
             var key = target.Repository + "\n" + target.ClaimGeneration;
@@ -307,6 +309,9 @@ public sealed partial class QueueSchedulerService
             }
             if (await ConductorFollowSession.CorrectionTargetAsync(BatonPaths.Root, target.Repository, token).ConfigureAwait(false) is { } correction)
                 await ConductorFollowSession.NotifyCorrectionAsync(correction, BatonPaths.Root, token, FollowBroker,
+                    FollowRepositoryResolver).ConfigureAwait(false);
+            if (target.Repository.StartsWith("github.com/", StringComparison.Ordinal))
+                await ConductorFollowSession.NotifyMergeAsync(target, BatonPaths.Root, _advancer, token, FollowBroker,
                     FollowRepositoryResolver).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }

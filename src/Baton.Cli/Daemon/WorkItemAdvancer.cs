@@ -1139,7 +1139,15 @@ public sealed partial class WorkItemAdvancer
                 $"{task.Id}\0{head}\0{reviewAttempt}\0{verdictDigest}\0{checksId}"))).ToLowerInvariant();
             taskReceipt = new TaskReadyReceipt(receiptId, task.Id, task.Repository, task.Issue,
                 prNumber, head, reviewAttempt, verdictDigest, pr.RequiredChecks, checksId,
-                requiredEvidence.ObservedAt, now < requiredEvidence.ObservedAt ? requiredEvidence.ObservedAt : now, requiredEvidence);
+                requiredEvidence.ObservedAt, now < requiredEvidence.ObservedAt ? requiredEvidence.ObservedAt : now, requiredEvidence,
+                CaptureReadyReviewProof(item, path, reviewAttempt));
+            // A fresh as-of read cannot replace the immutable identity shown to the operator when
+            // the exact review, head and required policy/witnesses are unchanged.
+            if (task.Ready is { } retained && retained.PullRequest == prNumber && retained.HeadSha == head
+                && retained.ReviewAttemptId == reviewAttempt && retained.VerdictSha256 == verdictDigest
+                && retained.RequiredEvidence?.PolicySha256 == requiredEvidence.PolicySha256
+                && retained.RequiredEvidence.WitnessesSha256 == requiredEvidence.WitnessesSha256)
+                taskReceipt = retained;
         }
         var stopped = await TryMarkAsync(item, existing => existing with
         {

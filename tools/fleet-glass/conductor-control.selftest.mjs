@@ -44,7 +44,7 @@ for(const diagnostic of ['history inspection limit reached','inspection incomple
   assert.ok(rendered.includes(diagnostic));
   assert.ok(rendered.includes('At this judgment, no replacement was requested.'));
   assert.ok(rendered.includes('2 invalid or incomplete event(s) excluded'));
-  assert.ok(rendered.includes('3 correction or prose-only event(s) excluded'));
+  assert.ok(rendered.includes('3 correction, merge or prose-only event(s) excluded'));
   assert.ok(rendered.includes('4 additional verified ordinary judgment(s) omitted'));
   assert.ok(rendered.includes('data-conductor-stop="0"'));
   assert.ok(rendered.includes('data-conductor-hold="0"'));
@@ -377,4 +377,52 @@ await independent.refresh(); await independent.correct(0,'A correction');
 await independent.refresh(); await independent.correct(1,'B correction');
 assert.equal(independentPosts,2,'one acquisition cannot consume another card correction capacity');
 assert.equal(correctionLatest.pending.requests.length,2,'both lost-reply identities remain available for exact lookup');
-console.log(`Conductor controls: existing scenarios, ${holdCases} Hold/Unhold scenarios, six correction states and lost-reply/reload exact lookup passed.`);
+const mergeCandidate={taskId:'task',pullRequest:77,pullRequestUrl:'https://github.com/test/repo/pull/77',
+  headSha:'a'.repeat(40),readyReceiptId:'b'.repeat(64),readyReceiptSha256:'c'.repeat(64)};
+const mergeGrant={grantId:'d'.repeat(64),taskId:'task',pullRequestUrl:mergeCandidate.pullRequestUrl,headSha:mergeCandidate.headSha,
+  issuer:'operator',requestId:'accepted',expiresAt:'2026-10-11T00:00:00Z',permission:'spent',delivery:'complete',decision:'Merge',
+  reason:'<script>unsafe</script>',operation:'unknown',revoked:false,observation:{state:'merged observed; executor unconfirmed',nextTrigger:'Owner must inspect attribution'}};
+const mergeSnapshot=()=>({...snapshot(),conductors:[{...row,merge:{candidates:[mergeCandidate],grants:[mergeGrant]}}]});
+const mergeCard=conductorControlHtml(mergeSnapshot(),'',false,esc);
+for(const expected of ['data-merge-grant="0:0"','data-merge-revoke="0:0"',mergeCandidate.headSha,mergeCandidate.readyReceiptSha256,
+  'Permission: spent','Delivery: complete','Attempt: unknown','merged observed; executor unconfirmed','Owner must inspect attribution','&lt;script&gt;']) assert.ok(mergeCard.includes(expected),expected);
+assert.ok(!mergeCard.includes('<script>unsafe'));
+assert.ok(conductorControlHtml({...mergeSnapshot(),conductors:[{...row,state:'frozen',merge:mergeSnapshot().conductors[0].merge}]},'',false,esc).includes('data-merge-revoke'));
+let mergeLatest,mergePosts=0,mergeBody,mergeReceipt=null;
+const mergeRender=(data,message,busy)=>{mergeLatest={data,message,busy};};
+let savedMerge='';
+globalThis.sessionStorage={getItem:key=>key==='baton-merge-request'?savedMerge:null,setItem:(key,value)=>{if(key==='baton-merge-request') savedMerge=value;}};
+const mergeFetch=async(path,options)=>{
+  if(path==='/conductors') return ok(mergeSnapshot());
+  if(path==='/conductor/merge/grant'){
+    mergePosts++; mergeBody=JSON.parse(options.body);
+    assert.equal(mergeBody.method,'squash'); assert.equal(mergeBody.issuer,undefined);
+    assert.equal(mergeBody.headSha,mergeCandidate.headSha); assert.equal(mergeBody.readyReceiptSha256,mergeCandidate.readyReceiptSha256);
+    return {ok:false,status:409};
+  }
+  assert.equal(path,'/conductor/merge/receipt?repository=github.com%2Ftest%2Frepo&requestId=merge-request');
+  return ok(mergeReceipt);
+};
+const exactMerge=createConductorControl(mergeFetch,mergeRender,()=>true,()=> 'merge-request');
+await exactMerge.refresh(); await exactMerge.mergeControl(0,0,false,new Date(Date.now()+3600000).toISOString());
+assert.match(mergeLatest.message,/outcome unknown/); assert.equal(mergePosts,1);
+await exactMerge.mergeControl(0,0,false,new Date(Date.now()+3600000).toISOString());
+assert.equal(mergePosts,1,'lost acknowledgement must block a new POST');
+mergeReceipt={requestId:'merge-request',operation:'grant',grantId:mergeGrant.grantId,grant:{...mergeBody,headSha:'e'.repeat(40)}};
+await exactMerge.refresh(); assert.match(mergeLatest.message,/outcome remains unknown/);
+mergeReceipt.grant={...mergeBody,expiresAt:mergeBody.expiresAt.replace('Z','+00:00')};
+const reloadedMerge=createConductorControl(mergeFetch,mergeRender,()=>true);
+await reloadedMerge.refresh(); assert.match(mergeLatest.message,/acceptance retained/);
+assert.equal(mergePosts,1,'refresh and reload only look up the original request');
+assert.equal(savedMerge,'null');
+delete globalThis.sessionStorage;
+let staleMergeReads=0,staleMergePosts=0;
+const staleMerge=createConductorControl(async(path,options)=>{
+  if(options.method==='POST'){staleMergePosts++; return ok({});}
+  staleMergeReads++;
+  const data=mergeSnapshot(); if(staleMergeReads>1) data.conductors[0].merge.candidates[0]={...mergeCandidate,readyReceiptId:'e'.repeat(64)};
+  return ok(data);
+},mergeRender,()=>true,()=> 'stale-merge');
+await staleMerge.refresh(); await staleMerge.mergeControl(0,0,false,new Date(Date.now()+3600000).toISOString());
+assert.equal(staleMergePosts,0); assert.match(mergeLatest.message,/receipt or owner changed/);
+console.log(`Conductor controls: existing scenarios, ${holdCases} Hold/Unhold scenarios, correction and exact-merge identity, lost-reply/reload lookup and stale-ready refusal passed.`);

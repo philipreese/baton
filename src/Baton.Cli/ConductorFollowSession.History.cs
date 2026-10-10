@@ -112,7 +112,7 @@ internal sealed partial class ConductorFollowSession
                     RejectLinks(eventDirectory);
                     var eventIdentity = Read<ConductorFollowEventIdentity>(Path.Combine(eventDirectory, "identity.json"));
                     ValidateRetainedEventIdentity(eventDirectory, eventIdentity, state);
-                    if (IsCorrection(eventIdentity)) { excluded++; continue; }
+                    if (IsCorrection(eventIdentity) || eventIdentity.Kind == "ready-merge") { excluded++; continue; }
                     var decision = session.ValidateCompletedRetainedEvent(eventDirectory, eventIdentity, state, journal);
                     if (decision is null) { excluded++; continue; }
                     var source = Read<ConductorFollowRetainedSource>(Path.Combine(eventDirectory, "source.json"));
