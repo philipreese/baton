@@ -12,6 +12,203 @@ namespace Baton.Cli.Tests;
 public sealed partial class ConductorFollowDeliveryTests
 {
     [Theory]
+    [InlineData(false, "head")]
+    [InlineData(false, "closed")]
+    [InlineData(false, "merged")]
+    [InlineData(false, "retired")]
+    [InlineData(true, "head")]
+    [InlineData(true, "closed")]
+    [InlineData(true, "merged")]
+    [InlineData(true, "retired")]
+    public async Task Glass_obligation_observation_crash_recovers_exact_proof_without_current_authority(bool legacy, string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await AdmitObservationCrashAsync(fixture, legacy);
+        var launches = 0;
+        using var scheduler = fixture.Scheduler(launch: (request, _) =>
+        {
+            launches++;
+            return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+        });
+        var before = await CrashAfterObligationObservationAsync(fixture, scheduler);
+        var action = before.ReplacementReviewAction!;
+        var obligation = (await fixture.Store.ReadAsync(action.ObligationKey, Ct))!;
+        await ChangeObservedSourceAsync(fixture, change);
+        await fixture.ChangeAsync("observation-crash", "opt-in");
+        await fixture.ChangeAsync("observation-crash", "claim");
+        await fixture.ChangeAsync("observation-crash", "held");
+        var claimPath = Path.Combine(fixture.Root, Identity.FileSlug, BatonPaths.ConductorClaimFileName);
+        var claimBytes = File.ReadAllBytes(claimPath);
+        var facts = File.ReadAllBytes(BatonPaths.FleetEventsFile);
+        var remoteCalls = fixture.RemoteCalls;
+        using var recovered = fixture.Scheduler(fixture.Advancer((_, _) =>
+            throw new InvalidOperationException("Historical recovery must not read today's workspace head")),
+            launch: (_, _) => throw new InvalidOperationException("Observed action must not launch again"));
+        await recovered.ReconcileReplacementReviewActionsAsync(Ct);
+        var row = await fixture.RowAsync("observation-crash");
+        Assert.Equal(action with
+        {
+            ActionObservedAt = obligation.ActionObservedAt,
+            BlockedReason = null,
+            NextTrigger = null,
+        }, row.ReplacementReviewAction);
+        Assert.Equal(before.Round, row.Round);
+        Assert.Equal(before.AutomaticFixUsed, row.AutomaticFixUsed);
+        Assert.Equal(JsonSerializer.Serialize(before.AttemptEnvelope), JsonSerializer.Serialize(row.AttemptEnvelope));
+        Assert.Equal(before.LaunchMayHaveBegunAt, row.LaunchMayHaveBegunAt);
+        var queueBytes = File.ReadAllBytes(BatonPaths.QueueFile);
+        var stamp = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(BatonPaths.QueueFile, stamp);
+        await recovered.ReconcileReplacementReviewActionsAsync(Ct);
+        await recovered.ReconcileReplacementReviewActionsAsync(Ct);
+        Assert.Equal(queueBytes, File.ReadAllBytes(BatonPaths.QueueFile));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(BatonPaths.QueueFile));
+        Assert.Equal(remoteCalls, fixture.RemoteCalls);
+        // Retain every row before ordinary lifecycle advancement to isolate recovery across ticks.
+        await ChangeObservedSourceAsync(fixture, "retired");
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => item.Tag == "observation-crash" ? item with
+            {
+                State = QueueItemState.Done,
+            } : item).ToList(),
+        }, Ct);
+        queueBytes = File.ReadAllBytes(BatonPaths.QueueFile);
+        File.SetLastWriteTimeUtc(BatonPaths.QueueFile, stamp);
+        await recovered.TickOnceAsync(Ct);
+        await recovered.TickOnceAsync(Ct);
+        Assert.Equal(queueBytes, File.ReadAllBytes(BatonPaths.QueueFile));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(BatonPaths.QueueFile));
+        Assert.Equal(remoteCalls, fixture.RemoteCalls);
+        Assert.Equal(claimBytes, File.ReadAllBytes(claimPath));
+        Assert.Equal(obligation, await fixture.Store.ReadAsync(action.ObligationKey, Ct));
+        Assert.Equal(facts, File.ReadAllBytes(BatonPaths.FleetEventsFile));
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var projection = Assert.Single((await glass.StatusAsync()).GetProperty("actions").EnumerateArray());
+        Assert.Equal("observed", projection.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, projection.GetProperty("reason").ValueKind);
+        Assert.Equal(JsonValueKind.Null, projection.GetProperty("nextTrigger").ValueKind);
+        Assert.Equal(1, launches);
+        Assert.Equal(legacy ? 0 : 1, fixture.Calls.Count);
+    }
+
+    [Theory]
+    [InlineData(false, "proof")]
+    [InlineData(false, "missing-proof")]
+    [InlineData(false, "attempt")]
+    [InlineData(false, "room")]
+    [InlineData(false, "holder")]
+    [InlineData(false, "head")]
+    [InlineData(false, "missing-issued")]
+    [InlineData(false, "conflicting-provenance")]
+    [InlineData(true, "proof")]
+    [InlineData(true, "missing-proof")]
+    [InlineData(true, "attempt")]
+    [InlineData(true, "room")]
+    [InlineData(true, "holder")]
+    [InlineData(true, "head")]
+    [InlineData(true, "advice")]
+    public async Task Glass_obligation_observation_crash_refuses_missing_or_mismatched_evidence(bool legacy, string mismatch)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await AdmitObservationCrashAsync(fixture, legacy);
+        using var scheduler = fixture.Scheduler(launch: (request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+        var before = await CrashAfterObligationObservationAsync(fixture, scheduler);
+        var action = before.ReplacementReviewAction!;
+        var obligation = await fixture.Store.ReadAsync(action.ObligationKey, Ct);
+        await ChangeObservedSourceAsync(fixture, "retired");
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => item.Tag == "observation-crash" ? item with
+            {
+                ReplacementReviewAction = mismatch switch
+                {
+                    "proof" => action with { CompletionProof = "replacement-review-sha256:" + new string('0', 64) },
+                    "missing-proof" => action with { CompletionProof = null },
+                    "attempt" => action with { ReplacementAttemptId = new Baton.Domain.FleetAttemptId("foreign") },
+                    "room" => action with { ReplacementRoomDirectory = action.SourceRoomDirectory },
+                    "holder" => action with { Holder = "foreign" },
+                    "head" => action with { HeadSha = new string('f', 40) },
+                    "missing-issued" => action with { IssuedAuthority = null },
+                    "conflicting-provenance" => action with { AdviceDigest = "foreign" },
+                    "advice" => action with { AdviceDigest = "foreign" },
+                    _ => throw new InvalidOperationException(mismatch),
+                },
+            } : item).ToList(),
+        }, Ct);
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        var unresolved = await fixture.RowAsync("observation-crash");
+        Assert.Null(unresolved.ReplacementReviewAction!.ActionObservedAt);
+        if (mismatch is not ("conflicting-provenance" or "missing-proof")) Assert.NotNull(unresolved.ReplacementReviewAction.BlockedReason);
+        var bytes = File.ReadAllBytes(BatonPaths.QueueFile);
+        var stamp = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(BatonPaths.QueueFile, stamp);
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
+        Assert.Equal(bytes, File.ReadAllBytes(BatonPaths.QueueFile));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(BatonPaths.QueueFile));
+        Assert.Equal(obligation, await fixture.Store.ReadAsync(action.ObligationKey, Ct));
+        Assert.Equal(before.Round, unresolved.Round);
+        Assert.Equal(before.AutomaticFixUsed, unresolved.AutomaticFixUsed);
+        Assert.Equal(JsonSerializer.Serialize(before.AttemptEnvelope), JsonSerializer.Serialize(unresolved.AttemptEnvelope));
+    }
+
+    private static async Task AdmitObservationCrashAsync(Fixture fixture, bool legacy)
+    {
+        if (!legacy)
+        {
+            await fixture.EnableAutomaticAsync();
+            await fixture.CommandAsync("attach");
+            fixture.Reply = "ReplaceReview";
+            await AdmitControlFollowAsync(fixture, "observation-crash");
+            return;
+        }
+        await fixture.HaltAsync("observation-crash", notify: false);
+        using var scheduler = fixture.Scheduler();
+        await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+        await fixture.LegacyAsync("observation-crash", () => { });
+        fixture.Store.MarkStoppedWorkAdviceSourceChecked(fixture.Key("observation-crash"));
+        Assert.Equal(0, await ReplacementReviewConductorCommand.ExecuteAsync(ConductorOptionsParser.Parse(
+            ["act", "--obligation", fixture.Key("observation-crash"), "--holder", "holder",
+                "--action", "replace-review", "--expected-head", Head]), TextWriter.Null,
+            fixture.Root, fixture.Advancer(), fixture.Store, Ct));
+    }
+
+    private static async Task<QueueItem> CrashAfterObligationObservationAsync(Fixture fixture, QueueSchedulerService scheduler)
+    {
+        await scheduler.TickOnceAsync(Ct);
+        await fixture.CompleteReviewAsync("observation-crash");
+        var issued = await fixture.RowAsync("observation-crash");
+        Assert.NotNull(await fixture.Advancer().ObserveIssuedReplacementReviewResultAsync(issued, Ct));
+        scheduler.ReplacementReviewAfterActionObserved = () => throw new IOException("Offline crash after durable obligation observation");
+        await Assert.ThrowsAsync<IOException>(() => scheduler.ReconcileReplacementReviewActionsAsync(Ct));
+        scheduler.ReplacementReviewAfterActionObserved = null;
+        var row = await fixture.RowAsync("observation-crash");
+        var action = row.ReplacementReviewAction!;
+        var obligation = (await fixture.Store.ReadAsync(action.ObligationKey, Ct))!;
+        Assert.Null(action.ActionObservedAt);
+        Assert.NotNull(action.CompletionProof);
+        Assert.Equal(ConductorObligationStatus.ActionObserved, obligation.Status);
+        Assert.Equal(action.CompletionProof, obligation.ActionProof);
+        Assert.NotNull(obligation.ActionObservedAt);
+        return row;
+    }
+
+    private static async Task ChangeObservedSourceAsync(Fixture fixture, string change)
+    {
+        if (change == "head") await fixture.ChangeAsync("observation-crash", "head");
+        if (change == "closed") fixture.PullRequestState = "CLOSED";
+        if (change == "merged") fixture.PullRequestState = "MERGED";
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => item.Tag == "observation-crash" ? item with
+            {
+                Retirement = change == "retired" ? new(QueueRetirement.Operator, DateTimeOffset.UtcNow, "Retained history") : item.Retirement,
+            } : item).ToList(),
+        }, Ct);
+    }
+
+    [Theory]
     [InlineData("head")]
     [InlineData("closed")]
     [InlineData("retired")]

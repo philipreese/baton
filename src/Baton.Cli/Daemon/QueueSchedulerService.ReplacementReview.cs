@@ -8,6 +8,8 @@ namespace Baton.Cli.Daemon;
 
 public sealed partial class QueueSchedulerService
 {
+    internal Action? ReplacementReviewAfterActionObserved { get; set; }
+
     private async Task<ConductorObligation?> ValidateReplacementReviewLaunchAsync(
         QueueItem selected, QueueReplacementReviewAction action, CancellationToken cancellationToken)
     {
@@ -106,6 +108,27 @@ public sealed partial class QueueSchedulerService
                     : item).ToList(),
         }, CancellationToken.None);
 
+    private static async Task ValidateObservedReplacementReviewAsync(
+        ConductorObligation obligation, QueueItem item, QueueReplacementReviewAction action,
+        string provenance, CancellationToken cancellationToken)
+    {
+        if (obligation.IdempotencyKey != action.ObligationKey || obligation.Owner != action.Holder
+            || obligation.TargetProject != action.Repository || obligation.TargetExecution != action.Tag
+            || obligation.PullRequestHead != action.HeadSha || item.Tag != action.Tag
+            || obligation.RequestedAction != StoppedWorkJudgmentKey.Action
+            || obligation.AdapterCapability != StoppedWorkJudgmentKey.Capability
+            || !StoppedWorkJudgmentKey.TryParse(action.ObligationKey, out var repository, out var tag, out var attempt, out var stage)
+            || repository != action.Repository || tag != action.Tag || attempt != action.SourceAttemptId || stage != action.SourceStage
+            || string.IsNullOrWhiteSpace(obligation.ActionProof) || obligation.ActionProof != action.CompletionProof)
+            throw new ConductorObligationStoreException("Observed replacement identity or completion proof changed.");
+
+        await WorkItemAdvancer.ValidateReplacementReviewCompletionProofAsync(action, cancellationToken).ConfigureAwait(false);
+        if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow)
+            ReplacementReviewEvidenceValidator.ValidateIssuedCompletedFollowCompletion(obligation, item, action);
+        else if (string.IsNullOrWhiteSpace(action.AdviceDigest) || obligation.TransportReceipt != action.AdviceDigest)
+            throw new ConductorObligationStoreException("Observed replacement advice proof changed.");
+    }
+
     internal async Task ReconcileReplacementReviewActionsAsync(CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
@@ -179,30 +202,37 @@ public sealed partial class QueueSchedulerService
                 {
                     try
                     {
-                        if (provenance != ReplacementReviewEvidenceProvenance.CompletedFollow)
+                        if (obligation.Status == ConductorObligationStatus.ActionObserved)
                         {
-                            if (snapshot.Held) continue;
-                            if (action.Origin == QueueReplacementReviewOrigin.Automatic)
-                                ReplacementReviewConductorCommand.ValidateAutomaticAuthority(item, action.Repository);
-                            var identity = RepositoryIdentity.From("https://" + action.Repository, null);
-                            var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,
-                                cancellationToken: cancellationToken).ConfigureAwait(false);
-                            if (claim?.Holder != action.Holder) continue;
-                        }
-                        await _advancer.ValidateReplacementReviewCompletionAsync(item, action, cancellationToken)
-                            .ConfigureAwait(false);
-                        if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow)
-                        {
-                            ReplacementReviewEvidenceValidator.ValidateIssuedCompletedFollowCompletion(obligation, item, action);
-                            authentic = obligation.Status is ConductorObligationStatus.Pending
-                                or ConductorObligationStatus.Submitted
-                                or ConductorObligationStatus.ActionObserved;
+                            await ValidateObservedReplacementReviewAsync(obligation, item, action, provenance, cancellationToken)
+                                .ConfigureAwait(false);
+                            authentic = true;
                         }
                         else
                         {
-                            authentic = obligation.TransportReceipt == action.AdviceDigest
-                                && obligation.Status is ConductorObligationStatus.TransportAcknowledged
-                                    or ConductorObligationStatus.ActionObserved;
+                            if (provenance != ReplacementReviewEvidenceProvenance.CompletedFollow)
+                            {
+                                if (snapshot.Held) continue;
+                                if (action.Origin == QueueReplacementReviewOrigin.Automatic)
+                                    ReplacementReviewConductorCommand.ValidateAutomaticAuthority(item, action.Repository);
+                                var identity = RepositoryIdentity.From("https://" + action.Repository, null);
+                                var claim = identity is null ? null : await ConductorClaimStore.GetClaimAsync(identity,
+                                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                                if (claim?.Holder != action.Holder) continue;
+                            }
+                            await _advancer.ValidateReplacementReviewCompletionAsync(item, action, cancellationToken)
+                                .ConfigureAwait(false);
+                            if (provenance == ReplacementReviewEvidenceProvenance.CompletedFollow)
+                            {
+                                ReplacementReviewEvidenceValidator.ValidateIssuedCompletedFollowCompletion(obligation, item, action);
+                                authentic = obligation.Status is ConductorObligationStatus.Pending
+                                    or ConductorObligationStatus.Submitted;
+                            }
+                            else
+                            {
+                                authentic = obligation.TransportReceipt == action.AdviceDigest
+                                    && obligation.Status == ConductorObligationStatus.TransportAcknowledged;
+                            }
                         }
                     }
                     catch (Exception ex) when (ex is ConductorObligationStoreException or IOException
@@ -213,8 +243,13 @@ public sealed partial class QueueSchedulerService
                 }
                 if (authentic)
                 {
-                    await _conductorObligations.ObserveActionAsync(action.ObligationKey, proof, cancellationToken)
-                        .ConfigureAwait(false);
+                    var observed = obligation!;
+                    if (observed.Status != ConductorObligationStatus.ActionObserved)
+                    {
+                        observed = await _conductorObligations.ObserveActionAsync(action.ObligationKey, proof, cancellationToken)
+                            .ConfigureAwait(false);
+                        ReplacementReviewAfterActionObserved?.Invoke();
+                    }
                     await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
                     {
                         Items = current.Items.Select(candidate => candidate.Tag == item.Tag && candidate.ReplacementReviewAction == action
@@ -222,7 +257,7 @@ public sealed partial class QueueSchedulerService
                             {
                                 ReplacementReviewAction = action with
                                 {
-                                    ActionObservedAt = DateTimeOffset.UtcNow,
+                                    ActionObservedAt = observed.ActionObservedAt ?? DateTimeOffset.UtcNow,
                                     BlockedReason = null,
                                     NextTrigger = null,
                                 },

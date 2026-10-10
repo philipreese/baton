@@ -116,6 +116,14 @@ public sealed partial class WorkItemAdvancer
     internal async Task ValidateReplacementReviewCompletionAsync(
         QueueItem item, QueueReplacementReviewAction action, CancellationToken cancellationToken)
     {
+        await ValidateReplacementReviewCompletionProofAsync(action, cancellationToken).ConfigureAwait(false);
+        await ValidateReplacementReviewHeadAsync(item, action, cancellationToken, requireCurrentStage: false)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task ValidateReplacementReviewCompletionProofAsync(
+        QueueReplacementReviewAction action, CancellationToken cancellationToken)
+    {
         if (action.ReplacementAttemptId is null || action.ReplacementRoomDirectory is null
             || string.IsNullOrEmpty(action.CompletionProof))
             throw new ConductorObligationStoreException("Replacement completion identity is missing.");
@@ -126,8 +134,6 @@ public sealed partial class WorkItemAdvancer
         if (verdict is null || !IsExactHeadVerdict(verdict, action.HeadSha)
             || CompletionProof(action, File.ReadAllBytes(path!), verdict) != action.CompletionProof)
             throw new ConductorObligationStoreException("Replacement completion proof no longer matches the exact-head verdict.");
-        await ValidateReplacementReviewHeadAsync(item, action, cancellationToken, requireCurrentStage: false)
-            .ConfigureAwait(false);
     }
 
     internal static string RenderReplacementReviewBrief(QueueItem item, QueueReplacementReviewAction action)
