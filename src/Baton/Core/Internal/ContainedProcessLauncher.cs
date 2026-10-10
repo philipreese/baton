@@ -21,17 +21,19 @@ internal static class ContainedProcessLauncher
     public static ContainedProcessLaunch Start(
         ProcessStartInfo startInfo,
         SafeJobObjectHandle job,
-        Action<SafeJobObjectHandle, Process, nint>? beforeResume)
+        Action<SafeJobObjectHandle, Process, nint>? beforeResume,
+        Action? beforeCreateProcess = null)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         ArgumentNullException.ThrowIfNull(job);
-        return StartWindows(startInfo, job, beforeResume);
+        return StartWindows(startInfo, job, beforeResume, beforeCreateProcess);
     }
 
     private static ContainedProcessLaunch StartWindows(
         ProcessStartInfo startInfo,
         SafeJobObjectHandle job,
-        Action<SafeJobObjectHandle, Process, nint>? beforeResume)
+        Action<SafeJobObjectHandle, Process, nint>? beforeResume,
+        Action? beforeCreateProcess)
     {
         AnonymousPipeServerStream? stdoutPipe = null;
         AnonymousPipeServerStream? stderrPipe = null;
@@ -85,6 +87,7 @@ internal static class ContainedProcessLauncher
                 creationFlags |= CreateNoWindow;
             }
 
+            beforeCreateProcess?.Invoke();
             if (!CreateProcessW(
                 applicationName: null,
                 commandLine,
