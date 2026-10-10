@@ -1,0 +1,3 @@
+# These hash-pinned snapshots must remain byte-identical to the historical Git blobs.
+[Source/*.cs.txt]
+generated_code = true

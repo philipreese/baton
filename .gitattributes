@@ -27,6 +27,7 @@ pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff
 
 # Test fixtures must preserve LF line endings across platforms (#1673)
 tests/fixtures/* text eol=lf
+tests/Baton.Compatibility068/Source/*.cs.txt text eol=lf
 
 # Derived benchmark tables (#1867): `derive_scores.py --check` compares the committed file byte-for-byte
 # against a fresh LF derivation, so a CRLF checkout on Windows would read as stale on a correct file.

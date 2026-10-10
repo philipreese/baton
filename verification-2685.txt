@@ -1,0 +1,62 @@
+Issue #2685 focused verification
+
+Red before wiring:
+python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests --filter-class Baton.Cli.Tests.AgyLifecycleTests --minimum-expected-tests 1
+Exit 2: 1 test failed because TaskOptionsParser rejected the named transport-only stage.
+
+Initial green (same focused command): exit 0, 1 test.
+Expanded focused runs: exit 2 (21 tests, 5 fixture record-equality failures), then exit 0 (21 tests).
+Admission/recovery expansion: exit 2 (24 tests, 1 fixture record-equality failure).
+Exact-source resource pin: exit 2 twice (24 tests, resource name/culture), fixed WithCulture metadata; exit 0 (24 tests).
+Most recent AgyLifecycleTests: exit 0, 24 tests.
+python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests --filter-method Baton.Cli.Tests.Daemon.WorkItemAdvancerTests.A_succeeded_implement_lane_with_an_open_pr_is_queued_for_review --minimum-expected-tests 1
+Exit 0: 2 cases, omitted/opted-in actual lifecycle advance, exact old store/scheduler refuses protected advanced queue unchanged.
+
+Harness build iteration:
+python tools/buildlock.py pixi run dotnet build tests/Baton.Compatibility068/Baton.Compatibility068.csproj -warnaserror
+Exit 1: corrected harness argument order and fixture library initializer analyzer declaration.
+Expanded test build iteration: exit 1 (incorrect test property name, corrected; xUnit warning corrected).
+
+git hash-object --no-filters on all seven compatibility source snapshots and git rev-parse of their exact v0.68 blobs: exit 0; every hash matched. Test pins these embedded source bytes.
+dotnet tool list --global: exit 0; no installed old tool, so exact source store/model/scheduler harness used. Ancillary shared types come from current core; the typed-list reader, mutation implementation, models, scheduling policy and their item-dependent helpers are exact historical sources. No old daemon or authenticated worker ran.
+
+Authorized continuation, 2026-10-10 (original attempt stopped at its tool cap; not a completed delivery):
+The original checkpoint 40055cea0772ffe6dde4f4d7b350e07c35ccf843 and existing implementation were preserved.
+Prior script/command references are unavailable in this execution; no mutation script remains in the workspace.
+Direct inspection found the admission CAS, disposition-envelope comparison and retained-declaration guards intact.
+The first serialized buildlock/test command completed before any continuation edit; restored AgyLifecycleTests exit 0, 25 cases.
+
+Three previously unverified causal controls, each applied/restored sequentially with apply_patch:
+python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests --filter-method Baton.Cli.Tests.AgyLifecycleTests.Transport_declaration_race_rejects_stale_admission_before_commit_or_claim --minimum-expected-tests 1
+Exit 2 with transport-stage admission comparison removed: both race cases failed.
+python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests --filter-method Baton.Cli.Tests.QueueCommandTests.Explicit_merged_pr_retirement_refuses_envelope_drift_at_the_queue_CAS --minimum-expected-tests 1
+Exit 2 with envelope transport comparison removed: transport case failed, other two controls passed.
+python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests --filter-method Baton.Cli.Tests.AgyLifecycleTests.Frozen_transport_requires_its_matching_retained_stage_declaration --minimum-expected-tests 1
+Exit 2 with QueueStore retained-declaration validation removed: both missing/contradictory cases failed.
+git hash-object on QueueSchedulerService.cs, QueueCommand.cs, QueueStore.cs before/after: exit 0 both times; identical respective hashes:
+1121c4bd6d5e06d88d4b258a805a2ac77e4d94cb
+5b7e345d192bd71a7179141ca76d81df5ec55c8a
+b921ab1675ed41d0081448a7a70954dc734ed488
+Previously completed propagation controls were not repeated.
+
+Added explicit historical null/nonempty-array controls; new/old/new writer round trips preserve exact queue bytes, omit false transport fields and reach the old fake launch.
+Final restored focused regressions (each prefix: python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests; each suffix: --minimum-expected-tests 1):
+--filter-class Baton.Cli.Tests.AgyLifecycleTests: exit 0, 27 cases (also rerun after fixture isolation/format changes, exit 0).
+--filter-class Baton.Cli.Tests.TaskCommandTests: exit 0, 94 cases, including historical digest branches.
+--filter-class Baton.Cli.Tests.QueueCommandTests: exit 0, 259 cases.
+--filter-class Baton.Cli.Tests.Daemon.WorkItemAdvancerTests: exit 0, 144 cases (final fixture rebuild rerun also exit 0).
+
+python tools/buildlock.py pixi run dotnet build -warnaserror --no-incremental
+Initial solution build exit 1: exact old QueueStore assembly leaked transitively into architecture tests. PrivateAssets=all fixed the fixture reference; subsequent build exit 0.
+Final forced solution build after all fixture/format edits: exit 0, zero warnings/errors.
+The architecture lockfile refresh is required by the new project-reference restore graph and is a protected C-15 path.
+
+python tools/buildlock.py pixi run dotnet format --verify-no-changes
+Three iterations exit 2: test initializer whitespace, plus verbatim old scheduler whitespace in the first run. Fixed authored test whitespace; generated_code is restricted to hash-pinned historical snapshots. Fixture-only CS8669 suppression avoids changing their nullable source bytes. Final exit 0.
+python tools/buildlock.py pixi run audit-recordonce: exit 0.
+python tools/buildlock.py pixi run audit-docsbudget: initial exit 1 because the deleted historical verification .md was still tracked in the index; staged its intentional .txt replacement, final exit 0.
+python tools/buildlock.py pixi run audit-completeness: exit 0.
+python tools/buildlock.py pixi run audit-speccitations: exit 0.
+git diff --check: exit 0.
+
+No whole suite, aggregate gates/receipts, live vendor CLI, production queue, auth/settings, install or subagent work was performed. Independent review, aggregate verification, operator merge and later useful installed acceptance remain conductor-owned.

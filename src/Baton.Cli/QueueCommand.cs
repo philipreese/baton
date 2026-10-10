@@ -1907,6 +1907,7 @@ public static class QueueCommand
             && string.Equals(observed.Adapter, current.Adapter, StringComparison.Ordinal)
             && string.Equals(observed.Model, current.Model, StringComparison.Ordinal)
             && string.Equals(observed.Effort, current.Effort, StringComparison.Ordinal)
+            && observed.EnableAgyCorrection == current.EnableAgyCorrection
             && SameAttemptEnvelopeList(observed.EffectiveGrant, current.EffectiveGrant)
             && SameAttemptEnvelopeList(observed.RequestedRequirements, current.RequestedRequirements)
             && SameAttemptEnvelopeList(observed.MissingCapabilities, current.MissingCapabilities)
@@ -2577,6 +2578,9 @@ public static class QueueCommand
         IReadOnlyList<QueueStageSelection>? StageSelections) ResolveTierForAdd(
         QueueOptions options, QueueSettings settings)
     {
+        if (options.StageSelections?.Any(selection => selection.EnableAgyCorrection) == true
+            && (!options.Lifecycle || options.LifecyclePin))
+            throw new CliArgumentException("AGY correction requires a named unpinned lifecycle stage.");
         try
         {
             _ = WorkerRoleCatalog.For(options.Role!);
@@ -2659,8 +2663,11 @@ public static class QueueCommand
             return null;
         }
 
+        var stages = new HashSet<WorkStage>();
         return selections.Select(selection =>
         {
+            if (!Enum.IsDefined(selection.Stage) || WorkStages.IsTerminal(selection.Stage) || !stages.Add(selection.Stage))
+                throw new CliArgumentException("Stage selections must name unique valid dispatch stages.");
             var (adapter, _, _) = InferAdapterForModel(scopeClass, selection.Adapter, selection.Model);
             return selection with { Adapter = adapter };
         }).ToList();

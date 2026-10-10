@@ -86,7 +86,6 @@ public sealed record QueueItem
     /// Per-stage axes for a lifecycle item. Null, rather than an empty list, is significant for a
     /// pre-stage-selection persisted item; see <see cref="QueueTierTable.ResolveForStage"/>.
     /// </summary>
-    [JsonConverter(typeof(QueueStageSelectionsJsonConverter))]
     public IReadOnlyList<QueueStageSelection>? StageSelections { get; init; }
 
     /// <summary>
@@ -242,17 +241,6 @@ public sealed record QueueItem
     /// text, and spec/baton.md §13 says why a room path must not travel into one.
     /// </summary>
     public string? LastVerdict { get; init; }
-
-    /// <summary>
-    /// The one bounded, immutable worker account retained from the latest settled mutating attempt
-    /// for a later lifecycle review. The bytes are the declared <c>changes.md</c> output itself;
-    /// provenance is retained beside them because the prose is untrusted author claims, never review
-    /// authority, test proof, approval, instructions or delivered-head evidence.
-    /// </summary>
-    public QueueWorkerAccount? SettledWorkerAccount { get; init; }
-
-    /// <summary>The incomplete mutating attempt that recorded no account; retained across review retargeting.</summary>
-    public FleetAttemptId? SettledWorkerAccountUnavailableAttemptId { get; init; }
 
     /// <summary>
     /// How many rounds the queue has run for this item: 0 at add time, and <c>WorkItemLifecycle</c>
@@ -475,131 +463,7 @@ public sealed record QueueAttemptEnvelope(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RoomId,
     [property: JsonPropertyName("attemptBaseRevision")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AttemptBaseRevision,
-    [property: JsonPropertyName("factTimestamp")] DateTimeOffset FactTimestamp,
-    [property: JsonPropertyName("ownedTaskIdentity")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    OwnedTaskExecutionIdentity? OwnedTaskIdentity = null,
-    [property: JsonPropertyName("enableAgyCorrection")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    bool EnableAgyCorrection = false);
-
-/// <summary>One exact settled mutating worker account carried across lifecycle review.</summary>
-public sealed record QueueWorkerAccount(
-    [property: JsonPropertyName("bytes")] byte[]? Bytes,
-    [property: JsonPropertyName("sha256")] string Sha256,
-    [property: JsonPropertyName("sourceAttemptId")] FleetAttemptId SourceAttemptId,
-    [property: JsonPropertyName("sourceExecutionId")] string SourceExecutionId,
-    [property: JsonPropertyName("sourceRepository")] string SourceRepository,
-    [property: JsonPropertyName("sourceWorkspace")] string SourceWorkspace)
-{
-    public const int MaxBytes = 64 * 1024;
-
-    public static byte[] ReadAtMostMaxBytes(string path)
-    {
-        using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-        var buffer = new byte[MaxBytes + 1];
-        var count = 0;
-        while (count < buffer.Length)
-        {
-            var read = stream.Read(buffer.AsSpan(count));
-            if (read == 0)
-            {
-                break;
-            }
-
-            count += read;
-        }
-
-        return count == buffer.Length ? buffer : buffer[..count];
-    }
-
-    public static bool TryValidateSourceMetadata(
-        FleetAttemptId sourceAttemptId,
-        string? sourceExecutionId,
-        string? sourceRepository,
-        string? sourceWorkspace,
-        out string reason)
-    {
-        if (sourceAttemptId.Value is not { Length: > 0 }
-            || sourceExecutionId is not { Length: > 0 }
-            || sourceRepository is not { Length: > 0 }
-            || sourceWorkspace is not { Length: > 0 })
-        {
-            reason = "source attempt, execution, repository or workspace metadata is missing";
-            return false;
-        }
-
-        if (sourceExecutionId.Contains(Path.DirectorySeparatorChar)
-            || sourceExecutionId.Contains(Path.AltDirectorySeparatorChar)
-            || sourceExecutionId.Contains(':')
-            || sourceExecutionId is "." or ".."
-            || sourceExecutionId.Contains("..", StringComparison.Ordinal))
-        {
-            reason = "retained step execution identity is not a safe recorded execution";
-            return false;
-        }
-
-        reason = string.Empty;
-        return true;
-    }
-
-    public bool HasValidDigest()
-    {
-        if (Bytes is null || Bytes.Length > MaxBytes || Sha256 is not { Length: 64 }
-            || !Sha256.All(char.IsAsciiHexDigit)
-            || SourceAttemptId.Value is not { Length: > 0 }
-            || SourceExecutionId is not { Length: > 0 }
-            || SourceRepository is not { Length: > 0 }
-            || SourceWorkspace is not { Length: > 0 })
-        {
-            return false;
-        }
-
-        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Bytes)).ToLowerInvariant();
-        return string.Equals(digest, Sha256, StringComparison.Ordinal);
-    }
-
-    public bool TryValidateFor(string? repository, string? workspace, out string reason)
-    {
-        if (!HasValidDigest())
-        {
-            reason = "retained bytes, digest or provenance metadata is malformed";
-            return false;
-        }
-
-        try
-        {
-            var text = new System.Text.UTF8Encoding(false, true).GetString(Bytes!);
-            if (!Bytes!.SequenceEqual(new System.Text.UTF8Encoding(false, true).GetBytes(text)))
-            {
-                reason = "retained bytes are not an exact UTF-8 byte sequence";
-                return false;
-            }
-        }
-        catch (System.Text.DecoderFallbackException)
-        {
-            reason = "retained bytes are not valid UTF-8";
-            return false;
-        }
-
-        if (!TryValidateSourceMetadata(
-                SourceAttemptId, SourceExecutionId, SourceRepository, SourceWorkspace, out reason))
-        {
-            return false;
-        }
-
-        if (!string.Equals(SourceRepository, repository, StringComparison.Ordinal)
-            || !string.Equals(SourceWorkspace, workspace, StringComparison.Ordinal))
-        {
-            reason = "retained repository/workspace identity does not match the queue item";
-            return false;
-        }
-
-        reason = string.Empty;
-        return true;
-    }
-}
+    [property: JsonPropertyName("factTimestamp")] DateTimeOffset FactTimestamp);
 
 /// <summary>The durable, pre-call identity for one queue-owned draft PR handoff.</summary>
 public sealed record QueueDraftPullRequestCreateMarker(

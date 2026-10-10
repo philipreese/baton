@@ -680,6 +680,8 @@ public static class QueueLauncher
         Add("--workspace", options.WorkspaceDirectory);
         Add("--model", options.Model);
         Add("--effort", options.Effort);
+        if (options.EnableAgyCorrection)
+            arguments.Add("--enable-agy-correction");
         Add("--timeout", options.Timeout is { } timeout
             ? ((int)Math.Ceiling(timeout.TotalMinutes)).ToString(CultureInfo.InvariantCulture)
             : null);
@@ -1062,6 +1064,8 @@ public static class QueueLauncher
     {
         ArgumentNullException.ThrowIfNull(request);
         var item = request.Item;
+        if (!QueueStageSelections.HasConsistentTransportDeclaration(item))
+            throw new CliArgumentException("Missing or contradictory retained AGY correction declaration; use a compatible release.");
         var tier = item.AttemptEnvelope is { } envelope
             ? request.Tier with
             {
@@ -1092,6 +1096,8 @@ public static class QueueLauncher
             WorkspaceDirectory: item.Workspace,
             Model: tier.Model,
             Effort: tier.Effort,
+            EnableAgyCorrection: item.AttemptEnvelope?.EnableAgyCorrection
+                ?? QueueStageSelections.EnablesAgyCorrection(item, item.Stage),
             Timeout: item.TimeoutMinutes is { } minutes ? TimeSpan.FromMinutes(minutes) : null,
             // WorkerBindingConfigEntry.Label is the bindings field spec/baton.md §13 requires the
             // override's justification to reach; it doubles as the tag-to-room trace, so one field

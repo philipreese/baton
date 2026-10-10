@@ -1628,6 +1628,10 @@ public sealed partial class QueueSchedulerService : BackgroundService
         TaskSizeDeclaration? declaredTaskSize = null) =>
         string.Equals(current.Role, admitted.Role, StringComparison.Ordinal)
         && current.Stage == admitted.Stage
+        && (current.StageSelections ?? []).Where(selection => selection.EnableAgyCorrection)
+            .Select(selection => selection.Stage).Order()
+            .SequenceEqual((admitted.StageSelections ?? []).Where(selection => selection.EnableAgyCorrection)
+                .Select(selection => selection.Stage).Order())
         && string.Equals(current.Workspace, admitted.Workspace, StringComparison.Ordinal)
         && current.DeclaredTaskSize.Size == (declaredTaskSize ?? admitted.DeclaredTaskSize).Size
         && string.Equals(
@@ -1695,7 +1699,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
                     ownedTask.Issue,
                     attemptId.Value,
                     room)
-                : null);
+                : null,
+            EnableAgyCorrection: QueueStageSelections.EnablesAgyCorrection(item, item.Stage));
 
     private async Task<QueueItem?> CommitAdmissionAsync(
         QueueItem item,

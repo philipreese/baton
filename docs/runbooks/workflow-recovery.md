@@ -6,6 +6,8 @@ already-approved urgent exception. Do not create a commit solely to trigger eith
 
 ## CI
 
+For retained queue transport recovery, see [the compatible-reader contract](../../spec/baton.md#explicit-stage-transport-and-compatible-reader-recovery-2685).
+
 An authorized operator can dispatch `CI` on `main` with `expected_sha` set to the
 current remote main commit. Verify the missing run and intended revision first.
 This is CI recovery only; it does not publish a release or repair release-please.
