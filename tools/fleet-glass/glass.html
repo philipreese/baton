@@ -321,6 +321,12 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
   .stream-summary-box, .stream-card-action, .stream-card-result{font-size:.9rem;}
   .stream-id-chip{white-space:normal; overflow-wrap:anywhere; min-width:0; max-width:100%; box-sizing:border-box;}
 }
+.conductor-control{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:.75rem;margin:.75rem 0;min-width:0;overflow-wrap:anywhere;font-size:.9375rem;line-height:1.4}
+.conductor-control h2{font-size:1.1rem;margin:0 0 .5rem}
+.conductor-control article{border-top:1px solid var(--line);padding:.5rem 0}
+.conductor-control p{margin:.25rem 0}
+.conductor-control button{font:inherit;min-height:44px;padding:.5rem .8rem;max-width:100%;white-space:normal;cursor:pointer}
+.conductor-control .control-note{color:var(--ink-soft);font-size:.8125rem}
 </style>
 <main>
   <div class="masthead">
@@ -350,6 +356,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
   </div>
   <div id="banner"></div>
   <div id="queue-write-feedback" aria-live="polite" role="status"></div>
+  <section id="conductor-control" class="conductor-control" aria-label="Conductor control" hidden></section>
   <div class="tabpanel active" id="tab-stream">
     <div id="stream-summary" class="stream-summary"></div>
     <div id="stream-content" class="stream-content"></div>
@@ -3271,6 +3278,100 @@ function createGlassWriteController(fetchImpl, applySnapshot, banner, renderQueu
   return { observeSnapshot, write };
 }
 
+// >>> CONDUCTOR-CONTROL-BEGIN
+function conductorControlHtml(snapshot, message, busy, escape){
+  const states = {attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor stopped on uncertain delivery"};
+  let cards = "";
+  if(snapshot){
+    cards = snapshot.conductors.map((row, index) => {
+      const detachable = ["attached","frozen"].includes(row.state) && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
+      return `<article><strong>${escape(row.repository || "Unknown repository")}</strong>`
+        + `<p>Owner: ${escape(row.holder || "Unknown")}</p><p>${escape(states[row.state] || states.unavailable)}</p>`
+        + (row.adapter ? `<p>${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
+        + `<p>Permissions: ${escape(typeof row.permissions === "string" ? row.permissions : "Unavailable")}</p>`
+        + (row.diagnostic && ["unavailable","frozen"].includes(row.state) ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
+        + (detachable ? `<button type="button" data-conductor-detach="${index}"${busy ? " disabled" : ""}>Detach automatic delivery</button>` : "")
+        + `</article>`;
+    }).join("");
+    if(!snapshot.conductors.length) cards = "<p>No conductor ownership records were returned.</p>";
+  }
+  return `<h2>Conductor</h2><p class="control-note">Ownership and settings, not live activity.</p>`
+    + (snapshot ? `<p class="control-note">Checked ${escape(new Date(snapshot.observedAt).toLocaleString())}. Refresh for changes.</p>` : "")
+    + `<p role="status" aria-live="polite">${escape(message)}</p>${cards}`
+    + `<button type="button" data-conductor-refresh${busy ? " disabled" : ""}>Refresh conductor</button>`
+    + `<p class="control-note">Detach blocks new handoffs, not work already in flight. Steering, stop and takeover are not available here yet.</p>`;
+}
+
+function createConductorControl(fetchImpl, renderPanel, confirmAction){
+  let snapshot = null;
+  let busy = false;
+  let message = "Loading conductor settings…";
+  const draw = () => renderPanel(snapshot, message, busy);
+  const request = async (path, options) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try { return await fetchImpl(path, {...options, cache:"no-store", signal:controller.signal}); }
+    finally { clearTimeout(timeout); }
+  };
+  const read = async () => {
+    const response = await request("/conductors", {});
+    if(!response.ok) throw new Error("Conductor status unavailable.");
+    const value = await response.json();
+    if(!value || !Number.isFinite(Date.parse(value.observedAt)) || !Array.isArray(value.conductors)
+      || value.conductors.length > 500 || value.conductors.some(row => !row || typeof row !== "object" || Array.isArray(row)))
+      throw new Error("Conductor status malformed.");
+    snapshot = value;
+  };
+  const refresh = async () => {
+    if(busy) return;
+    busy = true; draw();
+    try { await read(); message = ""; }
+    catch { snapshot = null; message = "Cannot read conductor settings. No controls are available until a fresh read succeeds."; }
+    finally { busy = false; draw(); }
+  };
+  const detach = async (index) => {
+    if(busy || !Number.isInteger(index)) return;
+    const row = snapshot?.conductors[index];
+    if(!row || !["attached","frozen"].includes(row.state) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
+    if(!confirmAction(`Detach automatic delivery for ${row.repository}? Running turns and actions already sent will not be cancelled.`)) return;
+    busy = true; message = "Requesting detach…"; draw();
+    let accepted = false;
+    try {
+      const response = await request("/conductor/detach", {method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({repository:row.repository,holder:row.holder,claimGeneration:row.claimGeneration,attachmentId:row.attachmentId})});
+      if(!response.ok){
+        snapshot = null;
+        message = response.status === 403 ? "Detach refused: this connection is not authorized to control Baton."
+          : response.status === 409 ? "Detach was refused. Refresh conductor settings before trying again."
+          : "The detach result is unknown. Refresh before deciding whether to try again.";
+        return;
+      }
+      accepted = true;
+      message = "Detach accepted. Checking the stored settings…"; draw();
+      await read();
+      const current = snapshot.conductors.find(item => item.repository === row.repository);
+      const matched = current?.holder === row.holder && current?.claimGeneration === row.claimGeneration && current?.attachmentId === row.attachmentId && current?.state === "detached";
+      message = matched ? "Automatic delivery is detached. Running turns and already issued actions are not cancelled."
+        : "Detach was accepted, but the current ownership/settings differ. Check the new state below.";
+    } catch {
+      snapshot = null;
+      message = accepted ? "Detach was accepted, but the fresh state could not be read. Refresh to verify."
+        : "The detach result is unknown. It may have succeeded. Refresh before deciding whether to try again.";
+    } finally { busy = false; draw(); }
+  };
+  return {refresh,detach};
+}
+
+function wireConductorControl(panel, control){
+  panel.addEventListener("click", event => {
+    const refresh = event.target.closest?.("[data-conductor-refresh]");
+    const detach = event.target.closest?.("[data-conductor-detach]");
+    if(refresh) void control.refresh();
+    else if(detach) void control.detach(Number(detach.dataset.conductorDetach));
+  });
+}
+// <<< CONDUCTOR-CONTROL-END
+
 function wireGlassWriteClicks(documentRef, glassWrites, confirmAction){
   documentRef.addEventListener("click", async (event) => {
     const button = event.target.closest && event.target.closest(".glasswrite");
@@ -3499,6 +3600,13 @@ function wireGlassWriteClicks(documentRef, glassWrites, confirmAction){
   // #1946: the tailnet delivery stops here — no connector is reached, and `window.mcpHandle` stays
   // unset, which every mcpHandle call site already treats as "this affordance is unavailable".
   if(DAEMON_SERVED){
+    const conductorPanel = $("conductor-control");
+    conductorPanel.hidden = false;
+    const conductorControl = createConductorControl(fetch,
+      (snapshot, message, busy) => { conductorPanel.innerHTML = conductorControlHtml(snapshot, message, busy, esc); },
+      window.confirm.bind(window));
+    wireConductorControl(conductorPanel, conductorControl);
+    void conductorControl.refresh();
     // #2168: the artifact has no private daemon origin, so only this delivery registers the
     // navigation-only worker. It caches nothing; its one bounded-timeout fallback is a static
     // failure page, never the dashboard or fleet data. A first successful online visit is needed

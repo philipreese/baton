@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Baton.Status;
 using Baton.Vendors;
 using Microsoft.Extensions.Hosting;
@@ -22,8 +23,8 @@ namespace Baton.Cli.Daemon;
 /// this plane: they must never be added to worker-served or artifact copies, whose secret gate and
 /// KV write cap are the two walls that forced a second plane in the first place.
 /// </para>
-/// <para><b>Narrow writes.</b> Reads remain open on the bound listener. Exactly three POST routes
-/// cross <see cref="GlassWriteGate"/> and then reuse Baton's queue/cancel commands; every other
+/// <para><b>Narrow writes.</b> Reads remain open on the bound listener. The approved POST routes
+/// cross <see cref="GlassWriteGate"/> for queue/cancel and exact conductor detach; every other
 /// method and route is refused. Origination, redispatch, merge and arbitrary resolution remain
 /// desktop/operator work.</para>
 /// <para>
@@ -62,6 +63,9 @@ internal sealed class GlassHttpService : BackgroundService
     private readonly TextWriter _log;
     private readonly Func<bool, CancellationToken, Task<string>> _setQueueHold;
     private readonly Func<string, CancellationToken, Task<string>> _cancelRoom;
+    private readonly string _conductorRoot;
+    private readonly Func<string, CancellationToken, Task<Baton.Accounting.RepositoryIdentity?>>? _conductorResolver;
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
 
     public GlassHttpService(DaemonSettings settings)
         : this(
@@ -87,7 +91,9 @@ internal sealed class GlassHttpService : BackgroundService
         string? eventsRolloverPath = null,
         long? eventsMaxBytes = null,
         Func<bool, CancellationToken, Task<string>>? setQueueHold = null,
-        Func<string, CancellationToken, Task<string>>? cancelRoom = null)
+        Func<string, CancellationToken, Task<string>>? cancelRoom = null,
+        string? conductorRoot = null,
+        Func<string, CancellationToken, Task<Baton.Accounting.RepositoryIdentity?>>? conductorResolver = null)
         : this(
             settings,
             projectionPath,
@@ -97,6 +103,8 @@ internal sealed class GlassHttpService : BackgroundService
             setQueueHold ?? GlassWriteActions.SetQueueHoldAsync,
             cancelRoom ?? GlassWriteActions.CancelRoomAsync)
     {
+        _conductorRoot = conductorRoot ?? Path.GetDirectoryName(projectionPath)!;
+        _conductorResolver = conductorResolver;
     }
 
     private GlassHttpService(
@@ -118,6 +126,7 @@ internal sealed class GlassHttpService : BackgroundService
         _log = log ?? Console.Out;
         _setQueueHold = setQueueHold;
         _cancelRoom = cancelRoom;
+        _conductorRoot = BatonPaths.Root;
     }
 
     private static FleetEventLog OpenTestEventLog(
@@ -299,6 +308,13 @@ internal sealed class GlassHttpService : BackgroundService
                     await WriteProjectionAsync(context).ConfigureAwait(false);
                     return;
 
+                case "/conductors":
+                    var conductors = await ConductorFollowSession.ReadGlassStatusAsync(
+                        _conductorRoot, stoppingToken, _conductorResolver).ConfigureAwait(false);
+                    await WriteTextAsync(context, HttpStatusCode.OK, "application/json; charset=utf-8",
+                        JsonSerializer.Serialize(conductors, WebJson)).ConfigureAwait(false);
+                    return;
+
                 case "/events":
                     await WriteEventStreamAsync(context, stoppingToken).ConfigureAwait(false);
                     return;
@@ -341,6 +357,7 @@ internal sealed class GlassHttpService : BackgroundService
         var route = context.Request.Url?.AbsolutePath ?? string.Empty;
         var isQueueHold = string.Equals(route, "/queue/hold", StringComparison.Ordinal);
         var isQueueResume = string.Equals(route, "/queue/resume", StringComparison.Ordinal);
+        var isConductorDetach = string.Equals(route, "/conductor/detach", StringComparison.Ordinal);
         const string cancelPrefix = "/rooms/";
         const string cancelSuffix = "/cancel";
         var isCancelShape = route.StartsWith(cancelPrefix, StringComparison.Ordinal)
@@ -360,7 +377,7 @@ internal sealed class GlassHttpService : BackgroundService
         }
         var isCancel = GlassWriteActions.IsValidRoomId(cancelRoomId);
 
-        if (!isQueueHold && !isQueueResume && !isCancel)
+        if (!isQueueHold && !isQueueResume && !isCancel && !isConductorDetach)
         {
             await WriteTextAsync(context, HttpStatusCode.NotFound, "text/plain; charset=utf-8", "Not found.")
                 .ConfigureAwait(false);
@@ -391,7 +408,30 @@ internal sealed class GlassHttpService : BackgroundService
         try
         {
             string receipt;
-            if (isQueueHold || isQueueResume)
+            if (isConductorDetach)
+            {
+                // Bound chunked bodies as well as declared lengths. Never deserialize raw request
+                // files or accept a client-selected local path through this endpoint.
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
+                var chars = new char[4097];
+                var length = 0;
+                while (length < chars.Length)
+                {
+                    // HttpListener stream reads need an external deadline as cancellation can wait
+                    // for more incoming bytes; a partial chunk must never hold this handler open.
+                    var count = await reader.ReadAsync(chars.AsMemory(length), timeout.Token).AsTask()
+                        .WaitAsync(timeout.Token).ConfigureAwait(false);
+                    if (count == 0) break;
+                    length += count;
+                }
+                if (length > 4096) throw new CliArgumentException("Detach request exceeds its bound.");
+                await ConductorFollowSession.DetachFromGlassAsync(new string(chars, 0, length),
+                    _conductorRoot, cancellationToken, _conductorResolver).ConfigureAwait(false);
+                receipt = "Automatic delivery detached. Running turns and already issued actions are not cancelled.";
+            }
+            else if (isQueueHold || isQueueResume)
             {
                 receipt = await _setQueueHold(isQueueHold, cancellationToken).ConfigureAwait(false);
             }
@@ -403,9 +443,16 @@ internal sealed class GlassHttpService : BackgroundService
             await WriteTextAsync(context, HttpStatusCode.OK, "text/plain; charset=utf-8", receipt)
                 .ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is BatonFlowException or ArgumentException or UriFormatException)
+        catch (OperationCanceledException) when (isConductorDetach && !cancellationToken.IsCancellationRequested)
         {
-            await WriteTextAsync(context, HttpStatusCode.Conflict, "text/plain; charset=utf-8", ex.Message)
+            await WriteTextAsync(context, HttpStatusCode.RequestTimeout, "text/plain; charset=utf-8",
+                "Detach request timed out before acceptance; automatic delivery was not changed.").ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or ArgumentException or UriFormatException
+            || isConductorDetach && ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        {
+            await WriteTextAsync(context, HttpStatusCode.Conflict, "text/plain; charset=utf-8",
+                isConductorDetach ? "Detach refused: conductor identity or retained state could not be verified. Refresh before retrying." : ex.Message)
                 .ConfigureAwait(false);
         }
     }

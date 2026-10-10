@@ -13,7 +13,7 @@ using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
 
-public sealed class ConductorFollowDeliveryTests
+public sealed partial class ConductorFollowDeliveryTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
     private const string Repository = "github.com/philipreese/delivery-fixture";

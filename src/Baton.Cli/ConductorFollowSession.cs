@@ -331,11 +331,13 @@ internal sealed partial class ConductorFollowSession
             // Daemon admission must refuse before any event identity or irreversible launch marker.
             if (requiredAdmission is not null)
                 await requiredAdmission(obligation, cancellationToken).ConfigureAwait(false);
+            string? admittedAttachmentId = null;
             if (File.Exists(AttachmentPath))
             {
                 var attachment = Read<ConductorFollowAttachment>(AttachmentPath);
                 ValidateAttachment(attachment);
                 if (!attachment.Attached) throw new CliArgumentException("Follow attachment is detached.");
+                admittedAttachmentId = attachment.Id;
             }
             Directory.CreateDirectory(evidence);
             var identityEvidence = new ConductorFollowEventIdentity(SchemaVersion, key, obligation.ObligationId,
@@ -353,8 +355,23 @@ internal sealed partial class ConductorFollowSession
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
             _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
-            Write(Path.Combine(evidence, "launch.json"),
-                new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
+            // Detach and launch admission serialize at the same cutover; a detached registration
+            // must never acquire a later launch marker. A marker already committed is an issued turn.
+            await Task.Run(() => MutexGuardedFileLock.RunUnderLock(Path.Combine(_root, "queue", "queue.json"),
+                QueueStore.LockNamePrefix, TimeSpan.FromSeconds(30), () =>
+                {
+                    if (File.Exists(AttachmentPath))
+                    {
+                        var current = Read<ConductorFollowAttachment>(AttachmentPath);
+                        ValidateAttachment(current);
+                        if (!current.Attached || current.Id != admittedAttachmentId)
+                            throw new CliArgumentException("Follow attachment revoked before launch.");
+                    }
+                    else if (admittedAttachmentId is not null)
+                        throw new CliArgumentException("Follow attachment missing before launch.");
+                    Write(Path.Combine(evidence, "launch.json"),
+                        new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
+                }), cancellationToken).ConfigureAwait(false);
             launched = true;
             var configuration = new CodexBrokerConfiguration(_request.Workspace, state.Model, state.Effort,
                 state.SessionId, state.SessionId is not null, state.EffectiveGrant, ["response.txt"], false);
@@ -784,10 +801,13 @@ internal sealed partial class ConductorFollowSession
     }
     private static T Read<T>(string path, int bound = 64 * 1024) => Deserialize<T>(ReadText(path, bound));
 
+    internal const FileShare RetainedReadShare = FileShare.ReadWrite | FileShare.Delete;
+
     private static string ReadText(string path, int bound)
     {
         RejectLinks(path);
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        // Glass may read while a running turn atomically replaces its retained state.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, RetainedReadShare);
         if (stream.Length > bound) throw new IOException("Evidence exceeds its bound.");
         using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
         var text = reader.ReadToEnd();
@@ -809,7 +829,7 @@ internal sealed partial class ConductorFollowSession
     }
 
     private static void Write<T>(string path, T value) => WriteAtomic(path, JsonSerializer.Serialize(value, Json));
-    private static void WriteAtomic(string path, string content)
+    internal static void WriteAtomic(string path, string content)
     {
         RejectLinks(path);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -821,7 +841,24 @@ internal sealed partial class ConductorFollowSession
                 stream.Write(Encoding.UTF8.GetBytes(content));
                 stream.Flush(true);
             }
-            File.Move(temporary, path, overwrite: true);
+            // On Windows Move(overwrite:true) refuses even delete-sharing read handles.
+            // Replace preserves atomic publication while Glass holds the previous snapshot open.
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    if (File.Exists(path)) File.Replace(temporary, path, destinationBackupFileName: null);
+                    else File.Move(temporary, path);
+                    break;
+                }
+                catch (IOException ex) when (OperatingSystem.IsWindows() && attempt < 4
+                    && (ex.HResult & 0xffff) is 32 or 33 or 1175 && File.Exists(temporary))
+                {
+                    // A transient sharing/removal refusal can follow a just-closed reader on
+                    // Windows. Retry only the same unpublished bytes; exhaustion still fails closed.
+                    Thread.Sleep(25 * (attempt + 1));
+                }
+            }
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
