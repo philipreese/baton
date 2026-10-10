@@ -455,7 +455,7 @@ internal sealed record QueueWorktreeEntry(
                 info.Environment["GIT_OPTIONAL_LOCKS"] = "0";
             });
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
-            using var process = Process.Start(start);
+            using var process = global::Baton.Core.ProcessLaunch.Start(start);
             if (process is null) return GitResult.Unavailable;
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

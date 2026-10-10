@@ -39,7 +39,7 @@ public sealed class QueueLaneAdoptionTests : IDisposable
     public async Task An_alive_engine_is_re_adopted_and_supervised_until_it_exits()
     {
         var psi = new ProcessStartInfo("ping.exe", "-n 60 127.0.0.1") { CreateNoWindow = true, UseShellExecute = false };
-        using var engine = Process.Start(psi)!;
+        using var engine = global::Baton.Core.ProcessLaunch.Start(psi)!;
         try
         {
             var room = RoomPath("alive");

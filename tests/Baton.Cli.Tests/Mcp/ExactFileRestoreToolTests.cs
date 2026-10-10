@@ -243,7 +243,7 @@ public sealed class ExactFileRestoreToolTests
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            using var process = Process.Start(startInfo);
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 Assert.Skip("this host could not start cmd.exe to create a junction");
@@ -1154,7 +1154,7 @@ public sealed class ExactFileRestoreToolTests
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         var stdout = process.StandardOutput.ReadToEndAsync(Ct);
         var stderr = process.StandardError.ReadToEndAsync(Ct);
         await BoundedProcessWait.WaitForExitAsync(process, TimeSpan.FromSeconds(60), Ct);

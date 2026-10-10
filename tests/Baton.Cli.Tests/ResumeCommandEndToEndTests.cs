@@ -470,7 +470,7 @@ public class ResumeCommandEndToEndTests : IDisposable
             startInfo.ArgumentList.Add(arg);
         }
 
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
+        return global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
     }
 
     private static async Task<string> WriteOneStepWorkflowAsync(string directory, string worker = "observer")

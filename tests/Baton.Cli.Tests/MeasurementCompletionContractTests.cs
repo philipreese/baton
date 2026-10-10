@@ -319,7 +319,7 @@ public sealed class MeasurementCompletionContractTests : IDisposable
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = Process.Start(startInfo)
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start git {string.Join(' ', arguments)}.");
         var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
             process, TimeSpan.FromSeconds(30), Ct);

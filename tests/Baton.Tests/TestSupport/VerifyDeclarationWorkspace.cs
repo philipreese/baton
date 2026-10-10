@@ -42,7 +42,7 @@ public static class VerifyDeclarationWorkspace
         startInfo.ArgumentList.Add("show");
         startInfo.ArgumentList.Add($"HEAD:./{VerifyCommandResolver.RepoDeclarationRelativePath}");
 
-        using var process = Process.Start(startInfo)
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new InvalidOperationException("Could not spawn git show.");
         var stdout = process.StandardOutput.ReadToEnd();
         process.WaitForExit();

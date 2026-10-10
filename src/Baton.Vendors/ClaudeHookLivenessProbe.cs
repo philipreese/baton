@@ -137,7 +137,7 @@ internal sealed class ProcessClaudeHookLivenessProbe : IClaudeHookLivenessProbe
 
             startInfo.Environment[ClaudeWorkerAdapter.DeniedToolsVariable] = DeniedToolsValue;
 
-            using var process = Process.Start(startInfo);
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 return new ClaudeHookLivenessResult(false, "the hook process did not start");

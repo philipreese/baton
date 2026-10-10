@@ -529,7 +529,7 @@ public sealed class QueueWorktreeApplyTests
             RedirectStandardError = true,
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start git.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(start) ?? throw new InvalidOperationException("Could not start git.");
         await process.WaitForExitAsync(cancellationToken);
         return (await process.StandardOutput.ReadToEndAsync(cancellationToken), await process.StandardError.ReadToEndAsync(cancellationToken), process.ExitCode);
     }

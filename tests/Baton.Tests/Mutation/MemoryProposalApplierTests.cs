@@ -663,7 +663,7 @@ public class MemoryProposalApplierTests : IDisposable
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         process.StandardOutput.ReadToEnd();
         process.StandardError.ReadToEnd();
         process.WaitForExit();
@@ -704,7 +704,7 @@ public class MemoryProposalApplierTests : IDisposable
         startInfo.ArgumentList.Add(linkPath);
         startInfo.ArgumentList.Add(targetPath);
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         process.WaitForExit();
 
         if (process.ExitCode != 0)

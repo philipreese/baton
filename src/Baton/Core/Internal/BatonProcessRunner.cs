@@ -63,7 +63,7 @@ internal static class BatonProcessRunner
             ProcessStartInfo startInfo = BuildStartInfo(program, args, envVars, clearEnv, cwd);
             try
             {
-                process = Process.Start(startInfo);
+                process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             }
             catch (Win32Exception ex)
             {

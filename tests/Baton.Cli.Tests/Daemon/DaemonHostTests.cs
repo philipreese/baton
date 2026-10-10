@@ -59,7 +59,7 @@ public class DaemonHostTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
+        return global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
     }
 
     /// <summary>Registers a stop trigger the moment the host finishes starting -- <see cref="IHostApplicationLifetime.ApplicationStarted"/>

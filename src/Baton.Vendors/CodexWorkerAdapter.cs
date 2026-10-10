@@ -438,7 +438,7 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
                 startInfo.WorkingDirectory = workingDirectory;
             }
 
-            process = Process.Start(startInfo);
+            process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 return EmptyCapabilities;

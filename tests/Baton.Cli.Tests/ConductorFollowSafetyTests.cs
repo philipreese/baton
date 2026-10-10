@@ -109,7 +109,7 @@ public sealed class ConductorFollowSafetyTests
         start.ArgumentList.Add("/J");
         start.ArgumentList.Add(events);
         start.ArgumentList.Add(retained);
-        using var process = System.Diagnostics.Process.Start(start)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
         await BoundedProcessWait.RunToExitAsync(process, TimeSpan.FromSeconds(30),
             TestContext.Current.CancellationToken);
         Assert.Equal(0, process.ExitCode);

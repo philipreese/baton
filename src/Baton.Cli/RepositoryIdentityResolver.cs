@@ -221,7 +221,7 @@ internal static class RepositoryIdentityResolver
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ProbeTimeout);
 
-            using var process = Process.Start(startInfo);
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 return null;

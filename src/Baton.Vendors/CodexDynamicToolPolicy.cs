@@ -1340,7 +1340,7 @@ public sealed class CodexDynamicToolPolicy
         Process process;
         try
         {
-            process = Process.Start(startInfo)
+            process = global::Baton.Core.ProcessLaunch.Start(startInfo)
                 ?? throw new IOException("Baton could not start the granted command.");
         }
         catch

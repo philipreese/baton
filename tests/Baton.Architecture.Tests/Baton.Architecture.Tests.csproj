@@ -43,6 +43,14 @@
     <ProjectReference Include="..\..\src\Baton\Baton.csproj" />
     <ProjectReference Include="..\..\src\Baton.Vendors\Baton.Vendors.csproj" />
     <ProjectReference Include="..\..\src\Baton.Cli\Baton.Cli.csproj" />
+    <!-- Compile fixture/probe IL for the launch ownership guard without running their entry points. -->
+    <ProjectReference Include="..\..\tools\Baton.GateProbe\Baton.GateProbe.csproj" />
+    <ProjectReference Include="..\Baton.Tests\Baton.Tests.csproj" />
+    <ProjectReference Include="..\Baton.Cli.Tests\Baton.Cli.Tests.csproj" Aliases="FixtureInspection" />
+    <ProjectReference Include="..\Baton.Cli.SmokeTests\Baton.Cli.SmokeTests.csproj" />
+    <ProjectReference Include="..\Baton.Vendors.Tests\Baton.Vendors.Tests.csproj" />
+    <ProjectReference Include="..\Baton.VendorProbe.Tests\Baton.VendorProbe.Tests.csproj" />
+    <ProjectReference Include="..\Baton.CrashTestHost\Baton.CrashTestHost.csproj" />
   </ItemGroup>
 
   <ItemGroup>

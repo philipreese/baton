@@ -457,7 +457,7 @@ public sealed class GraceCheckpointRealGitTests
                 startInfo.ArgumentList.Add(argument);
             }
 
-            return Process.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
+            return global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
         }
     }
 

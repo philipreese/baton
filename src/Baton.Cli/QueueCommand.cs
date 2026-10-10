@@ -1056,7 +1056,7 @@ public static class QueueCommand
             GitReferenceFence? fence = null;
             try
             {
-                process = Process.Start(startInfo);
+                process = global::Baton.Core.ProcessLaunch.Start(startInfo);
                 if (process is null) return null;
 
                 fence = new GitReferenceFence(process, process.StandardError.ReadToEndAsync());

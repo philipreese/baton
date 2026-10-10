@@ -351,7 +351,7 @@ public sealed class OriginatingPullRequestVerifierTests
         MakeExecutable(externalGit);
         MakeExecutable(externalGh);
 
-        // If VerifyAsync ever regresses to Process.Start("gh"), PATH selects this invalid worker
+        // If VerifyAsync ever regresses to a bare "gh" launch, PATH selects this invalid worker
         // executable first: the spawn fails and the external marker never lands.
         var workspaceGh = Path.Combine(workspace, "gh" + suffix);
         File.WriteAllText(
@@ -626,7 +626,7 @@ public sealed class OriginatingPullRequestVerifierTests
             RedirectStandardError = true,
         };
         foreach (var arg in args) start.ArgumentList.Add(arg);
-        using var process = Process.Start(start)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
         var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
             process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         Assert.True(process.ExitCode == 0, stderr);

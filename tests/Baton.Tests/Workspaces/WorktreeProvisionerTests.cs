@@ -228,7 +228,7 @@ public sealed class WorktreeProvisionerTests : IDisposable
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         process.WaitForExit();
@@ -250,7 +250,7 @@ public sealed class WorktreeProvisionerTests : IDisposable
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         var stderr = process.StandardError.ReadToEndAsync();
         _ = process.StandardOutput.ReadToEndAsync();
         process.WaitForExit();

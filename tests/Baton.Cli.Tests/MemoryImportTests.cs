@@ -1912,7 +1912,7 @@ public sealed class MemoryImportTests : IDisposable
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = Process.Start(startInfo)!;
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)!;
         // Bounded, per #1804: an unbounded wait here would hold the machine-wide build lock if git
         // ever hung on a credential or filesystem prompt.
         await BoundedProcessWait.RunToExitAsync(

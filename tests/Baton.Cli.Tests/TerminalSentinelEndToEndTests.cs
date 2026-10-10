@@ -761,7 +761,7 @@ public class TerminalSentinelEndToEndTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
+        return global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
     }
 
     private static Process StartRedirectingPowerShellWrapper(
@@ -805,7 +805,7 @@ public class TerminalSentinelEndToEndTests
         startInfo.ArgumentList.Add("-Command");
         startInfo.ArgumentList.Add(script);
 
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the PowerShell wrapper.");
+        return global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the PowerShell wrapper.");
     }
 
     private static void WriteLingeringGitFixture(string fixtureBin)

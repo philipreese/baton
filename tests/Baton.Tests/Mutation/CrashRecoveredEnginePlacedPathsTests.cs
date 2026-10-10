@@ -193,7 +193,7 @@ public class CrashRecoveredEnginePlacedPathsTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
         var output = process.StandardOutput.ReadToEnd();
         process.WaitForExit();
         return output;
@@ -213,7 +213,7 @@ public class CrashRecoveredEnginePlacedPathsTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
         process.WaitForExit();
         if (process.ExitCode != 0)
         {

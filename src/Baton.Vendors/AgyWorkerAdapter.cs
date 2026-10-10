@@ -1611,7 +1611,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
                 startInfo.WorkingDirectory = workingDirectory;
             }
 
-            using var process = Process.Start(startInfo);
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null)
             {
                 return null;

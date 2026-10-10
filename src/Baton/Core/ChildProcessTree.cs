@@ -65,7 +65,7 @@ public sealed class ChildProcessTree : IDisposable
 
         if (!OperatingSystem.IsWindows())
         {
-            var process = Process.Start(startInfo)
+            var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
                 ?? throw new InvalidOperationException($"{startInfo.FileName} did not start.");
             process.StandardInput.Close();
             return new ChildProcessTree(process, job: null, process.StandardOutput, process.StandardError);

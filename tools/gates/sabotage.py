@@ -172,6 +172,7 @@ def _sabotage_ci_page_selftest() -> None:
         for relative in [
             "tools/ci/page_selftest.py", "tools/ci/page_changes.py", "tools/ci/aggregate.py",
             "tools/ci/selftest.py", "tools/ci/test_shards.py", "tools/gates/gates.py",
+            "tools/ci/print_long_running.py",
             "tools/gates/member_receipt.py", "pixi.toml", ".github/workflows/ci.yml",
         ]:
             target = dest / relative
@@ -204,7 +205,7 @@ def _sabotage_ci_selftest() -> None:
         dest = Path(td)
         tools_dir = dest / "tools" / "ci"
         tools_dir.mkdir(parents=True)
-        for name in ["aggregate.py", "selftest.py", "test_shards.py"]:
+        for name in ["aggregate.py", "selftest.py", "test_shards.py", "print_long_running.py"]:
             shutil.copy2(ROOT / "tools" / "ci" / name, tools_dir / name)
 
         # Exercise the production aggregate assertions without selftest.main()'s unrelated live

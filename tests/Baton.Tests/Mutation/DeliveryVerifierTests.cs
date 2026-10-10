@@ -809,7 +809,7 @@ public sealed class DeliveryVerifierTests
             startInfo.ArgumentList.Add(arg);
         }
 
-        using var process = System.Diagnostics.Process.Start(startInfo)
+        using var process = global::Baton.Core.ProcessLaunch.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not spawn git {string.Join(' ', args)}.");
         var stdout = process.StandardOutput.ReadToEnd();
         process.WaitForExit();
