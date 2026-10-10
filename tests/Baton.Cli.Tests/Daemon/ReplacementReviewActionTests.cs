@@ -29,6 +29,13 @@ public sealed class ReplacementReviewActionTests
     [InlineData("promoted-reacquire")]
     [InlineData("registration")]
     [InlineData("evidence")]
+    [InlineData("malformed-decision")]
+    [InlineData("duplicate-decision")]
+    [InlineData("invalid-encoding")]
+    [InlineData("missing-decision")]
+    [InlineData("locked-decision")]
+    [InlineData("malformed-ceiling")]
+    [InlineData("locked-claim")]
     public async Task Completed_follow_authority_cutover_during_head_validation_refuses_launch(string change)
     {
         using var fixture = await ConductorFollowDeliveryTests.Fixture.CreateAsync();
@@ -52,6 +59,11 @@ public sealed class ReplacementReviewActionTests
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var launches = 0;
+        var decisionPath = fixture.EventEvidencePath("cutover", "decision.json");
+        var responsePath = fixture.EventEvidencePath("cutover", "response.json");
+        var originalResponse = await File.ReadAllBytesAsync(responsePath, Ct);
+        byte[]? retainedDecision = null;
+        FileStream? readLock = null;
         var launchBoundaryReached = false;
         using var scheduler = fixture.Scheduler(fixture.Advancer(async (_, token) =>
         {
@@ -96,11 +108,29 @@ public sealed class ReplacementReviewActionTests
             }
             else if (change == "evidence")
                 await File.WriteAllTextAsync(fixture.EventEvidencePath("cutover", "response.json"), "{}", Ct);
+            else if (change == "malformed-decision")
+                await File.WriteAllTextAsync(decisionPath, "{", Ct);
+            else if (change == "duplicate-decision")
+                await File.WriteAllTextAsync(decisionPath, "{\"decision\":\"ReplaceReview\",\"decision\":\"ReplaceReview\"}", Ct);
+            else if (change == "invalid-encoding")
+                await File.WriteAllBytesAsync(decisionPath, [0xff], Ct);
+            else if (change == "missing-decision")
+                File.Move(decisionPath, decisionPath + ".retained");
+            else if (change == "malformed-ceiling")
+                await File.WriteAllTextAsync(Path.Combine(fixture.Root, "project-ceilings.json"), "{", Ct);
+            retainedDecision = await File.ReadAllBytesAsync(
+                change == "missing-decision" ? decisionPath + ".retained" : decisionPath, Ct);
+            if (change == "locked-decision")
+                readLock = new FileStream(decisionPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            else if (change == "locked-claim")
+                readLock = new FileStream(Path.Combine(fixture.Root, identity.FileSlug, BatonPaths.ConductorClaimFileName),
+                    FileMode.Open, FileAccess.Read, FileShare.None);
         }
         finally
         {
             release.TrySetResult();
-            await tick.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+            try { await tick.WaitAsync(TimeSpan.FromSeconds(60), Ct); }
+            finally { readLock?.Dispose(); }
         }
         var row = await fixture.RowAsync("cutover");
         Assert.Equal(change == "unchanged" ? 1 : 0, launches);
@@ -121,7 +151,17 @@ public sealed class ReplacementReviewActionTests
                 row.ReplacementReviewAction.NextTrigger);
             Assert.Equal(action.EvidenceDigest, row.ReplacementReviewAction.EvidenceDigest);
             Assert.Equal(action.EvidenceDirectory, row.ReplacementReviewAction.EvidenceDirectory);
+            Assert.Equal(action, row.ReplacementReviewAction with { BlockedReason = null, NextTrigger = null });
+            if (change == "locked-claim")
+                Assert.Contains("conductor claim file", row.ReplacementReviewAction.BlockedReason,
+                    StringComparison.OrdinalIgnoreCase);
+            else
+                Assert.DoesNotContain("conductor claim file", row.ReplacementReviewAction.BlockedReason,
+                    StringComparison.OrdinalIgnoreCase);
         }
+        Assert.Equal(retainedDecision, await File.ReadAllBytesAsync(
+            change == "missing-decision" ? decisionPath + ".retained" : decisionPath, Ct));
+        if (change != "evidence") Assert.Equal(originalResponse, await File.ReadAllBytesAsync(responsePath, Ct));
         await scheduler.TickOnceAsync(Ct);
         Assert.Equal(change == "unchanged" ? 1 : 0, launches);
         Assert.Single(fixture.Calls);

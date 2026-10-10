@@ -719,8 +719,13 @@ public sealed partial class QueueSchedulerService : BackgroundService
                                     replacementObligation!, current, finalAction,
                                     ConductorClaimStore.GetClaimGeneration(claim));
                         }
-                        catch (Exception ex) when (ex is ConductorObligationStoreException or ConductorClaimException)
+                        catch (Exception ex) when (ex is ConductorObligationStoreException or ConductorClaimException
+                            or IOException or UnauthorizedAccessException or JsonException
+                            or System.Text.DecoderFallbackException or ProjectCeilingStoreException)
                         {
+                            // Refuse local evidence failures here, before the claim-lock boundary can
+                            // label their IO as claim access. Unexpected defects still escape; no
+                            // launch marker is written, and the exact action is blocked after unlock.
                             authorityRefusal = "replacement launch evidence changed or is unavailable: " + ex.Message;
                             return snapshot;
                         }
