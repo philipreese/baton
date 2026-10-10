@@ -3289,17 +3289,17 @@ function conductorControlHtml(snapshot, message, busy, escape){
         + `<p>Owner: ${escape(row.holder || "Unknown")}</p><p>${escape(states[row.state] || states.unavailable)}</p>`
         + (row.adapter ? `<p>${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
         + `<p>Permissions: ${escape(typeof row.permissions === "string" ? row.permissions : "Unavailable")}</p>`
-        + (row.diagnostic ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
+        + (row.diagnostic && ["unavailable","frozen"].includes(row.state) ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
         + (detachable ? `<button type="button" data-conductor-detach="${index}"${busy ? " disabled" : ""}>Detach automatic delivery</button>` : "")
         + `</article>`;
     }).join("");
     if(!snapshot.conductors.length) cards = "<p>No conductor ownership records were returned.</p>";
   }
-  return `<h2>Conductor</h2><p class="control-note">Ownership and delivery settings—not proof that a model is working.</p>`
-    + (snapshot ? `<p class="control-note">Observed ${escape(snapshot.observedAt)}. Refresh to check for changes.</p>` : "")
+  return `<h2>Conductor</h2><p class="control-note">Ownership and settings, not live activity.</p>`
+    + (snapshot ? `<p class="control-note">Checked ${escape(new Date(snapshot.observedAt).toLocaleString())}. Refresh for changes.</p>` : "")
     + `<p role="status" aria-live="polite">${escape(message)}</p>${cards}`
     + `<button type="button" data-conductor-refresh${busy ? " disabled" : ""}>Refresh conductor</button>`
-    + `<p class="control-note">Detaching prevents new automatic delivery. It does not cancel a running turn or an action already sent. Steering, stop and takeover controls are not available here yet.</p>`;
+    + `<p class="control-note">Detach blocks new handoffs, not work already in flight. Steering, stop and takeover are not available here yet.</p>`;
 }
 
 function createConductorControl(fetchImpl, renderPanel, confirmAction){
@@ -3325,7 +3325,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction){
   const refresh = async () => {
     if(busy) return;
     busy = true; draw();
-    try { await read(); message = "Settings fetched. No activity or completion claim is implied."; }
+    try { await read(); message = ""; }
     catch { snapshot = null; message = "Cannot read conductor settings. No controls are available until a fresh read succeeds."; }
     finally { busy = false; draw(); }
   };

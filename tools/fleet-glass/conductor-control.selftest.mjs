@@ -12,7 +12,7 @@ const esc = value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;'
 const card = conductorControlHtml(snapshot(),'',false,esc);
 assert.ok(card.includes('data-conductor-detach="0"'));
 assert.ok(conductorControlHtml(snapshot('frozen'),'',false,esc).includes('data-conductor-detach="0"'));
-assert.ok(card.includes('not proof that a model is working'));
+assert.ok(card.includes('not live activity'));
 assert.ok(card.includes('not available here yet'));
 assert.ok(!conductorControlHtml(snapshot('unavailable'),'',false,esc).includes('data-conductor-detach'));
 assert.ok(conductorControlHtml({...snapshot(),conductors:[{...row,holder:'<img src=x onerror=alert(1)>'}]},'',false,esc).includes('&lt;img'));
