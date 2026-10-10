@@ -133,7 +133,7 @@ internal static class ReplacementReviewEvidenceValidator
         var registration = ConductorFollowSession.ValidateCurrentHostedAuthority(claim, decision.SourceRepository,
             holder, decision.ClaimGeneration, source.StoppedWorkJudgment?.FollowAttachmentId, BatonPaths.Root);
         var state = JsonSerializer.Deserialize<ConductorFollowState>(File.ReadAllText(Path.Combine(directory, "..", "..", "session.json")), Json);
-        if (state is null || state.Frozen || registration.RequestSha256 != decision.RequestSha256
+        if (state is null || registration.RequestSha256 != decision.RequestSha256
             || state?.ProjectCeiling != ProjectCeilingStore.TryGet(state!.Workspace, Path.Combine(BatonPaths.Root, "project-ceilings.json")))
             throw new ConductorObligationStoreException("Current hosted trust or registration changed.");
     }

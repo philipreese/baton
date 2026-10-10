@@ -166,7 +166,7 @@ internal sealed partial class ConductorFollowSession
                     if (current?.Holder != claim.Holder || current.Stopped != claim.Stopped || current.ControlRevision != claim.ControlRevision || ConductorClaimStore.GetClaimGeneration(current) != generation
                         || Read<ConductorFollowAttachment>(registrationPath) != registration)
                     {
-                        status = status with { StopEligible = false, TakeoverEligible = false };
+                        status = status with { StopEligible = false, TakeoverEligible = false, HoldEligible = false, UnholdEligible = false };
                         throw new CliArgumentException("Conductor changed during status read.");
                     }
                     status = status with

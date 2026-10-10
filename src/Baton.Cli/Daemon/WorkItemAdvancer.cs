@@ -1221,29 +1221,33 @@ public sealed partial class WorkItemAdvancer
                 terminalOutcome, transition.HaltCause, now,
                 cancellationToken).ConfigureAwait(false)
             : null;
-        var failed = await TryMarkAsync(item, existing => existing with
+        var failed = await TryMarkAsync(item, existing =>
         {
-            Stage = from,
-            State = QueueItemState.Failed,
-            Error = transition.Reason,
-            ReconciliationKind = transition.ReconciliationKind,
-            PullRequest = transition.ReconciliationKind == QueueReconciliationKind.AwaitingRequiredCheckEvidence
-                ? pullRequest?.Number : existing.PullRequest,
-            LastVerdict = verdictPath ?? existing.LastVerdict,
-            RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
-            ExpectedOriginatingPullRequestHead = null,
-            OriginatingPullRequestRecoveryClaim = null,
-            OriginatingPullRequestRecoveryProofDigest = null,
-            Halted = true,
-            ReadinessMutationClaim = null,
-            StoppedWorkJudgment = stoppedJudgment is null ? existing.StoppedWorkJudgment
-                : stoppedJudgment with { FollowAttachmentId = ConductorFollowSession.AttachmentAtHalt(existing), FollowContinuationPending = true },
-            OwnedTask = existing.OwnedTask is null ? null : existing.OwnedTask with
+            var attachment = stoppedJudgment is null ? null : ConductorFollowSession.AttachmentAtHalt(existing);
+            return existing with
             {
-                Blocked = new TaskBlockedDisposition(
+                Stage = from,
+                State = QueueItemState.Failed,
+                Error = transition.Reason,
+                ReconciliationKind = transition.ReconciliationKind,
+                PullRequest = transition.ReconciliationKind == QueueReconciliationKind.AwaitingRequiredCheckEvidence
+                ? pullRequest?.Number : existing.PullRequest,
+                LastVerdict = verdictPath ?? existing.LastVerdict,
+                RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
+                ExpectedOriginatingPullRequestHead = null,
+                OriginatingPullRequestRecoveryClaim = null,
+                OriginatingPullRequestRecoveryProofDigest = null,
+                Halted = true,
+                ReadinessMutationClaim = null,
+                StoppedWorkJudgment = stoppedJudgment is null ? existing.StoppedWorkJudgment
+                : stoppedJudgment with { FollowAttachmentId = attachment, FollowContinuationPending = attachment is not null },
+                OwnedTask = existing.OwnedTask is null ? null : existing.OwnedTask with
+                {
+                    Blocked = new TaskBlockedDisposition(
                     transition.HaltCause.ToString().ToLowerInvariant(), transition.Reason, now,
                     stoppedJudgment?.Key),
-            },
+                },
+            };
         }).ConfigureAwait(false);
 
         if (failed && stoppedJudgment?.Key is not null

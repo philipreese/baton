@@ -326,7 +326,6 @@ public sealed partial class ConductorFollowDeliveryTests
     [InlineData("held")]
     [InlineData("opt-in")]
     [InlineData("detach")]
-    [InlineData("frozen")]
     [InlineData("trust")]
     [InlineData("head")]
     public async Task Issue2662_Unhold_keeps_independent_action_blockers_and_allowance(string blocker)
@@ -346,13 +345,6 @@ public sealed partial class ConductorFollowDeliveryTests
             using var detached = await glass.DetachAsync(DetachBody(await glass.StatusAsync()));
             Assert.Equal(HttpStatusCode.OK, detached.StatusCode);
         }
-        else if (blocker == "frozen")
-        {
-            var path = Path.Combine(SessionDirectory(fixture), "session.json");
-            var state = JsonNode.Parse(File.ReadAllText(path))!;
-            state["frozen"] = true;
-            File.WriteAllText(path, state.ToJsonString());
-        }
         else await fixture.ChangeAsync("blocked-held", blocker);
         await ApplyHoldAsync(glass, "unhold", "blocker-unhold");
         await scheduler.TickOnceAsync(Ct);
@@ -371,12 +363,6 @@ public sealed partial class ConductorFollowDeliveryTests
             await scheduler.TickOnceAsync(Ct);
             Assert.NotNull((await fixture.RowAsync("blocked-held")).ReplacementReviewAction!.ReplacementAttemptId);
             Assert.Equal(original.Round, (await fixture.RowAsync("blocked-held")).Round);
-        }
-        if (blocker == "frozen")
-        {
-            var status = await glass.StatusAsync();
-            Assert.Equal("frozen", status.GetProperty("state").GetString());
-            Assert.False(status.GetProperty("held").GetBoolean());
         }
     }
 

@@ -45,17 +45,16 @@ public sealed partial class ConductorFollowDeliveryTests
         fixture.Reply = "ReplaceReview";
         await using var glass = await GlassFixture.StartAsync(fixture);
         await ApplyHoldAsync(glass, "hold", "fair-hold");
-        var staleWorkspace = Path.Combine(fixture.Root, "stale-workspace");
-        Directory.CreateDirectory(staleWorkspace);
-        await fixture.HaltAsync("stale-first", notify: false, workspace: staleWorkspace);
+        await fixture.HaltAsync("stale-first", notify: false, pullRequest: 78);
         var valid = await fixture.HaltAsync("valid-later", notify: false);
-        fixture.PullRequestHeadForWorkspace = workspace => workspace == staleWorkspace ? new string('f', 40) : Head;
+        fixture.PullRequestHeadForNumber = number => number == 78 ? new string('f', 40) : Head;
         await ApplyHoldAsync(glass, "unhold", "fair-unhold");
         for (var pass = 0; pass < 3; pass++)
         {
             await scheduler.TickOnceAsync(Ct);
             await WaitForAdvicePassAsync(scheduler);
         }
+        await scheduler.DrainStoppedWorkAdviceAsync();
         var continued = await fixture.RowAsync(valid.Tag);
         Assert.NotNull(continued.ReplacementReviewAction);
         Assert.False(continued.StoppedWorkJudgment!.FollowContinuationPending);
@@ -64,7 +63,7 @@ public sealed partial class ConductorFollowDeliveryTests
         Assert.True(File.Exists(Path.Combine(legacyDirectory, "source-checked")));
         var refused = await fixture.RowAsync("stale-first");
         Assert.True(refused.StoppedWorkJudgment!.FollowContinuationPending);
-        Assert.Equal("Claim, trust, source, or state admission refused; no new turn admitted.", refused.StoppedWorkJudgment.FollowContinuationWait);
+        Assert.Equal("Claim, trust, source, or state admission refused; no vendor call.", refused.StoppedWorkJudgment.FollowContinuationWait);
         Assert.Equal("Owner must inspect retained evidence and current eligibility; uncertain launches have no retry path.", refused.StoppedWorkJudgment.FollowContinuationTrigger);
         Assert.Null(refused.ReplacementReviewAction);
         Assert.Equal(valid.AutomaticFixUsed, continued.AutomaticFixUsed);
@@ -109,6 +108,7 @@ public sealed partial class ConductorFollowDeliveryTests
         await WaitForAdvicePassAsync(scheduler);
         await delivered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct); // wait-ok: Detect a lost notification without another tick or restart.
         await WaitForAdvicePassAsync(scheduler);
+        await scheduler.DrainStoppedWorkAdviceAsync();
         Assert.Equal(1, fixture.LegacyCalls);
         Assert.Single(fixture.Calls);
         Assert.True(File.Exists(Path.Combine(fixture.Store.GetStoppedWorkAdviceEvidenceDirectory(fixture.Key(legacy.Tag)),
@@ -137,15 +137,24 @@ public sealed partial class ConductorFollowDeliveryTests
         if (hold) await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
         // Freeze on a different real uncertain turn; the earlier admitted decision remains exact.
         if (hold) await ApplyHoldAsync(glass, "unhold", "freeze-unhold");
+        var statePath = Path.Combine(SessionDirectory(fixture), "session.json");
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var priorState = JsonSerializer.Deserialize<ConductorFollowState>(File.ReadAllText(statePath), json)!;
         fixture.Interrupt = true;
         await fixture.HaltAsync("unrelated-uncertain", notify: false);
         await scheduler.NotifyOwnedHaltAsync(await fixture.RowAsync("unrelated-uncertain"), Ct);
         fixture.Interrupt = false;
+        Assert.Equal("uncertain", (await fixture.FollowAsync("unrelated-uncertain")).GetProperty("status").GetString());
+        var frozenState = JsonSerializer.Deserialize<ConductorFollowState>(File.ReadAllText(statePath), json)!;
+        Assert.True(frozenState.Frozen);
+        Assert.Equal(priorState, frozenState with { Frozen = priorState.Frozen });
         await scheduler.TickOnceAsync(Ct);
         await scheduler.TickOnceAsync(Ct);
+        await WaitForAdvicePassAsync(scheduler);
+        await scheduler.DrainStoppedWorkAdviceAsync();
         var issued = await fixture.RowAsync("admitted-before-freeze");
+        Assert.True(issued.ReplacementReviewAction!.BlockedReason is null, issued.ReplacementReviewAction.BlockedReason);
         Assert.Equal(1, launches);
-        Assert.Null(issued.ReplacementReviewAction!.BlockedReason);
         Assert.NotNull(issued.ReplacementReviewAction.ReplacementAttemptId);
         Assert.Equal(original.Round, issued.Round);
         Assert.Equal(original.AutomaticFixUsed, issued.AutomaticFixUsed);

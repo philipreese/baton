@@ -9057,7 +9057,8 @@ An action's independent Held-pending flag preserves its reserved round, envelope
 opt-in unpause and manual promotion cannot erase Hold. Source/head, grants, opt-in and runway are
 rechecked before final serialized admission. Stale proof and uncertain launches retain an owner,
 reason and concrete reconciliation trigger; no history is reconstructed or uncertain work retried.
-Detach, frozen state, revoked grants and global queue Hold remain independent blockers. Glass shows
+Detach, revoked grants and global queue Hold remain independent blockers. Frozen state blocks new
+conversation turns; it does not invalidate an earlier admitted action's exact completed decision. Glass shows
 pending events, received responses, marker-free actions and issued outcomes separately, with control
 reason/issuer/time, eligibility and next trigger. Source fixtures do not establish installed acceptance.
 
