@@ -52,7 +52,7 @@ def check_shard_timeout_wiring(workflow: str) -> None:
     assert re.search(r"(?m)^    timeout-minutes: \$\{\{ matrix\.timeout-minutes \}\}$", test_job)
     matrix = test_job.split("      matrix:\n", 1)[1].split("    runs-on:", 1)[0]
     rows = re.findall(
-        r'name: "([^"]+)", task: "([^"]+)", timeout-minutes: (\d+)',
+        r'name: "([^"]+)", task: "([^"]+)", timeout-minutes: (\d+)(?=\s*\})',
         matrix,
     )
     expected = [(name, task, str(minutes)) for name, (task, minutes) in SHARD_JOB_BOUNDS.items()]
@@ -194,6 +194,11 @@ def check_pixi_and_workflow() -> None:
                 'task: "test-flow", timeout-minutes: 34',
                 1,
             )
+        )
+    )
+    refused_assertion(
+        lambda: check_shard_timeout_wiring(
+            workflow.replace('timeout-minutes: 18 }', 'timeout-minutes: 18.5 }', 1)
         )
     )
     assert workflow.count("name: Snapshot ~/.baton before tests") == 1
