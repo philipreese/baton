@@ -94,4 +94,7 @@ public sealed record StoppedWorkJudgment(
     bool AdviceEligibleAtHalt = false,
     [property: JsonPropertyName("followAttachmentId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? FollowAttachmentId = null);
+    string? FollowAttachmentId = null,
+    [property: JsonPropertyName("followContinuationPending")] bool FollowContinuationPending = false,
+    [property: JsonPropertyName("followContinuationWait")] string? FollowContinuationWait = null,
+    [property: JsonPropertyName("followContinuationTrigger")] string? FollowContinuationTrigger = null);

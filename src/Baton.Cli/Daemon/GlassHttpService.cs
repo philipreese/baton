@@ -361,7 +361,10 @@ internal sealed class GlassHttpService : BackgroundService
         var isConductorResume = string.Equals(route, "/conductor/resume", StringComparison.Ordinal);
         var isConductorStop = string.Equals(route, "/conductor/stop", StringComparison.Ordinal);
         var isConductorTakeover = string.Equals(route, "/conductor/takeover", StringComparison.Ordinal);
-        var isConductorControl = isConductorDetach || isConductorResume || isConductorStop || isConductorTakeover;
+        var isConductorHold = string.Equals(route, "/conductor/hold", StringComparison.Ordinal);
+        var isConductorUnhold = string.Equals(route, "/conductor/unhold", StringComparison.Ordinal);
+        var isConductorControl = isConductorDetach || isConductorResume || isConductorStop || isConductorTakeover
+            || isConductorHold || isConductorUnhold;
         const string cancelPrefix = "/rooms/";
         const string cancelSuffix = "/cancel";
         var isCancelShape = route.StartsWith(cancelPrefix, StringComparison.Ordinal)
@@ -431,10 +434,10 @@ internal sealed class GlassHttpService : BackgroundService
                     length += count;
                 }
                 if (length > 4096) throw new CliArgumentException("Detach request exceeds its bound.");
-                if (isConductorStop || isConductorTakeover)
+                if (isConductorStop || isConductorTakeover || isConductorHold || isConductorUnhold)
                 {
                     var result = await ConductorFollowSession.ControlFromGlassAsync(new string(chars, 0, length),
-                        _conductorRoot, _settings.Glass.OperatorLogin!, isConductorTakeover, cancellationToken).ConfigureAwait(false);
+                        _conductorRoot, _settings.Glass.OperatorLogin!, route["/conductor/".Length..], cancellationToken).ConfigureAwait(false);
                     if (DropHostedControlAcknowledgementForTest)
                     {
                         context.Response.Abort();

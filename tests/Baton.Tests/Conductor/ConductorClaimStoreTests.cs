@@ -5,6 +5,7 @@ using Baton.Tests.Shared;
 
 namespace Baton.Tests.Conductor;
 
+[Collection(SerializedEnvironmentCollection.Name)]
 public sealed class ConductorClaimStoreTests
 {
     private static readonly RepositoryIdentity RepoA =

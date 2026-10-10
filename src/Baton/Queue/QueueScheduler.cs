@@ -267,6 +267,7 @@ public static class QueueScheduler
     private static bool IsEligible(QueueItem item) =>
         item.State == QueueItemState.Queued && !item.External && item.Retirement is null && !IsReady(item)
         && item.ReplacementReviewAction?.PausedReason is null
+        && item.ReplacementReviewAction?.HeldPending != true
         && item.IssuePreparation?.State is null or TaskPreparationState.Prepared;
 
     /// <summary>

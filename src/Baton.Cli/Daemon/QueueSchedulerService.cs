@@ -262,7 +262,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
             // candidate this same tick rather than one tick later.
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
             await ReconcileContinuationObligationsAsync(cancellationToken).ConfigureAwait(false);
-            await ReconcileStoppedWorkAdviceAsync(cancellationToken).ConfigureAwait(false);
+            await ReconcileStoppedWorkAdviceAsync(cancellationToken, continueHosted: true).ConfigureAwait(false);
             await ConductorFollowSession.ReconcileHostedControlCleanupAsync(BatonPaths.Root, cancellationToken).ConfigureAwait(false);
             await ReconcileReplacementReviewActionsAsync(cancellationToken).ConfigureAwait(false);
 
@@ -638,6 +638,11 @@ public sealed partial class QueueSchedulerService : BackgroundService
                         continue;
                     }
                 }
+                catch (HostedConductorHeldException)
+                {
+                    await SetHeldReplacementReviewAsync(replacement, true).ConfigureAwait(false);
+                    continue;
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
                 {
                     await BlockReplacementReviewAsync(replacement,
@@ -648,11 +653,15 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 }
             }
 
+            if (item.ReplacementReviewAction is not null && ReplacementReviewBeforeLaunchMarker is not null)
+                await ReplacementReviewBeforeLaunchMarker(cancellationToken).ConfigureAwait(false);
+
             // Re-check Queued under QueueStore's mutation lock, rather than trusting the snapshot this
             // tick read above: `baton queue cancel` owns the same seam. A cancellation that gets there
             // first wins and this scheduler never starts a lane from its stale candidate.
             var launchClaimed = false;
             string? authorityRefusal = null;
+            var heldPending = false;
             IReadOnlyList<QueueItem>? claimedItems = null;
             using (DaemonLoopDriver.EnterPhase("queue-store"))
             {
@@ -720,6 +729,11 @@ public sealed partial class QueueSchedulerService : BackgroundService
                                     replacementObligation!, current, finalAction,
                                     claim);
                         }
+                        catch (HostedConductorHeldException)
+                        {
+                            heldPending = true;
+                            return snapshot;
+                        }
                         catch (Exception ex) when (ex is ConductorObligationStoreException or ConductorClaimException
                             or IOException or UnauthorizedAccessException or JsonException
                             or System.Text.DecoderFallbackException or ProjectCeilingStoreException or CliArgumentException)
@@ -782,6 +796,8 @@ public sealed partial class QueueSchedulerService : BackgroundService
                 }
             }
 
+            if (heldPending)
+                await SetHeldReplacementReviewAsync(item.ReplacementReviewAction!, true).ConfigureAwait(false);
             if (authorityRefusal is not null)
                 await BlockReplacementReviewAsync(item.ReplacementReviewAction!, authorityRefusal,
                     "Re-establish owner, workspace and exact open PR head; inspect retained action.")

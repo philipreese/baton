@@ -1237,7 +1237,7 @@ public sealed partial class WorkItemAdvancer
             Halted = true,
             ReadinessMutationClaim = null,
             StoppedWorkJudgment = stoppedJudgment is null ? existing.StoppedWorkJudgment
-                : stoppedJudgment with { FollowAttachmentId = ConductorFollowSession.AttachmentAtHalt(existing) },
+                : stoppedJudgment with { FollowAttachmentId = ConductorFollowSession.AttachmentAtHalt(existing), FollowContinuationPending = true },
             OwnedTask = existing.OwnedTask is null ? null : existing.OwnedTask with
             {
                 Blocked = new TaskBlockedDisposition(

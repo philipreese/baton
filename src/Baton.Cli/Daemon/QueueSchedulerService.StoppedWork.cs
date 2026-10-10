@@ -32,7 +32,7 @@ public sealed partial class QueueSchedulerService
             if (intent.FollowAttachmentId is not null)
             {
                 var retained = await ConductorFollowSession.NotifyAttachedAsync(source, token, FollowBroker,
-                    FollowRepositoryResolver).ConfigureAwait(false);
+                    FollowRepositoryResolver, _advancer.ValidateStoppedWorkHeadAsync).ConfigureAwait(false);
                 if (retained?.DecisionEvidence is { Decision: "ReplaceReview" } decision)
                 {
                     await ReplacementReviewConductorCommand.ExecuteAsync(
@@ -54,6 +54,29 @@ public sealed partial class QueueSchedulerService
                             retained.EvidenceLocation,
                             decision)).ConfigureAwait(false);
                 }
+                if (retained?.Status is "delivered" or "replayed")
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                    {
+                        Items = current.Items.Select(item => item.StoppedWorkJudgment is { } pending
+                            && pending.Key == key && pending.FollowAttachmentId == intent.FollowAttachmentId
+                            && pending.FollowContinuationPending
+                            ? item with
+                            {
+                                StoppedWorkJudgment = pending with
+                                {
+                                    FollowContinuationPending = false,
+                                    FollowContinuationWait = null,
+                                    FollowContinuationTrigger = null
+                                }
+                            }
+                            : item).ToList(),
+                    }, token).ConfigureAwait(false);
+                else if (retained?.Status == "held-pending")
+                    await RetainFollowWaitAsync(key, "Hosted acquisition is Held.",
+                        "Unhold this acquisition; next scheduler reconciliation rechecks the retained event.", token).ConfigureAwait(false);
+                else if (retained?.Status is "refused" or "uncertain")
+                    await RetainFollowWaitAsync(key, retained.Diagnostic,
+                        "Owner must inspect retained evidence and current eligibility; uncertain launches have no retry path.", token).ConfigureAwait(false);
             }
             else if (source.OwnedTask is null || !ConductorFollowSession.HasRegistrationFor(source))
             {
@@ -61,12 +84,28 @@ public sealed partial class QueueSchedulerService
                 await ReconcileStoppedWorkAdviceAsync(token, allowLaunch: true).ConfigureAwait(false);
             }
         }
+        catch (HostedConductorHeldException)
+        {
+            await RetainFollowWaitAsync(key, "Complete response retained; hosted action admission is Held.",
+                "Unhold this acquisition; next scheduler reconciliation admits the saved decision without another model call.", token).ConfigureAwait(false);
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliArgumentException
             or ConductorClaimException or ConductorObligationStoreException or JsonException)
         {
             Console.Error.WriteLine("Owned-halt delivery refused; durable source and obligation retained.");
+            await RetainFollowWaitAsync(key, "Hosted continuation unresolved: current source, head, grants, opt-in or registration could not be verified.",
+                "Owner must inspect the retained source and response; next scheduler reconciliation rechecks current eligibility without retrying uncertain launches.", token).ConfigureAwait(false);
         }
     }
+
+    private static Task RetainFollowWaitAsync(string key, string reason, string trigger, CancellationToken token) =>
+        QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+        {
+            Items = current.Items.Select(item => item.StoppedWorkJudgment is { FollowContinuationPending: true } pending
+                && pending.Key == key && (pending.FollowContinuationWait != reason || pending.FollowContinuationTrigger != trigger)
+                ? item with { StoppedWorkJudgment = pending with { FollowContinuationWait = reason, FollowContinuationTrigger = trigger } }
+                : item).ToList(),
+        }, token);
 
     internal async Task RecoverAttachedFollowAsync(CancellationToken token)
     {
@@ -80,12 +119,12 @@ public sealed partial class QueueSchedulerService
     }
 
     internal async Task ReconcileStoppedWorkAdviceAsync(CancellationToken cancellationToken,
-        bool allowLaunch = false)
+        bool allowLaunch = false, bool continueHosted = false)
     {
         await _adviceReconciliation.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await ReconcileStoppedWorkAdviceUnderLockAsync(cancellationToken, allowLaunch).ConfigureAwait(false);
+            await ReconcileStoppedWorkAdviceUnderLockAsync(cancellationToken, allowLaunch, continueHosted).ConfigureAwait(false);
         }
         finally
         {
@@ -93,7 +132,8 @@ public sealed partial class QueueSchedulerService
         }
     }
 
-    private async Task ReconcileStoppedWorkAdviceUnderLockAsync(CancellationToken cancellationToken, bool allowLaunch)
+    private async Task ReconcileStoppedWorkAdviceUnderLockAsync(CancellationToken cancellationToken, bool allowLaunch,
+        bool continueHosted = false)
     {
         if (_adviceStopping || cancellationToken.IsCancellationRequested) return;
         if (_stoppedWorkTask is { IsCompleted: false }) return;
@@ -107,6 +147,28 @@ public sealed partial class QueueSchedulerService
         }
 
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        if (continueHosted && !snapshot.Held)
+        {
+            foreach (var pending in snapshot.Items.Where(item => item.Halted && item.OwnedTask is not null
+                && item.ReplacementReviewAction is null
+                && item.StoppedWorkJudgment is { FollowAttachmentId: not null, FollowContinuationPending: true }))
+            {
+                if (!await ConductorFollowSession.CanContinueAttachedAsync(pending, cancellationToken).ConfigureAwait(false)) continue;
+                _stoppedWorkTaskKey = pending.StoppedWorkJudgment!.Key;
+                _adviceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var followToken = _adviceCancellation.Token;
+                _stoppedWorkTask = Task.Run(async () =>
+                {
+                    try { await NotifyOwnedHaltAsync(pending, followToken).ConfigureAwait(false); }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ConductorClaimException
+                        or ConductorObligationStoreException or CliArgumentException or JsonException)
+                    {
+                        Console.Error.WriteLine("Hosted continuation could not persist its disposition; durable source remains pending for reconciliation.");
+                    }
+                }, followToken);
+                return;
+            }
+        }
         foreach (var item in snapshot.Items.Where(item => item.StoppedWorkJudgment is not null))
         {
             var intent = item.StoppedWorkJudgment!;

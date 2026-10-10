@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Baton.Accounting;
+using Baton.Cli.Daemon;
 using Baton.Conductor;
 using Baton.Queue;
 using Baton.Status;
@@ -11,7 +12,9 @@ internal sealed record GlassConductorStatus(string Repository, string? Holder, s
     string? Effort = null, string? Permissions = null, string? Diagnostic = null, bool ResumeEligible = false,
     bool StopEligible = false, bool TakeoverEligible = false, string? DestinationAddress = null,
     string? RetainedHolder = null, string? RetainedGeneration = null, bool HistoricalProvider = false,
-    IReadOnlyList<GlassHostedControlResult>? Controls = null, IReadOnlyList<GlassIssuedActionStatus>? Actions = null);
+    IReadOnlyList<GlassHostedControlResult>? Controls = null, IReadOnlyList<GlassIssuedActionStatus>? Actions = null,
+    bool Held = false, long ControlRevision = 0, bool HoldEligible = false, bool UnholdEligible = false,
+    string? AdmissionWait = null, bool QueueHeld = false, ConductorHostedControlReceipt? HoldControl = null);
 
 internal sealed record GlassHostedControlResult(ConductorHostedControlReceipt Receipt, string Cleanup);
 internal sealed record GlassIssuedActionStatus(string Tag, string State, string? Reason, string? NextTrigger, string Holder);
@@ -70,11 +73,16 @@ internal sealed partial class ConductorFollowSession
                     status = status with { ClaimGeneration = SafeLabel(generation) };
                     var controls = (claim.Transitions ?? []).Where(t => t.Control is not null)
                         .Select(t => t.Control!).TakeLast(20).ToArray();
+                    var activity = await ReadGlassActionsAsync(identity.Value, root, token).ConfigureAwait(false);
                     status = status with
                     {
                         DestinationAddress = claim.DestinationAddress,
+                        Held = claim.Held,
+                        ControlRevision = claim.ControlRevision,
+                        HoldControl = claim.Held ? controls.LastOrDefault(c => c.Operation == "hold" && c.ResultGeneration == generation) : null,
                         Controls = controls.Select(c => new GlassHostedControlResult(c, ControlCleanupState(identity, root, c))).ToArray(),
-                        Actions = await ReadGlassActionsAsync(identity.Value, root, token).ConfigureAwait(false),
+                        Actions = activity.Actions,
+                        QueueHeld = activity.QueueHeld,
                     };
                     if (claim.Holder is null)
                     {
@@ -91,7 +99,7 @@ internal sealed partial class ConductorFollowSession
                     }
                     var displaced = registration.Holder != claim.Holder || registration.ClaimGeneration != generation;
                     var transferred = displaced && controls.Any(c => c.Operation == "takeover" && MatchesControlTarget(registration, c));
-                    if (claim.Stopped || displaced && controls.Any(c => MatchesControlTarget(registration, c)))
+                    if (claim.Stopped || displaced && controls.Any(c => c.Operation is "stop" or "takeover" && MatchesControlTarget(registration, c)))
                     {
                         ValidateControlRegistration(identity, root, registration, registration.Holder,
                             registration.ClaimGeneration, registration.Id);
@@ -124,7 +132,16 @@ internal sealed partial class ConductorFollowSession
                     }
                     ValidateControlRegistration(identity, root, registration, claim.Holder!, generation, registration.Id);
                     // Revocation eligibility depends on exact authority identity, not delivery recovery or trust.
-                    status = status with { AttachmentId = registration.Id, StopEligible = true, TakeoverEligible = true };
+                    status = status with
+                    {
+                        AttachmentId = registration.Id,
+                        StopEligible = true,
+                        TakeoverEligible = true,
+                        HoldEligible = !claim.Held,
+                        UnholdEligible = claim.Held,
+                        AdmissionWait = claim.Held ? "Unhold this acquisition; valid pending work continues on the next scheduler reconciliation."
+                            : "Pending work waits for current source, head, grants, opt-in and runway admission."
+                    };
                     var session = await ReadGlassSessionAsync(identity, generation, root, registration,
                         resolver, token).ConfigureAwait(false);
                     var state = Read<ConductorFollowState>(session.StatePath);
@@ -146,7 +163,7 @@ internal sealed partial class ConductorFollowSession
                         catch (Exception ex) when (IsRefusal(ex)) { resumeEligible = false; }
                     }
                     var current = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
-                    if (current?.Holder != claim.Holder || current.Stopped != claim.Stopped || ConductorClaimStore.GetClaimGeneration(current) != generation
+                    if (current?.Holder != claim.Holder || current.Stopped != claim.Stopped || current.ControlRevision != claim.ControlRevision || ConductorClaimStore.GetClaimGeneration(current) != generation
                         || Read<ConductorFollowAttachment>(registrationPath) != registration)
                     {
                         status = status with { StopEligible = false, TakeoverEligible = false };
@@ -155,7 +172,7 @@ internal sealed partial class ConductorFollowSession
                     status = status with
                     {
                         AttachmentId = registration.Id,
-                        State = !registration.Attached ? "detached" : state.Frozen ? "frozen" : "attached",
+                        State = !registration.Attached ? "detached" : state.Frozen ? "frozen" : claim.Held ? "held" : "attached",
                         Adapter = state.Adapter,
                         Model = state.Model,
                         Effort = state.Effort,
@@ -293,7 +310,11 @@ internal sealed partial class ConductorFollowSession
     internal static Action? AfterHostedControlFence { get; set; }
 
     internal static async Task<GlassHostedControlResult> ControlFromGlassAsync(string body, string root,
-        string issuer, bool takeover, CancellationToken token)
+        string issuer, bool takeover, CancellationToken token) =>
+        await ControlFromGlassAsync(body, root, issuer, takeover ? "takeover" : "stop", token).ConfigureAwait(false);
+
+    internal static async Task<GlassHostedControlResult> ControlFromGlassAsync(string body, string root,
+        string issuer, string operation, CancellationToken token)
     {
         var request = Deserialize<ConductorHostedControlRequest>(body);
         var identity = RepositoryIdentity.From("https://" + request.Repository, null);
@@ -304,7 +325,7 @@ internal sealed partial class ConductorFollowSession
         return await Task.Run(() => MutexGuardedFileLock.RunUnderLock(Path.Combine(root, "queue", "queue.json"),
             QueueStore.LockNamePrefix, GlassLockTimeout, () =>
             {
-                var receipt = ConductorClaimStore.ApplyHostedControl(identity, root, request, issuer, takeover, _ =>
+                var receipt = ConductorClaimStore.ApplyHostedControl(identity, root, request, issuer, operation, _ =>
                 {
                     token.ThrowIfCancellationRequested();
                     var registration = Read<ConductorFollowAttachment>(Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json"));
@@ -328,6 +349,7 @@ internal sealed partial class ConductorFollowSession
 
     private static void CleanupHostedControl(RepositoryIdentity identity, string root, ConductorHostedControlReceipt receipt)
     {
+        if (receipt.Operation is "hold" or "unhold") return;
         var path = Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json");
         ConductorFollowAttachment registration;
         try { registration = Read<ConductorFollowAttachment>(path); }
@@ -342,6 +364,7 @@ internal sealed partial class ConductorFollowSession
 
     private static string ControlCleanupState(RepositoryIdentity identity, string root, ConductorHostedControlReceipt receipt)
     {
+        if (receipt.Operation is "hold" or "unhold") return "complete";
         try
         {
             var registration = Read<ConductorFollowAttachment>(Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json"));
@@ -381,12 +404,17 @@ internal sealed partial class ConductorFollowSession
         }
     }
 
-    private static async Task<IReadOnlyList<GlassIssuedActionStatus>> ReadGlassActionsAsync(string repository, string root, CancellationToken token)
+    private static async Task<(IReadOnlyList<GlassIssuedActionStatus> Actions, bool QueueHeld)> ReadGlassActionsAsync(string repository, string root, CancellationToken token)
     {
         var snapshot = await QueueStore.LoadAsync(Path.Combine(root, "queue", "queue.json"), token, GlassLockTimeout).ConfigureAwait(false);
-        return snapshot.Items.Where(i => i.Repository == repository && i.ReplacementReviewAction is not null).Take(100)
+        var identity = RepositoryIdentity.From("https://" + repository, null)!;
+        var claim = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
+        bool Revoked(string holder) => claim is null || claim.Stopped || claim.Holder != holder;
+        var actions = snapshot.Items.Where(i => i.Repository == repository && i.ReplacementReviewAction is not null).Take(100)
             .Select(i => new GlassIssuedActionStatus(SafeLabel(i.Tag),
                 i.ReplacementReviewAction!.ActionObservedAt is not null ? "observed" :
+                i.ReplacementReviewAction.ReplacementAttemptId is null && Revoked(i.ReplacementReviewAction.Holder) ? "revoked-pending" :
+                i.ReplacementReviewAction.HeldPending ? "held-pending-marker" :
                 i.ReplacementReviewAction.BlockedReason is not null
                     ? i.ReplacementReviewAction.ReplacementAttemptId is null ? "refused"
                         : i.ReplacementReviewAction.TerminalObservation is null ? "uncertain" : "terminal-unresolved" :
@@ -394,7 +422,39 @@ internal sealed partial class ConductorFollowSession
                 i.ReplacementReviewAction.ReplacementAttemptId is not null
                     ? i.AttemptStartedFactDurable ? "in-flight" : "issued" : "pending",
                 i.ReplacementReviewAction.BlockedReason ?? i.ReplacementReviewAction.PausedReason,
-                i.ReplacementReviewAction.NextTrigger, SafeLabel(i.ReplacementReviewAction.Holder))).ToArray();
+                i.ReplacementReviewAction.ReplacementAttemptId is null && Revoked(i.ReplacementReviewAction.Holder)
+                    ? "Owner must inspect retained evidence; Stop or displaced ownership cannot be undone by Unhold."
+                    : i.ReplacementReviewAction.NextTrigger, SafeLabel(i.ReplacementReviewAction.Holder))).ToList();
+        foreach (var source in snapshot.Items.Where(i => i.Repository == repository && i.ReplacementReviewAction is null
+            && i.StoppedWorkJudgment is { FollowAttachmentId: not null, FollowContinuationPending: true }).Take(100 - actions.Count))
+        {
+            var pending = source.StoppedWorkJudgment!;
+            var registration = Read<ConductorFollowAttachment>(Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json"));
+            ValidateControlRegistration(identity, root, registration, registration.Holder, registration.ClaimGeneration, registration.Id);
+            if (registration.Id != pending.FollowAttachmentId || registration.Holder != pending.Holder)
+            {
+                actions.Add(new(SafeLabel(source.Tag), "unresolved-prior-attachment", "Retained event belongs to a prior attachment.",
+                    "Owner must inspect its retained evidence; Unhold cannot restamp or replay it.", SafeLabel(pending.Holder!)));
+                continue;
+            }
+            if (Revoked(pending.Holder!) || claim is not null && ConductorClaimStore.GetClaimGeneration(claim) != registration.ClaimGeneration)
+            {
+                actions.Add(new(SafeLabel(source.Tag), "revoked-pending", "Hosted acquisition was stopped or displaced.",
+                    "Owner must inspect retained evidence; Unhold cannot restore this acquisition or replay its event.", SafeLabel(pending.Holder!)));
+                continue;
+            }
+            var fleet = Path.Combine(root, BatonPaths.FleetDirectoryName);
+            var obligations = new ConductorObligationStore(new FleetEventLog(Path.Combine(fleet, BatonPaths.FleetEventsFileName),
+                Path.Combine(fleet, BatonPaths.FleetEventsRolloverFileName), 16 * 1024 * 1024), Path.Combine(fleet, BatonPaths.ConductorObligationsFileName));
+            var obligation = await obligations.ReadAsync(pending.Key!, token).ConfigureAwait(false);
+            var eventDirectory = obligation is null ? null : Path.Combine(registration.SessionDirectory, "events", Digest(obligation.ObligationId));
+            var completed = eventDirectory is not null && File.Exists(Path.Combine(eventDirectory, "response.json"));
+            var uncertain = !completed && eventDirectory is not null && File.Exists(Path.Combine(eventDirectory, "launch.json"));
+            actions.Add(new(SafeLabel(source.Tag), completed ? "received-response-pending-decision" : uncertain ? "uncertain-turn" : "event-pending-turn",
+                pending.FollowContinuationWait ?? "Real event retained; delivery admission pending.",
+                pending.FollowContinuationTrigger ?? "Next scheduler reconciliation checks current eligibility.", SafeLabel(pending.Holder!)));
+        }
+        return (actions, snapshot.Held);
     }
 
     internal static async Task DetachFromGlassAsync(string body, string root, CancellationToken token,
