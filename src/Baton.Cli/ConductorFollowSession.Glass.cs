@@ -15,7 +15,8 @@ internal sealed record GlassConductorStatus(string Repository, string? Holder, s
     IReadOnlyList<GlassHostedControlResult>? Controls = null, IReadOnlyList<GlassIssuedActionStatus>? Actions = null,
     bool Held = false, long ControlRevision = 0, bool HoldEligible = false, bool UnholdEligible = false,
     string? AdmissionWait = null, bool QueueHeld = false, ConductorHostedControlReceipt? HoldControl = null,
-    bool CorrectionEligible = false, GlassCorrectionStatus? Correction = null);
+    bool CorrectionEligible = false, GlassCorrectionStatus? Correction = null,
+    GlassRetainedJudgmentHistory? History = null);
 
 internal sealed record GlassHostedControlResult(ConductorHostedControlReceipt Receipt, string Cleanup);
 internal sealed record GlassIssuedActionStatus(string Tag, string State, string? Reason, string? NextTrigger, string Holder);
@@ -84,6 +85,7 @@ internal sealed partial class ConductorFollowSession
                         Controls = controls.Select(c => new GlassHostedControlResult(c, ControlCleanupState(identity, root, c))).ToArray(),
                         Actions = activity.Actions,
                         QueueHeld = activity.QueueHeld,
+                        History = ReadGlassHistory(identity, root, activity.Items, token: token),
                     };
                     if (claim.Holder is null)
                     {
@@ -416,7 +418,7 @@ internal sealed partial class ConductorFollowSession
         }
     }
 
-    private static async Task<(IReadOnlyList<GlassIssuedActionStatus> Actions, bool QueueHeld)> ReadGlassActionsAsync(string repository, string root, CancellationToken token)
+    private static async Task<(IReadOnlyList<GlassIssuedActionStatus> Actions, bool QueueHeld, IReadOnlyList<QueueItem> Items)> ReadGlassActionsAsync(string repository, string root, CancellationToken token)
     {
         var snapshot = await QueueStore.LoadAsync(Path.Combine(root, "queue", "queue.json"), token, GlassLockTimeout).ConfigureAwait(false);
         var identity = RepositoryIdentity.From("https://" + repository, null)!;
@@ -471,7 +473,7 @@ internal sealed partial class ConductorFollowSession
                 pending.FollowContinuationWait ?? "Real event retained; delivery admission pending.",
                 pending.FollowContinuationTrigger ?? "Next scheduler reconciliation checks current eligibility.", SafeLabel(pending.Holder!)));
         }
-        return (actions, snapshot.Held);
+        return (actions, snapshot.Held, snapshot.Items);
     }
 
     internal static async Task DetachFromGlassAsync(string body, string root, CancellationToken token,

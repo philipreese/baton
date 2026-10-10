@@ -330,6 +330,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
 .conductor-control input{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:44px;font:inherit}
 .conductor-control textarea{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:96px;font:inherit;resize:vertical}
 .conductor-control .control-note{color:var(--ink-soft);font-size:.8125rem}
+.retained-judgment{border-top:1px solid var(--line);padding:.5rem 0;min-width:0;overflow-wrap:anywhere}
 </style>
 <main>
   <div class="masthead">
@@ -3316,6 +3317,7 @@ function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection
         + (row.takeoverEligible === true ? `<label>Destination owner <input type="text" data-conductor-owner="${index}" maxlength="256"${busy ? " disabled" : ""}></label><label>Owner address (display text) <input type="text" data-conductor-address="${index}" maxlength="512"${busy ? " disabled" : ""}></label><button type="button" data-conductor-takeover="${index}"${busy ? " disabled" : ""}>Take Over</button>` : "")
         + (Array.isArray(row.controls) ? row.controls.map(result => `<p class="control-note">Historical ${escape(result.receipt?.operation || "Control")} receipt · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.appliedAt || "unknown time")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("") : "")
         + (Array.isArray(row.actions) ? row.actions.map(action => `<p class="control-note">Action ${escape(action.tag)}: ${escape(action.state)}. Owner: ${escape(action.holder || "unknown")}. ${escape(action.reason || "")} ${escape(action.nextTrigger || "")}</p>`).join("") : "")
+        + retainedJudgmentsHtml(row.history, escape)
         + `</article>`;
     }).join("");
     if(!snapshot.conductors.length) cards = "<p>No conductor ownership records were returned.</p>";
@@ -3326,6 +3328,25 @@ function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection
     + (pendingCorrection ? (pendingCorrection.requests || [pendingCorrection]).map(pending => `<p class="control-note">${escape(pending.body.repository)} · exact correction request ${escape(pending.body.requestId)}. Acceptance receipt and current conductor state are checked separately.</p>${correctionStatusHtml(pending.receipt,escape)}<button type="button" data-conductor-correction-lookup="${escape(pending.body.requestId)}"${busy ? " disabled" : ""}>Look up exact correction receipt</button>`).join("") : "")
     + `<button type="button" data-conductor-refresh${busy ? " disabled" : ""}>Refresh conductor</button>`
     + `<p class="control-note">Stop is terminal for this acquisition. Take Over transfers ownership only. Issued work may finish. Correction application is not verified.</p>`;
+}
+
+function retainedJudgmentsHtml(history, escape){
+  if(!history) return "";
+  const judgments = Array.isArray(history.judgments) ? history.judgments.slice(0,20) : [];
+  return `<section aria-label="Retained judgments"><h3>Retained judgments</h3><p class="control-note">Identity order, not newest-first or activity chronology. Historical evidence; current task state is not shown.</p>`
+    + judgments.map(judgment => `<div class="retained-judgment"><p><strong>${escape(judgment.decision)}</strong> · ${escape(judgment.tag)}</p>`
+      + `<p>Source attempt: ${escape(judgment.sourceAttempt)} · Head: ${escape(judgment.sourceHeadSha)}</p>`
+      + `<p>Source observation: ${escape(judgment.sourceObservedAt)}</p>`
+      + `<details><summary>Exact source identity</summary><p>Repository: ${escape(judgment.sourceRepository)} · Acquisition: ${escape(judgment.claimGeneration)}</p><p>Obligation: ${escape(judgment.obligationId)} · Key: ${escape(judgment.obligationKey)}</p><p>Event identity: ${escape(judgment.eventIdentity)}</p></details>`
+      + (judgment.decision === "Hold" ? `<p>At this judgment, no replacement was requested.</p>` : `<p>At this judgment, a replacement review was requested.</p>`)
+      + `<p class="control-note">No decision rationale retained</p>`
+      + (judgment.decision === "ReplaceReview" ? `<p class="control-note">${judgment.actionDisposition ? `Matching retained action: ${escape(judgment.actionDisposition)}` : "No matching retained action"}</p>` : "")
+      + `</div>`).join("")
+    + (history.diagnostic ? `<p class="control-note">${escape(history.diagnostic)}</p>` : judgments.length ? "" : `<p>No verified ordinary judgments in the inspected history.</p>`)
+    + (history.invalidEvents ? `<p class="control-note">${escape(history.invalidEvents)} invalid or incomplete event(s) excluded.</p>` : "")
+    + (history.excludedEvents ? `<p class="control-note">${escape(history.excludedEvents)} correction or prose-only event(s) excluded.</p>` : "")
+    + (history.omittedJudgments ? `<p class="control-note">${escape(history.omittedJudgments)} additional verified ordinary judgment(s) omitted.</p>` : "")
+    + `</section>`;
 }
 
 function createConductorControl(fetchImpl, renderPanel, confirmAction, newRequestId = () => globalThis.crypto.randomUUID()){

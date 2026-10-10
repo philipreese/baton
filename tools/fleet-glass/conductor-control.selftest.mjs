@@ -25,6 +25,44 @@ assert.ok(card.includes('application is not verified'));
 assert.ok(!conductorControlHtml(snapshot('unavailable'),'',false,esc).includes('data-conductor-detach'));
 assert.ok(conductorControlHtml({...snapshot(),conductors:[{...row,holder:'<img src=x onerror=alert(1)>'}]},'',false,esc).includes('&lt;img'));
 
+const retainedJudgment={eventIdentity:'a'.repeat(64),obligationId:'ordinary-id',obligationKey:'ordinary-key',
+  sourceRepository:row.repository,claimGeneration:row.claimGeneration,tag:'task',sourceAttempt:'attempt',
+  sourceHeadSha:'b'.repeat(40),sourceObservedAt:'2026-10-09T01:02:03Z',decision:'Hold',actionDisposition:null};
+const historyCard=history=>conductorControlHtml({...snapshot(),conductors:[{...row,stopEligible:true,holdEligible:true,history}]},'',false,esc);
+const retainedCard=historyCard({judgments:[retainedJudgment]});
+assert.ok(retainedCard.includes('Retained judgments'));
+assert.ok(retainedCard.includes('Identity order, not newest-first or activity chronology'));
+assert.ok(retainedCard.includes('At this judgment, no replacement was requested.'));
+assert.ok(retainedCard.includes('No decision rationale retained'));
+assert.ok(retainedCard.includes('Source observation: 2026-10-09T01:02:03Z'));
+assert.ok(retainedCard.includes('Source attempt: attempt'));
+assert.ok(retainedCard.includes(retainedJudgment.sourceHeadSha));
+assert.ok(retainedCard.includes('Exact source identity'));
+assert.ok(!retainedCard.includes('No matching retained action'),'Hold must not imply a pending replacement');
+for(const diagnostic of ['history inspection limit reached','inspection incomplete; additional history not checked']){
+  const rendered=historyCard({judgments:[retainedJudgment],invalidEvents:2,excludedEvents:3,omittedJudgments:4,diagnostic});
+  assert.ok(rendered.includes(diagnostic));
+  assert.ok(rendered.includes('At this judgment, no replacement was requested.'));
+  assert.ok(rendered.includes('2 invalid or incomplete event(s) excluded'));
+  assert.ok(rendered.includes('3 correction or prose-only event(s) excluded'));
+  assert.ok(rendered.includes('4 additional verified ordinary judgment(s) omitted'));
+  assert.ok(rendered.includes('data-conductor-stop="0"'));
+  assert.ok(rendered.includes('data-conductor-hold="0"'));
+  assert.ok(!rendered.includes('No verified ordinary judgments'));
+}
+assert.ok(historyCard({judgments:[],diagnostic:'history inspection limit reached'}).includes('history inspection limit reached'));
+assert.ok(!historyCard({judgments:[],diagnostic:'history inspection limit reached'}).includes('No verified ordinary judgments'));
+assert.ok(historyCard({judgments:[]}).includes('No verified ordinary judgments in the inspected history'));
+assert.ok(historyCard({judgments:[{...retainedJudgment,decision:'ReplaceReview'}]}).includes('No matching retained action'));
+assert.ok(historyCard({judgments:[{...retainedJudgment,decision:'ReplaceReview',actionDisposition:'retained-unlaunched'}]}).includes('Matching retained action: retained-unlaunched'));
+const escapedHistory=historyCard({judgments:[{...retainedJudgment,tag:'<img src=x>',sourceAttempt:'<script>',obligationKey:'<svg onload=alert(1)>',
+  rationale:'PRIVATE-RATIONALE',completedAt:'PRIVATE-COMPLETION',sessionId:'PRIVATE-NATIVE',outputLines:['PRIVATE-PROSE'],workspace:'PRIVATE-PATH'}]});
+assert.ok(escapedHistory.includes('&lt;img'));
+assert.ok(escapedHistory.includes('&lt;script&gt;'));
+assert.ok(escapedHistory.includes('&lt;svg'));
+assert.ok(!escapedHistory.includes('PRIVATE'));
+assert.equal((historyCard({judgments:Array.from({length:21},()=>retainedJudgment)}).match(/class="retained-judgment"/g)||[]).length,20);
+
 let latest, calls=[];
 const render = (snapshot,message,busy) => {latest={snapshot,message,busy};};
 let readCount=0;

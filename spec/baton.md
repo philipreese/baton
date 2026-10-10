@@ -9033,6 +9033,37 @@ No result restores authority, retries a worker or reuses
 the slot. Legacy records lacking issued hosted proof remain unresolved; current authority cannot
 manufacture historical permission. Independent legacy advice completion keeps its existing checks.
 
+### Retained ordinary judgments in Glass (#2670)
+
+The existing conductor card includes **Retained judgments** after an ordinary completed follow
+clears pending, including `Hold` with no action. Each row proves the retained acquisition,
+request/configuration, ordinary event identity/kind, source, launch, complete matching response,
+existing receipt, typed `Hold`/`ReplaceReview` decision and matching journal entry through a shared
+read-only per-event validator. GET never recovers, repairs, appends, replays or launches. Corrections
+and prose-only responses are excluded; missing legacy kind defaults to `halted-task`, whereas
+explicit null/unknown kinds refuse through the existing classifier. An unrelated incomplete or busy
+event cannot erase verified history or change Stop/Hold eligibility. Later task transitions do not
+invalidate historical proof or turn it into current permission or task state.
+
+Rows show task tag, source attempt, exact head and **Source observation** (`ObservedAt`), plus exact
+repository/acquisition/obligation/event identity. They infer neither completion time nor chronology.
+Hold says **“At this judgment, no replacement was requested.”** Every row says **“No decision
+rationale retained”**; prompts, response prose, paths and native session IDs never leave the history
+projection. Current task state is omitted. Optional action disposition requires the complete retained
+obligation ID/key, repository/acquisition, attempt/head and decision/action provenance; tag alone
+cannot join. Without an exact match, ReplaceReview says **“No matching retained action”**.
+
+History enumerates at most 101 directory names. More than 100 yields **“history inspection limit
+reached”**, independently of controls. Otherwise it inspects at most 100 event directories in ordinal
+event-directory identity order, rejecting malformed names/identities. It reads at most 8 MiB aggregate
+evidence (repeated proof reads are charged conservatively) and spends at most one second within the
+existing GET budget. Byte/time exhaustion keeps verified rows and reports **“inspection incomplete;
+additional history not checked”**. At most 20 verified ordinary judgments display in **identity
+order, not newest-first or activity chronology**, with an explicit omitted count. Invalid/incomplete
+and correction/prose events have bounded diagnostic counts. These are defensive limits, not measured
+capacity claims or a global obligation-store limit. This increment does not complete broader live
+task/decision/reason/next-action visibility.
+
 ### Reversible acquisition Hold / Unhold (#2662)
 
 Authenticated bounded `POST /conductor/hold` and `/conductor/unhold` reuse the exact hosted control
