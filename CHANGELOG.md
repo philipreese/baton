@@ -9,6 +9,23 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.70.0](https://github.com/philipreese/baton/compare/v0.69.0...v0.70.0) (2026-10-10)
+
+
+### Features
+
+* **conductor:** Hold hosted acquisitions and durably continue on Unhold ([#2667](https://github.com/philipreese/baton/issues/2667)) ([46992bd](https://github.com/philipreese/baton/commit/46992bdceb210e202de8db2664e82e49d49ce664))
+* **conductor:** Stop hosted acquisitions and transfer ownership from Glass ([#2663](https://github.com/philipreese/baton/issues/2663)) ([5c1cadf](https://github.com/philipreese/baton/commit/5c1cadf1508e07a48d32a8e383de98a8a3f1ed3e))
+* **glass:** Resume automatic delivery for the retained conductor ([#2657](https://github.com/philipreese/baton/issues/2657)) ([3a24fab](https://github.com/philipreese/baton/commit/3a24fabc6440fb7eb334b32598b811116f666ff8))
+* **glass:** Show conductor ownership and detach automatic delivery ([#2654](https://github.com/philipreese/baton/issues/2654)) ([46f8ca4](https://github.com/philipreese/baton/commit/46f8ca4f4a3c1cb9f790e874ff23ccc9cc4c7c44))
+
+
+### Bug Fixes
+
+* **conductor:** Serialize replacement launch with authority cutover ([#2658](https://github.com/philipreese/baton/issues/2658)) ([93a5908](https://github.com/philipreese/baton/commit/93a5908f7fe63465441dbcbb6a0d52e2069967f8))
+* **queue:** Deliver settled worker account to lifecycle review ([#2652](https://github.com/philipreese/baton/issues/2652)) ([63bc8d5](https://github.com/philipreese/baton/commit/63bc8d5b361f7f79921248ee070a5435104b1688))
+* **tests:** Synchronize stopped-work advice recovery journey ([#2649](https://github.com/philipreese/baton/issues/2649)) ([7b57e15](https://github.com/philipreese/baton/commit/7b57e1522ed0db22029bb94cbfa2c14f77f2956e))
+
 ## [0.69.0](https://github.com/philipreese/baton/compare/v0.68.0...v0.69.0) (2026-10-07)
 
 
