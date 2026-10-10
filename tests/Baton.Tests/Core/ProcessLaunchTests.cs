@@ -61,7 +61,9 @@ public class ProcessLaunchTests
             var stderr = launch.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
             await BoundedProcessWait.WaitForExitAsync(launch.Process, TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
             job.Terminate();
+            // wait-ok: bounded EOF diagnosis after contained child exit, with the sibling deliberately alive.
             Assert.Equal("out", await stdout.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            // wait-ok: independently diagnose stderr retention under the same bounded intervention.
             Assert.Equal("err", await stderr.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
             Assert.False(sibling.HasExited);
         }
@@ -117,6 +119,7 @@ public class ProcessLaunchTests
             {
                 // A finite negative observation alone proves little. Killing the sole holder and
                 // seeing both reads complete below is the causal intervention.
+                // wait-ok: negative observation arm; sibling termination and subsequent EOF are the causal proof.
                 await Task.WhenAny(Task.WhenAll(stdout, stderr), Task.Delay(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
                 Assert.False(stdout.IsCompleted);
                 Assert.False(stderr.IsCompleted);
@@ -124,7 +127,9 @@ public class ProcessLaunchTests
                 sibling.Kill(entireProcessTree: true);
                 await BoundedProcessWait.WaitForExitAsync(sibling, TimeSpan.FromSeconds(60), CancellationToken.None);
             }
+            // wait-ok: after the sole raw holder is killed, or with an allowlisted contained sibling still alive.
             Assert.Equal("out", await stdout.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            // wait-ok: independent stderr EOF diagnosis after the same intervention.
             Assert.Equal("err", await stderr.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
             if (contained) Assert.False(sibling.HasExited);
         }
@@ -176,13 +181,16 @@ public class ProcessLaunchTests
             }
             Assert.NotNull(sibling);
             await BoundedProcessWait.WaitForExitAsync(root.Process, TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            // wait-ok: EOF must arrive without waiting for the unrelated sibling's lifetime.
             Assert.Equal("out", await root.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            // wait-ok: same independent stderr invariant, after the root has already exited.
             Assert.Equal("err", await root.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
             Assert.False(sibling.HasExited);
         }
         finally
         {
             job.Terminate();
+            // wait-ok: bounded recovery of the callback's launch task, before killing its owned child.
             if (started is not null) sibling ??= await started.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
             if (sibling is not null)
             {
@@ -226,6 +234,7 @@ public class ProcessLaunchTests
         foreach (nint handle in handles) Assert.False(GetHandleInformation(handle, out _));
         // Must be a different thread: Monitor is reentrant and same-thread recovery is vacuous.
         using Process recovered = (await Task.Run(() => ProcessLaunch.Start(ExitChild()))
+            // wait-ok: detects leaked launch exclusion, not an allowance for child work or scheduling throughput.
             .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))!;
         await BoundedProcessWait.WaitForExitAsync(recovered, TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         Assert.Equal("out", await recovered.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken));
