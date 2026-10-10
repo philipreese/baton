@@ -801,11 +801,13 @@ internal sealed partial class ConductorFollowSession
     }
     private static T Read<T>(string path, int bound = 64 * 1024) => Deserialize<T>(ReadText(path, bound));
 
+    internal const FileShare RetainedReadShare = FileShare.ReadWrite | FileShare.Delete;
+
     private static string ReadText(string path, int bound)
     {
         RejectLinks(path);
         // Glass may read while a running turn atomically replaces its retained state.
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, RetainedReadShare);
         if (stream.Length > bound) throw new IOException("Evidence exceeds its bound.");
         using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
         var text = reader.ReadToEnd();
@@ -827,7 +829,7 @@ internal sealed partial class ConductorFollowSession
     }
 
     private static void Write<T>(string path, T value) => WriteAtomic(path, JsonSerializer.Serialize(value, Json));
-    private static void WriteAtomic(string path, string content)
+    internal static void WriteAtomic(string path, string content)
     {
         RejectLinks(path);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -839,7 +841,10 @@ internal sealed partial class ConductorFollowSession
                 stream.Write(Encoding.UTF8.GetBytes(content));
                 stream.Flush(true);
             }
-            File.Move(temporary, path, overwrite: true);
+            // On Windows Move(overwrite:true) refuses even delete-sharing read handles.
+            // Replace preserves atomic publication while Glass holds the previous snapshot open.
+            if (File.Exists(path)) File.Replace(temporary, path, destinationBackupFileName: null);
+            else File.Move(temporary, path);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

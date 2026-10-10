@@ -13,6 +13,39 @@ namespace Baton.Cli.Tests;
 public sealed partial class ConductorFollowDeliveryTests
 {
     [Fact]
+    public async Task Glass_incomplete_chunked_detach_returns_timeout_without_acknowledging_or_mutating()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.CommandAsync("attach");
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var before = File.ReadAllBytes(fixture.RegistrationPath);
+        Assert.Contains(" 408 ", await glass.SlowDetachStatusLineAsync());
+        Assert.Equal(before, File.ReadAllBytes(fixture.RegistrationPath));
+    }
+
+    [Fact]
+    public async Task Glass_status_read_handle_allows_actual_session_writer_to_replace_evidence()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = await Fixture.CreateAsync();
+        var path = Path.Combine(fixture.Root, "held-read.json");
+        ConductorFollowSession.WriteAtomic(path, "before");
+        using (var reader = new FileStream(path, FileMode.Open, FileAccess.Read, ConductorFollowSession.RetainedReadShare))
+        {
+            ConductorFollowSession.WriteAtomic(path, "after");
+            using var text = new StreamReader(reader);
+            Assert.Equal("before", text.ReadToEnd());
+            Assert.Equal("after", File.ReadAllText(path));
+        }
+        // Negative control: without delete sharing the same writer must propagate refusal,
+        // preserve the prior bytes, and clean up its uncommitted temporary file.
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.ThrowsAny<IOException>(() => ConductorFollowSession.WriteAtomic(path, "refused"));
+        Assert.Equal("after", File.ReadAllText(path));
+        Assert.Empty(Directory.GetFiles(fixture.Root, "held-read.json.tmp.*"));
+    }
+
+    [Fact]
     public async Task Glass_exact_detach_preserves_evidence_and_refuses_subsequent_launch_and_action()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -159,6 +192,19 @@ public sealed partial class ConductorFollowDeliveryTests
 
     private sealed class GlassFixture(GlassHttpService service, HttpClient client) : IAsyncDisposable
     {
+        public async Task<string> SlowDetachStatusLineAsync()
+        {
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(IPAddress.Loopback, client.BaseAddress!.Port, Ct);
+            await using var stream = socket.GetStream();
+            var headers = $"POST /conductor/detach HTTP/1.1\r\nHost: 127.0.0.1:{client.BaseAddress.Port}\r\n"
+                + "Tailscale-User-Login: operator@example.test\r\nTransfer-Encoding: chunked\r\n"
+                + "Content-Type: application/json\r\n\r\n1\r\n{\r\n";
+            await stream.WriteAsync(Encoding.UTF8.GetBytes(headers), Ct);
+            using var reader = new StreamReader(stream);
+            return await reader.ReadLineAsync(Ct).AsTask().WaitAsync(TimeSpan.FromMinutes(1), Ct) ?? "";
+        }
+
         public static async Task<GlassFixture> StartAsync(Fixture fixture)
         {
             var probe = new TcpListener(IPAddress.Loopback, 0);

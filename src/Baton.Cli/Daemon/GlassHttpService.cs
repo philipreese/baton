@@ -419,7 +419,10 @@ internal sealed class GlassHttpService : BackgroundService
                 var length = 0;
                 while (length < chars.Length)
                 {
-                    var count = await reader.ReadAsync(chars.AsMemory(length), timeout.Token).ConfigureAwait(false);
+                    // HttpListener stream reads need an external deadline as cancellation can wait
+                    // for more incoming bytes; a partial chunk must never hold this handler open.
+                    var count = await reader.ReadAsync(chars.AsMemory(length), timeout.Token).AsTask()
+                        .WaitAsync(timeout.Token).ConfigureAwait(false);
                     if (count == 0) break;
                     length += count;
                 }
@@ -439,6 +442,11 @@ internal sealed class GlassHttpService : BackgroundService
 
             await WriteTextAsync(context, HttpStatusCode.OK, "text/plain; charset=utf-8", receipt)
                 .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (isConductorDetach && !cancellationToken.IsCancellationRequested)
+        {
+            await WriteTextAsync(context, HttpStatusCode.RequestTimeout, "text/plain; charset=utf-8",
+                "Detach request timed out before acceptance; automatic delivery was not changed.").ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is BatonFlowException or ArgumentException or UriFormatException
             || isConductorDetach && ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
