@@ -2,8 +2,14 @@ import {readFileSync} from 'node:fs';
 import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./glass.html', import.meta.url), 'utf8');
-const source = html.split('// >>> CONDUCTOR-CONTROL-BEGIN\n')[1]?.split('// <<< CONDUCTOR-CONTROL-END')[0];
+const extractControls = text => text.split(/\/\/ >>> CONDUCTOR-CONTROL-BEGIN\r?\n/)[1]?.split('// <<< CONDUCTOR-CONTROL-END')[0];
+const source = extractControls(html);
 assert.ok(source, 'tests must execute the actual shipped controls');
+for (const newline of ['\n', '\r\n']) {
+  const checkout = html.replace(/\r?\n/g, newline);
+  assert.equal(extractControls(checkout)?.replace(/\r\n/g, '\n'), source.replace(/\r\n/g, '\n'),
+    'shipped controls must be extracted identically from LF and CRLF checkouts');
+}
 const {createConductorControl,conductorControlHtml,wireConductorControl} = new Function(`${source}; return {createConductorControl,conductorControlHtml,wireConductorControl};`)();
 const row = {repository:'github.com/test/repo',holder:'owner',claimGeneration:'generation',attachmentId:'attachment',state:'attached',adapter:'codex',model:'test',effort:'high',permissions:'Read only'};
 const snapshot = (state='attached') => ({observedAt:'2026-10-10T00:00:00Z',conductors:[{...row,state}]});
