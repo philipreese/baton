@@ -147,28 +147,6 @@ public sealed partial class QueueSchedulerService
         }
 
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        if (continueHosted && !snapshot.Held)
-        {
-            foreach (var pending in snapshot.Items.Where(item => item.Halted && item.OwnedTask is not null
-                && item.ReplacementReviewAction is null
-                && item.StoppedWorkJudgment is { FollowAttachmentId: not null, FollowContinuationPending: true }))
-            {
-                if (!await ConductorFollowSession.CanContinueAttachedAsync(pending, cancellationToken).ConfigureAwait(false)) continue;
-                _stoppedWorkTaskKey = pending.StoppedWorkJudgment!.Key;
-                _adviceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var followToken = _adviceCancellation.Token;
-                _stoppedWorkTask = Task.Run(async () =>
-                {
-                    try { await NotifyOwnedHaltAsync(pending, followToken).ConfigureAwait(false); }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ConductorClaimException
-                        or ConductorObligationStoreException or CliArgumentException or JsonException)
-                    {
-                        Console.Error.WriteLine("Hosted continuation could not persist its disposition; durable source remains pending for reconciliation.");
-                    }
-                }, followToken);
-                return;
-            }
-        }
         foreach (var item in snapshot.Items.Where(item => item.StoppedWorkJudgment is not null))
         {
             var intent = item.StoppedWorkJudgment!;
@@ -221,16 +199,57 @@ public sealed partial class QueueSchedulerService
                 token, cancellationToken));
             return;
         }
+        if (continueHosted && !snapshot.Held)
+        {
+            var pending = snapshot.Items.Where(item => item.Halted && item.OwnedTask is not null
+                && item.ReplacementReviewAction is null
+                && item.StoppedWorkJudgment is { FollowAttachmentId: not null, FollowContinuationPending: true }).ToArray();
+            if (pending.Length == 0) return;
+            _adviceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var token = _adviceCancellation.Token;
+            _stoppedWorkTask = Task.Run(() => ContinueAndDrainHostedWorkAsync(pending, token, cancellationToken));
+        }
+    }
+
+    private async Task ContinueAndDrainHostedWorkAsync(IReadOnlyList<QueueItem> pending,
+        CancellationToken token, CancellationToken schedulerToken)
+    {
+        try
+        {
+            // One attempt per retained identity in this snapshot; a refusal cannot monopolize the slot.
+            foreach (var source in pending)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    if (await ConductorFollowSession.CanContinueAttachedAsync(source, token).ConfigureAwait(false))
+                        await NotifyOwnedHaltAsync(source, token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ConductorClaimException
+                    or ConductorObligationStoreException or CliArgumentException or JsonException)
+                {
+                    Console.Error.WriteLine("Hosted continuation could not persist its disposition; durable source remains pending for reconciliation.");
+                }
+            }
+        }
+        finally { await DrainStoppedWorkNotificationsAsync(token, schedulerToken).ConfigureAwait(false); }
     }
 
     private async Task ProcessAndDrainStoppedWorkAdviceAsync(QueueItem source, ConductorObligation obligation,
         CancellationToken token, CancellationToken schedulerToken)
     {
         await ProcessStoppedWorkAdviceAsync(source, obligation, token).ConfigureAwait(false);
+        await DrainStoppedWorkNotificationsAsync(token, schedulerToken, obligation).ConfigureAwait(false);
+    }
+
+    private async Task DrainStoppedWorkNotificationsAsync(CancellationToken token, CancellationToken schedulerToken,
+        ConductorObligation? completed = null)
+    {
         try
         {
             token.ThrowIfCancellationRequested();
-            await _conductorObligations.CompleteLegacyHaltNotificationAsync(obligation, token).ConfigureAwait(false);
+            if (completed is not null)
+                await _conductorObligations.CompleteLegacyHaltNotificationAsync(completed, token).ConfigureAwait(false);
             await _adviceReconciliation.WaitAsync(token).ConfigureAwait(false);
             try
             {

@@ -64,7 +64,7 @@ public sealed partial class ConductorFollowDeliveryTests
         Assert.True(File.Exists(Path.Combine(legacyDirectory, "source-checked")));
         var refused = await fixture.RowAsync("stale-first");
         Assert.True(refused.StoppedWorkJudgment!.FollowContinuationPending);
-        Assert.Equal("Session admission or retained state refused; no new turn admitted.", refused.StoppedWorkJudgment.FollowContinuationWait);
+        Assert.Equal("Claim, trust, source, or state admission refused; no new turn admitted.", refused.StoppedWorkJudgment.FollowContinuationWait);
         Assert.Equal("Owner must inspect retained evidence and current eligibility; uncertain launches have no retry path.", refused.StoppedWorkJudgment.FollowContinuationTrigger);
         Assert.Null(refused.ReplacementReviewAction);
         Assert.Equal(valid.AutomaticFixUsed, continued.AutomaticFixUsed);
