@@ -10,18 +10,28 @@ public class ManagedProcessLaunchOwnershipTests
     // Inspect resolved IL, not receiver spellings: aliases, arbitrary variable names and async
     // compiler-generated methods must not bypass the process-wide inheritance exclusion (#2677).
     [Fact]
-    public void Production_managed_starts_belong_only_to_the_shared_seam()
+    public void Managed_starts_belong_only_to_the_shared_seam_or_named_controls()
     {
-        var assemblies = new[] { "Baton", "Baton.Vendors", "Baton.Cli", "Baton.VendorProbe" }.Select(Assembly.Load);
+        var fixtureNames = Directory.EnumerateFiles(Path.Combine(RepoRoot.Locate(), "tests"), "*.csproj", SearchOption.AllDirectories)
+            .Select(Path.GetFileNameWithoutExtension);
+        var assemblies = new[] { "Baton", "Baton.Vendors", "Baton.Cli", "Baton.VendorProbe", "Baton.GateProbe" }
+            .Concat(fixtureNames).Distinct().Select(name => Assembly.Load(name!));
         var offenders = assemblies.SelectMany(assembly => assembly.GetTypes())
             .Where(type => type != typeof(ProcessLaunch))
             .SelectMany(Methods)
+            .Where(method => !IsNamedControl(method))
             .Where(method => RawStarts(method).Any())
             .Select(method => $"{method.DeclaringType!.FullName}.{method.Name}")
             .Order(StringComparer.Ordinal).ToArray();
         Assert.Empty(offenders);
         Assert.NotEmpty(Methods(typeof(ProcessLaunch)).SelectMany(RawStarts));
     }
+
+    private static bool IsNamedControl(MethodBase method) =>
+        (method.DeclaringType == typeof(ManagedProcessLaunchOwnershipTests)
+            && method.Name is nameof(StaticBypass) or nameof(InstanceBypass))
+        || (method.DeclaringType == typeof(Baton.Tests.Core.ProcessLaunchTests)
+            && method.Name == "RawSiblingBypass");
 
     [Theory]
     [InlineData(nameof(StaticBypass))]

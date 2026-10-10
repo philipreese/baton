@@ -107,7 +107,7 @@ public class ProcessLaunchTests
                 }
                 else
                 {
-                    sibling = Process.Start(Sleeper()); // Intentional isolated bypass control (#2677).
+                    sibling = RawSiblingBypass();
                 }
             });
             Assert.NotNull(sibling);
@@ -242,6 +242,9 @@ public class ProcessLaunchTests
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetHandleInformation(nint handle, out uint flags);
+
+    // Intentional isolated bypass control (#2677), called only by the serialized causal test.
+    private static Process? RawSiblingBypass() => Process.Start(Sleeper());
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
