@@ -8932,7 +8932,10 @@ an attached frozen session is `frozen`. Separate `resumeEligible` is true only f
 non-frozen session with complete retained delivery evidence; detached frozen rows remain detached
 with eligibility false. A terminal stopped acquisition is `stopped`; an operator takeover projects
 the new holder/address separately from the retained session as `taken-over`, with provider/model
-labeled historical and no replacement hosted session. Released claims retain readable receipts as
+labeled historical and no replacement hosted session. Only a matching Take Over receipt establishes
+that transfer; a matching Stop receipt followed by explicit release/new acquisition projects the retained
+provider as `prior-acquisition`, with no current hosted session or controls for the old attachment.
+Released claims retain readable receipts as
 `released`. Separate Stop/Take Over eligibility depends on bounded exact claim/registration/session
 identity, independent of healthy historical delivery evidence. Corrupt, stale, mismatched, unsafe-to-display or unreadable state is
 explicitly `unavailable`. `attached` proves registration, not health or a currently running turn.
@@ -8989,6 +8992,7 @@ Authenticated bounded `POST /conductor/stop` and `POST /conductor/takeover` bind
 holder, claim generation, attachment ID, client request ID and nonblank reason. Take Over additionally
 requires a different explicitly named destination holder and bounded human-readable address. The
 server records its configured authenticated operator as issuer; requests cannot supply issuer or grants.
+Destination holders must pass the shared safe Glass label policy; path-shaped holder text refuses.
 Addresses are inert escaped display text, never executable or verified endpoints.
 
 Both controls acquire queue then claim locks without waiting for the running session, forge or vendor.
@@ -9022,7 +9026,9 @@ evidence, never reusable permission. Already-issued completion validates that bi
 request/source/response evidence independently of today's holder, attachment, trust, queue hold or
 opt-in. Independent full-head verdict, attempt/room and digest checks remain required. Exact proof
 observes the original obligation once; terminal observations without sufficient proof retain an owner,
-unresolved reason and reconciliation trigger. No result restores authority, retries a worker or reuses
+unresolved reason and reconciliation trigger. Once observed, that historical completion is retained
+without current-head revalidation; unchanged unresolved disposition does not rewrite the queue.
+No result restores authority, retries a worker or reuses
 the slot. Legacy records lacking issued hosted proof remain unresolved; current authority cannot
 manufacture historical permission. Independent legacy advice completion keeps its existing checks.
 

@@ -3282,7 +3282,7 @@ function createGlassWriteController(fetchImpl, applySnapshot, banner, renderQueu
 
 // >>> CONDUCTOR-CONTROL-BEGIN
 function conductorControlHtml(snapshot, message, busy, escape){
-  const states = {attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor frozen on uncertain delivery",stopped:"Hosted acquisition stopped",released:"Claim released; retained history", "taken-over":"Ownership transferred; no replacement hosted session started"};
+  const states = {attached:"Automatic delivery attached",detached:"Automatic delivery detached",unattached:"No automatic delivery attached",unavailable:"Conductor state unavailable",frozen:"Conductor frozen on uncertain delivery",stopped:"Hosted acquisition stopped",released:"Claim released; retained history", "taken-over":"Ownership transferred; no replacement hosted session started", "prior-acquisition":"Retained provider from a prior acquisition; no current hosted session"};
   let cards = "";
   if(snapshot){
     cards = snapshot.conductors.map((row, index) => {
@@ -3360,9 +3360,10 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
     if(!row || !eligible(row) || ![row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)) return;
     const action = operation === "stop" ? "Stop" : operation === "takeover" ? "Take Over" : resuming ? "Resume" : "Detach";
     const bounded = (value,bound) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= bound && !/[\x00-\x1f\x7f]/.test(value);
+    const safeOwner = value => bounded(value,256) && !/[\\\x80-\x9f]/.test(value) && !value.includes(":/") && !value.trim().startsWith("/");
     if(operation && (!bounded(inputs.reason,1024) || operation === "takeover"
-      && (!bounded(inputs.destinationHolder,256) || inputs.destinationHolder.trim() === row.holder || !bounded(inputs.destinationAddress,512)))){
-      message = "Enter a reason and, for Take Over, a different named owner and address."; draw(); return;
+      && (!safeOwner(inputs.destinationHolder) || inputs.destinationHolder.trim() === row.holder || !bounded(inputs.destinationAddress,512)))){
+      message = "Enter a reason and, for Take Over, a different named owner and address. Owner names cannot contain backslashes, :/ or a leading slash."; draw(); return;
     }
     if(!operation && !confirmAction(resuming ? `Resume automatic delivery for ${row.repository}? Only future handoffs will be accepted. Work halted while detached and old handoffs will not be replayed.`
       : `Detach automatic delivery for ${row.repository}? Running turns and actions already sent will not be cancelled.`)) return;

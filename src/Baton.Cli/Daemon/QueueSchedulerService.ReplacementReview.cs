@@ -170,6 +170,8 @@ public sealed partial class QueueSchedulerService
             }
             if (action.CompletionProof is { Length: > 0 } proof)
             {
+                // Observation records a verified historical result, not today's launch permission.
+                if (action.ActionObservedAt is not null) continue;
                 var obligation = await _conductorObligations.ReadAsync(action.ObligationKey, cancellationToken)
                     .ConfigureAwait(false);
                 var authentic = false;
@@ -213,22 +215,6 @@ public sealed partial class QueueSchedulerService
                 {
                     await _conductorObligations.ObserveActionAsync(action.ObligationKey, proof, cancellationToken)
                         .ConfigureAwait(false);
-                    if (action.ActionObservedAt is null || action.BlockedReason is not null)
-                        await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
-                        {
-                            Items = current.Items.Select(candidate => candidate.Tag == item.Tag && candidate.ReplacementReviewAction == action
-                                ? candidate with
-                                {
-                                    ReplacementReviewAction = action with
-                                    {
-                                        ActionObservedAt = DateTimeOffset.UtcNow,
-                                        BlockedReason = null,
-                                        NextTrigger = null,
-                                    },
-                                } : candidate).ToList(),
-                        }, cancellationToken).ConfigureAwait(false);
-                }
-                else
                     await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
                     {
                         Items = current.Items.Select(candidate => candidate.Tag == item.Tag && candidate.ReplacementReviewAction == action
@@ -236,11 +222,31 @@ public sealed partial class QueueSchedulerService
                             {
                                 ReplacementReviewAction = action with
                                 {
-                                    BlockedReason = "Issued result unresolved: retained admission or exact completion proof could not be verified.",
-                                    NextTrigger = "Owner must inspect retained issued authority and exact-head verdict; next trusted reconciliation rechecks proof.",
+                                    ActionObservedAt = DateTimeOffset.UtcNow,
+                                    BlockedReason = null,
+                                    NextTrigger = null,
                                 },
                             } : candidate).ToList(),
                     }, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    const string unresolvedReason = "Issued result unresolved: retained admission or exact completion proof could not be verified.";
+                    const string trigger = "Owner must inspect retained issued authority and exact-head verdict; next trusted reconciliation rechecks proof.";
+                    if (action.BlockedReason == unresolvedReason && action.NextTrigger == trigger) continue;
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                    {
+                        Items = current.Items.Select(candidate => candidate.Tag == item.Tag && candidate.ReplacementReviewAction == action
+                            ? candidate with
+                            {
+                                ReplacementReviewAction = action with
+                                {
+                                    BlockedReason = unresolvedReason,
+                                    NextTrigger = trigger,
+                                },
+                            } : candidate).ToList(),
+                    }, cancellationToken).ConfigureAwait(false);
+                }
                 continue;
             }
 

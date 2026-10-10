@@ -357,11 +357,16 @@ public static class ConductorClaimStore
             || !Label(request.ClaimGeneration, 256) || !Label(request.AttachmentId, 32)
             || request.AttachmentId.Length != 32 || !request.AttachmentId.All(Uri.IsHexDigit)
             || !Label(request.RequestId, 128) || !Label(request.Reason, 1024) || !Label(issuer, 256)
-            || takeover && (!Label(request.DestinationHolder, 256) || !Label(request.DestinationAddress, 512)
+            || takeover && (!Label(request.DestinationHolder, 256) || !IsSafeHostedHolderLabel(request.DestinationHolder!)
+                || !Label(request.DestinationAddress, 512)
                 || request.DestinationHolder == request.Holder)
             || !takeover && (request.DestinationHolder is not null || request.DestinationAddress is not null))
             throw new ConductorClaimException("A bounded exact control identity, reason and explicit takeover destination are required.");
     }
+
+    /// <summary>Holder display data admitted by hosted Take Over must remain readable in Glass.</summary>
+    public static bool IsSafeHostedHolderLabel(string value) => value.Length <= 256 && !value.Any(char.IsControl)
+        && !value.Contains('\\') && !value.Contains(":/", StringComparison.Ordinal) && !value.StartsWith('/');
 
     /// <summary>
     /// Lists all currently held repository claims under <paramref name="batonRoot"/> (spec/baton.md §14).

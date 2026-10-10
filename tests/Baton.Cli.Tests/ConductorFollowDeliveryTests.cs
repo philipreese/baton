@@ -877,6 +877,8 @@ public sealed partial class ConductorFollowDeliveryTests
         public int LegacyCalls { get; private set; }
         public ConductorObligationStore Store { get; }
         private FakeGh Gh { get; } = new();
+        public string PullRequestState { set => Gh.State = value; }
+        public int RemoteCalls => Gh.Calls;
 
         public Fixture(string? root = null)
         {
@@ -1211,13 +1213,16 @@ public sealed partial class ConductorFollowDeliveryTests
     private sealed class FakeGh : IGhCliRunner
     {
         public string HeadSha { get; set; } = Head;
+        public string State { get; set; } = "OPEN";
+        public int Calls { get; private set; }
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
+            Calls++;
             if (args is ["api", ..]) return Task.FromResult(RequiredCheckFixture.Read(args, Repository, HeadSha,
                 new GhCliResult(true, 0, "[{\"name\":\"ci\",\"bucket\":\"pass\"}]", "")));
             if (args is ["pr", "checks", ..]) return Task.FromResult(new GhCliResult(true, 0,
                 "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", ""));
-            var pr = "{\"number\":77,\"state\":\"OPEN\",\"isDraft\":true,\"headRefOid\":\"" + HeadSha
+            var pr = "{\"number\":77,\"state\":\"" + State + "\",\"isDraft\":true,\"headRefOid\":\"" + HeadSha
                 + "\",\"headRefName\":\"2632-lane\",\"baseRefName\":\"main\",\"isCrossRepository\":false,\"statusCheckRollup\":[]}";
             return Task.FromResult(new GhCliResult(true, 0, args is ["pr", "view", ..] ? pr : "[" + pr + "]", ""));
         }

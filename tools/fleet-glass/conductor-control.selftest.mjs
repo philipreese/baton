@@ -221,5 +221,12 @@ const emptyReason=createConductorControl(async path=>{
 },render,()=>true);
 await emptyReason.refresh();await emptyReason.stop(0,{reason:' '});
 await emptyReason.takeover(0,{reason:'reason',destinationHolder:row.holder,destinationAddress:'address'});
+for(const destinationHolder of ['CORP\\alice','/alice','owner:/alice']){
+  await emptyReason.takeover(0,{reason:'reason',destinationHolder,destinationAddress:'address'});
+}
 assert.equal(staleInputsWrites,0);
+const priorAcquisition=conductorControlHtml({...snapshot(),conductors:[{...controllable,state:'prior-acquisition',historicalProvider:true,stopEligible:false,takeoverEligible:false,resumeEligible:false}]},'',false,esc);
+assert.ok(priorAcquisition.includes('Retained provider from a prior acquisition'));
+assert.ok(!priorAcquisition.includes('Ownership transferred'));
+assert.ok(!priorAcquisition.includes('data-conductor-resume'));
 console.log('Conductor controls: shipped render, exact mutation, refusal, uncertainty, refresh and click wiring passed.');

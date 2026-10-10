@@ -92,11 +92,12 @@ public sealed partial class ConductorFollowDeliveryTests
         {
             await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
             Assert.Null((await fixture.RowAsync("pending")).LaunchMayHaveBegunAt);
+            ConductorFollowSession.AfterHostedControlFence = () => throw new IOException("Offline cleanup failure");
             using var response = await glass.ControlAsync(verb, body);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             using var receipt = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
             Assert.Equal("operator@example.test", receipt.RootElement.GetProperty("receipt").GetProperty("issuer").GetString());
-            Assert.Equal("complete", receipt.RootElement.GetProperty("cleanup").GetString());
+            Assert.StartsWith("pending", receipt.RootElement.GetProperty("cleanup").GetString());
             var action = source.ReplacementReviewAction!;
             var refused = await Record.ExceptionAsync(() => ReplacementReviewConductorCommand.ExecuteAsync(
                 ConductorOptionsParser.Parse(["act", "--obligation", action.ObligationKey, "--holder", action.Holder,
@@ -105,7 +106,12 @@ public sealed partial class ConductorFollowDeliveryTests
             Assert.NotNull(refused);
             Assert.Equal(QueueReplacementReviewOrigin.Automatic, (await fixture.RowAsync("pending")).ReplacementReviewAction!.Origin);
         }
-        finally { release.TrySetResult(); await tick.WaitAsync(TimeSpan.FromMinutes(1), Ct); }
+        finally
+        {
+            release.TrySetResult();
+            try { await tick.WaitAsync(TimeSpan.FromMinutes(1), Ct); }
+            finally { ConductorFollowSession.AfterHostedControlFence = null; }
+        }
         var blocked = await fixture.RowAsync("pending");
         Assert.Equal(0, launches);
         Assert.Null(blocked.LaunchMayHaveBegunAt);
@@ -114,7 +120,7 @@ public sealed partial class ConductorFollowDeliveryTests
         Assert.Equal(source.Round, blocked.Round);
         Assert.Equal(source.ReplacementReviewAction!.EvidenceDigest, blocked.ReplacementReviewAction.EvidenceDigest);
         Assert.Equal(original, await fixture.Store.ReadAsync(fixture.Key("pending"), Ct));
-        Assert.False(JsonNode.Parse(File.ReadAllText(fixture.RegistrationPath))!["attached"]!.GetValue<bool>());
+        Assert.True(JsonNode.Parse(File.ReadAllText(fixture.RegistrationPath))!["attached"]!.GetValue<bool>());
         using var restarted = fixture.Scheduler(launch: (_, _) => throw new InvalidOperationException("Revoked slot must never launch"));
         await restarted.TickOnceAsync(Ct);
         await restarted.RecoverAttachedFollowAsync(Ct);
@@ -198,15 +204,23 @@ public sealed partial class ConductorFollowDeliveryTests
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+            ConductorFollowSession.AfterHostedControlFence = () => throw new IOException("Offline cleanup failure");
             using var response = await glass.ControlAsync(verb, body);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.False(halt.IsCompleted);
         }
-        finally { release.TrySetResult(); }
+        finally
+        {
+            release.TrySetResult();
+            try { await halt.WaitAsync(TimeSpan.FromMinutes(1), Ct); }
+            finally { ConductorFollowSession.AfterHostedControlFence = null; }
+        }
         await halt.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+        Assert.True(JsonNode.Parse(File.ReadAllText(fixture.RegistrationPath))!["attached"]!.GetValue<bool>());
         Assert.NotNull(fixture.Receipt("delayed"));
         Assert.NotNull(ConductorFollowSession.ReadDecisionEvidence(Path.GetDirectoryName(fixture.EventEvidencePath("delayed", "decision.json"))!));
         Assert.Null((await fixture.RowAsync("delayed")).ReplacementReviewAction);
+        Assert.Null((await fixture.RowAsync("delayed")).LaunchMayHaveBegunAt);
         using var restarted = fixture.Scheduler();
         await restarted.RecoverAttachedFollowAsync(Ct);
         Assert.Single(fixture.Calls);

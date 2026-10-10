@@ -90,15 +90,15 @@ internal sealed partial class ConductorFollowSession
                         continue;
                     }
                     var displaced = registration.Holder != claim.Holder || registration.ClaimGeneration != generation;
-                    if (claim.Stopped || displaced && controls.Any(c => c.Request.Holder == registration.Holder
-                        && c.Request.ClaimGeneration == registration.ClaimGeneration && c.Request.AttachmentId == registration.Id))
+                    var transferred = displaced && controls.Any(c => c.Operation == "takeover" && MatchesControlTarget(registration, c));
+                    if (claim.Stopped || displaced && controls.Any(c => MatchesControlTarget(registration, c)))
                     {
                         ValidateControlRegistration(identity, root, registration, registration.Holder,
                             registration.ClaimGeneration, registration.Id);
                         var historical = Read<ConductorFollowState>(Path.Combine(registration.SessionDirectory, "session.json"));
                         status = status with
                         {
-                            State = claim.Stopped ? "stopped" : "taken-over",
+                            State = claim.Stopped ? "stopped" : transferred ? "taken-over" : "prior-acquisition",
                             AttachmentId = registration.Id,
                             RetainedHolder = registration.Holder,
                             RetainedGeneration = registration.ClaimGeneration,
@@ -108,7 +108,8 @@ internal sealed partial class ConductorFollowSession
                             Effort = historical.Effort,
                             TakeoverEligible = claim.Stopped,
                             Diagnostic = claim.Stopped ? "Hosted acquisition stopped; no Resume path."
-                                : "Ownership transferred; no replacement hosted session started.",
+                                : transferred ? "Ownership transferred; no replacement hosted session started."
+                                : "Retained provider from a prior acquisition; no hosted session attached to the current acquisition.",
                         };
                         var finalClaim = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
                         if (finalClaim?.Holder != claim.Holder || finalClaim.Stopped != claim.Stopped
@@ -185,8 +186,7 @@ internal sealed partial class ConductorFollowSession
         return new(DateTimeOffset.UtcNow, rows);
     }
 
-    private static string SafeLabel(string value) => value.Length <= 256 && !value.Any(char.IsControl)
-        && !value.Contains('\\') && !value.Contains(":/") && !value.StartsWith('/') ? value : "<redacted>";
+    private static string SafeLabel(string value) => ConductorClaimStore.IsSafeHostedHolderLabel(value) ? value : "<redacted>";
 
     private static async Task<ConductorFollowSession> ReadGlassSessionAsync(RepositoryIdentity identity,
         string generation, string root, ConductorFollowAttachment registration,
@@ -312,7 +312,6 @@ internal sealed partial class ConductorFollowSession
                 }, GlassLockTimeout);
                 try
                 {
-                    AfterHostedControlFence?.Invoke();
                     CleanupHostedControl(identity, root, receipt);
                 }
                 catch (Exception ex) when (IsRefusal(ex))
@@ -334,7 +333,11 @@ internal sealed partial class ConductorFollowSession
         try { registration = Read<ConductorFollowAttachment>(path); }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return; }
         if (!MatchesControlTarget(registration, receipt)) return;
-        if (registration.Attached) Write(path, registration with { Attached = false });
+        if (registration.Attached)
+        {
+            AfterHostedControlFence?.Invoke();
+            Write(path, registration with { Attached = false });
+        }
     }
 
     private static string ControlCleanupState(RepositoryIdentity identity, string root, ConductorHostedControlReceipt receipt)

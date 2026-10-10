@@ -73,6 +73,28 @@ public sealed class ConductorHostedControlStoreTests
     }
 
     [Theory]
+    [InlineData("CORP\\alice")]
+    [InlineData("/alice")]
+    [InlineData("owner:/alice")]
+    public async Task Unsafe_takeover_destination_refuses_before_target_validation_without_changing_authority(string holder)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "baton-controls-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var claim = await ConductorClaimStore.ClaimAsync(Repo, "old", root, cancellationToken: Ct);
+            var request = new ConductorHostedControlRequest(Repo.Value, "old", ConductorClaimStore.GetClaimGeneration(claim),
+                new string('a', 32), "request", "operator reason", holder, "human address");
+            var path = Path.Combine(root, Repo.FileSlug, BatonPaths.ConductorClaimFileName);
+            var bytes = File.ReadAllBytes(path);
+            Assert.Throws<ConductorClaimException>(() => ConductorClaimStore.ApplyHostedControl(Repo, root, request,
+                "operator", true, _ => throw new InvalidOperationException("Unsafe input must refuse before target validation")));
+            Assert.Equal(bytes, File.ReadAllBytes(path));
+            Assert.Equal(JsonSerializer.Serialize(claim), JsonSerializer.Serialize(await ConductorClaimStore.GetClaimAsync(Repo, root, Ct)));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(root); }
+    }
+
+    [Theory]
     [InlineData("stopped")]
     [InlineData("takeover-missing-request")]
     [InlineData("receipt-generation")]
