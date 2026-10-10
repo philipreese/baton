@@ -843,8 +843,22 @@ internal sealed partial class ConductorFollowSession
             }
             // On Windows Move(overwrite:true) refuses even delete-sharing read handles.
             // Replace preserves atomic publication while Glass holds the previous snapshot open.
-            if (File.Exists(path)) File.Replace(temporary, path, destinationBackupFileName: null);
-            else File.Move(temporary, path);
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    if (File.Exists(path)) File.Replace(temporary, path, destinationBackupFileName: null);
+                    else File.Move(temporary, path);
+                    break;
+                }
+                catch (IOException ex) when (OperatingSystem.IsWindows() && attempt < 4
+                    && (ex.HResult & 0xffff) is 32 or 33 or 1175 && File.Exists(temporary))
+                {
+                    // A transient sharing/removal refusal can follow a just-closed reader on
+                    // Windows. Retry only the same unpublished bytes; exhaustion still fails closed.
+                    Thread.Sleep(25 * (attempt + 1));
+                }
+            }
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
