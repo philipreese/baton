@@ -165,6 +165,10 @@ jobs:
       - name: Test
         run: pixi run ${{ matrix.task }}
 
+      - name: Report long-running test identities
+        if: always()
+        run: pixi run python tools/ci/print_long_running.py
+
       # Diagnostic for the #398 file-lock flake class. On a Windows test failure, capture whether
       # Defender real-time protection is actually on (PR #922 measured that windows-latest excludes
       # C:\ and D:\ whole-drive, so realtime is almost certainly irrelevant to these files — this

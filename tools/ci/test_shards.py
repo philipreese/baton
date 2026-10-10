@@ -108,6 +108,17 @@ def test_command(project: PurePosixPath) -> list[str]:
         "--no-build",
         "--minimum-expected-tests",
         "1",
+        "--output",
+        "Detailed",
+        "--long-running",
+        "30",
+        "--xunit-diagnostics",
+        "on",
+        "--diagnostic",
+        "--diagnostic-verbosity",
+        "Information",
+        "--diagnostic-output-directory",
+        str(ROOT / ".local-data/ci-test-diagnostics" / project.stem),
     ]
 
 

@@ -10,6 +10,7 @@ import tempfile
 import tomllib
 
 from aggregate import verify_coverage
+from print_long_running import safe_warning
 from test_shards import ContractError, discover_shards, evaluated_identity, test_command
 
 
@@ -105,6 +106,17 @@ def check_discovery() -> None:
         "--no-build",
         "--minimum-expected-tests",
         "1",
+        "--output",
+        "Detailed",
+        "--long-running",
+        "30",
+        "--xunit-diagnostics",
+        "on",
+        "--diagnostic",
+        "--diagnostic-verbosity",
+        "Information",
+        "--diagnostic-output-directory",
+        str(ROOT / ".local-data/ci-test-diagnostics" / FLOW.stem),
     ]
 
 
@@ -121,6 +133,11 @@ def check_pixi_and_workflow() -> None:
     legs = re.findall(r'name: "([^"]+)", task: "([^"]+)"', matrix)
     assert legs == [("windows-shard-flow", "test-flow"), ("windows-shard-other", "test-other")]
     assert workflow.count("name: Snapshot ~/.baton before tests") == 1
+    diagnostics = workflow.split("name: Report long-running test identities", 1)[1].split("- name:", 1)[0]
+    assert "if: always()" in diagnostics
+    assert "run: pixi run python tools/ci/print_long_running.py" in diagnostics
+    assert "upload-artifact" not in diagnostics
+    assert "path: .local-data/ci-test-diagnostics" not in workflow
     sentinel = workflow.split("name: Assert ~/.baton untouched by tests", 1)[1].split("- name:", 1)[0]
     assert "if: always()" in sentinel and "aer-before.txt" in sentinel and "aer-after.txt" in sentinel
     assert workflow.count("ref: ${{ github.sha }}") >= 4
@@ -175,6 +192,23 @@ def check_aggregate_table() -> None:
 
 
 def main() -> None:
+    prefix = "2026-10-10T14:37:28.2162448+00:00 xUnit.net INFORMATION "
+    identity = "Baton.Cli.Tests.ExampleTests.Wait_is_bounded"
+    assert safe_warning(prefix + f"[Long Running Test] '{identity}', Elapsed: 00:00:11") == (
+        f"long-running: {identity} elapsed=00:00:11"
+    )
+    assert safe_warning(prefix + f"[Long Running Test] '{identity}(secret: \"hidden\")', Elapsed: 00:01:02.123") == (
+        f"long-running: {identity} elapsed=00:01:02.123"
+    )
+    for line in (
+        "arbitrary metadata",
+        prefix + "[Long Running Test] 'Other.Tests.Name', Elapsed: 00:00:11",
+        prefix + "[Long Running Test] 'C:\\secret', Elapsed: 00:00:11",
+        prefix + f"[Long Running Test] '{identity}', Elapsed: secret",
+        prefix + f"[Long Running Test] '{identity}', Elapsed: 00:99:11",
+        prefix + f"[Long Running Test] '{identity}(secret: hidden\nvalue)', Elapsed: 00:00:11",
+    ):
+        assert safe_warning(line) is None
     check_discovery()
     check_pixi_and_workflow()
     check_aggregate_table()
