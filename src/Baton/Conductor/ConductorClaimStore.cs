@@ -69,6 +69,8 @@ public static class ConductorClaimStore
                 {
                     if (string.Equals(existing.Holder, normalizedHolder, StringComparison.Ordinal))
                     {
+                        if (existing.Stopped)
+                            throw new ConductorClaimException("This hosted acquisition is stopped; explicitly release or take over before a new claim.");
                         // Idempotent claim by the same holder: do not invent a second acquisition.
                         return existing;
                     }
@@ -80,13 +82,14 @@ public static class ConductorClaimStore
                         takeoverCommand);
                 }
 
+                var generation = Guid.NewGuid().ToString("N");
                 var transitions = new List<ConductorClaimTransition>(existing?.Transitions ?? []);
                 transitions.Add(new ConductorClaimTransition(
                     Kind: ConductorClaimTransitionKind.Claim,
                     Holder: normalizedHolder,
                     DisplacedHolder: null,
                     Reason: null,
-                    Timestamp: timestamp));
+                    Timestamp: timestamp, Generation: generation));
 
                 var record = new ConductorClaimRecord(
                     Repository: identity.Value,
@@ -95,7 +98,7 @@ public static class ConductorClaimStore
                     AcquiredAt: timestamp,
                     Takeover: null,
                     Transitions: transitions,
-                    ClaimGeneration: Guid.NewGuid().ToString("N"));
+                    ClaimGeneration: generation);
 
                 WriteUnlocked(path, record);
                 return record;
@@ -152,6 +155,7 @@ public static class ConductorClaimStore
                         + "Takeover explicitly replaces another holder.");
                 }
 
+                var generation = Guid.NewGuid().ToString("N");
                 var displaced = existing.Holder;
                 var takeoverProvenance = new ConductorTakeoverProvenance(
                     DisplacedHolder: displaced,
@@ -164,7 +168,7 @@ public static class ConductorClaimStore
                     Holder: normalizedHolder,
                     DisplacedHolder: displaced,
                     Reason: normalizedReason,
-                    Timestamp: timestamp));
+                    Timestamp: timestamp, Generation: generation));
 
                 var record = new ConductorClaimRecord(
                     Repository: identity.Value,
@@ -173,7 +177,7 @@ public static class ConductorClaimStore
                     AcquiredAt: timestamp,
                     Takeover: takeoverProvenance,
                     Transitions: transitions,
-                    ClaimGeneration: Guid.NewGuid().ToString("N"));
+                    ClaimGeneration: generation);
 
                 WriteUnlocked(path, record);
                 return (record, displaced);
@@ -292,6 +296,78 @@ public static class ConductorClaimStore
         RunUnderClaimLock(GetClaimFilePath(batonRoot, identity.FileSlug),
             () => operation(ReadUnlocked(GetClaimFilePath(batonRoot, identity.FileSlug))), lockTimeout);
 
+    /// <summary>Current permission to consume a hosted acquisition; retained evidence is separate.</summary>
+    public static bool IsCurrentHostedAuthority(ConductorClaimRecord? claim, string holder, string generation) =>
+        claim is { Stopped: false } && claim.Holder == holder && GetClaimGeneration(claim) == generation;
+
+    /// <summary>Caller owns queue admission. Replay precedes stale-target validation, under one claim lock.</summary>
+    public static ConductorHostedControlReceipt ApplyHostedControl(
+        RepositoryIdentity identity, string batonRoot, ConductorHostedControlRequest request,
+        string issuer, bool takeover, Action<ConductorClaimRecord> validateTarget,
+        TimeSpan? lockTimeout = null) => RunUnderClaimLock(GetClaimFilePath(batonRoot, identity.FileSlug), () =>
+    {
+        ValidateControlInput(request, issuer, takeover, identity.Value);
+        var path = GetClaimFilePath(batonRoot, identity.FileSlug);
+        var claim = ReadUnlocked(path) ?? throw new ConductorClaimException("Conductor claim is absent.");
+        var operation = takeover ? "takeover" : "stop";
+        var previous = claim.Transitions!.Select(t => t.Control).FirstOrDefault(c =>
+            c is not null && c.Issuer == issuer && c.Request.RequestId == request.RequestId);
+        if (previous is not null)
+        {
+            if (previous.Request != request || previous.Operation != operation)
+                throw new ConductorClaimException("Control request ID was already used with different input.");
+            return previous;
+        }
+        var generation = GetClaimGeneration(claim);
+        if (claim.Holder != request.Holder || generation != request.ClaimGeneration
+            || !takeover && claim.Stopped)
+            throw new ConductorClaimException("Conductor identity changed; refresh before controlling it.");
+        validateTarget(claim);
+        // Pin the legacy acquisition before appending history: its derived identity must not move.
+        var transitions = claim.Transitions!.ToList();
+        var acquisition = transitions.FindLastIndex(t => t.Kind is ConductorClaimTransitionKind.Claim or ConductorClaimTransitionKind.Takeover);
+        if (transitions[acquisition].Generation is null)
+            transitions[acquisition] = transitions[acquisition] with { Generation = generation };
+        var timestamp = DateTime.UtcNow;
+        var resultGeneration = takeover ? Guid.NewGuid().ToString("N") : generation;
+        var resultHolder = takeover ? request.DestinationHolder! : request.Holder;
+        var receipt = new ConductorHostedControlReceipt(request, issuer, operation, resultHolder, resultGeneration, timestamp);
+        transitions.Add(new(takeover ? ConductorClaimTransitionKind.Takeover : ConductorClaimTransitionKind.Stop,
+            resultHolder, takeover ? claim.Holder : null, request.Reason, timestamp,
+            takeover ? resultGeneration : null, receipt));
+        WriteUnlocked(path, claim with
+        {
+            Holder = resultHolder,
+            ClaimGeneration = resultGeneration,
+            Stopped = !takeover,
+            AcquiredAt = takeover ? timestamp : claim.AcquiredAt,
+            Takeover = takeover ? new(claim.Holder!, request.Reason, timestamp) : claim.Takeover,
+            DestinationAddress = takeover ? request.DestinationAddress : claim.DestinationAddress,
+            Transitions = transitions,
+        });
+        return receipt;
+    }, lockTimeout);
+
+    private static void ValidateControlInput(ConductorHostedControlRequest request, string issuer,
+        bool takeover, string repository)
+    {
+        static bool Label(string? value, int bound) => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= bound && !value.Any(char.IsControl) && value == value.Trim();
+        if (request.Repository != repository || !Label(request.Holder, 256)
+            || !Label(request.ClaimGeneration, 256) || !Label(request.AttachmentId, 32)
+            || request.AttachmentId.Length != 32 || !request.AttachmentId.All(Uri.IsHexDigit)
+            || !Label(request.RequestId, 128) || !Label(request.Reason, 1024) || !Label(issuer, 256)
+            || takeover && (!Label(request.DestinationHolder, 256) || !IsSafeHostedHolderLabel(request.DestinationHolder!)
+                || !Label(request.DestinationAddress, 512)
+                || request.DestinationHolder == request.Holder)
+            || !takeover && (request.DestinationHolder is not null || request.DestinationAddress is not null))
+            throw new ConductorClaimException("A bounded exact control identity, reason and explicit takeover destination are required.");
+    }
+
+    /// <summary>Holder display data admitted by hosted Take Over must remain readable in Glass.</summary>
+    public static bool IsSafeHostedHolderLabel(string value) => value.Length <= 256 && !value.Any(char.IsControl)
+        && !value.Contains('\\') && !value.Contains(":/", StringComparison.Ordinal) && !value.StartsWith('/');
+
     /// <summary>
     /// Lists all currently held repository claims under <paramref name="batonRoot"/> (spec/baton.md §14).
     /// </summary>
@@ -323,7 +399,7 @@ public static class ConductorClaimStore
                             RepositorySlug: record.RepositorySlug,
                             Holder: record.Holder,
                             AcquiredAt: record.AcquiredAt.Value,
-                            Takeover: record.Takeover));
+                            Takeover: record.Takeover, Stopped: record.Stopped, DestinationAddress: record.DestinationAddress));
                     }
                 }
 
@@ -333,6 +409,21 @@ public static class ConductorClaimStore
             },
             cancellationToken);
     }
+
+    /// <summary>Retained authority and receipts, including released claims, for bounded operator reconciliation.</summary>
+    public static Task<IReadOnlyList<ConductorClaimRecord>> ListRetainedClaimsAsync(string root,
+        CancellationToken token = default, TimeSpan? lockTimeout = null) => Task.Run(() =>
+    {
+        var records = new List<ConductorClaimRecord>();
+        foreach (var directory in EnumerateClaimDirectories(root))
+        {
+            token.ThrowIfCancellationRequested();
+            var path = Path.Combine(directory, BatonPaths.ConductorClaimFileName);
+            var record = RunUnderClaimLock(path, () => ReadUnlocked(path), lockTimeout);
+            if (record is not null) records.Add(record);
+        }
+        return (IReadOnlyList<ConductorClaimRecord>)records.OrderBy(c => c.Repository, StringComparer.OrdinalIgnoreCase).ToArray();
+    }, token);
 
     private static string GetClaimFilePath(string root, string repositorySlug) =>
         InClaimStoreBoundary(
@@ -506,6 +597,11 @@ public static class ConductorClaimStore
         DateTime? acquiredAt = null;
         ConductorTakeoverProvenance? takeover = null;
         DateTime? previousTimestamp = null;
+        var stopped = false;
+        string? generation = null;
+        string? destinationAddress = null;
+        var requests = new HashSet<(string, string)>();
+        var generations = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var transition in record.Transitions)
         {
@@ -515,6 +611,7 @@ public static class ConductorClaimStore
                 throw Corrupt(path, "its audit transition history is malformed or impossible");
             }
 
+            var previousGeneration = generation;
             switch (transition.Kind)
             {
                 case ConductorClaimTransitionKind.Claim when holder is null
@@ -523,6 +620,9 @@ public static class ConductorClaimStore
                     holder = transition.Holder;
                     acquiredAt = transition.Timestamp;
                     takeover = null;
+                    stopped = false;
+                    generation = transition.Generation;
+                    destinationAddress = null;
                     break;
                 case ConductorClaimTransitionKind.Takeover when holder is not null
                     && !string.IsNullOrWhiteSpace(transition.Holder)
@@ -532,6 +632,9 @@ public static class ConductorClaimStore
                     holder = transition.Holder;
                     acquiredAt = transition.Timestamp;
                     takeover = new ConductorTakeoverProvenance(transition.DisplacedHolder!, transition.Reason!, transition.Timestamp);
+                    stopped = false;
+                    generation = transition.Generation;
+                    destinationAddress = transition.Control?.Request?.DestinationAddress;
                     break;
                 case ConductorClaimTransitionKind.Release when holder is not null
                     && string.Equals(holder, transition.Holder, StringComparison.Ordinal)
@@ -539,16 +642,51 @@ public static class ConductorClaimStore
                     holder = null;
                     acquiredAt = null;
                     takeover = null;
+                    stopped = false;
+                    destinationAddress = null;
+                    break;
+                case ConductorClaimTransitionKind.Stop when holder is not null && !stopped
+                    && transition.Holder == holder && transition.DisplacedHolder is null
+                    && !string.IsNullOrWhiteSpace(transition.Reason) && transition.Control is not null
+                    && transition.Generation is null:
+                    stopped = true;
                     break;
                 default:
                     throw Corrupt(path, "its audit transition history is malformed or impossible");
             }
 
+            if (transition.Control is { } control)
+            {
+                if (control.Request is null) throw Corrupt(path, "its control request is missing");
+                try
+                {
+                    ValidateControlInput(control.Request, control.Issuer,
+                        transition.Kind == ConductorClaimTransitionKind.Takeover, record.Repository);
+                }
+                catch (ConductorClaimException) { throw Corrupt(path, "its control receipt is malformed"); }
+                if (transition.Kind is not (ConductorClaimTransitionKind.Stop or ConductorClaimTransitionKind.Takeover)
+                    || control.Operation != (transition.Kind == ConductorClaimTransitionKind.Stop ? "stop" : "takeover")
+                    || control.AppliedAt != transition.Timestamp || control.ResultHolder != holder
+                    || control.ResultGeneration != generation || control.Request.Reason != transition.Reason
+                    || previousGeneration is null || control.Request.ClaimGeneration != previousGeneration
+                    || transition.Kind == ConductorClaimTransitionKind.Stop && control.Request.Holder != holder
+                    || transition.Kind == ConductorClaimTransitionKind.Takeover
+                        && (control.Request.Holder != transition.DisplacedHolder || control.Request.DestinationHolder != holder)
+                    || !requests.Add((control.Issuer, control.Request.RequestId)))
+                    throw Corrupt(path, "its control receipt conflicts with authority history");
+            }
+            if (transition.Generation is not null && (transition.Generation.Length > 256
+                || string.IsNullOrWhiteSpace(transition.Generation) || transition.Generation.Any(char.IsControl)
+                || transition.Kind is not (ConductorClaimTransitionKind.Claim or ConductorClaimTransitionKind.Takeover)
+                || !generations.Add(transition.Generation)))
+                throw Corrupt(path, "its acquisition generation is malformed");
             previousTimestamp = transition.Timestamp;
         }
 
         if (!string.Equals(holder, record.Holder, StringComparison.Ordinal)
-            || acquiredAt != record.AcquiredAt || !Equals(takeover, record.Takeover))
+            || acquiredAt != record.AcquiredAt || !Equals(takeover, record.Takeover)
+            || stopped != record.Stopped || destinationAddress != record.DestinationAddress
+            || generation is not null && generation != record.ClaimGeneration)
         {
             throw Corrupt(path, "its current claim projection does not match its audit transition history");
         }

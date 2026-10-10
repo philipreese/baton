@@ -99,10 +99,11 @@ public static class QueueStore
 
     /// <summary>The queue as it stands. An absent file is <see cref="QueueSnapshot.Empty"/>.</summary>
     /// <exception cref="QueueStoreException">The file exists but is not readable as a queue.</exception>
-    public static Task<QueueSnapshot> LoadAsync(string path, CancellationToken cancellationToken = default)
+    public static Task<QueueSnapshot> LoadAsync(string path, CancellationToken cancellationToken = default,
+        TimeSpan? lockTimeout = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
-        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path)), cancellationToken);
+        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, lockTimeout ?? LockTimeout, () => ReadUnlocked(path)), cancellationToken);
     }
 
     /// <summary>

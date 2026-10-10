@@ -153,4 +153,80 @@ resumeHandler({target:{closest:selector=>selector==='[data-conductor-resume]'?{d
 assert.deepEqual(clicked,[0,'resume-0']);
 assert.ok(html.includes('wireConductorControl(conductorPanel, conductorControl);'));
 assert.ok(html.includes('void conductorControl.refresh();'));
+const controllable={...row,stopEligible:true,takeoverEligible:true};
+const controlledSnapshot=(operation,body)=>({observedAt:snapshot().observedAt,conductors:[{
+  ...controllable,state:operation==='stop'?'stopped':'taken-over',stopEligible:false,
+  holder:operation==='stop'?row.holder:body.destinationHolder,claimGeneration:operation==='stop'?row.claimGeneration:'successor',
+  historicalProvider:true,destinationAddress:body.destinationAddress,
+  controls:[controlResult(operation,body)],actions:[{tag:'issued',state:'issued'}]
+}]});
+const controlResult=(operation,body)=>({receipt:{operation,request:body,issuer:'operator@example.test',
+  resultHolder:operation==='stop'?body.holder:body.destinationHolder,
+  resultGeneration:operation==='stop'?body.claimGeneration:'successor'},cleanup:'complete'});
+for(const operation of ['stop','takeover']){
+  let body,reads=0,writes=0;
+  const tested=createConductorControl(async(path,options)=>{
+    if(path==='/conductors') {reads++;return ok(body?controlledSnapshot(operation,body):{...snapshot(),conductors:[controllable]});}
+    writes++;body=JSON.parse(options.body);
+    assert.equal(path,`/conductor/${operation}`);
+    assert.equal(body.requestId,'exact-request');
+    assert.equal(body.reason,'operator reason');
+    assert.ok(!('issuer' in body));
+    return ok(controlResult(operation,body));
+  },render,text=>{confirmation=text;return true;},()=> 'exact-request');
+  await tested.refresh();
+  await tested[operation](0,{reason:' operator reason ',destinationHolder:'successor',destinationAddress:'javascript:alert(1)<img src=x>'});
+  assert.equal(reads,3,'a fresh pre-confirmation GET and post-receipt GET are required');
+  assert.equal(writes,1);
+  assert.match(latest.message,/applied and confirmed/);
+  assert.match(confirmation,operation==='stop'?/cannot Resume/:/No replacement hosted session/);
+  const rendered=conductorControlHtml(latest.snapshot,'',false,esc);
+  assert.ok(!rendered.includes('data-conductor-resume'));
+  assert.ok(rendered.includes('Historical provider'));
+  assert.ok(rendered.includes('request exact-request'));
+  assert.ok(rendered.includes('Action issued: issued'));
+  if(operation==='takeover'){
+    assert.ok(rendered.includes('javascript:alert(1)&lt;img'));
+    assert.ok(!rendered.includes('href='),'owner address must be inert escaped text');
+  }
+}
+for(const failure of ['lost',403,409,500,'stale-get','bad-receipt','bad-final-get']){
+  let body,reads=0,writes=0;
+  const tested=createConductorControl(async(path,options)=>{
+    if(path==='/conductors'){
+      reads++;
+      if(failure==='stale-get' && reads===2) return ok({...snapshot(),conductors:[{...controllable,claimGeneration:'foreign'}]});
+      if(body && failure!=='bad-final-get') return ok(controlledSnapshot('stop',body));
+      return ok({...snapshot(),conductors:[controllable]});
+    }
+    writes++;body=JSON.parse(options.body);
+    if(failure==='lost') throw new Error('lost acknowledgement after fence');
+    if(typeof failure==='number') return {ok:false,status:failure};
+    return ok(controlResult('stop',failure==='bad-receipt'?{...body,requestId:'foreign'}:body));
+  },render,()=>true,()=> 'retained-lost-request');
+  await tested.refresh();await tested.stop(0,{reason:'reason'});
+  assert.equal(writes,failure==='stale-get'?0:1);
+  assert.doesNotMatch(latest.message,/applied and confirmed/);
+  if(failure==='lost'){
+    assert.match(latest.message,/unknown/);
+    await tested.refresh();
+    assert.match(latest.message,/Exact stop receipt found/);
+    assert.equal(writes,1,'lost response reconciliation must never repeat a POST');
+  }
+}
+let staleInputsWrites=0;
+const emptyReason=createConductorControl(async path=>{
+  if(path==='/conductors') return ok({...snapshot(),conductors:[controllable]});
+  staleInputsWrites++;return ok(null);
+},render,()=>true);
+await emptyReason.refresh();await emptyReason.stop(0,{reason:' '});
+await emptyReason.takeover(0,{reason:'reason',destinationHolder:row.holder,destinationAddress:'address'});
+for(const destinationHolder of ['CORP\\alice','/alice','owner:/alice']){
+  await emptyReason.takeover(0,{reason:'reason',destinationHolder,destinationAddress:'address'});
+}
+assert.equal(staleInputsWrites,0);
+const priorAcquisition=conductorControlHtml({...snapshot(),conductors:[{...controllable,state:'prior-acquisition',historicalProvider:true,stopEligible:false,takeoverEligible:false,resumeEligible:false}]},'',false,esc);
+assert.ok(priorAcquisition.includes('Retained provider from a prior acquisition'));
+assert.ok(!priorAcquisition.includes('Ownership transferred'));
+assert.ok(!priorAcquisition.includes('data-conductor-resume'));
 console.log('Conductor controls: shipped render, exact mutation, refusal, uncertainty, refresh and click wiring passed.');

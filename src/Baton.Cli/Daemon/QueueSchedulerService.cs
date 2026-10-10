@@ -263,6 +263,7 @@ public sealed partial class QueueSchedulerService : BackgroundService
             await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
             await ReconcileContinuationObligationsAsync(cancellationToken).ConfigureAwait(false);
             await ReconcileStoppedWorkAdviceAsync(cancellationToken).ConfigureAwait(false);
+            await ConductorFollowSession.ReconcileHostedControlCleanupAsync(BatonPaths.Root, cancellationToken).ConfigureAwait(false);
             await ReconcileReplacementReviewActionsAsync(cancellationToken).ConfigureAwait(false);
 
             QueueSnapshot snapshot;
@@ -715,13 +716,13 @@ public sealed partial class QueueSchedulerService : BackgroundService
                                 throw new ConductorObligationStoreException("Conductor ownership changed.");
                             if (ReplacementReviewEvidenceProvenance.For(finalAction)
                                 == ReplacementReviewEvidenceProvenance.CompletedFollow)
-                                ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
+                                ReplacementReviewEvidenceValidator.ValidateCompletedFollowActionAdmission(
                                     replacementObligation!, current, finalAction,
-                                    ConductorClaimStore.GetClaimGeneration(claim));
+                                    claim);
                         }
                         catch (Exception ex) when (ex is ConductorObligationStoreException or ConductorClaimException
                             or IOException or UnauthorizedAccessException or JsonException
-                            or System.Text.DecoderFallbackException or ProjectCeilingStoreException)
+                            or System.Text.DecoderFallbackException or ProjectCeilingStoreException or CliArgumentException)
                         {
                             // Refuse local evidence failures here, before the claim-lock boundary can
                             // label their IO as claim access. Unexpected defects still escape; no
@@ -752,6 +753,10 @@ public sealed partial class QueueSchedulerService : BackgroundService
                             {
                                 ReplacementAttemptId = attemptId,
                                 ReplacementRoomDirectory = roomDirectory,
+                                IssuedAuthority = ReplacementReviewEvidenceProvenance.For(action)
+                                    == ReplacementReviewEvidenceProvenance.CompletedFollow
+                                    ? ReplacementReviewEvidenceValidator.BindIssuedAuthority(current, action, attemptId, roomDirectory, now)
+                                    : null,
                             }
                             : null,
                     });
@@ -1782,6 +1787,24 @@ public sealed partial class QueueSchedulerService : BackgroundService
                     ? null
                     : current.OriginatingPullRequestRecoveryProofDigest,
             };
+            if (current.ReplacementReviewAction is { ReplacementAttemptId: not null } issuedAction
+                && ReplacementReviewEvidenceProvenance.For(issuedAction) == ReplacementReviewEvidenceProvenance.CompletedFollow)
+            {
+                var reason = "Issued hosted replacement was refused: " + QueueWaitReasons.Token(waitReason) + "; this slot cannot retry.";
+                updated = current with
+                {
+                    State = QueueItemState.Failed,
+                    Halted = true,
+                    Error = reason,
+                    ReplacementReviewAction = issuedAction with
+                    {
+                        BlockedReason = reason,
+                        TerminalObservation = "admission-refused:" + QueueWaitReasons.Token(waitReason),
+                        TerminalObservedAt = occurredAt,
+                        NextTrigger = "Owner must inspect the exact retained issued attempt; no replacement call is authorized.",
+                    },
+                };
+            }
             var next = snapshot with { Items = Replace(snapshot.Items, tag, _ => updated) };
             return QueueFleetEventOutbox.Enqueue(
                 next,

@@ -39,8 +39,12 @@ internal static class ReplacementReviewEvidenceValidator
 
     internal static void ValidateCompletedFollow(
         ConductorObligation obligation, QueueItem source, ReplacementReviewEvidenceInput evidence,
-        string holder, string expectedHead, string? claimGeneration = null)
-        => ValidateCompletedFollowCore(obligation, source, evidence, holder, expectedHead, claimGeneration, null);
+        string holder, string expectedHead, ConductorClaimRecord? claim)
+    {
+        ValidateCompletedFollowCore(obligation, source, evidence, holder, expectedHead,
+            claim is null ? null : ConductorClaimStore.GetClaimGeneration(claim), null);
+        ValidateLiveAdmission(source, evidence.Decision, evidence.EvidenceDirectory, holder, claim);
+    }
 
     private static void ValidateCompletedFollowCore(
         ConductorObligation obligation, QueueItem source, ReplacementReviewEvidenceInput evidence,
@@ -73,9 +77,9 @@ internal static class ReplacementReviewEvidenceValidator
         ValidateFiles(directory, evidence.Decision, obligation, source, holder);
     }
 
-    internal static void ValidateCompletedFollowAction(
+    internal static void ValidateCompletedFollowActionAdmission(
         ConductorObligation obligation, QueueItem source, QueueReplacementReviewAction action,
-        string? claimGeneration = null)
+        ConductorClaimRecord? claim)
     {
         if (ReplacementReviewEvidenceProvenance.For(action) != ReplacementReviewEvidenceProvenance.CompletedFollow
             || action.EvidenceDigest is null || action.EvidenceDirectory is null)
@@ -85,7 +89,53 @@ internal static class ReplacementReviewEvidenceValidator
         ValidateCompletedFollowCore(obligation, source,
             new ReplacementReviewEvidenceInput(ReplacementReviewEvidenceProvenance.CompletedFollow,
                 action.EvidenceDigest, action.EvidenceDirectory, decision), action.Holder, action.HeadSha,
-            claimGeneration, action.CompletionProof);
+            claim is null ? null : ConductorClaimStore.GetClaimGeneration(claim), action.CompletionProof);
+        ValidateLiveAdmission(source, decision, action.EvidenceDirectory, action.Holder, claim);
+    }
+
+    internal static QueueHostedIssuedAuthority BindIssuedAuthority(QueueItem source, QueueReplacementReviewAction action,
+        Baton.Domain.FleetAttemptId attempt, string room, DateTimeOffset issuedAt)
+    {
+        var decision = ConductorFollowSession.ReadDecisionEvidence(action.EvidenceDirectory!)
+            ?? throw new ConductorObligationStoreException("Completed follow decision evidence is missing.");
+        return new(1, action.Repository, action.Holder, decision.ClaimGeneration,
+            source.StoppedWorkJudgment!.FollowAttachmentId!, action.ObligationKey, action.SourceAttemptId, action.HeadSha,
+            decision.RequestSha256, decision.ConfigurationSha256, decision.SessionId, decision.ResponseSha256,
+            attempt, room, issuedAt);
+    }
+
+    internal static void ValidateIssuedCompletedFollowCompletion(
+        ConductorObligation obligation, QueueItem source, QueueReplacementReviewAction action)
+    {
+        if (ReplacementReviewEvidenceProvenance.For(action) != ReplacementReviewEvidenceProvenance.CompletedFollow
+            || action.EvidenceDirectory is null || action.EvidenceDigest is null || action.IssuedAuthority is not { } issued
+            || issued.SchemaVersion != 1 || issued.Repository != action.Repository || issued.Holder != action.Holder
+            || issued.ObligationKey != action.ObligationKey || issued.SourceAttemptId != action.SourceAttemptId
+            || issued.HeadSha != action.HeadSha || issued.AttachmentId != source.StoppedWorkJudgment?.FollowAttachmentId
+            || issued.AttemptId != action.ReplacementAttemptId || issued.RoomDirectory != action.ReplacementRoomDirectory
+            || issued.IssuedAt == default || issued.IssuedAt.Offset != TimeSpan.Zero
+            || issued.AttachmentId is not { Length: 32 } || !issued.AttachmentId.All(Uri.IsHexDigit)
+            || string.IsNullOrWhiteSpace(issued.ClaimGeneration))
+            throw new ConductorObligationStoreException("Historical issued authority is missing or inconsistent; no new admission is permitted.");
+        var decision = ConductorFollowSession.ReadDecisionEvidence(action.EvidenceDirectory)
+            ?? throw new ConductorObligationStoreException("Completed follow decision evidence is missing.");
+        if (issued.RequestSha256 != decision.RequestSha256 || issued.ConfigurationSha256 != decision.ConfigurationSha256
+            || issued.SessionId != decision.SessionId || issued.ResponseSha256 != decision.ResponseSha256)
+            throw new ConductorObligationStoreException("Issued decision binding changed.");
+        ValidateCompletedFollowCore(obligation, source,
+            new(ReplacementReviewEvidenceProvenance.CompletedFollow, action.EvidenceDigest, action.EvidenceDirectory, decision),
+            action.Holder, action.HeadSha, issued.ClaimGeneration, action.CompletionProof);
+    }
+
+    private static void ValidateLiveAdmission(QueueItem source, ConductorFollowDecisionEvidence decision, string directory,
+        string holder, ConductorClaimRecord? claim)
+    {
+        var registration = ConductorFollowSession.ValidateCurrentHostedAuthority(claim, decision.SourceRepository,
+            holder, decision.ClaimGeneration, source.StoppedWorkJudgment?.FollowAttachmentId, BatonPaths.Root);
+        var state = JsonSerializer.Deserialize<ConductorFollowState>(File.ReadAllText(Path.Combine(directory, "..", "..", "session.json")), Json);
+        if (registration.RequestSha256 != decision.RequestSha256
+            || state?.ProjectCeiling != ProjectCeilingStore.TryGet(state!.Workspace, Path.Combine(BatonPaths.Root, "project-ceilings.json")))
+            throw new ConductorObligationStoreException("Current hosted trust or registration changed.");
     }
 
     private static void ValidateFiles(
@@ -109,20 +159,11 @@ internal static class ReplacementReviewEvidenceValidator
             var sourceDigest = DigestFile(source);
             var receipt = File.ReadAllText(Path.Combine(directory, "receipt.txt"));
             var requestDigest = DigestFile(Path.Combine(directory, "..", "..", "request.json"));
-            var registration = JsonSerializer.Deserialize<ConductorFollowAttachment>(File.ReadAllText(
-                Path.Combine(directory, "..", "..", "..", "registration.json")), Json)
-                ?? throw new IOException("Missing follow attachment.");
             // JsonRequired checks presence, not nullability. Refuse corrupt persisted fields
             // before path, hash or ceiling operations, preserving an evidence refusal at admission.
-            if (string.IsNullOrEmpty(registration.SessionDirectory)
-                || request.InitialInstructions is null || state.ProjectCeiling is null)
+            if (request.InitialInstructions is null || state.ProjectCeiling is null)
                 throw new IOException("Completed follow evidence has missing required values.");
             if (identity.ObligationKey != decision.ObligationKey || identity.ObligationId != decision.ObligationId
-                || !registration.Attached || registration.Id != queueSource.StoppedWorkJudgment?.FollowAttachmentId
-                || registration.Repository != decision.SourceRepository || registration.Holder != holder
-                || registration.ClaimGeneration != decision.ClaimGeneration
-                || registration.RequestSha256 != decision.RequestSha256
-                || Path.GetFullPath(registration.SessionDirectory) != Path.GetFullPath(Path.Combine(directory, "..", ".."))
                 || identity.Repository != decision.SourceRepository
                 || identity.ContextSha256 != decision.SourceContextSha256
                 || identity.ClaimGeneration != decision.ClaimGeneration
@@ -136,8 +177,6 @@ internal static class ReplacementReviewEvidenceValidator
                 || state.InitialInstructionsSha256 != DigestText(request.InitialInstructions)
                 || state.EffectiveGrant != request.PermissionGrant
                 || state.ProjectCeiling.Cap(request.PermissionGrant) != request.PermissionGrant
-                || state.ProjectCeiling != ProjectCeilingStore.TryGet(request.Workspace,
-                    Path.Combine(BatonPaths.Root, "project-ceilings.json"))
                 || ConductorFollowSession.ConfigurationDigest(state) != decision.ConfigurationSha256
                 || responseDigest != decision.ResponseSha256
                 || sourceDigest != decision.SourceDigest

@@ -59,15 +59,15 @@ public sealed partial class ConductorFollowDeliveryTests
         var completed = await fixture.RowAsync("typed");
         var observed = (await fixture.Store.ReadAsync(fixture.Key("typed"), Ct))!;
         Assert.NotNull(completed.ReplacementReviewAction!.CompletionProof);
-        ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(observed, completed, completed.ReplacementReviewAction);
+        ReplacementReviewEvidenceValidator.ValidateIssuedCompletedFollowCompletion(observed, completed, completed.ReplacementReviewAction);
         Assert.Equal(ConductorObligationStatus.ActionObserved, observed.Status);
         Assert.Equal(completed.ReplacementReviewAction!.CompletionProof, observed.ActionProof);
-        ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(observed, completed, completed.ReplacementReviewAction);
+        ReplacementReviewEvidenceValidator.ValidateIssuedCompletedFollowCompletion(observed, completed, completed.ReplacementReviewAction);
         var decision = ConductorFollowSession.ReadDecisionEvidence(action.EvidenceDirectory!)!;
         Assert.Throws<ConductorObligationStoreException>(() => ReplacementReviewEvidenceValidator.ValidateCompletedFollow(
             observed, completed, new(ReplacementReviewEvidenceProvenance.CompletedFollow,
-                action.EvidenceDigest!, action.EvidenceDirectory!, decision), "holder", Head));
-        Assert.Throws<ConductorObligationStoreException>(() => ReplacementReviewEvidenceValidator.ValidateCompletedFollowAction(
+                action.EvidenceDigest!, action.EvidenceDirectory!, decision), "holder", Head, null));
+        Assert.Throws<ConductorObligationStoreException>(() => ReplacementReviewEvidenceValidator.ValidateIssuedCompletedFollowCompletion(
             observed, completed, completed.ReplacementReviewAction with { CompletionProof = "foreign-proof" }));
         await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
         await scheduler.TickOnceAsync(Ct);
@@ -766,7 +766,7 @@ public sealed partial class ConductorFollowDeliveryTests
     [InlineData("trust")]
     [InlineData("head")]
     [InlineData("artifactless")]
-    public async Task Typed_completion_proof_revalidates_authority_and_artifact_before_observation(string change)
+    public async Task Typed_issued_completion_survives_live_policy_changes_but_revalidates_head_and_artifact(string change)
     {
         using var fixture = await Fixture.CreateAsync();
         await fixture.EnableAutomaticAsync();
@@ -793,7 +793,8 @@ public sealed partial class ConductorFollowDeliveryTests
         var action = (await fixture.RowAsync("observe")).ReplacementReviewAction!;
         Assert.NotNull(action.CompletionProof);
         await scheduler.ReconcileReplacementReviewActionsAsync(Ct);
-        Assert.Equal(ConductorObligationStatus.Pending, (await fixture.Store.ReadAsync(fixture.Key("observe"), Ct))!.Status);
+        Assert.Equal(change is "head" or "artifactless" ? ConductorObligationStatus.Pending : ConductorObligationStatus.ActionObserved,
+            (await fixture.Store.ReadAsync(fixture.Key("observe"), Ct))!.Status);
         Assert.Equal(action.CompletionProof, (await fixture.RowAsync("observe")).ReplacementReviewAction!.CompletionProof);
         Assert.Single(fixture.Calls);
     }
@@ -876,6 +877,8 @@ public sealed partial class ConductorFollowDeliveryTests
         public int LegacyCalls { get; private set; }
         public ConductorObligationStore Store { get; }
         private FakeGh Gh { get; } = new();
+        public string PullRequestState { set => Gh.State = value; }
+        public int RemoteCalls => Gh.Calls;
 
         public Fixture(string? root = null)
         {
@@ -1210,13 +1213,16 @@ public sealed partial class ConductorFollowDeliveryTests
     private sealed class FakeGh : IGhCliRunner
     {
         public string HeadSha { get; set; } = Head;
+        public string State { get; set; } = "OPEN";
+        public int Calls { get; private set; }
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
+            Calls++;
             if (args is ["api", ..]) return Task.FromResult(RequiredCheckFixture.Read(args, Repository, HeadSha,
                 new GhCliResult(true, 0, "[{\"name\":\"ci\",\"bucket\":\"pass\"}]", "")));
             if (args is ["pr", "checks", ..]) return Task.FromResult(new GhCliResult(true, 0,
                 "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", ""));
-            var pr = "{\"number\":77,\"state\":\"OPEN\",\"isDraft\":true,\"headRefOid\":\"" + HeadSha
+            var pr = "{\"number\":77,\"state\":\"" + State + "\",\"isDraft\":true,\"headRefOid\":\"" + HeadSha
                 + "\",\"headRefName\":\"2632-lane\",\"baseRefName\":\"main\",\"isCrossRepository\":false,\"statusCheckRollup\":[]}";
             return Task.FromResult(new GhCliResult(true, 0, args is ["pr", "view", ..] ? pr : "[" + pr + "]", ""));
         }

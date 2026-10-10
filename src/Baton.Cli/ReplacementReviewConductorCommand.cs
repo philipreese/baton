@@ -49,18 +49,21 @@ internal static class ReplacementReviewConductorCommand
         if (candidates.Length != 1)
             throw new ConductorObligationStoreException("The stopped-work source is missing or ambiguous.");
         var source = candidates[0];
+        var identity = RepositoryIdentity.From("https://" + repository, null)
+            ?? throw new ConductorObligationStoreException("Repository identity is invalid.");
         if (source.ReplacementReviewAction is { } retained)
         {
             RequireSameRequest(retained, obligation, holder, expectedHead, evidence);
-            if (!automatic && retained.Origin == QueueReplacementReviewOrigin.Automatic)
+            if (!automatic && CanPromote(retained))
             {
-                await QueueStore.MutateAsync(BatonPaths.QueueFile, current => current with
+                await QueueStore.MutateWithCurrentClaimAsync(BatonPaths.QueueFile, identity, batonRoot, (current, claim) => current with
                 {
                     Items = current.Items.Select(item =>
                     {
                         if (item.Tag != source.Tag || item.ReplacementReviewAction is not { } currentAction)
                             return item;
                         RequireSameRequest(currentAction, obligation, holder, expectedHead, evidence);
+                        ValidatePromotion(current, item, currentAction, obligation, claim);
                         retained = currentAction with
                         {
                             Origin = QueueReplacementReviewOrigin.Manual,
@@ -107,11 +110,11 @@ internal static class ReplacementReviewConductorCommand
             {
                 RequireSameRequest(raced, obligation, holder, expectedHead, evidence);
                 RequireSameSource(raced, source);
-                if (!automatic && raced.Origin == QueueReplacementReviewOrigin.Automatic)
+                if (!automatic && CanPromote(raced))
                 {
                     // A racing manual request must retain manual authority on this exact slot;
                     // promoting it under the queue lock must never consume another review round.
-                    await QueueStore.MutateAsync(BatonPaths.QueueFile, currentSnapshot =>
+                    await QueueStore.MutateWithCurrentClaimAsync(BatonPaths.QueueFile, identity, batonRoot, (currentSnapshot, claim) =>
                     {
                         var current = currentSnapshot.Items.FirstOrDefault(item => item.Tag == source.Tag)
                             ?? throw new ConductorObligationStoreException("The retained source disappeared.");
@@ -121,6 +124,7 @@ internal static class ReplacementReviewConductorCommand
                         RequireSameSource(currentAction, source);
                         if (currentAction.Origin != QueueReplacementReviewOrigin.Automatic)
                             return currentSnapshot;
+                        ValidatePromotion(currentSnapshot, current, currentAction, obligation, claim);
                         return currentSnapshot with
                         {
                             Items = currentSnapshot.Items.Select(item => ReferenceEquals(item, current)
@@ -151,8 +155,6 @@ internal static class ReplacementReviewConductorCommand
             throw new ConductorObligationStoreException(
                 "Automatic replacement review requires an opted-in MissingVerdict source and a retained Recommend advice choice.");
 
-        var identity = RepositoryIdentity.From("https://" + repository, null)
-            ?? throw new ConductorObligationStoreException("Repository identity is invalid.");
         var claim = await ConductorClaimStore.GetClaimAsync(identity, batonRoot, cancellationToken)
             .ConfigureAwait(false);
         if (claim?.Holder != holder)
@@ -161,7 +163,7 @@ internal static class ReplacementReviewConductorCommand
         if (evidence is not null)
             ReplacementReviewEvidenceValidator.ValidateCompletedFollow(
                 obligation, source, evidence, holder, expectedHead,
-                ConductorClaimStore.GetClaimGeneration(claim));
+                claim);
 
         var action = new QueueReplacementReviewAction(
             key, holder, evidence is null ? obligation.TransportReceipt! : string.Empty,
@@ -182,15 +184,16 @@ internal static class ReplacementReviewConductorCommand
         var sourceJson = JsonSerializer.Serialize(source);
         var admitted = false;
         var replayed = false;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, currentSnapshot =>
+        await QueueStore.MutateWithCurrentClaimAsync(BatonPaths.QueueFile, identity, batonRoot, (currentSnapshot, currentClaim) =>
         {
             var current = currentSnapshot.Items.FirstOrDefault(item => item.Tag == tag);
             if (current?.ReplacementReviewAction is { } existing)
             {
                 RequireSameRequest(existing, obligation, holder, expectedHead, evidence);
                 replayed = true;
-                if (!automatic && existing.Origin == QueueReplacementReviewOrigin.Automatic)
+                if (!automatic && CanPromote(existing))
                 {
+                    ValidatePromotion(currentSnapshot, current!, existing, obligation, currentClaim);
                     var promoted = existing with
                     {
                         Origin = QueueReplacementReviewOrigin.Manual,
@@ -215,13 +218,13 @@ internal static class ReplacementReviewConductorCommand
             if (automatic) ValidateAutomaticAuthority(current, repository);
             if (evidence is not null)
             {
-                var currentClaim = ConductorClaimStore.GetClaimAsync(identity, batonRoot, cancellationToken)
-                    .GetAwaiter().GetResult();
                 if (currentClaim?.Holder != holder)
                     throw new ConductorObligationStoreException("Conductor ownership changed before admission.");
                 ReplacementReviewEvidenceValidator.ValidateCompletedFollow(obligation, current, evidence,
-                    holder, expectedHead, ConductorClaimStore.GetClaimGeneration(currentClaim));
+                    holder, expectedHead, currentClaim);
             }
+            else if (currentClaim?.Holder != holder)
+                throw new ConductorObligationStoreException("Conductor ownership changed before admission.");
             var brief = WorkItemAdvancer.RenderReplacementReviewBrief(current, action);
             Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
             QueueCommand.WriteSpecFileAtomically(current.SpecFile, brief);
@@ -298,6 +301,19 @@ internal static class ReplacementReviewConductorCommand
             || !StoppedWorkAdviceSettings.IsAutomaticMissingVerdictReplacementReviewEnabled(repository))
             throw new ConductorObligationStoreException(
                 "Automatic replacement review requires an opted-in eligible MissingVerdict source.");
+    }
+
+    private static bool CanPromote(QueueReplacementReviewAction action) =>
+        action.Origin == QueueReplacementReviewOrigin.Automatic && action.ReplacementAttemptId is null
+        && action.BlockedReason is null && action.CompletionProof is null;
+
+    private static void ValidatePromotion(QueueSnapshot snapshot, QueueItem item, QueueReplacementReviewAction action,
+        ConductorObligation obligation, ConductorClaimRecord? claim)
+    {
+        if (!CanPromote(action) || snapshot.Held || item.LaunchMayHaveBegunAt is not null || claim?.Holder != action.Holder)
+            throw new ConductorObligationStoreException("Retained action promotion is no longer authorized.");
+        if (ReplacementReviewEvidenceProvenance.For(action) == ReplacementReviewEvidenceProvenance.CompletedFollow)
+            ReplacementReviewEvidenceValidator.ValidateCompletedFollowActionAdmission(obligation, item, action, claim);
     }
 
     private static void RequireSameSource(QueueReplacementReviewAction action, QueueItem source)

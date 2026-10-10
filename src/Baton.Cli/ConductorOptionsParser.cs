@@ -14,7 +14,8 @@ public static class ConductorOptionsParser
                                 "       baton conductor act --obligation <key> --holder <holder> --action replace-review --expected-head <full-sha>\n" +
                                 "       baton conductor follow --request <file>\n" +
                                 "       baton conductor attach --request <file>\n" +
-                                "       baton conductor detach --request <file>";
+                                "       baton conductor detach --request <file>\n" +
+                                "Hosted control and stopped-acquisition recovery: spec/baton.md §14.";
 
     public static ConductorOptions Parse(string[] args)
     {

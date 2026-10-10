@@ -35,14 +35,13 @@ internal sealed partial class ConductorFollowSession
             {
                 var state = session.LoadState();
                 session.ValidateState(state);
-                var claim = ConductorClaimStore.GetClaimAsync(session._identity, root, token).GetAwaiter().GetResult();
-                if (claim?.Holder != session._request.Holder
-                    || ConductorClaimStore.GetClaimGeneration(claim) != session._generation
-                    || ReadCeiling(root, session._request.Workspace) != session._ceiling)
-                    throw new CliArgumentException("Follow attachment authority changed.");
                 // The cutover and every halt's attachment stamp share the queue commit lock.
-                QueueStore.MutateAsync(Path.Combine(root, "queue", "queue.json"), snapshot =>
+                QueueStore.MutateWithCurrentClaimAsync(Path.Combine(root, "queue", "queue.json"),
+                    session._identity, root, (snapshot, claim) =>
                 {
+                    if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, session._request.Holder, session._generation)
+                        || ReadCeiling(root, session._request.Workspace) != session._ceiling)
+                        throw new CliArgumentException("Follow attachment authority changed.");
                     var old = File.Exists(session.AttachmentPath)
                         ? Read<ConductorFollowAttachment>(session.AttachmentPath) : null;
                     if (old is not null) session.ValidateAttachment(old);
@@ -75,6 +74,21 @@ internal sealed partial class ConductorFollowSession
         new(SchemaVersion, Guid.NewGuid().ToString("N"), _identity.Value, _generation, _request.Holder,
             _directory, Digest(JsonSerializer.Serialize(_request, Json)), DateTimeOffset.UtcNow, true);
 
+    internal static ConductorFollowAttachment ValidateCurrentHostedAuthority(
+        ConductorClaimRecord? claim, string repository, string holder, string generation,
+        string? attachmentId, string root)
+    {
+        if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, holder, generation))
+            throw new ConductorObligationStoreException("Hosted acquisition is stopped or displaced.");
+        var identity = RepositoryIdentity.From("https://" + repository, null)
+            ?? throw new ConductorObligationStoreException("Hosted repository identity is invalid.");
+        var registration = Read<ConductorFollowAttachment>(Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json"));
+        ValidateControlRegistration(identity, root, registration, holder, generation, attachmentId);
+        if (!registration.Attached)
+            throw new ConductorObligationStoreException("Hosted attachment is detached.");
+        return registration;
+    }
+
     // Called only inside the successful halt CAS, after the attachment cutover has committed.
     internal static string? AttachmentAtHalt(QueueItem source)
     {
@@ -85,10 +99,12 @@ internal sealed partial class ConductorFollowSession
         try
         {
             var registration = Read<ConductorFollowAttachment>(path);
-            return registration.SchemaVersion == SchemaVersion && registration.Attached
+            return ConductorClaimStore.WithCurrentClaim(identity, BatonPaths.Root, claim =>
+                ConductorClaimStore.IsCurrentHostedAuthority(claim, registration.Holder, registration.ClaimGeneration)
+                && registration.SchemaVersion == SchemaVersion && registration.Attached
                 && registration.Id is { Length: 32 } && registration.Id.All(Uri.IsHexDigit)
                 && registration.Repository == source.Repository && registration.Holder == source.OwnedTask.ConductorHolder
-                ? registration.Id : null;
+                ? registration.Id : null);
         }
         catch (Exception ex) when (IsRefusal(ex))
         {

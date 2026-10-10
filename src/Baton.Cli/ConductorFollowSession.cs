@@ -182,7 +182,7 @@ internal sealed partial class ConductorFollowSession
             throw new CliArgumentException("Follow repository does not match the canonical workspace identity.");
         RejectLinks(Path.Combine(root, identity.FileSlug, BatonPaths.ConductorClaimFileName));
         var claim = await ConductorClaimStore.GetClaimAsync(identity, root, cancellationToken, claimLockTimeout).ConfigureAwait(false);
-        if (claim?.Holder != request.Holder)
+        if (claim is not { Stopped: false } || claim.Holder != request.Holder)
             throw new CliArgumentException("Follow requires the current repository claim holder.");
         var ceiling = ReadCeiling(root, request.Workspace);
         if (ceiling is null || ceiling.Cap(request.PermissionGrant) != request.PermissionGrant)
@@ -267,7 +267,7 @@ internal sealed partial class ConductorFollowSession
             RejectLinks(Path.Combine(_root, BatonPaths.FleetDirectoryName, BatonPaths.FleetEventsFileName));
             RejectLinks(Path.Combine(_root, BatonPaths.FleetDirectoryName, BatonPaths.FleetEventsRolloverFileName));
             var claim = await ConductorClaimStore.GetClaimAsync(_identity, _root, cancellationToken).ConfigureAwait(false);
-            if (claim?.Holder != _request.Holder || ConductorClaimStore.GetClaimGeneration(claim) != _generation)
+            if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, _request.Holder, _generation))
                 throw new CliArgumentException("Claim changed.");
             var ceiling = ReadCeiling(_root, _request.Workspace);
             if (ceiling != _ceiling || ceiling is null || ceiling.Cap(_request.PermissionGrant) != _request.PermissionGrant)
@@ -353,7 +353,7 @@ internal sealed partial class ConductorFollowSession
             if (new FileInfo(sourcePath).Length > 64 * 1024) throw new CliArgumentException("Source exceeds bounded input.");
             // Re-read authority immediately before the irreversible launch marker, after source I/O.
             claim = await ConductorClaimStore.GetClaimAsync(_identity, _root, cancellationToken).ConfigureAwait(false);
-            if (claim?.Holder != _request.Holder || ConductorClaimStore.GetClaimGeneration(claim) != _generation
+            if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, _request.Holder, _generation)
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
             _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
@@ -363,7 +363,10 @@ internal sealed partial class ConductorFollowSession
             // must never acquire a later launch marker. A marker already committed is an issued turn.
             await Task.Run(() => MutexGuardedFileLock.RunUnderLock(Path.Combine(_root, "queue", "queue.json"),
                 QueueStore.LockNamePrefix, TimeSpan.FromSeconds(30), () =>
+                    ConductorClaimStore.WithCurrentClaim(_identity, _root, currentClaim =>
                 {
+                    if (!ConductorClaimStore.IsCurrentHostedAuthority(currentClaim, _request.Holder, _generation))
+                        throw new CliArgumentException("Hosted authority revoked before launch.");
                     if (File.Exists(AttachmentPath))
                     {
                         var current = Read<ConductorFollowAttachment>(AttachmentPath);
@@ -375,7 +378,8 @@ internal sealed partial class ConductorFollowSession
                         throw new CliArgumentException("Follow attachment missing before launch.");
                     Write(Path.Combine(evidence, "launch.json"),
                         new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
-                }), cancellationToken).ConfigureAwait(false);
+                    return true;
+                })), cancellationToken).ConfigureAwait(false);
             launched = true;
             var configuration = new CodexBrokerConfiguration(_request.Workspace, state.Model, state.Effort,
                 state.SessionId, state.SessionId is not null, state.EffectiveGrant, ["response.txt"], false);
