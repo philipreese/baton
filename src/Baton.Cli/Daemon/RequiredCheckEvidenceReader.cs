@@ -235,6 +235,12 @@ internal sealed class RequiredCheckEvidenceReader(
 
     private static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
 
+    internal static void ValidateJsonKeys(JsonElement value)
+    {
+        try { RejectDuplicateKeys(value); }
+        catch (Unreadable ex) { throw new JsonException(ex.Message, ex); }
+    }
+
     private static void RejectDuplicateKeys(JsonElement value)
     {
         if (value.ValueKind == JsonValueKind.Object)

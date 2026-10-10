@@ -92,6 +92,7 @@ internal sealed partial class ConductorFollowSession
     {
         "correction" => true,
         "halted-task" => false,
+        "ready-merge" => false,
         _ => throw new IOException("Unknown or null follow event kind."),
     };
 

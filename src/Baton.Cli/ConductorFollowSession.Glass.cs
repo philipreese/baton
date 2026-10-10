@@ -16,7 +16,7 @@ internal sealed record GlassConductorStatus(string Repository, string? Holder, s
     bool Held = false, long ControlRevision = 0, bool HoldEligible = false, bool UnholdEligible = false,
     string? AdmissionWait = null, bool QueueHeld = false, ConductorHostedControlReceipt? HoldControl = null,
     bool CorrectionEligible = false, GlassCorrectionStatus? Correction = null,
-    GlassRetainedJudgmentHistory? History = null);
+    GlassRetainedJudgmentHistory? History = null, GlassMergeView? Merge = null);
 
 internal sealed record GlassHostedControlResult(ConductorHostedControlReceipt Receipt, string Cleanup);
 internal sealed record GlassIssuedActionStatus(string Tag, string State, string? Reason, string? NextTrigger, string Holder);
@@ -86,6 +86,7 @@ internal sealed partial class ConductorFollowSession
                         Actions = activity.Actions,
                         QueueHeld = activity.QueueHeld,
                         History = ReadGlassHistory(identity, root, activity.Items, token: token),
+                        Merge = ReadGlassMerge(identity, root, activity.Items, claim),
                     };
                     if (claim.Holder is null)
                     {

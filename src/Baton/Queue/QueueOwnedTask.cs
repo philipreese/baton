@@ -45,7 +45,15 @@ public sealed record TaskReadyReceipt(
     string ChecksObservationId,
     DateTimeOffset ChecksObservedAt,
     DateTimeOffset ReadyObservedAt,
-    RequiredCheckEvidence? RequiredEvidence = null);
+    RequiredCheckEvidence? RequiredEvidence = null,
+    TaskReadyReviewProof? ReviewProof = null);
+
+/// <summary>Producer-retained independent review identity; legacy receipts carry no merge proof.</summary>
+public sealed record TaskReadyReviewProof(
+    QueueAttemptEnvelope Attempt,
+    string VerdictPath,
+    string TerminalSha256,
+    string ExecutionId);
 
 public sealed record TaskBlockedDisposition(
     string ReasonCode,

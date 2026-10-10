@@ -3317,6 +3317,7 @@ function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection
         + (row.takeoverEligible === true ? `<label>Destination owner <input type="text" data-conductor-owner="${index}" maxlength="256"${busy ? " disabled" : ""}></label><label>Owner address (display text) <input type="text" data-conductor-address="${index}" maxlength="512"${busy ? " disabled" : ""}></label><button type="button" data-conductor-takeover="${index}"${busy ? " disabled" : ""}>Take Over</button>` : "")
         + (Array.isArray(row.controls) ? row.controls.map(result => `<p class="control-note">Historical ${escape(result.receipt?.operation || "Control")} receipt · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.appliedAt || "unknown time")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("") : "")
         + (Array.isArray(row.actions) ? row.actions.map(action => `<p class="control-note">Action ${escape(action.tag)}: ${escape(action.state)}. Owner: ${escape(action.holder || "unknown")}. ${escape(action.reason || "")} ${escape(action.nextTrigger || "")}</p>`).join("") : "")
+        + exactMergeHtml(row,index,busy,escape)
         + retainedJudgmentsHtml(row.history, escape)
         + `</article>`;
     }).join("");
@@ -3328,6 +3329,19 @@ function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection
     + (pendingCorrection ? (pendingCorrection.requests || [pendingCorrection]).map(pending => `<p class="control-note">${escape(pending.body.repository)} · exact correction request ${escape(pending.body.requestId)}. Acceptance receipt and current conductor state are checked separately.</p>${correctionStatusHtml(pending.receipt,escape)}<button type="button" data-conductor-correction-lookup="${escape(pending.body.requestId)}"${busy ? " disabled" : ""}>Look up exact correction receipt</button>`).join("") : "")
     + `<button type="button" data-conductor-refresh${busy ? " disabled" : ""}>Refresh conductor</button>`
     + `<p class="control-note">Stop is terminal for this acquisition. Take Over transfers ownership only. Issued work may finish. Correction application is not verified.</p>`;
+}
+
+function exactMergeHtml(row,index,busy,escape){
+  const view = row.merge;
+  if(!view) return "";
+  const candidates = Array.isArray(view.candidates) ? view.candidates.slice(0,20) : [];
+  const grants = Array.isArray(view.grants) ? view.grants.slice(0,20) : [];
+  return `<section aria-label="Exact merge permission"><h3>Exact squash permission</h3><p class="control-note">Model permission remains file-read-only. Each grant permits one qualified host attempt.</p>`
+    + (view.diagnostic ? `<p>${escape(view.diagnostic)}</p>` : "")
+    + candidates.map((candidate,slot) => `<div><p>Task ${escape(candidate.taskId)} · ${escape(candidate.pullRequestUrl)}</p><p>Full head: ${escape(candidate.headSha)}</p><p class="control-note">Ready receipt: ${escape(candidate.readyReceiptId || "awaiting next eligible ready transition")} · ${escape(candidate.readyReceiptSha256 || "unbound until ready")}</p>`
+      + (["attached","held","frozen"].includes(row.state) ? `<label>Expiry (local time)<input type="datetime-local" data-merge-expiry="${index}:${slot}"${busy ? " disabled" : ""}></label><button type="button" data-merge-grant="${index}:${slot}"${busy ? " disabled" : ""}>Grant one exact squash attempt</button>` : "") + `</div>`).join("")
+    + grants.map((grant,slot) => `<div><p>Grant ${escape(grant.grantId)} · ${escape(grant.pullRequestUrl)}</p><p>Full head: ${escape(grant.headSha)}</p><p>Permission: ${escape(grant.permission)}${grant.revoked ? " · revocation recorded" : ""}. Expires ${escape(grant.expiresAt)}</p><p>Delivery: ${escape(grant.delivery)} · Decision: ${escape(grant.decision || "unavailable")} · ${escape(grant.reason || "reason unavailable")}</p><p>Attempt: ${escape(grant.operation)} · Outcome: ${escape(grant.observation?.state || "not observed")}</p><p class="control-note">Issuer ${escape(grant.issuer)} · Request ${escape(grant.requestId)} · ${escape(grant.observation?.nextTrigger || "Refresh to inspect retained permission and outcome.")}</p>`
+      + (!grant.revoked ? `<button type="button" data-merge-revoke="${index}:${slot}"${busy ? " disabled" : ""}>Revoke this exact grant</button>` : "") + `</div>`).join("") + `</section>`;
 }
 
 function retainedJudgmentsHtml(history, escape){
@@ -3344,7 +3358,7 @@ function retainedJudgmentsHtml(history, escape){
       + `</div>`).join("")
     + (history.diagnostic ? `<p class="control-note">${escape(history.diagnostic)}</p>` : judgments.length ? "" : `<p>No verified ordinary judgments in the inspected history.</p>`)
     + (history.invalidEvents ? `<p class="control-note">${escape(history.invalidEvents)} invalid or incomplete event(s) excluded.</p>` : "")
-    + (history.excludedEvents ? `<p class="control-note">${escape(history.excludedEvents)} correction or prose-only event(s) excluded.</p>` : "")
+    + (history.excludedEvents ? `<p class="control-note">${escape(history.excludedEvents)} correction, merge or prose-only event(s) excluded.</p>` : "")
     + (history.omittedJudgments ? `<p class="control-note">${escape(history.omittedJudgments)} additional verified ordinary judgment(s) omitted.</p>` : "")
     + `</section>`;
 }
@@ -3370,6 +3384,9 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
     }
   } catch { /* A denied browser storage operation leaves the in-memory request available. */ }
   const sameIdentity = (a,b) => ["repository","holder","claimGeneration","attachmentId"].every(key => a?.[key] === b?.[key]);
+  let pendingMerge = null;
+  try { pendingMerge = JSON.parse(globalThis.sessionStorage?.getItem("baton-merge-request") || "null"); } catch {}
+  const saveMerge = () => { try { globalThis.sessionStorage?.setItem("baton-merge-request",JSON.stringify(pendingMerge)); } catch {} };
   const exactReceipt = result => result?.receipt?.operation === pendingControl?.operation
     && ["repository","holder","claimGeneration","attachmentId","requestId","reason","destinationHolder","destinationAddress","expectedControlRevision"]
       .every(key => (result.receipt.request?.[key] ?? null) === (pendingControl.body[key] ?? null));
@@ -3405,6 +3422,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
           : `No exact receipt for request ${pendingControl.body.requestId} in this snapshot; outcome remains unknown. Do not infer failure or repeat automatically.`;
       }
       if(pendingCorrection) await readCorrectionReceipt();
+      if(pendingMerge) await lookupMergeReceipt();
     }
     catch { snapshot = null; message = "Cannot read conductor settings. No controls are available until a fresh read succeeds."; }
     finally { busy = false; draw(); }
@@ -3546,7 +3564,54 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
         : `The ${action.toLowerCase()} result is unknown. It may have succeeded. Refresh before deciding whether to try again.`;
     } finally { busy = false; draw(); }
   };
-  return {refresh,correct,lookupCorrection,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true),
+  const lookupMergeReceipt = async () => {
+    const response = await request(`/conductor/merge/receipt?repository=${encodeURIComponent(pendingMerge.body.repository)}&requestId=${encodeURIComponent(pendingMerge.body.requestId)}`,{});
+    if(!response.ok) throw new Error("Exact merge receipt unavailable.");
+    const receipt = await response.json();
+    const body = pendingMerge.body;
+    const matches = receipt?.requestId === body.requestId && receipt?.operation === pendingMerge.operation
+      && (pendingMerge.operation === "revoke" ? receipt.grantId === body.grantId
+        : Object.keys(body).every(key => key === "expiresAt"
+          ? new Date(receipt.grant?.[key]).getTime() === new Date(body[key]).getTime()
+          : receipt.grant?.[key] === body[key]));
+    message = matches ? `Exact ${pendingMerge.operation} acceptance retained. Permission, delivery, attempt and outcome are shown separately.`
+      : `No matching acceptance for merge request ${body.requestId}; outcome remains unknown. No POST was repeated.`;
+    if(matches){ pendingMerge = null; saveMerge(); }
+  };
+  const mergeControl = async (index,slot,revoke,expiry) => {
+    if(busy || !Number.isInteger(index) || !Number.isInteger(slot)) return;
+    if(pendingMerge){ message = `Refresh to look up merge request ${pendingMerge.body.requestId} before another merge control.`; draw(); return; }
+    const row = snapshot?.conductors[index];
+    const selected = revoke ? row?.merge?.grants?.[slot] : row?.merge?.candidates?.[slot];
+    if(!row || !selected) return;
+    const expires = revoke ? null : new Date(expiry);
+    const expiryMs = expires?.getTime();
+    const now = Date.now();
+    if(!revoke && (!expiry || !Number.isFinite(expiryMs) || expiryMs <= now || expiryMs > now + 24*60*60*1000)){ message = "Choose an explicit future expiry within 24 hours."; draw(); return; }
+    busy = true; draw();
+    try {
+      await read();
+      const fresh = snapshot.conductors.find(r => r.repository === row.repository);
+      const candidate = fresh?.merge?.candidates?.find(c => c.taskId === selected.taskId);
+      if(!revoke && (!sameIdentity(row,fresh) || JSON.stringify(candidate) !== JSON.stringify(selected))){ message = "Exact task, receipt or owner changed. Inspect the fresh card before granting."; return; }
+      const body = revoke ? {repository:row.repository,grantId:selected.grantId,requestId:newRequestId()}
+        : {repository:row.repository,holder:row.holder,claimGeneration:row.claimGeneration,attachmentId:row.attachmentId,requestId:newRequestId(),
+          taskId:selected.taskId,pullRequest:selected.pullRequest,pullRequestUrl:selected.pullRequestUrl,headSha:selected.headSha,method:"squash",expiresAt:expires.toISOString(),readyReceiptId:selected.readyReceiptId ?? null,readyReceiptSha256:selected.readyReceiptSha256 ?? null};
+      if(!confirmAction(revoke ? `Revoke grant ${selected.grantId} for ${selected.pullRequestUrl} at ${selected.headSha}? Already issued work may finish.`
+        : `Grant ONE squash attempt for ${row.repository}, task ${selected.taskId}, ${selected.pullRequestUrl}, full head ${selected.headSha}, owner ${row.holder}, acquisition ${row.claimGeneration}, attachment ${row.attachmentId}, receipt ${selected.readyReceiptId || "next eligible ready receipt"}, expiry ${body.expiresAt}? Fresh review, checks and server protections must qualify.`)) return;
+      pendingMerge = {operation:revoke ? "revoke" : "grant",body}; saveMerge();
+      message = `Submitting exact merge request ${body.requestId}.`; draw();
+      const response = await request(`/conductor/merge/${pendingMerge.operation}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(!response.ok){
+        if(response.status === 403){ pendingMerge = null; saveMerge(); message = "Exact merge control refused. Refresh before submitting a new request."; return; }
+        throw new Error("Unknown merge control outcome.");
+      }
+      await lookupMergeReceipt();
+      await read();
+    } catch { message = `Merge control outcome unknown. Retain request ${pendingMerge?.body.requestId || "shown above"} and refresh for its receipt. No POST will be repeated automatically.`; }
+    finally { busy = false; draw(); }
+  };
+  return {refresh,correct,lookupCorrection,mergeControl,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true),
     hold:(index,inputs)=>changeDelivery(index,false,"hold",inputs),unhold:(index,inputs)=>changeDelivery(index,false,"unhold",inputs),
     stop:(index,inputs)=>changeDelivery(index,false,"stop",inputs),takeover:(index,inputs)=>changeDelivery(index,false,"takeover",inputs)};
 }
@@ -3562,7 +3627,14 @@ function wireConductorControl(panel, control){
     const unhold = event.target.closest?.("[data-conductor-unhold]");
     const correct = event.target.closest?.("[data-conductor-correct]");
     const lookup = event.target.closest?.("[data-conductor-correction-lookup]");
-    if(refresh) void control.refresh();
+    const mergeGrant = event.target.closest?.("[data-merge-grant]");
+    const mergeRevoke = event.target.closest?.("[data-merge-revoke]");
+    if(mergeGrant || mergeRevoke){
+      const key = (mergeGrant || mergeRevoke).dataset[mergeGrant ? "mergeGrant" : "mergeRevoke"];
+      const [index,slot] = key.split(":").map(Number);
+      void control.mergeControl(index,slot,!!mergeRevoke,panel.querySelector(`[data-merge-expiry="${key}"]`)?.value || "");
+    }
+    else if(refresh) void control.refresh();
     else if(lookup) void control.lookupCorrection(lookup.dataset.conductorCorrectionLookup || null);
     else if(correct){
       const index = Number(correct.dataset.conductorCorrect);

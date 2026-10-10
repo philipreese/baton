@@ -161,6 +161,24 @@ public static class QueueStore
     }
 
     /// <summary>
+    /// Reads queue then claim under their admission locks without rewriting the queue. The short synchronous
+    /// callback may fence another local durable register, but must not perform remote I/O or wait on a session.
+    /// </summary>
+    public static Task<TResult> ReadWithCurrentClaimAsync<TResult>(
+        string path, RepositoryIdentity identity, string batonRoot,
+        Func<QueueSnapshot, ConductorClaimRecord?, TResult> read,
+        CancellationToken cancellationToken = default, TimeSpan? lockTimeout = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        ArgumentNullException.ThrowIfNull(identity);
+        ArgumentException.ThrowIfNullOrEmpty(batonRoot);
+        ArgumentNullException.ThrowIfNull(read);
+        return Task.Run(() => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, lockTimeout ?? LockTimeout,
+            () => ConductorClaimStore.WithCurrentClaim(identity, batonRoot,
+                claim => read(ReadUnlocked(path), claim), lockTimeout)), cancellationToken);
+    }
+
+    /// <summary>
     /// Persists a claim for one exact resolved path. Existing claims and completed receipts win every race;
     /// callers must treat a null result as an instruction to leave the workspace untouched.
     /// Non-success receipts (refused, retained, race-lost) do not permanently prevent future cleanup.

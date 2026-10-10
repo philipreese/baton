@@ -629,7 +629,9 @@ internal sealed partial class ConductorFollowSession
         if (identity.SchemaVersion != SchemaVersion || identity.Repository != state.Repository
             || identity.ClaimGeneration != state.ClaimGeneration || identity.ConfigurationSha256 != ConfigurationDigest(state)
             || string.IsNullOrWhiteSpace(identity.ObligationId) || Path.GetFileName(directory) != Digest(identity.ObligationId)
-            || (IsCorrection(identity) ? identity.SourceCapability != "correction" : identity.SourceCapability != StoppedWorkJudgmentKey.Capability)
+            || (IsCorrection(identity) ? identity.SourceCapability != "correction"
+                : identity.Kind == "ready-merge" ? identity.SourceCapability != "exact-merge"
+                : identity.SourceCapability != StoppedWorkJudgmentKey.Capability)
             || identity.ContextSha256 is not { Length: 64 })
             throw new IOException("Incomplete event identity.");
     }
@@ -664,6 +666,11 @@ internal sealed partial class ConductorFollowSession
     private void ValidateRetainedDecision(string directory, ConductorFollowEventIdentity identity,
         ConductorFollowState state, ConductorFollowResponse response, string receipt)
     {
+        if (identity.Kind == "ready-merge")
+        {
+            _ = ValidateMergeTypedResponse(directory, identity, state, response);
+            return;
+        }
         if (IsCorrection(identity))
         {
             RefuseCorrectionDecision(directory);
@@ -687,6 +694,11 @@ internal sealed partial class ConductorFollowSession
     private static void ValidateRetainedSource(string directory, ConductorFollowEventIdentity identity,
         ConductorFollowState state)
     {
+        if (identity.Kind == "ready-merge")
+        {
+            ValidateMergeEventSource(directory, identity, state);
+            return;
+        }
         if (IsCorrection(identity))
         {
             ValidateCorrectionEventSource(directory, identity, state);
@@ -726,6 +738,7 @@ internal sealed partial class ConductorFollowSession
     internal static ConductorFollowDecisionEvidence? ReadDecisionEvidence(string directory)
     {
         var identity = Read<ConductorFollowEventIdentity>(Path.Combine(directory, "identity.json"));
+        if (identity.Kind == "ready-merge") return null;
         if (IsCorrection(identity))
         {
             RefuseCorrectionDecision(directory);
@@ -741,6 +754,7 @@ internal sealed partial class ConductorFollowSession
         IReadOnlyList<string> lines, string evidenceDirectory,
         ConductorFollowEventIdentity identity, ConductorFollowState state)
     {
+        if (identity.Kind == "ready-merge") return null;
         if (IsCorrection(identity))
         {
             RefuseCorrectionDecision(evidenceDirectory);

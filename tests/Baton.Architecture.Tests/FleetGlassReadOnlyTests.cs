@@ -210,7 +210,7 @@ public class FleetGlassReadOnlyTests
         var rawHtml = File.ReadAllText(glassPath);
         var violations = new List<string>();
 
-        // 1. Keep three auditable POST sinks: queue/room controls, hosted controls and corrections, all
+        // 1. Keep four auditable POST sinks: queue/room controls, hosted controls, corrections and exact merge grants, all
         // rendered behind DAEMON_SERVED; the artifact cannot paint them.
         var forbiddenNetworkSinks = new[]
         {
@@ -232,7 +232,10 @@ public class FleetGlassReadOnlyTests
         }
 
         violations.AddRange(SameOriginReadViolations(htmlWithoutComments));
-        Assert.Equal(3, Regex.Matches(htmlWithoutComments, @"\bmethod\s*:\s*[""']POST[""']").Count);
+        Assert.Equal(4, Regex.Matches(htmlWithoutComments, @"\bmethod\s*:\s*[""']POST[""']").Count);
+        Assert.Contains("request(`/conductor/merge/${pendingMerge.operation}`,{method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("operation:revoke ? \"revoke\" : \"grant\"", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("/conductor/merge/receipt?repository=${encodeURIComponent(pendingMerge.body.repository)}&requestId=${encodeURIComponent(pendingMerge.body.requestId)}", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("request(\"/conductor/correct\", {method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("/conductor/corrections/receipt?requestId=${encodeURIComponent(pendingCorrection.body.requestId)}", htmlWithoutComments, StringComparison.Ordinal);
         Assert.Contains("request(route, {method:\"POST\"", htmlWithoutComments, StringComparison.Ordinal);
