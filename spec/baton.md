@@ -6826,8 +6826,9 @@ configuration, missing/multiple identity values, tagged-device traffic, mismatch
 peers fail closed. This rests on the measured `tailscale serve` path stripping caller-supplied
 identity headers and injecting the authenticated tailnet login before proxying to loopback. A
 refusal appends one `glassWriteRefused` fleet fact with route plus only `<redacted>`/`<missing>` for
-the login. The route table admits exactly `POST /queue/hold`, `POST /queue/resume`, and
-`POST /rooms/<id>/cancel`; unknown POST routes, including resolve and redispatch, are 404. The page
+the login. The route table admits `POST /queue/hold`, `POST /queue/resume`,
+`POST /rooms/<id>/cancel`, and the exact conductor detach in §14 (#2653); unknown POST routes,
+including resolve and redispatch, are 404. The page
 renders these controls only under `DAEMON_SERVED`, confirms cancel explicitly, and refreshes the
 projection after the server receipt rather than changing displayed state optimistically.
 
@@ -8920,6 +8921,32 @@ This section defines the first bounded slice: a durable, auditable repository-cl
 - Writes are serialized with `MutexGuardedFileLock` using the `baton-conductor-claim` mutex prefix.
 - Writes use atomic replacement (`.tmp` file written then replaced via `File.Move(..., overwrite: true)`).
 - The durable record maintains full audit history in `transitions[]`, tracking every `Claim`, `Takeover`, and `Release` transition with timestamps, holders, displaced holders, and reasons.
+
+### Glass conductor visibility and detach (#2653)
+
+`GET /conductors` returns an as-of registration snapshot: canonical remote repository, current
+claim holder/generation, matching attachment ID/state, adapter/model/effort and the accepted file-read-only
+permission description. Missing attachment is `unattached`; revoked registration is `detached`;
+a frozen session is `frozen`. Corrupt, stale, mismatched, unsafe-to-display or unreadable state is
+explicitly `unavailable`. `attached` proves registration, not health or a currently running turn.
+The projection omits instructions, request files, native session IDs and local absolute paths;
+local-only repository identities are unavailable on this surface. The display is bounded to 100
+claims with an explicit overflow row, and a failed registry read never becomes an empty healthy list.
+
+`POST /conductor/detach` crosses the existing Glass write gate (C-11) and requires exactly
+`repository`, `holder`, `claimGeneration`, and `attachmentId` from the displayed snapshot.
+The bounded request accepts no path or authority grant. Detach checks the current claim under its
+existing lock and the registration under the queue admission lock. A stale identity refuses;
+repeating the same completed detach succeeds. It only persists `attached: false` in the existing
+registration, preserving claim ownership, request, session identity, journal and evidence.
+Launch-marker admission shares that queue cutover: a detached or replaced registration cannot
+admit a subsequent follow launch. Existing action admission revalidates the same registration.
+Detach does not cancel an already admitted turn or already issued action. The page immediately
+shows the server receipt, then reconciles the authoritative status; unavailable reads disable control.
+
+The broader operator-approved hosted conductor direction (#2091) requires visible task, decision,
+next action, permissions and correction state, plus hold/stop/takeover. Those remain planned beyond
+this bounded increment; it introduces no unattended merge authority or general remote steering.
 
 ### Continuing conductor follow (#2628)
 

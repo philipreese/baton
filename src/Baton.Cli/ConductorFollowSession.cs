@@ -331,11 +331,13 @@ internal sealed partial class ConductorFollowSession
             // Daemon admission must refuse before any event identity or irreversible launch marker.
             if (requiredAdmission is not null)
                 await requiredAdmission(obligation, cancellationToken).ConfigureAwait(false);
+            string? admittedAttachmentId = null;
             if (File.Exists(AttachmentPath))
             {
                 var attachment = Read<ConductorFollowAttachment>(AttachmentPath);
                 ValidateAttachment(attachment);
                 if (!attachment.Attached) throw new CliArgumentException("Follow attachment is detached.");
+                admittedAttachmentId = attachment.Id;
             }
             Directory.CreateDirectory(evidence);
             var identityEvidence = new ConductorFollowEventIdentity(SchemaVersion, key, obligation.ObligationId,
@@ -353,8 +355,23 @@ internal sealed partial class ConductorFollowSession
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
             _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
-            Write(Path.Combine(evidence, "launch.json"),
-                new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
+            // Detach and launch admission serialize at the same cutover; a detached registration
+            // must never acquire a later launch marker. A marker already committed is an issued turn.
+            await Task.Run(() => MutexGuardedFileLock.RunUnderLock(Path.Combine(_root, "queue", "queue.json"),
+                QueueStore.LockNamePrefix, TimeSpan.FromSeconds(30), () =>
+                {
+                    if (File.Exists(AttachmentPath))
+                    {
+                        var current = Read<ConductorFollowAttachment>(AttachmentPath);
+                        ValidateAttachment(current);
+                        if (!current.Attached || current.Id != admittedAttachmentId)
+                            throw new CliArgumentException("Follow attachment revoked before launch.");
+                    }
+                    else if (admittedAttachmentId is not null)
+                        throw new CliArgumentException("Follow attachment missing before launch.");
+                    Write(Path.Combine(evidence, "launch.json"),
+                        new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
+                }), cancellationToken).ConfigureAwait(false);
             launched = true;
             var configuration = new CodexBrokerConfiguration(_request.Workspace, state.Model, state.Effort,
                 state.SessionId, state.SessionId is not null, state.EffectiveGrant, ["response.txt"], false);

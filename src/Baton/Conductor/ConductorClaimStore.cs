@@ -285,6 +285,12 @@ public static class ConductorClaimStore
             Encoding.UTF8.GetBytes($"{claim.Repository}\n{history}"))).ToLowerInvariant();
     }
 
+    /// <summary>Runs a short synchronous operation while the current claim cannot be replaced.</summary>
+    public static T WithCurrentClaim<T>(RepositoryIdentity identity, string batonRoot,
+        Func<ConductorClaimRecord?, T> operation) =>
+        RunUnderClaimLock(GetClaimFilePath(batonRoot, identity.FileSlug),
+            () => operation(ReadUnlocked(GetClaimFilePath(batonRoot, identity.FileSlug))));
+
     /// <summary>
     /// Lists all currently held repository claims under <paramref name="batonRoot"/> (spec/baton.md §14).
     /// </summary>

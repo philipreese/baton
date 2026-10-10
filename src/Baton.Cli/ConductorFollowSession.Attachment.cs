@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Baton.Accounting;
 using Baton.Cli.Daemon;
 using Baton.Conductor;
@@ -10,8 +11,15 @@ using Baton.Vendors;
 namespace Baton.Cli;
 
 internal sealed record ConductorFollowAttachment(
-    int SchemaVersion, string Id, string Repository, string ClaimGeneration, string Holder,
-    string SessionDirectory, string RequestSha256, DateTimeOffset CutoverAt, bool Attached);
+    [property: JsonRequired] int SchemaVersion,
+    [property: JsonRequired] string Id,
+    [property: JsonRequired] string Repository,
+    [property: JsonRequired] string ClaimGeneration,
+    [property: JsonRequired] string Holder,
+    [property: JsonRequired] string SessionDirectory,
+    [property: JsonRequired] string RequestSha256,
+    [property: JsonRequired] DateTimeOffset CutoverAt,
+    [property: JsonRequired] bool Attached);
 
 internal sealed partial class ConductorFollowSession
 {
