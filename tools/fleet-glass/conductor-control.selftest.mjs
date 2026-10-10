@@ -16,6 +16,24 @@ const snapshot = (state='attached') => ({observedAt:'2026-10-10T00:00:00Z',condu
 const ok = value => ({ok:true,status:200,json:async()=>value});
 const esc = value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const card = conductorControlHtml(snapshot(),'',false,esc);
+const recorded = {observedAt:'2026-10-10T00:00:00Z',availability:'available',omitted:1,items:Array.from({length:21},(_,i)=>({
+  task:{id:`task-${String(i).padStart(2,'0')}`,issue:2683,conductorHolder:'prior-owner',preparation:'blocked',readyReceiptId:'ready-1',readyHeadSha:'b'.repeat(40),blocker:'Recorded blocker'},
+  stage:'implement',state:i===0?'Launched':'Queued',cancelled:i===1
+})).slice(0,20)};
+const recordedCard=conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:recorded}]},'',false,esc);
+assert.ok(recordedCard.includes('Recorded repository tasks'));
+assert.ok(recordedCard.includes('Recorded conductor holder: prior-owner'));
+assert.ok(recordedCard.includes('does not record acquisition generation'));
+assert.ok(recordedCard.includes('Historical ready reference: ready-1'));
+assert.ok(recordedCard.includes('Next trigger not shown here'));
+assert.ok(recordedCard.includes('1 additional task record(s) omitted'));
+assert.ok(recordedCard.includes('cancelled (retained record)'));
+assert.ok(recordedCard.includes('href="#queue"') && recordedCard.includes('href="#stream"'));
+assert.ok(conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:{availability:'available',items:[],omitted:0}}]},'',false,esc).includes('No matching recorded task rows'));
+assert.ok(conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:null}]},'',false,esc).includes('Queue records unavailable'));
+const hostileRecorded=conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:{...recorded,items:[{...recorded.items[0],task:{...recorded.items[0].task,id:'<img src=x>',conductorHolder:'<script>private</script>'}}]}}]},'',false,esc);
+assert.ok(hostileRecorded.includes('&lt;img src=x&gt;'));
+assert.ok(hostileRecorded.includes('&lt;script&gt;private&lt;/script&gt;'));
 assert.ok(conductorControlHtml({...snapshot('detached'),conductors:[{...row,state:'detached',resumeEligible:true}]},'',false,esc).includes('data-conductor-resume="0"'));
 assert.ok(!conductorControlHtml(snapshot('detached'),'',false,esc).includes('data-conductor-resume'));
 assert.ok(card.includes('data-conductor-detach="0"'));
@@ -225,7 +243,7 @@ for(const operation of ['stop','takeover']){
   assert.ok(rendered.includes('Action issued: issued'));
   if(operation==='takeover'){
     assert.ok(rendered.includes('javascript:alert(1)&lt;img'));
-    assert.ok(!rendered.includes('href='),'owner address must be inert escaped text');
+    assert.ok(!rendered.includes('href="javascript:'),'owner address must be inert escaped text');
   }
 }
 for(const failure of ['lost',403,409,500,'stale-get','bad-receipt','bad-final-get']){

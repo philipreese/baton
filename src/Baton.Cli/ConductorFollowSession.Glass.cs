@@ -14,12 +14,16 @@ internal sealed record GlassConductorStatus(string Repository, string? Holder, s
     string? RetainedHolder = null, string? RetainedGeneration = null, bool HistoricalProvider = false,
     IReadOnlyList<GlassHostedControlResult>? Controls = null, IReadOnlyList<GlassIssuedActionStatus>? Actions = null,
     bool Held = false, long ControlRevision = 0, bool HoldEligible = false, bool UnholdEligible = false,
-    string? AdmissionWait = null, bool QueueHeld = false, ConductorHostedControlReceipt? HoldControl = null,
+    string? AdmissionWait = null, bool? QueueHeld = false, ConductorHostedControlReceipt? HoldControl = null,
     bool CorrectionEligible = false, GlassCorrectionStatus? Correction = null,
-    GlassRetainedJudgmentHistory? History = null, GlassMergeView? Merge = null);
+    GlassRetainedJudgmentHistory? History = null, GlassMergeView? Merge = null,
+    GlassRecordedTasks? RecordedTasks = null);
 
 internal sealed record GlassHostedControlResult(ConductorHostedControlReceipt Receipt, string Cleanup);
 internal sealed record GlassIssuedActionStatus(string Tag, string State, string? Reason, string? NextTrigger, string Holder);
+internal sealed record GlassRecordedTask(QueueTaskPublicView Task, string Stage, string State, bool Cancelled);
+internal sealed record GlassRecordedTasks(DateTimeOffset ObservedAt, string Availability,
+    IReadOnlyList<GlassRecordedTask> Items, int Omitted);
 
 internal sealed record GlassConductorsSnapshot(DateTimeOffset ObservedAt, IReadOnlyList<GlassConductorStatus> Conductors);
 
@@ -84,6 +88,7 @@ internal sealed partial class ConductorFollowSession
                         HoldControl = claim.Held ? controls.LastOrDefault(c => c.Operation == "hold" && c.ResultGeneration == generation) : null,
                         Controls = controls.Select(c => new GlassHostedControlResult(c, ControlCleanupState(identity, root, c))).ToArray(),
                         Actions = activity.Actions,
+                        RecordedTasks = activity.RecordedTasks,
                         QueueHeld = activity.QueueHeld,
                         History = ReadGlassHistory(identity, root, activity.Items, token: token),
                         Merge = ReadGlassMerge(identity, root, activity.Items, claim),
@@ -419,9 +424,21 @@ internal sealed partial class ConductorFollowSession
         }
     }
 
-    private static async Task<(IReadOnlyList<GlassIssuedActionStatus> Actions, bool QueueHeld, IReadOnlyList<QueueItem> Items)> ReadGlassActionsAsync(string repository, string root, CancellationToken token)
+    private static async Task<(IReadOnlyList<GlassIssuedActionStatus> Actions, bool? QueueHeld, IReadOnlyList<QueueItem> Items, GlassRecordedTasks RecordedTasks)> ReadGlassActionsAsync(string repository, string root, CancellationToken token)
     {
-        var snapshot = await QueueStore.LoadAsync(Path.Combine(root, "queue", "queue.json"), token, GlassLockTimeout).ConfigureAwait(false);
+        var observedAt = DateTimeOffset.UtcNow;
+        QueueSnapshot snapshot;
+        var queueAvailable = true;
+        try
+        {
+            snapshot = await QueueStore.LoadAsync(Path.Combine(root, "queue", "queue.json"), token, GlassLockTimeout).ConfigureAwait(false);
+        }
+        catch (QueueStoreException)
+        {
+            // A broken queue makes its evidence unavailable, but must not erase independent hosted controls.
+            snapshot = QueueSnapshot.Empty;
+            queueAvailable = false;
+        }
         var identity = RepositoryIdentity.From("https://" + repository, null)!;
         var claim = await ConductorClaimStore.GetClaimAsync(identity, root, token, GlassLockTimeout).ConfigureAwait(false);
         bool Revoked(string holder) => claim is null || claim.Stopped || claim.Holder != holder;
@@ -474,8 +491,43 @@ internal sealed partial class ConductorFollowSession
                 pending.FollowContinuationWait ?? "Real event retained; delivery admission pending.",
                 pending.FollowContinuationTrigger ?? "Next scheduler reconciliation checks current eligibility.", SafeLabel(pending.Holder!)));
         }
-        return (actions, snapshot.Held, snapshot.Items);
+        var rows = snapshot.Items
+            .Where(item => item.Retirement is null && item.OwnedTask is { } task
+                && item.Repository == repository && task.Repository == repository && item.Repository == task.Repository)
+            .OrderBy(item => item.OwnedTask!.Id, StringComparer.Ordinal)
+            .Select(item => new GlassRecordedTask(SafeRecordedTask(QueueBoard.PublicTask(item)!),
+                item.Stage is { } stage ? WorkStages.Token(stage) : "unknown",
+                SafeRecordedToken(item.State.ToString()), item.State.ToString().Equals("Cancelled", StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+        var visible = rows.Take(20).ToArray();
+        var recordedTasks = new GlassRecordedTasks(observedAt, queueAvailable ? "available" : "unavailable",
+            queueAvailable ? visible : [], queueAvailable ? Math.Max(0, rows.Length - visible.Length) : 0);
+        return (actions, queueAvailable ? snapshot.Held : null, snapshot.Items, recordedTasks);
     }
+
+    private static QueueTaskPublicView SafeRecordedTask(QueueTaskPublicView task) => task with
+    {
+        Id = SafeRecordedIdentifier(task.Id),
+        Repository = SafeRecordedRepository(task.Repository),
+        ConductorHolder = SafeRecordedLabel(task.ConductorHolder),
+        Preparation = SafeRecordedToken(task.Preparation),
+        ReadyReceiptId = task.ReadyReceiptId is null ? null : SafeRecordedIdentifier(task.ReadyReceiptId),
+        ReadyHeadSha = task.ReadyHeadSha is null ? null : SafeRecordedSha(task.ReadyHeadSha),
+        Blocker = task.Blocker is null ? null : SafeRecordedBlocker(task.Blocker),
+    };
+
+    private static string SafeRecordedIdentifier(string value) => value.Length is > 0 and <= 64
+        && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_') ? value : "Unavailable identifier";
+    private static string SafeRecordedRepository(string value) => value.Length <= 160
+        && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '/' or '-' or '_' or '.') ? value : "Unknown repository";
+    private static string SafeRecordedLabel(string value) => value.Length is > 0 and <= 80
+        && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '@' or '.' or '-' or '_') ? value : "Unknown holder";
+    private static string SafeRecordedToken(string value) => value.Length is > 0 and <= 40
+        && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_') ? value : "unknown";
+    private static string SafeRecordedSha(string value) => value.Length is 7 or 40 or 64
+        && value.All(Uri.IsHexDigit) ? value : "Unavailable reference";
+    private static string SafeRecordedBlocker(string value) => value is "source-unavailable" or "checks-failed" or "review-failed"
+        or "head-changed" or "pull-request-closed" ? value : "Recorded blocker";
 
     internal static async Task DetachFromGlassAsync(string body, string root, CancellationToken token,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)

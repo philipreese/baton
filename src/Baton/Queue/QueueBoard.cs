@@ -427,7 +427,7 @@ public static class QueueBoard
         return parts.Count == 0 ? null : string.Join(" ", parts);
     }
 
-    private static QueueTaskPublicView? PublicTask(QueueItem item) => item.OwnedTask is { } task
+    public static QueueTaskPublicView? PublicTask(QueueItem item) => item.OwnedTask is { } task
         ? new QueueTaskPublicView(task.Id, task.Repository, task.Issue, task.ConductorHolder,
             item.IssuePreparation?.State.ToString().ToLowerInvariant() ?? "unknown",
             task.Ready?.Id, task.Ready?.HeadSha, task.Blocked?.ReasonCode)
