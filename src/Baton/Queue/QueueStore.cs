@@ -141,7 +141,7 @@ public static class QueueStore
     public static Task<QueueSnapshot> MutateWithCurrentClaimAsync(
         string path, RepositoryIdentity identity, string batonRoot,
         Func<QueueSnapshot, ConductorClaimRecord?, QueueSnapshot> mutate,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, TimeSpan? lockTimeout = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         ArgumentNullException.ThrowIfNull(identity);
@@ -150,13 +150,13 @@ public static class QueueStore
 
         EnsureParentDirectory(path);
         return Task.Run(
-            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, lockTimeout ?? LockTimeout, () =>
                 ConductorClaimStore.WithCurrentClaim(identity, batonRoot, claim =>
                 {
                     var updated = mutate(ReadUnlocked(path), claim);
                     WriteUnlocked(path, updated);
                     return updated;
-                })),
+                }, lockTimeout)),
             cancellationToken);
     }
 

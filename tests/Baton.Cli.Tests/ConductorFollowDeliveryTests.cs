@@ -13,6 +13,7 @@ using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
 
+[Collection(SerializedEnvironmentCollection.Name)]
 public sealed partial class ConductorFollowDeliveryTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -238,6 +239,7 @@ public sealed partial class ConductorFollowDeliveryTests
         });
         await restarted.StartAsync(Ct);
         await reachedIdle.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        await WaitForAdvicePassAsync(restarted);
         await restarted.StopAsync(Ct);
         Assert.Single(fixture.Calls);
         Assert.NotNull(fixture.Receipt("gap"));
@@ -960,6 +962,15 @@ public sealed partial class ConductorFollowDeliveryTests
             throw new InvalidOperationException($"No event evidence for {tag}.");
         }
 
+        public async Task<ConductorFollowResult?> DeliverCorrectionAsync()
+        {
+            var target = await ConductorFollowSession.CorrectionTargetAsync(Root, Repository, Ct);
+            return target is null ? null : await ConductorFollowSession.NotifyCorrectionAsync(target, Root, Ct,
+                Broker, (_, _) => Task.FromResult<RepositoryIdentity?>(Identity));
+        }
+
+        public ConductorFollowBroker CorrectionBroker => Broker;
+
         public QueueSchedulerService Scheduler(WorkItemAdvancer? advancer = null,
             Func<TimeSpan, CancellationToken, Task>? delay = null,
             Func<ConductorObligation, StoppedWorkAdviceRequest, StoppedWorkAdviceContext,
@@ -1099,7 +1110,17 @@ public sealed partial class ConductorFollowDeliveryTests
             };
             File.WriteAllText(item.SpecFile, "Fixture");
             await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with { Items = [.. queue.Items, item] }, Ct);
-            if (notify) await (scheduler ?? Scheduler()).TickOnceAsync(Ct);
+            if (notify)
+            {
+                var notifying = scheduler ?? Scheduler();
+                await notifying.TickOnceAsync(Ct);
+                await WaitForAdvicePassAsync(notifying);
+                if (scheduler is null)
+                {
+                    await notifying.DrainStoppedWorkAdviceAsync();
+                    notifying.Dispose();
+                }
+            }
             else Assert.Single(await Advancer().AdvanceAsync(DateTimeOffset.UtcNow, Ct));
             return (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single(row => row.Tag == tag);
         }
@@ -1146,10 +1167,20 @@ public sealed partial class ConductorFollowDeliveryTests
             }
             var sourcePath = Assert.Single(inputs);
             using var source = JsonDocument.Parse(File.ReadAllText(sourcePath));
-            var key = source.RootElement.GetProperty("idempotencyKey").GetString()!;
-            Assert.NotNull(await Store.ReadAsync(key, token));
-            Assert.Contains((await QueueStore.LoadAsync(BatonPaths.QueueFile, token)).Items,
-                row => row.Halted && row.StoppedWorkJudgment?.Key == key);
+            var correction = source.RootElement.TryGetProperty("receiptId", out var correctionReceipt);
+            var key = correction ? "correction:" + correctionReceipt.GetString() : source.RootElement.GetProperty("idempotencyKey").GetString()!;
+            var eventId = correction ? source.RootElement.GetProperty("eventId").GetString()! : (await Store.ReadAsync(key, token))!.ObligationId;
+            if (!correction)
+            {
+                Assert.NotNull(await Store.ReadAsync(key, token));
+                Assert.Contains((await QueueStore.LoadAsync(BatonPaths.QueueFile, token)).Items,
+                    row => row.Halted && row.StoppedWorkJudgment?.Key == key);
+            }
+            else
+            {
+                Assert.Contains("operator correction", prompt, StringComparison.Ordinal);
+                Assert.Equal(new PermissionGrant(ReadFiles: true), configuration.PermissionGrant);
+            }
             await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue, token).WaitAsync(TimeSpan.FromSeconds(60), token);
             if (Interrupt)
             {
@@ -1161,13 +1192,14 @@ public sealed partial class ConductorFollowDeliveryTests
             {
                 schemaVersion = 1,
                 obligationKey = Reply == "foreign-key" ? Key("foreign") : key,
-                obligationId = Reply == "foreign-id" ? "foreign" : (await Store.ReadAsync(key, token))!.ObligationId,
+                obligationId = Reply == "foreign-id" ? "foreign" : eventId,
                 sourceHeadSha = Reply == "foreign-head" ? new string('f', 40) : Head,
                 decision = Reply == "Hold" ? "Hold" : "ReplaceReview",
             });
             reply = Reply switch
             {
                 "prose" => "Please " + reply,
+                "applied" => "Applied this correction.",
                 "duplicate" => reply.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1", StringComparison.Ordinal),
                 "unknown" => reply.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"unknown\":true", StringComparison.Ordinal),
                 "alias" => reply.Replace("obligationKey", "ObligationKey", StringComparison.Ordinal),

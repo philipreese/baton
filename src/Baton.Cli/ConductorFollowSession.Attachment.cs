@@ -147,10 +147,10 @@ internal sealed partial class ConductorFollowSession
             var queue = await QueueStore.LoadAsync(BatonPaths.QueueFile, ct).ConfigureAwait(false);
             var row = queue.Items.SingleOrDefault(item => item.StoppedWorkJudgment?.Key == key);
             if (queue.Held || row?.StoppedWorkJudgment?.FollowAttachmentId != id)
-                throw new CliArgumentException("Follow source admission changed.");
+                throw new HostedConductorAdmissionPendingException("Queue Hold or attachment admission changed.");
             if (validateSource is not null) await validateSource(row!, ct).ConfigureAwait(false);
             await session.AdmitDaemonTurnAsync(obligation, ct).ConfigureAwait(false);
-        }).ConfigureAwait(false);
+        }, sessionLockTimeout: TimeSpan.FromMilliseconds(100)).ConfigureAwait(false);
         if (result.Status is "delivered" or "replayed")
         {
             var current = Read<ConductorFollowAttachment>(path);
@@ -188,6 +188,9 @@ internal sealed partial class ConductorFollowSession
     }
 
     private async Task AdmitDaemonTurnAsync(ConductorObligation obligation, CancellationToken token)
+        => await AdmitDaemonTurnAsync(obligation.ObligationId, token).ConfigureAwait(false);
+
+    private async Task AdmitDaemonTurnAsync(string correlationId, CancellationToken token)
     {
         var settings = await DaemonSettingsStore.LoadAsync(Path.Combine(_root, BatonPaths.SettingsFileName), token).ConfigureAwait(false);
         var thresholds = settings.RunwayHold.For(_request.Adapter);
@@ -203,10 +206,10 @@ internal sealed partial class ConductorFollowSession
             thresholds.WeekHoldPct, thresholds.SessionHoldPct, thresholds.EffectiveMaxSnapshotAge.TotalHours,
             decision.SnapshotHarvestedAt, decision.HeadroomPoints,
             policy.Estimate(new(_request.Adapter, "conductor", costs)),
-            obligation.ObligationId, "conductor", null, DateTimeOffset.UtcNow) };
+            correlationId, "conductor", null, DateTimeOffset.UtcNow) };
         var entries = await RunwayAdmissionLedgerStore.ReserveAndRecordAsync(requests,
             Path.Combine(_root, BatonPaths.FleetDirectoryName, BatonPaths.RunwayAdmissionLedgerFileName), token).ConfigureAwait(false);
         if (entries.Count != 1 || entries[0].Decision != RunwayAdmissionDecisions.Admitted)
-            throw new CliArgumentException("Required daemon runway admission refused; no launch admitted.");
+            throw new HostedConductorAdmissionPendingException("Required daemon runway admission refused; no launch admitted.");
     }
 }

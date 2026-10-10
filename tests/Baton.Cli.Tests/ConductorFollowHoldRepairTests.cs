@@ -18,6 +18,8 @@ public sealed partial class ConductorFollowDeliveryTests
 
     private static async Task WaitForAdvicePassAsync(QueueSchedulerService scheduler)
     {
+        foreach (var hosted in await scheduler.SnapshotHostedTasksAsync())
+            await hosted.WaitAsync(TimeSpan.FromSeconds(30), Ct); // wait-ok: Bound each acquisition's offline hosted pass.
         if (AdviceTask(scheduler) is { } task)
             await task.WaitAsync(TimeSpan.FromSeconds(30), Ct); // wait-ok: Bound the offline advisory pass independently of scheduler liveness.
     }

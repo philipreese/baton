@@ -23,7 +23,8 @@ namespace Baton.Cli.Daemon;
 /// this plane: they must never be added to worker-served or artifact copies, whose secret gate and
 /// KV write cap are the two walls that forced a second plane in the first place.
 /// </para>
-/// <para><b>Narrow writes.</b> Reads remain open on the bound listener. The approved POST routes
+/// <para><b>Narrow writes.</b> Ordinary reads remain open on the bound listener; exact correction
+/// receipt lookup follows spec/baton.md §14. The approved POST routes
 /// cross <see cref="GlassWriteGate"/> for queue/cancel and exact conductor delivery control; every other
 /// method and route is refused. Origination, redispatch, merge and arbitrary resolution remain
 /// desktop/operator work.</para>
@@ -315,6 +316,10 @@ internal sealed class GlassHttpService : BackgroundService
                         JsonSerializer.Serialize(conductors, WebJson)).ConfigureAwait(false);
                     return;
 
+                case "/conductor/corrections/receipt":
+                    await HandleCorrectionReceiptAsync(context, stoppingToken).ConfigureAwait(false);
+                    return;
+
                 case "/events":
                     await WriteEventStreamAsync(context, stoppingToken).ConfigureAwait(false);
                     return;
@@ -363,8 +368,9 @@ internal sealed class GlassHttpService : BackgroundService
         var isConductorTakeover = string.Equals(route, "/conductor/takeover", StringComparison.Ordinal);
         var isConductorHold = string.Equals(route, "/conductor/hold", StringComparison.Ordinal);
         var isConductorUnhold = string.Equals(route, "/conductor/unhold", StringComparison.Ordinal);
+        var isConductorCorrection = string.Equals(route, "/conductor/correct", StringComparison.Ordinal);
         var isConductorControl = isConductorDetach || isConductorResume || isConductorStop || isConductorTakeover
-            || isConductorHold || isConductorUnhold;
+            || isConductorHold || isConductorUnhold || isConductorCorrection;
         const string cancelPrefix = "/rooms/";
         const string cancelSuffix = "/cancel";
         var isCancelShape = route.StartsWith(cancelPrefix, StringComparison.Ordinal)
@@ -433,7 +439,20 @@ internal sealed class GlassHttpService : BackgroundService
                     if (count == 0) break;
                     length += count;
                 }
-                if (length > 4096) throw new CliArgumentException("Detach request exceeds its bound.");
+                if (length > 4096) throw new CliArgumentException("Conductor request exceeds its bound.");
+                if (isConductorCorrection)
+                {
+                    var result = await ConductorFollowSession.CorrectFromGlassAsync(new string(chars, 0, length),
+                        _conductorRoot, identityHeaders![0], cancellationToken).ConfigureAwait(false);
+                    if (DropCorrectionAcknowledgementForTest)
+                    {
+                        context.Response.Abort();
+                        return;
+                    }
+                    await WriteTextAsync(context, result.Outcome == "capacity" ? HttpStatusCode.Conflict : HttpStatusCode.OK,
+                        "application/json; charset=utf-8", JsonSerializer.Serialize(result, WebJson)).ConfigureAwait(false);
+                    return;
+                }
                 if (isConductorStop || isConductorTakeover || isConductorHold || isConductorUnhold)
                 {
                     var result = await ConductorFollowSession.ControlFromGlassAsync(new string(chars, 0, length),
@@ -489,6 +508,30 @@ internal sealed class GlassHttpService : BackgroundService
         }
     }
 
+    private async Task HandleCorrectionReceiptAsync(HttpListenerContext context, CancellationToken token)
+    {
+        var headers = context.Request.Headers.GetValues(GlassWriteGate.IdentityHeader);
+        var decision = GlassWriteGate.Evaluate(_settings.Glass, context.Request.RemoteEndPoint?.Address, headers);
+        if (!decision.IsAllowed)
+        {
+            await WriteTextAsync(context, HttpStatusCode.Forbidden, "text/plain; charset=utf-8", decision.Refusal!).ConfigureAwait(false);
+            return;
+        }
+        try
+        {
+            var query = context.Request.QueryString;
+            if (query.Count != 1 || query.AllKeys[0] != "requestId" || query.GetValues("requestId") is not { Length: 1 } ids)
+                throw new CliArgumentException("Exactly one requestId is required.");
+            var result = await ConductorFollowSession.LookupCorrectionReceiptAsync(_conductorRoot, headers![0], ids[0], token).ConfigureAwait(false);
+            await WriteTextAsync(context, HttpStatusCode.OK, "application/json; charset=utf-8",
+                JsonSerializer.Serialize(result, WebJson)).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or ArgumentException or System.Text.Json.JsonException)
+        {
+            await WriteTextAsync(context, HttpStatusCode.Conflict, "text/plain; charset=utf-8", "Exact receipt lookup refused; supply one bounded requestId.").ConfigureAwait(false);
+        }
+    }
+
     /// <summary>The share mode <c>spec/baton.md</c> §7 states for every C# reader of this file, named
     /// so a test pins the production value rather than a re-typed copy of it.
     /// <para>
@@ -509,6 +552,7 @@ internal sealed class GlassHttpService : BackgroundService
     /// </para>
     /// </summary>
     internal bool DropHostedControlAcknowledgementForTest { get; set; }
+    internal bool DropCorrectionAcknowledgementForTest { get; set; }
 
     internal const FileShare ProjectionShare = FileShare.ReadWrite | FileShare.Delete;
 
