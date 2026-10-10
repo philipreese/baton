@@ -5,6 +5,7 @@ using Baton.Conductor;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests;
 
@@ -141,7 +142,7 @@ public sealed partial class ConductorFollowDeliveryTests
         fixture.Reply = "Hold";
         await fixture.HaltAsync("missing");
         var path = file == "delivery.jsonl" ? Path.Combine(SessionDirectory(fixture), file) : fixture.EventEvidencePath("missing", file);
-        File.Delete(path);
+        FileCleanup.EnsureDeleted(path);
         var before = RetainedHistoryBytes(fixture);
         await using var glass = await GlassFixture.StartAsync(fixture);
         Assert.Empty((await glass.StatusAsync()).GetProperty("history").GetProperty("judgments").EnumerateArray());
