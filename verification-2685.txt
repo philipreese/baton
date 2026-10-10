@@ -60,3 +60,16 @@ python tools/buildlock.py pixi run audit-speccitations: exit 0.
 git diff --check: exit 0.
 
 No whole suite, aggregate gates/receipts, live vendor CLI, production queue, auth/settings, install or subagent work was performed. Independent review, aggregate verification, operator merge and later useful installed acceptance remain conductor-owned.
+
+Post-handoff delivery check:
+First normal git push origin 2685-lane: exit 1. The automatic gates-lane-fast hook passed 10 members but failed audit-clitripwire: third-level optional brackets caused the new help syntax to classify --stage as required.
+Flattened optional correction help in both queue/task parser Usage constants with an explicit preceding-stage qualifier; no behavior change or checker edit.
+python tools/buildlock.py pixi run audit-clitripwire: exit 0.
+python tools/buildlock.py pixi run dotnet build -warnaserror: exit 0, zero warnings/errors.
+python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests --filter-class Baton.Cli.Tests.AgyLifecycleTests --minimum-expected-tests 1: exit 0, 27 cases.
+python tools/buildlock.py pixi run dotnet test --project tests/Baton.Cli.Tests --filter-class Baton.Cli.Tests.QueueOptionsParserTests --minimum-expected-tests 1: exit 0, 61 cases.
+Attempted TaskOptionsParserTests filter: exit 8, zero tests; no such standalone class. Replaced it with the existing TaskCommandTests parser/digest class, same command prefix/suffix: exit 0, 94 cases.
+python tools/buildlock.py pixi run dotnet format --verify-no-changes: exit 0.
+python tools/buildlock.py pixi run audit-recordonce: exit 0 (30 changed files against origin/main).
+python tools/buildlock.py pixi run audit-docsbudget: exit 0.
+The child changes.md retains its original precommit observation; later commit/push/PR effects are verified through branch and stored PR state.

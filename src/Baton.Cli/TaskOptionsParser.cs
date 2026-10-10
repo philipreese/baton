@@ -29,7 +29,7 @@ public static class TaskOptionsParser
         "baton task submit --issue <number> --project <repository-directory> "
         + "--declared-size <small|medium|large|unknown> --size-rationale <clause> [--spec <file>] "
         + "[--scope <engine|tooling|docs>] [--adapter <name>] [--model <name>] [--effort <name>] [--reason <why>] "
-        + "[--stage <implement|review|fix|re-review|continue> [--enable-agy-correction]] [--timeout <minutes>] "
+        + "[--stage <implement|review|fix|re-review|continue>] [--enable-agy-correction (after explicit stage only)] [--timeout <minutes>] "
         + "[--max-tool-steps <n>] [--token-budget <n>]\n"
         + "       baton task status <task-id> [--json]";
 
