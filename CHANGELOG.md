@@ -9,6 +9,20 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.71.0](https://github.com/philipreese/baton/compare/v0.70.0...v0.71.0) (2026-10-10)
+
+
+### Features
+
+* **conductor:** Add revocable exact-head one-use merge control ([#2676](https://github.com/philipreese/baton/issues/2676)) ([5dac9de](https://github.com/philipreese/baton/commit/5dac9deb818c2a8ca01dec680d7b452ca981f809))
+* **conductor:** Deliver retained operator corrections ([#2672](https://github.com/philipreese/baton/issues/2672)) ([b0dc0c1](https://github.com/philipreese/baton/commit/b0dc0c1b1184ea3b4118831287bb55eba4cefc43))
+* **glass:** Show validated retained conductor judgments ([#2675](https://github.com/philipreese/baton/issues/2675)) ([95d9392](https://github.com/philipreese/baton/commit/95d939200565c70231d26071c07534451c67156e))
+
+
+### Bug Fixes
+
+* **core:** Prevent inherited pipe writers across process launches ([#2678](https://github.com/philipreese/baton/issues/2678)) ([f4bde26](https://github.com/philipreese/baton/commit/f4bde260bf207f96693305e5b2b48bf5461275fc))
+
 ## [0.70.0](https://github.com/philipreese/baton/compare/v0.69.0...v0.70.0) (2026-10-10)
 
 
