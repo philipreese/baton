@@ -192,12 +192,12 @@ public sealed partial class ConductorFollowDeliveryTests
 
     private sealed class GlassFixture(GlassHttpService service, HttpClient client) : IAsyncDisposable
     {
-        public async Task<string> SlowDetachStatusLineAsync()
+        public async Task<string> SlowDetachStatusLineAsync(string verb = "detach")
         {
             using var socket = new TcpClient();
             await socket.ConnectAsync(IPAddress.Loopback, client.BaseAddress!.Port, Ct);
             await using var stream = socket.GetStream();
-            var headers = $"POST /conductor/detach HTTP/1.1\r\nHost: 127.0.0.1:{client.BaseAddress.Port}\r\n"
+            var headers = $"POST /conductor/{verb} HTTP/1.1\r\nHost: 127.0.0.1:{client.BaseAddress.Port}\r\n"
                 + "Tailscale-User-Login: operator@example.test\r\nTransfer-Encoding: chunked\r\n"
                 + "Content-Type: application/json\r\n\r\n1\r\n{\r\n";
             await stream.WriteAsync(Encoding.UTF8.GetBytes(headers), Ct);

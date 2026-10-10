@@ -24,7 +24,7 @@ namespace Baton.Cli.Daemon;
 /// KV write cap are the two walls that forced a second plane in the first place.
 /// </para>
 /// <para><b>Narrow writes.</b> Reads remain open on the bound listener. The approved POST routes
-/// cross <see cref="GlassWriteGate"/> for queue/cancel and exact conductor detach; every other
+/// cross <see cref="GlassWriteGate"/> for queue/cancel and exact conductor delivery control; every other
 /// method and route is refused. Origination, redispatch, merge and arbitrary resolution remain
 /// desktop/operator work.</para>
 /// <para>
@@ -358,6 +358,8 @@ internal sealed class GlassHttpService : BackgroundService
         var isQueueHold = string.Equals(route, "/queue/hold", StringComparison.Ordinal);
         var isQueueResume = string.Equals(route, "/queue/resume", StringComparison.Ordinal);
         var isConductorDetach = string.Equals(route, "/conductor/detach", StringComparison.Ordinal);
+        var isConductorResume = string.Equals(route, "/conductor/resume", StringComparison.Ordinal);
+        var isConductorControl = isConductorDetach || isConductorResume;
         const string cancelPrefix = "/rooms/";
         const string cancelSuffix = "/cancel";
         var isCancelShape = route.StartsWith(cancelPrefix, StringComparison.Ordinal)
@@ -377,7 +379,7 @@ internal sealed class GlassHttpService : BackgroundService
         }
         var isCancel = GlassWriteActions.IsValidRoomId(cancelRoomId);
 
-        if (!isQueueHold && !isQueueResume && !isCancel && !isConductorDetach)
+        if (!isQueueHold && !isQueueResume && !isCancel && !isConductorControl)
         {
             await WriteTextAsync(context, HttpStatusCode.NotFound, "text/plain; charset=utf-8", "Not found.")
                 .ConfigureAwait(false);
@@ -408,7 +410,7 @@ internal sealed class GlassHttpService : BackgroundService
         try
         {
             string receipt;
-            if (isConductorDetach)
+            if (isConductorControl)
             {
                 // Bound chunked bodies as well as declared lengths. Never deserialize raw request
                 // files or accept a client-selected local path through this endpoint.
@@ -427,6 +429,14 @@ internal sealed class GlassHttpService : BackgroundService
                     length += count;
                 }
                 if (length > 4096) throw new CliArgumentException("Detach request exceeds its bound.");
+                if (isConductorResume)
+                {
+                    var resumed = await ConductorFollowSession.ResumeFromGlassAsync(new string(chars, 0, length),
+                        _conductorRoot, cancellationToken, _conductorResolver).ConfigureAwait(false);
+                    await WriteTextAsync(context, HttpStatusCode.OK, "application/json; charset=utf-8",
+                        JsonSerializer.Serialize(resumed, WebJson)).ConfigureAwait(false);
+                    return;
+                }
                 await ConductorFollowSession.DetachFromGlassAsync(new string(chars, 0, length),
                     _conductorRoot, cancellationToken, _conductorResolver).ConfigureAwait(false);
                 receipt = "Automatic delivery detached. Running turns and already issued actions are not cancelled.";
@@ -443,16 +453,18 @@ internal sealed class GlassHttpService : BackgroundService
             await WriteTextAsync(context, HttpStatusCode.OK, "text/plain; charset=utf-8", receipt)
                 .ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (isConductorDetach && !cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (isConductorControl && !cancellationToken.IsCancellationRequested)
         {
             await WriteTextAsync(context, HttpStatusCode.RequestTimeout, "text/plain; charset=utf-8",
-                "Detach request timed out before acceptance; automatic delivery was not changed.").ConfigureAwait(false);
+                isConductorDetach ? "Detach request timed out before acceptance; automatic delivery was not changed."
+                    : "Resume request timed out before acceptance; automatic delivery was not changed.").ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is BatonFlowException or ArgumentException or UriFormatException
-            || isConductorDetach && ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+            || isConductorControl && ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
         {
             await WriteTextAsync(context, HttpStatusCode.Conflict, "text/plain; charset=utf-8",
-                isConductorDetach ? "Detach refused: conductor identity or retained state could not be verified. Refresh before retrying." : ex.Message)
+                isConductorDetach ? "Detach refused: conductor identity or retained state could not be verified. Refresh before retrying."
+                    : isConductorResume ? "Resume refused: session busy, conductor identity or retained state could not be verified. Refresh before retrying." : ex.Message)
                 .ConfigureAwait(false);
         }
     }

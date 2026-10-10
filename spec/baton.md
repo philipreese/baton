@@ -6827,7 +6827,7 @@ peers fail closed. This rests on the measured `tailscale serve` path stripping c
 identity headers and injecting the authenticated tailnet login before proxying to loopback. A
 refusal appends one `glassWriteRefused` fleet fact with route plus only `<redacted>`/`<missing>` for
 the login. The route table admits `POST /queue/hold`, `POST /queue/resume`,
-`POST /rooms/<id>/cancel`, and the exact conductor detach in §14 (#2653); unknown POST routes,
+`POST /rooms/<id>/cancel`, and exact conductor detach/resume in §14 (#2653, #2655); unknown POST routes,
 including resolve and redispatch, are 404. The page
 renders these controls only under `DAEMON_SERVED`, confirms cancel explicitly, and refreshes the
 projection after the server receipt rather than changing displayed state optimistically.
@@ -8922,12 +8922,14 @@ This section defines the first bounded slice: a durable, auditable repository-cl
 - Writes use atomic replacement (`.tmp` file written then replaced via `File.Move(..., overwrite: true)`).
 - The durable record maintains full audit history in `transitions[]`, tracking every `Claim`, `Takeover`, and `Release` transition with timestamps, holders, displaced holders, and reasons.
 
-### Glass conductor visibility and detach (#2653)
+### Glass conductor visibility and automatic delivery control (#2653, #2655)
 
 `GET /conductors` returns an as-of registration snapshot: canonical remote repository, current
 claim holder/generation, matching attachment ID/state, adapter/model/effort and the accepted file-read-only
 permission description. Missing attachment is `unattached`; revoked registration is `detached`;
-a frozen session is `frozen`. Corrupt, stale, mismatched, unsafe-to-display or unreadable state is
+an attached frozen session is `frozen`. Separate `resumeEligible` is true only for a verified detached,
+non-frozen session with complete retained delivery evidence; detached frozen rows remain detached
+with eligibility false. Corrupt, stale, mismatched, unsafe-to-display or unreadable state is
 explicitly `unavailable`. `attached` proves registration, not health or a currently running turn.
 The projection omits instructions, request files, native session IDs and local absolute paths;
 local-only repository identities are unavailable on this surface. The display is bounded to 100
@@ -8943,6 +8945,26 @@ Launch-marker admission shares that queue cutover: a detached or replaced regist
 admit a subsequent follow launch. Existing action admission revalidates the same registration.
 Detach does not cancel an already admitted turn or already issued action. The page immediately
 shows the server receipt, then reconciles the authoritative status; unavailable reads disable control.
+
+`POST /conductor/resume` uses the same authentication and bounded exact-identity request. It accepts
+only the same current detached registration and original accepted request, unchanged claim generation
+and project ceiling, and non-frozen native session identity. A valid never-started null identity remains
+null. Missing, linked, corrupt, unresolved launch or partial delivery evidence refuses without repairing
+receipts, appending journals, unfreezing state or writing any retained evidence. Read-only inspection
+shares recovery validation with additional completeness checks; Glass bounds each lock wait and
+inspection independently, including a conservative retained-event limit. Busy means refusal, never
+inferred death. The POST acquires session, queue, then current-claim locks in that order before deciding
+eligibility and comparing the displayed identity at write. It never holds the queue while waiting for
+an in-flight session turn.
+
+Resume replaces only the registration with a fresh attachment ID and cutover. Original request,
+grant, conversation, obligations, budgets and delivery/action history are preserved. Queue hold is
+unchanged, and the request launches no vendor turn. Historical old-ID and detached-period unstamped
+halts are never restamped or replayed; only future halt commits receive the new ID. An old-ID duplicate
+is stale and cannot allocate another cutover. The receipt returns the resulting identity, and UI success
+requires a fresh uncached GET to agree on repository, holder, generation, new attachment ID and attached
+state. Only explicitly eligible detached rows offer Resume, with future-handoffs-only confirmation.
+Denied, busy/stale and unknown outcomes require refresh; the client never automatically repeats a POST.
 
 The broader operator-approved hosted conductor direction (#2091) requires visible task, decision,
 next action, permissions and correction state, plus hold/stop/takeover. Those remain planned beyond
