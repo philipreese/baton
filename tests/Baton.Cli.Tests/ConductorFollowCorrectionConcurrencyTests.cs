@@ -98,6 +98,66 @@ public sealed partial class ConductorFollowDeliveryTests
     }
 
     [Theory]
+    [InlineData("locked")]
+    [InlineData("malformed")]
+    [InlineData("empty")]
+    [InlineData("readable")]
+    public async Task Issue2673_Retained_claim_enumeration_refuses_and_recovers_on_existing_tick(string authority)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await DaemonSettingsStore.SaveAsync(new DaemonSettings { RunwayHold = new RunwayHoldSettings { ReservationPolicy = "off" } }, BatonPaths.SettingsFile, Ct);
+        await fixture.CommandAsync("attach");
+        var accepted = await ConductorFollowSession.CorrectFromGlassAsync(
+            CorrectionBody(CorrectionRegistration(fixture), "enumeration-recovery"), fixture.Root, Operator, Ct);
+        Assert.Equal("queued", accepted.Receipt!.State);
+        var slot = JsonNode.Parse(File.ReadAllText(Path.Combine(SessionDirectory(fixture), "correction.json")))!;
+        var sourcePath = Path.Combine(SessionDirectory(fixture), "correction-inputs", slot["eventId"]!.GetValue<string>() + ".json");
+        var source = await File.ReadAllBytesAsync(sourcePath, Ct);
+        // An unrelated claim isolates global enumeration from the correction target's own fences.
+        var other = RepositoryIdentity.From("https://github.com/test/enumeration-refusal", null)!;
+        await ConductorClaimStore.ClaimAsync(other, "holder", fixture.Root, cancellationToken: Ct);
+        var claimPath = Path.Combine(fixture.Root, other.FileSlug, BatonPaths.ConductorClaimFileName);
+        var original = await File.ReadAllBytesAsync(claimPath, Ct);
+        if (authority is "malformed" or "empty")
+            await File.WriteAllTextAsync(claimPath, authority == "malformed" ? "{" : "", Ct);
+        var refusedBytes = authority == "locked" ? original : await File.ReadAllBytesAsync(claimPath, Ct);
+        using var scheduler = fixture.Scheduler();
+        FileStream? claimLock = authority == "locked"
+            ? new FileStream(claimPath, FileMode.Open, FileAccess.Read, FileShare.None) : null;
+        try
+        {
+            await scheduler.TickOnceAsync(Ct);
+            if (authority == "readable")
+            {
+                await WaitForAdvicePassAsync(scheduler);
+                Assert.Single(fixture.Calls);
+                Assert.Equal("delivered", (await LookupCorrectionAsync(fixture, "enumeration-recovery")).Receipt!.State);
+            }
+            else
+            {
+                await scheduler.TickOnceAsync(Ct);
+                Assert.Empty(await scheduler.SnapshotHostedTasksAsync());
+                Assert.Empty(fixture.Calls);
+                Assert.Equal("queued", (await LookupCorrectionAsync(fixture, "enumeration-recovery")).Receipt!.State);
+                Assert.False(File.Exists(CorrectionEvidence(fixture, "launch.json")));
+                Assert.Equal(source, await File.ReadAllBytesAsync(sourcePath, Ct));
+            }
+        }
+        finally { claimLock?.Dispose(); }
+        Assert.Equal(refusedBytes, await File.ReadAllBytesAsync(claimPath, Ct));
+        await File.WriteAllBytesAsync(claimPath, original, Ct);
+        await scheduler.TickOnceAsync(Ct);
+        await WaitForAdvicePassAsync(scheduler);
+        Assert.Equal("delivered", (await LookupCorrectionAsync(fixture, "enumeration-recovery")).Receipt!.State);
+        await scheduler.TickOnceAsync(Ct);
+        await WaitForAdvicePassAsync(scheduler);
+        Assert.Single(fixture.Calls);
+        Assert.Equal(source, await File.ReadAllBytesAsync(sourcePath, Ct));
+        Assert.False(File.Exists(CorrectionEvidence(fixture, "decision.json")));
+        await scheduler.DrainStoppedWorkAdviceAsync();
+    }
+
+    [Theory]
     [InlineData("source", false)]
     [InlineData("slot", false)]
     [InlineData("acceptance", true)]

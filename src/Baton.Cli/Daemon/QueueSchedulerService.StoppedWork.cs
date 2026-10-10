@@ -255,7 +255,16 @@ public sealed partial class QueueSchedulerService
                 existing?.Adapter ?? StoppedWorkJudgmentKey.ProviderRoute, StoppedWorkJudgmentKey.Capability, true,
                 TargetRevision: intent.PullRequestHead, ContextSha256: intent.ContextSha256), token).ConfigureAwait(false);
         }
-        var claims = await ConductorClaimStore.ListRetainedClaimsAsync(BatonPaths.Root, token, TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+        IReadOnlyList<ConductorClaimRecord> claims;
+        try
+        {
+            claims = await ConductorClaimStore.ListRetainedClaimsAsync(BatonPaths.Root, token, TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+        }
+        catch (ConductorClaimException ex)
+        {
+            Console.Error.WriteLine($"Hosted selection refused because retained claim authority could not be verified; durable work remains unresolved for a later tick: {ex.Message}");
+            return;
+        }
         foreach (var repository in pending.Select(item => item.Repository).Concat(claims.Select(claim => claim.Repository)).Distinct(StringComparer.Ordinal))
         {
             if (repository is null) continue;
