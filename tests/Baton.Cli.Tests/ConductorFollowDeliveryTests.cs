@@ -878,6 +878,7 @@ public sealed partial class ConductorFollowDeliveryTests
         public ConductorObligationStore Store { get; }
         private FakeGh Gh { get; } = new();
         public string PullRequestState { set => Gh.State = value; }
+        public Func<string, string>? PullRequestHeadForWorkspace { set => Gh.HeadForWorkspace = value; }
         public int RemoteCalls => Gh.Calls;
 
         public Fixture(string? root = null)
@@ -1066,7 +1067,8 @@ public sealed partial class ConductorFollowDeliveryTests
             }, Ct);
         }
 
-        public async Task<QueueItem> HaltAsync(string tag, bool notify = true, QueueSchedulerService? scheduler = null)
+        public async Task<QueueItem> HaltAsync(string tag, bool notify = true, QueueSchedulerService? scheduler = null,
+            bool owned = true, string? workspace = null)
         {
             var room = Path.Combine(Root, "rooms", tag);
             Directory.CreateDirectory(room);
@@ -1080,7 +1082,7 @@ public sealed partial class ConductorFollowDeliveryTests
                 ScopeClass = "engine",
                 DeclaredTaskSize = TaskSizeDeclaration.Parse("small", "One bounded review recovery"),
                 Round = 1,
-                Workspace = Workspace,
+                Workspace = workspace ?? Workspace,
                 SpecFile = Path.Combine(Root, tag + ".md"),
                 Issue = 2632,
                 Branch = "2632-lane",
@@ -1093,7 +1095,7 @@ public sealed partial class ConductorFollowDeliveryTests
                 PullRequest = 77,
                 Instructions = "Fixture",
                 AutomaticFixUsed = true,
-                OwnedTask = new("task-" + tag, Repository, 2632, "digest", "holder", DateTimeOffset.UtcNow),
+                OwnedTask = owned ? new("task-" + tag, Repository, 2632, "digest", "holder", DateTimeOffset.UtcNow) : null,
             };
             File.WriteAllText(item.SpecFile, "Fixture");
             await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with { Items = [.. queue.Items, item] }, Ct);
@@ -1213,16 +1215,18 @@ public sealed partial class ConductorFollowDeliveryTests
     private sealed class FakeGh : IGhCliRunner
     {
         public string HeadSha { get; set; } = Head;
+        public Func<string, string>? HeadForWorkspace { get; set; }
         public string State { get; set; } = "OPEN";
         public int Calls { get; private set; }
         public Task<GhCliResult> RunAsync(string workspace, IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
             Calls++;
+            var head = HeadForWorkspace?.Invoke(workspace) ?? HeadSha;
             if (args is ["api", ..]) return Task.FromResult(RequiredCheckFixture.Read(args, Repository, HeadSha,
                 new GhCliResult(true, 0, "[{\"name\":\"ci\",\"bucket\":\"pass\"}]", "")));
             if (args is ["pr", "checks", ..]) return Task.FromResult(new GhCliResult(true, 0,
                 "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", ""));
-            var pr = "{\"number\":77,\"state\":\"" + State + "\",\"isDraft\":true,\"headRefOid\":\"" + HeadSha
+            var pr = "{\"number\":77,\"state\":\"" + State + "\",\"isDraft\":true,\"headRefOid\":\"" + head
                 + "\",\"headRefName\":\"2632-lane\",\"baseRefName\":\"main\",\"isCrossRepository\":false,\"statusCheckRollup\":[]}";
             return Task.FromResult(new GhCliResult(true, 0, args is ["pr", "view", ..] ? pr : "[" + pr + "]", ""));
         }
