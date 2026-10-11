@@ -36,9 +36,15 @@ Record each exit code in the workspace:
 1. `dotnet build -warnaserror` (through `python tools/buildlock.py` where present).
 2. Touched test projects only, filtered as briefed; never the whole suite.
 3. `dotnet format --verify-no-changes`.
-4. `pixi run audit-recordonce`, and `pixi run audit-docsbudget` where that task exists.
 
 Report red checks; name any that cannot run and why.
+
+## Committed-content audits, after the commit and before push
+
+Run `pixi run audit-recordonce` and, where that task exists, `pixi run audit-docsbudget` against the
+committed change. If an audit fails, commit the repair under `docs/agents/developing-baton.md`'s
+Git conventions before rerunning it; a working-tree-only repair leaves the audited commit unchanged.
+Record each exit code with the other verification results.
 
 ## Delivery
 
