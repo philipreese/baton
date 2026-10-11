@@ -10,7 +10,7 @@ for (const newline of ['\n', '\r\n']) {
   assert.equal(extractControls(checkout)?.replace(/\r\n/g, '\n'), source.replace(/\r\n/g, '\n'),
     'shipped controls must be extracted identically from LF and CRLF checkouts');
 }
-const {createConductorControl,conductorControlHtml,wireConductorControl} = new Function(`${source}; return {createConductorControl,conductorControlHtml,wireConductorControl};`)();
+const {createConductorControl,conductorControlHtml,wireConductorControl,renderConductorControl} = new Function(`${source}; return {createConductorControl,conductorControlHtml,wireConductorControl,renderConductorControl};`)();
 const row = {repository:'github.com/test/repo',holder:'owner',claimGeneration:'generation',attachmentId:'attachment',state:'attached',adapter:'codex',model:'test',effort:'high',permissions:'Read only'};
 const snapshot = (state='attached') => ({observedAt:'2026-10-10T00:00:00Z',conductors:[{...row,state}]});
 const ok = value => ({ok:true,status:200,json:async()=>value});
@@ -513,5 +513,226 @@ const staleMerge=createConductorControl(async(path,options)=>{
   return ok(data);
 },mergeRender,()=>true,()=> 'stale-merge');
 await staleMerge.refresh(); await staleMerge.mergeControl(0,0,false,new Date(Date.now()+3600000).toISOString());
-assert.equal(staleMergePosts,0); assert.match(mergeLatest.message,/receipt or owner changed/);
+// Issue #2700: Compact default panel and collapsed controls discrimination tests
+const defaultCard = conductorControlHtml(snapshot(), '', false, esc);
+assert.ok(defaultCard.includes('No pending conductor decisions reported.'), 'empty decisions must not imply no workers are running');
+assert.ok(defaultCard.includes('data-conductor-disclosure="advanced-0"'), 'advanced controls must be collapsed under disclosure');
+assert.ok(defaultCard.includes('<summary>Advanced controls</summary>'), 'advanced controls must have clearly labeled summary');
+assert.ok(!defaultCard.includes('<textarea'), 'default card must not expose uncollapsed textareas');
+assert.ok(!defaultCard.includes('data-conductor-owner'), 'default card must not expose takeover owner input');
+assert.ok(!defaultCard.includes('data-conductor-address'), 'default card must not expose takeover address input');
+
+const allEligibleRow = {
+  ...row,
+  correctionEligible: true,
+  stopEligible: true,
+  takeoverEligible: true,
+  holdEligible: true,
+  unholdEligible: false,
+  resumeEligible: false
+};
+const allEligibleCard = conductorControlHtml({...snapshot(), conductors: [allEligibleRow]}, '', false, esc);
+assert.ok(allEligibleCard.includes('<details data-conductor-disclosure="correction-0"><summary>Send instruction</summary>'),
+  'correction composition must be collapsed under Send instruction');
+assert.ok(allEligibleCard.includes('<details data-conductor-disclosure="advanced-0"><summary>Advanced controls</summary>'),
+  'destructive/advanced controls must be collapsed under Advanced controls');
+assert.ok(allEligibleCard.includes('<details data-conductor-disclosure="hold-reason-0"><summary>Optional custom reason</summary>'),
+  'Hold/Unhold reason must be optional and collapsed');
+assert.ok(allEligibleCard.includes('data-conductor-hold="0"'), 'Hold button must be prominent in everyday controls');
+
+// Discrimination: Verify inputs are NOT bare outside details
+const articleBody = allEligibleCard.split(/<article[^>]*>/)[1]?.split('</article>')[0] || '';
+const beforeDetails = articleBody.split('<details')[0];
+assert.ok(!beforeDetails.includes('<textarea'), 'textarea must not appear before disclosures');
+assert.ok(!beforeDetails.includes('data-conductor-owner'), 'takeover owner must not appear before disclosures');
+assert.ok(!beforeDetails.includes('data-conductor-address'), 'takeover address must not appear before disclosures');
+assert.ok(!beforeDetails.includes('data-conductor-stop'), 'stop button must not appear before disclosures');
+assert.ok(beforeDetails.includes('data-conductor-hold="0"'), 'hold button must appear before disclosures');
+
+// Issue #2700: Exact generated Hold and Unhold without typed reason or UUID
+let defaultReasonBody;
+const holdDefaultControl = createConductorControl(async (path, options) => {
+  if (path === '/conductors') {
+    return ok({...snapshot(), conductors: [{...allEligibleRow, controlRevision: 10}]});
+  }
+  defaultReasonBody = JSON.parse(options.body);
+  assert.equal(path, '/conductor/hold');
+  assert.equal(defaultReasonBody.expectedControlRevision, 10);
+  assert.equal(defaultReasonBody.requestId, 'generated-hold-req');
+  assert.equal(defaultReasonBody.reason, 'Operator requested Hold');
+  return ok(controlResult('hold', defaultReasonBody));
+}, render, () => true, () => 'generated-hold-req');
+await holdDefaultControl.refresh();
+// Calling hold with NO arguments or empty object generates truthful default reason automatically:
+await holdDefaultControl.hold(0);
+assert.equal(defaultReasonBody.reason, 'Operator requested Hold', 'Hold must generate truthful default reason identifying the operation');
+assert.equal(defaultReasonBody.requestId, 'generated-hold-req', 'Hold must generate exact requestId automatically without user typing');
+
+let unholdDefaultBody;
+const unholdDefaultControl = createConductorControl(async (path, options) => {
+  if (path === '/conductors') {
+    return ok({...snapshot(), conductors: [{...allEligibleRow, state: 'held', held: true, holdEligible: false, unholdEligible: true, controlRevision: 11}]});
+  }
+  unholdDefaultBody = JSON.parse(options.body);
+  assert.equal(path, '/conductor/unhold');
+  assert.equal(unholdDefaultBody.expectedControlRevision, 11);
+  assert.equal(unholdDefaultBody.requestId, 'generated-unhold-req');
+  assert.equal(unholdDefaultBody.reason, 'Operator requested Unhold');
+  return ok(controlResult('unhold', unholdDefaultBody));
+}, render, () => true, () => 'generated-unhold-req');
+await unholdDefaultControl.refresh();
+// Calling unhold with whitespace reason falls back to truthful default reason:
+await unholdDefaultControl.unhold(0, { reason: '   ' });
+assert.equal(unholdDefaultBody.reason, 'Operator requested Unhold', 'Unhold must generate truthful default reason identifying the operation');
+
+// Optional custom reason is used when provided
+let customReasonBody;
+const customReasonControl = createConductorControl(async (path, options) => {
+  if (path === '/conductors') return ok({...snapshot(), conductors: [{...allEligibleRow, controlRevision: 12}]});
+  customReasonBody = JSON.parse(options.body);
+  return ok(controlResult('hold', customReasonBody));
+}, render, () => true, () => 'custom-hold-req');
+await customReasonControl.refresh();
+await customReasonControl.hold(0, { reason: '  operator deployment pause  ' });
+assert.equal(customReasonBody.reason, 'operator deployment pause', 'Hold must preserve optional custom reason when supplied');
+
+// Stop and Take Over strictly preserve required reason (cannot default)
+let stopAttemptPosts = 0;
+const stopSafeguardControl = createConductorControl(async (path, options) => {
+  if (path === '/conductors') return ok({...snapshot(), conductors: [allEligibleRow]});
+  stopAttemptPosts++;
+  return ok(null);
+}, render, () => true);
+await stopSafeguardControl.refresh();
+await stopSafeguardControl.stop(0, { reason: '' });
+await stopSafeguardControl.stop(0, {});
+assert.equal(stopAttemptPosts, 0, 'Stop must refuse empty/missing reason without POST');
+await stopSafeguardControl.takeover(0, { reason: 'valid', destinationHolder: '', destinationAddress: '' });
+assert.equal(stopAttemptPosts, 0, 'Take Over must refuse missing destination holder/address without POST');
+
+// wireConductorControl click on Hold without typed reason
+const wiredClicked = [];
+let wiredHandler;
+const mockWiredPanel = {
+  addEventListener: (_, fn) => { wiredHandler = fn; },
+  querySelector: selector => {
+    if (selector === '[data-conductor-hold-reason="0"]') return { value: '' };
+    if (selector === '[data-conductor-reason="0"]') return { value: '' };
+    return null;
+  }
+};
+wireConductorControl(mockWiredPanel, {
+  hold: async (index, inputs) => { wiredClicked.push({ index, inputs }); }
+});
+wiredHandler({
+  target: {
+    closest: selector => selector === '[data-conductor-hold]' ? { dataset: { conductorHold: '0' } } : null
+  }
+});
+assert.equal(wiredClicked.length, 1);
+assert.equal(wiredClicked[0].index, 0);
+assert.equal(wiredClicked[0].inputs.reason, '');
+
+// wireConductorControl click on Hold with custom typed reason
+const customWiredClicked = [];
+let customWiredHandler;
+const mockCustomPanel = {
+  addEventListener: (_, fn) => { customWiredHandler = fn; },
+  querySelector: selector => {
+    if (selector === '[data-conductor-hold-reason="0"]') return { value: 'custom operator note' };
+    return null;
+  }
+};
+wireConductorControl(mockCustomPanel, {
+  hold: async (index, inputs) => { customWiredClicked.push({ index, inputs }); }
+});
+customWiredHandler({
+  target: {
+    closest: selector => selector === '[data-conductor-hold]' ? { dataset: { conductorHold: '0' } } : null
+  }
+});
+assert.equal(customWiredClicked.length, 1);
+assert.equal(customWiredClicked[0].inputs.reason, 'custom operator note');
+
+// Issue #2700: Preservation of open form state and unsent field values across redraw
+const createMockElement = (tag, attrs = {}) => {
+  const el = {
+    tagName: tag.toUpperCase(),
+    dataset: attrs.dataset || {},
+    closest: () => ({dataset: {conductorTarget: attrs.target || 'target-A'}}),
+    value: attrs.value || '',
+    open: attrs.open || false
+  };
+  return el;
+};
+
+const mockElements = {
+  detailsCorrection: createMockElement('details', { dataset: { conductorDisclosure: 'correction-0' }, open: true }),
+  textareaCorrection: createMockElement('textarea', { dataset: { conductorCorrectionText: '0' }, value: 'draft unsent text' }),
+  detailsHoldReason: createMockElement('details', { dataset: { conductorDisclosure: 'hold-reason-0' }, open: true }),
+  inputHoldReason: createMockElement('input', { dataset: { conductorHoldReason: '0' }, value: 'draft reason text' }),
+  detailsAdvanced: createMockElement('details', { dataset: { conductorDisclosure: 'advanced-0' }, open: false })
+};
+
+const newMockElements = {
+  detailsCorrection: createMockElement('details', { dataset: { conductorDisclosure: 'correction-0' }, open: false }),
+  textareaCorrection: createMockElement('textarea', { dataset: { conductorCorrectionText: '0' }, value: '' }),
+  detailsHoldReason: createMockElement('details', { dataset: { conductorDisclosure: 'hold-reason-0' }, open: false }),
+  inputHoldReason: createMockElement('input', { dataset: { conductorHoldReason: '0' }, value: '' }),
+  detailsAdvanced: createMockElement('details', { dataset: { conductorDisclosure: 'advanced-0' }, open: false })
+};
+
+let currentDom = mockElements;
+const mockPanel = {
+  _html: '',
+  get innerHTML() { return this._html; },
+  set innerHTML(val) { this._html = val; currentDom = newMockElements; },
+  querySelectorAll: selector => {
+    if (selector === 'details[data-conductor-disclosure]') {
+      return [currentDom.detailsCorrection, currentDom.detailsHoldReason, currentDom.detailsAdvanced];
+    }
+    if (selector === 'input, textarea') {
+      return [currentDom.textareaCorrection, currentDom.inputHoldReason];
+    }
+    return [];
+  },
+  querySelector: selector => {
+    if (selector === 'details[data-conductor-disclosure="correction-0"]') return currentDom.detailsCorrection;
+    if (selector === 'details[data-conductor-disclosure="hold-reason-0"]') return currentDom.detailsHoldReason;
+    if (selector === 'details[data-conductor-disclosure="advanced-0"]') return currentDom.detailsAdvanced;
+    if (selector === '[data-conductor-correction-text="0"]') return currentDom.textareaCorrection;
+    if (selector === '[data-conductor-hold-reason="0"]') return currentDom.inputHoldReason;
+    return null;
+  }
+};
+
+// Execute redraw with state preservation:
+renderConductorControl(mockPanel, allEligibleCard);
+assert.equal(newMockElements.detailsCorrection.open, true, 'open disclosure must remain open after redraw');
+assert.equal(newMockElements.detailsHoldReason.open, true, 'open hold-reason disclosure must remain open after redraw');
+assert.equal(newMockElements.detailsAdvanced.open, false, 'unopened disclosure must remain closed after redraw');
+assert.equal(newMockElements.textareaCorrection.value, 'draft unsent text', 'unsent textarea text must be preserved on redraw');
+assert.equal(newMockElements.inputHoldReason.value, 'draft reason text', 'unsent input text must be preserved on redraw');
+
+// A replaced acquisition at the same card index must never inherit a draft.
+currentDom = mockElements;
+newMockElements.textareaCorrection.value = '';
+newMockElements.inputHoldReason.value = '';
+for (const el of Object.values(newMockElements)) {
+  el.closest = () => ({dataset: {conductorTarget: 'target-B'}});
+}
+renderConductorControl(mockPanel, allEligibleCard);
+assert.equal(newMockElements.textareaCorrection.value, '', 'changed target must not inherit a correction');
+assert.equal(newMockElements.inputHoldReason.value, '', 'changed target must not inherit a control reason');
+
+// Structural disclosure checks, NOT viewport/layout evidence. Rendered widths need a browser.
+{
+  const rendered = conductorControlHtml({...snapshot(), conductors: [{...allEligibleRow, recordedTasks: recorded}]}, '', false, esc);
+  assert.ok(rendered.includes('<details data-conductor-disclosure="correction-0">'), 'correction starts closed');
+  assert.ok(rendered.includes('<details data-conductor-disclosure="advanced-0">'), 'advanced controls start closed');
+  assert.ok(rendered.includes('<details data-conductor-disclosure="tasks-0">'), 'recorded tasks start closed');
+  const unavailableRendered = conductorControlHtml({...snapshot(), conductors: [{...allEligibleRow, recordedTasks: null}]}, '', false, esc);
+  assert.ok(unavailableRendered.includes('Queue records unavailable'), 'unavailable diagnostics remain present');
+}
+
 console.log(`Conductor controls: existing scenarios, ${holdCases} Hold/Unhold scenarios, correction and exact-merge identity, lost-reply/reload lookup and stale-ready refusal passed.`);

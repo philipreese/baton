@@ -325,10 +325,17 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
 .conductor-control h2{font-size:1.1rem;margin:0 0 .5rem}
 .conductor-control article{border-top:1px solid var(--line);padding:.5rem 0}
 .conductor-control p{margin:.25rem 0}
-.conductor-control button{font:inherit;min-height:44px;padding:.5rem .8rem;max-width:100%;white-space:normal;cursor:pointer}
-.conductor-control label{display:block;margin:.5rem 0;overflow-wrap:anywhere}
-.conductor-control input{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:44px;font:inherit}
-.conductor-control textarea{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:96px;font:inherit;resize:vertical}
+.conductor-control button{font:inherit;min-height:44px;padding:.5rem .8rem;margin:.25rem .25rem .25rem 0;max-width:100%;white-space:normal;cursor:pointer;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);box-sizing:border-box}
+.conductor-control button:hover:not(:disabled){border-color:var(--accent)}
+.conductor-control button[data-conductor-hold],.conductor-control button[data-conductor-unhold]{font-weight:600;background:var(--accent);color:#fff;border-color:var(--accent)}
+.conductor-control button[data-conductor-hold]:hover:not(:disabled),.conductor-control button[data-conductor-unhold]:hover:not(:disabled){opacity:.9}
+.conductor-control label{display:block;margin:.5rem 0;overflow-wrap:anywhere;font-size:.875rem}
+.conductor-control input{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:44px;font:inherit;font-size:1rem;background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:.5rem .6rem}
+.conductor-control input:focus,.conductor-control textarea:focus{border-color:var(--accent);outline:none}
+.conductor-control textarea{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:96px;font:inherit;font-size:1rem;background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:.5rem .6rem;resize:vertical}
+.conductor-control details{margin:.5rem 0;border:1px solid var(--line);border-radius:8px;padding:.35rem .6rem;background:var(--paper)}
+.conductor-control details[open]{background:var(--card)}
+.conductor-control summary{font-weight:600;cursor:pointer;padding:.35rem 0;min-height:44px;display:flex;align-items:center;color:var(--ink);user-select:none;-webkit-user-select:none;touch-action:manipulation}
 .conductor-control .control-note{color:var(--ink-soft);font-size:.8125rem}
 .retained-judgment{border-top:1px solid var(--line);padding:.5rem 0;min-width:0;overflow-wrap:anywhere}
 </style>
@@ -3288,9 +3295,9 @@ function correctionStatusHtml(receipt, escape){
   return receipt ? `<p>Correction: ${escape(labels[receipt.state] || "Unknown outcome")}</p><p class="control-note">Request ${escape(receipt.requestId)} · received ${escape(receipt.acceptedAt || "unknown time")}. ${escape(receipt.reason || "Evidence unavailable.")} Application: not verified.</p>` : "";
 }
 
-function recordedTasksHtml(summary, escape){
+function recordedTasksHtml(summary, escape, index = 0){
   if(!summary || summary.availability !== "available")
-    return `<section aria-label="Recorded repository tasks"><h3>Recorded repository tasks</h3><p class="control-note">Queue records unavailable. Refresh conductor to try again.</p><a href="#queue">Queue</a> · <a href="#stream">Stream</a></section>`;
+    return `<section aria-label="Recorded repository tasks"><h3>Recorded repository tasks</h3><p class="control-note">Queue records unavailable. Refresh conductor to try again.</p><p><a href="#queue">Queue</a> · <a href="#stream">Stream</a></p></section>`;
   const rows = Array.isArray(summary.items) ? summary.items.slice(0,20) : [];
   const body = rows.length ? rows.map(row => {
     const task = row && row.task || {};
@@ -3319,10 +3326,10 @@ function recordedTasksHtml(summary, escape){
       + (task.blocker ? `<br>Recorded blocker: ${escape(task.blocker)}` : "")
       + `<br>Next trigger: ${escape(nextTriggerToken)} · next actor: ${escape(nextActorCopy)}</div>`;
   }).join("") : `<p class="control-note">No matching recorded task rows.</p>`;
-  return `<section aria-label="Recorded repository tasks"><h3>Recorded repository tasks</h3>`
+  return `<details data-conductor-disclosure="tasks-${index}"><summary>Recorded repository tasks</summary><section aria-label="Recorded repository tasks"><h3>Recorded repository tasks</h3>`
     + `<p class="control-note">Queue observed ${escape(new Date(summary.observedAt).toLocaleString())}. This is read time. Task ownership does not record acquisition generation.</p>`
     + body + (summary.omitted > 0 ? `<p class="control-note">${escape(String(summary.omitted))} additional task record(s) omitted.</p>` : "")
-    + `<p><a href="#queue">Queue</a> · <a href="#stream">Stream</a></p></section>`;
+    + `<p><a href="#queue">Queue</a> · <a href="#stream">Stream</a></p></section></details>`;
 }
 
 function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection = null){
@@ -3332,31 +3339,75 @@ function conductorControlHtml(snapshot, message, busy, escape, pendingCorrection
     cards = snapshot.conductors.map((row, index) => {
       const detachable = ["attached","frozen","held"].includes(row.state) && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
       const resumable = row.state === "detached" && row.resumeEligible === true && [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0);
-      return `<article><strong>${escape(row.repository || "Unknown repository")}</strong>`
+
+      let everydayControls = "";
+      if(row.holdEligible === true || row.unholdEligible === true){
+        everydayControls = (row.holdEligible === true ? `<button type="button" data-conductor-hold="${index}"${busy ? " disabled" : ""}>Hold new conductor work</button>` : "")
+          + (row.unholdEligible === true ? `<button type="button" data-conductor-unhold="${index}"${busy ? " disabled" : ""}>Unhold conductor</button>` : "")
+          + `<details data-conductor-disclosure="hold-reason-${index}"><summary>Optional custom reason</summary><label>Custom Hold/Unhold reason <input type="text" data-conductor-hold-reason="${index}" maxlength="1024"${busy ? " disabled" : ""}></label></details>`;
+      }
+
+      let correctionForm = "";
+      if(row.correctionEligible === true && ["attached","held"].includes(row.state)){
+        correctionForm = `<details data-conductor-disclosure="correction-${index}"><summary>Send instruction</summary>`
+          + `<label>Correction for this retained conversation <textarea data-conductor-correction-text="${index}" maxlength="4096"${busy ? " disabled" : ""}></textarea></label>`
+          + `<button type="button" data-conductor-correct="${index}"${busy ? " disabled" : ""}>Send correction</button>`
+          + `<p class="control-note">Current work may finish. This uses the existing read-only grant; application is not verified.</p>`
+          + `</details>`;
+      }
+
+      let advanced = "";
+      if(detachable || resumable || row.stopEligible === true || row.takeoverEligible === true){
+        advanced = `<details data-conductor-disclosure="advanced-${index}"><summary>Advanced controls</summary>`
+          + (detachable ? `<button type="button" data-conductor-detach="${index}"${busy ? " disabled" : ""}>Detach automatic delivery</button>` : "")
+          + (resumable ? `<button type="button" data-conductor-resume="${index}"${busy ? " disabled" : ""}>Resume automatic delivery</button><p class="control-note">Future handoffs only. Work halted while detached is not replayed.</p>` : "")
+          + (row.stopEligible === true || row.takeoverEligible === true ? `<label>Control reason <input type="text" data-conductor-reason="${index}" maxlength="1024"${busy ? " disabled" : ""}></label>` : "")
+          + (row.stopEligible === true ? `<button type="button" data-conductor-stop="${index}"${busy ? " disabled" : ""}>Stop hosted conductor</button>` : "")
+          + (row.takeoverEligible === true ? `<label>Destination owner <input type="text" data-conductor-owner="${index}" maxlength="256"${busy ? " disabled" : ""}></label><label>Owner address (display text) <input type="text" data-conductor-address="${index}" maxlength="512"${busy ? " disabled" : ""}></label><button type="button" data-conductor-takeover="${index}"${busy ? " disabled" : ""}>Take Over</button>` : "")
+          + `</details>`;
+      }
+
+      const currentActions = Array.isArray(row.actions) ? row.actions.filter(action => action.state !== "historical") : [];
+      const actionsList = currentActions.length > 0
+        ? currentActions.map(action => `<p class="control-note">${escape(action.state)}: ${escape(action.reason || "")}${action.nextTrigger ? ` ${escape(action.nextTrigger)}` : ""}</p>`).join("")
+        : `<p class="control-note">No pending conductor decisions reported.</p>`;
+      const actionDetails = Array.isArray(row.actions)
+        ? row.actions.map(action => `<p class="control-note">Action ${escape(action.tag)}: ${escape(action.state)}. Owner: ${escape(action.holder || "unknown")}. ${escape(action.reason || "")}${action.nextTrigger ? ` ${escape(action.nextTrigger)}` : ""}</p>`).join("") : "";
+
+      const historicalControls = Array.isArray(row.controls) && row.controls.length > 0
+        ? `<details data-conductor-disclosure="controls-${index}"><summary>Historical control receipts</summary>`
+          + row.controls.map(result => `<p class="control-note">Historical ${escape(result.receipt?.operation || "Control")} receipt · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.appliedAt || "unknown time")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("")
+          + `</details>`
+        : "";
+
+      const draftTarget = [row.repository,row.holder,row.claimGeneration,row.attachmentId].every(v => typeof v === "string" && v.length > 0)
+        ? JSON.stringify([row.repository,row.holder,row.claimGeneration,row.attachmentId]) : "";
+      return `<article data-conductor-target="${escape(draftTarget)}"><strong>${escape(row.repository || "Unknown repository")}</strong>`
         + `<p>Owner: ${escape(row.holder || "Unknown")}</p><p>${escape(states[row.state] || states.unavailable)}</p>`
-        + (row.destinationAddress ? `<p>Owner address: ${escape(row.destinationAddress)}</p>` : "")
-        + (row.retainedHolder ? `<p>Retained session owner: ${escape(row.retainedHolder)}</p>` : "")
-        + (row.adapter ? `<p>${row.historicalProvider ? "Historical provider: " : "Provider: "}${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
-        + `<p>Permissions: ${escape(typeof row.permissions === "string" ? row.permissions : "Unavailable")}</p>`
+        + (row.destinationAddress ? `<p class="control-note">Owner address: ${escape(row.destinationAddress)}</p>` : "")
+        + (row.retainedHolder ? `<p class="control-note">Retained session owner: ${escape(row.retainedHolder)}</p>` : "")
+        + (row.adapter ? `<p class="control-note">${row.historicalProvider ? "Historical provider: " : "Provider: "}${escape(row.adapter)} · ${escape(row.model || "unknown model")} · ${escape(row.effort || "unknown effort")}</p>` : "")
+        + `<p class="control-note">Permissions: ${escape(typeof row.permissions === "string" ? row.permissions : "Unavailable")}</p>`
         + (row.diagnostic && ["unavailable","frozen","detached"].includes(row.state) ? `<p class="control-note">${escape(row.diagnostic)}</p>` : "")
-        + (detachable ? `<button type="button" data-conductor-detach="${index}"${busy ? " disabled" : ""}>Detach automatic delivery</button>` : "")
-        + (resumable ? `<button type="button" data-conductor-resume="${index}"${busy ? " disabled" : ""}>Resume automatic delivery</button><p class="control-note">Future handoffs only. Work halted while detached is not replayed.</p>` : "")
         + (row.held === true ? `<p>Held: new turns and action admissions wait. Unhold eligible: ${row.unholdEligible === true ? "yes" : "no"}.</p>` : "")
         + (row.held === true && row.holdControl ? `<p class="control-note">Current Hold: ${escape(row.holdControl.request?.reason || "unknown reason")} · ${escape(row.holdControl.issuer || "unknown issuer")} · ${escape(row.holdControl.appliedAt || "unknown time")}</p>` : "")
         + (row.admissionWait ? `<p class="control-note">${escape(row.admissionWait)}</p>` : "")
         + (row.queueHeld === true ? `<p class="control-note">Global worker queue is Held; Unhold does not resume it.</p>` : "")
+        + (!row.recordedTasks || row.recordedTasks.availability !== "available" ? `<p class="control-note">Queue records unavailable. Refresh conductor to try again.</p>` : "")
+        + (row.merge?.diagnostic ? `<p class="control-note">${escape(row.merge.diagnostic)}</p>` : "")
+        + (row.history?.diagnostic ? `<p class="control-note">${escape(row.history.diagnostic)}</p>` : "")
+        + actionsList
+        + everydayControls
         + correctionStatusHtml(row.correction,escape)
-        + (row.correctionEligible === true && ["attached","held"].includes(row.state) ? `<label>Correction for this retained conversation <textarea data-conductor-correction-text="${index}" maxlength="4096"${busy ? " disabled" : ""}></textarea></label><button type="button" data-conductor-correct="${index}"${busy ? " disabled" : ""}>Send correction</button><p class="control-note">Current work may finish. This uses the existing read-only grant; application is not verified.</p>` : "")
-        + (row.stopEligible === true || row.takeoverEligible === true || row.holdEligible === true || row.unholdEligible === true ? `<label>Control reason <input type="text" data-conductor-reason="${index}" maxlength="1024"${busy ? " disabled" : ""}></label>` : "")
-        + (row.holdEligible === true ? `<button type="button" data-conductor-hold="${index}"${busy ? " disabled" : ""}>Hold new conductor work</button>` : "")
-        + (row.unholdEligible === true ? `<button type="button" data-conductor-unhold="${index}"${busy ? " disabled" : ""}>Unhold conductor</button>` : "")
-        + (row.stopEligible === true ? `<button type="button" data-conductor-stop="${index}"${busy ? " disabled" : ""}>Stop hosted conductor</button>` : "")
-        + (row.takeoverEligible === true ? `<label>Destination owner <input type="text" data-conductor-owner="${index}" maxlength="256"${busy ? " disabled" : ""}></label><label>Owner address (display text) <input type="text" data-conductor-address="${index}" maxlength="512"${busy ? " disabled" : ""}></label><button type="button" data-conductor-takeover="${index}"${busy ? " disabled" : ""}>Take Over</button>` : "")
-        + (Array.isArray(row.controls) ? row.controls.map(result => `<p class="control-note">Historical ${escape(result.receipt?.operation || "Control")} receipt · request ${escape(result.receipt?.request?.requestId || "unknown")} · ${escape(result.receipt?.issuer || "unknown issuer")} · ${escape(result.receipt?.appliedAt || "unknown time")} · ${escape(result.receipt?.request?.reason || "")} · cleanup ${escape(result.cleanup || "unknown")}</p>`).join("") : "")
-        + (Array.isArray(row.actions) ? row.actions.map(action => `<p class="control-note">Action ${escape(action.tag)}: ${escape(action.state)}. Owner: ${escape(action.holder || "unknown")}. ${escape(action.reason || "")} ${escape(action.nextTrigger || "")}</p>`).join("") : "")
-        + recordedTasksHtml(row.recordedTasks, escape)
+        + correctionForm
+        + advanced
+        + `<details data-conductor-disclosure="technical-${index}"><summary>Details and history</summary>`
+        + actionDetails
+        + historicalControls
+        + recordedTasksHtml(row.recordedTasks, escape, index)
         + exactMergeHtml(row,index,busy,escape)
-        + retainedJudgmentsHtml(row.history, escape)
+        + retainedJudgmentsHtml(row.history, escape, index)
+        + `</details>`
         + `</article>`;
     }).join("");
     if(!snapshot.conductors.length) cards = "<p>No conductor ownership records were returned.</p>";
@@ -3374,18 +3425,19 @@ function exactMergeHtml(row,index,busy,escape){
   if(!view) return "";
   const candidates = Array.isArray(view.candidates) ? view.candidates.slice(0,20) : [];
   const grants = Array.isArray(view.grants) ? view.grants.slice(0,20) : [];
-  return `<section aria-label="Exact merge permission"><h3>Exact squash permission</h3><p class="control-note">Model permission remains file-read-only. Each grant permits one qualified host attempt.</p>`
-    + (view.diagnostic ? `<p>${escape(view.diagnostic)}</p>` : "")
+  return (view.diagnostic ? `<p class="control-note">${escape(view.diagnostic)}</p>` : "")
+    + `<details data-conductor-disclosure="merge-${index}"><summary>Exact squash permission</summary><section aria-label="Exact merge permission"><h3>Exact squash permission</h3><p class="control-note">Model permission remains file-read-only. Each grant permits one qualified host attempt.</p>`
     + candidates.map((candidate,slot) => `<div><p>Task ${escape(candidate.taskId)} · ${escape(candidate.pullRequestUrl)}</p><p>Full head: ${escape(candidate.headSha)}</p><p class="control-note">Ready receipt: ${escape(candidate.readyReceiptId || "awaiting next eligible ready transition")} · ${escape(candidate.readyReceiptSha256 || "unbound until ready")}</p>`
       + (["attached","held","frozen"].includes(row.state) ? `<label>Expiry (local time)<input type="datetime-local" data-merge-expiry="${index}:${slot}"${busy ? " disabled" : ""}></label><button type="button" data-merge-grant="${index}:${slot}"${busy ? " disabled" : ""}>Grant one exact squash attempt</button>` : "") + `</div>`).join("")
     + grants.map((grant,slot) => `<div><p>Grant ${escape(grant.grantId)} · ${escape(grant.pullRequestUrl)}</p><p>Full head: ${escape(grant.headSha)}</p><p>Permission: ${escape(grant.permission)}${grant.revoked ? " · revocation recorded" : ""}. Expires ${escape(grant.expiresAt)}</p><p>Delivery: ${escape(grant.delivery)} · Decision: ${escape(grant.decision || "unavailable")} · ${escape(grant.reason || "reason unavailable")}</p><p>Attempt: ${escape(grant.operation)} · Outcome: ${escape(grant.observation?.state || "not observed")}</p><p class="control-note">Issuer ${escape(grant.issuer)} · Request ${escape(grant.requestId)} · ${escape(grant.observation?.nextTrigger || "Refresh to inspect retained permission and outcome.")}</p>`
-      + (!grant.revoked ? `<button type="button" data-merge-revoke="${index}:${slot}"${busy ? " disabled" : ""}>Revoke this exact grant</button>` : "") + `</div>`).join("") + `</section>`;
+      + (!grant.revoked ? `<button type="button" data-merge-revoke="${index}:${slot}"${busy ? " disabled" : ""}>Revoke this exact grant</button>` : "") + `</div>`).join("") + `</section></details>`;
 }
 
-function retainedJudgmentsHtml(history, escape){
+function retainedJudgmentsHtml(history, escape, index = 0){
   if(!history) return "";
   const judgments = Array.isArray(history.judgments) ? history.judgments.slice(0,20) : [];
-  return `<section aria-label="Retained judgments"><h3>Retained judgments</h3><p class="control-note">Identity order, not newest-first or activity chronology. Historical evidence; current task state is not shown.</p>`
+  return (history.diagnostic ? `<p class="control-note">${escape(history.diagnostic)}</p>` : "")
+    + `<details data-conductor-disclosure="history-${index}"><summary>Retained judgments</summary><section aria-label="Retained judgments"><h3>Retained judgments</h3><p class="control-note">Identity order, not newest-first or activity chronology. Historical evidence; current task state is not shown.</p>`
     + judgments.map(judgment => `<div class="retained-judgment"><p><strong>${escape(judgment.decision)}</strong> · ${escape(judgment.tag)}</p>`
       + `<p>Source attempt: ${escape(judgment.sourceAttempt)} · Head: ${escape(judgment.sourceHeadSha)}</p>`
       + `<p>Source observation: ${escape(judgment.sourceObservedAt)}</p>`
@@ -3398,7 +3450,7 @@ function retainedJudgmentsHtml(history, escape){
     + (history.invalidEvents ? `<p class="control-note">${escape(history.invalidEvents)} invalid or incomplete event(s) excluded.</p>` : "")
     + (history.excludedEvents ? `<p class="control-note">${escape(history.excludedEvents)} correction, merge or prose-only event(s) excluded.</p>` : "")
     + (history.omittedJudgments ? `<p class="control-note">${escape(history.omittedJudgments)} additional verified ordinary judgment(s) omitted.</p>` : "")
-    + `</section>`;
+    + `</section></details>`;
 }
 
 function createConductorControl(fetchImpl, renderPanel, confirmAction, newRequestId = () => globalThis.crypto.randomUUID()){
@@ -3537,7 +3589,11 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
     const action = operation === "stop" ? "Stop" : operation === "takeover" ? "Take Over" : operation === "hold" ? "Hold" : operation === "unhold" ? "Unhold" : resuming ? "Resume" : "Detach";
     const bounded = (value,bound) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= bound && !/[\x00-\x1f\x7f]/.test(value);
     const safeOwner = value => bounded(value,256) && !/[\\\x80-\x9f]/.test(value) && !value.includes(":/") && !value.trim().startsWith("/");
-    if(operation && (!bounded(inputs.reason,1024) || operation === "takeover"
+    const defaultReason = operation === "hold" ? "Operator requested Hold" : operation === "unhold" ? "Operator requested Unhold" : "";
+    const effectiveReason = (typeof inputs.reason === "string" && inputs.reason.trim().length > 0)
+      ? inputs.reason.trim()
+      : defaultReason;
+    if(operation && (!bounded(effectiveReason,1024) || operation === "takeover"
       && (!safeOwner(inputs.destinationHolder) || inputs.destinationHolder.trim() === row.holder || !bounded(inputs.destinationAddress,512)))){
       message = "Enter a reason and, for Take Over, a different named owner and address. Owner names cannot contain backslashes, :/ or a leading slash."; draw(); return;
     }
@@ -3553,7 +3609,7 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
         if(!sameIdentity(fresh,row) || !eligible(fresh) || ["hold","unhold"].includes(operation) && (!Number.isSafeInteger(row.controlRevision) || fresh.controlRevision !== row.controlRevision)){ message = "Control refused locally: ownership or control revision changed. Inspect the fresh snapshot."; return; }
         const consequence = operation === "stop" ? "This acquisition cannot Resume." : operation === "hold" ? "Pause new turns and action admissions; retain ownership and conversation." : operation === "unhold" ? "Continue valid pending work on scheduler reconciliation. Detached, frozen, grants, queue and opt-in blockers remain independent." : `Transfer ownership to ${inputs.destinationHolder.trim()} at ${inputs.destinationAddress.trim()}. No replacement hosted session will start.`;
         if(!confirmAction(`${action} ${row.repository}, owner ${row.holder}, acquisition ${row.claimGeneration}? ${consequence} Issued work may still finish.`)) return;
-        Object.assign(body,{requestId:newRequestId(),reason:inputs.reason.trim()});
+        Object.assign(body,{requestId:newRequestId(),reason:effectiveReason});
         if(["hold","unhold"].includes(operation)) body.expectedControlRevision = row.controlRevision;
         if(operation === "takeover") Object.assign(body,{destinationHolder:inputs.destinationHolder.trim(),destinationAddress:inputs.destinationAddress.trim()});
         pendingControl = {operation,body};
@@ -3650,8 +3706,39 @@ function createConductorControl(fetchImpl, renderPanel, confirmAction, newReques
     finally { busy = false; draw(); }
   };
   return {refresh,correct,lookupCorrection,mergeControl,detach:index=>changeDelivery(index,false),resume:index=>changeDelivery(index,true),
-    hold:(index,inputs)=>changeDelivery(index,false,"hold",inputs),unhold:(index,inputs)=>changeDelivery(index,false,"unhold",inputs),
-    stop:(index,inputs)=>changeDelivery(index,false,"stop",inputs),takeover:(index,inputs)=>changeDelivery(index,false,"takeover",inputs)};
+    hold:(index,inputs={})=>changeDelivery(index,false,"hold",inputs),unhold:(index,inputs={})=>changeDelivery(index,false,"unhold",inputs),
+    stop:(index,inputs={})=>changeDelivery(index,false,"stop",inputs),takeover:(index,inputs={})=>changeDelivery(index,false,"takeover",inputs)};
+}
+
+function renderConductorControl(panel, ...args){
+  if(!panel) return;
+  const html = typeof args[0] === "string" ? args[0] : conductorControlHtml(...args);
+  const fields = ['conductorCorrectionText','conductorReason','conductorHoldReason','conductorOwner','conductorAddress'];
+  // Never move a draft to another acquisition merely because it occupies the same row.
+  // Merge expiry is intentionally not restored: a refresh can replace its exact candidate/head.
+  const keyOf = el => {
+    const target = el.closest?.('article[data-conductor-target]')?.dataset?.conductorTarget;
+    if(!target) return null;
+    const field = fields.find(name => el.dataset?.[name] !== undefined);
+    const disclosure = el.dataset?.conductorDisclosure?.replace(/-\d+$/, '');
+    return field || disclosure ? JSON.stringify([target, field || disclosure]) : null;
+  };
+  const select = () => panel.querySelectorAll ? [
+    ...panel.querySelectorAll('details[data-conductor-disclosure]'),
+    ...panel.querySelectorAll('input, textarea')
+  ] : [];
+  const retained = new Map();
+  for(const el of select()){
+    const key = keyOf(el);
+    if(key) retained.set(key, {open:el.open === true, value:typeof el.value === 'string' ? el.value : null});
+  }
+  panel.innerHTML = html;
+  for(const el of select()){
+    const saved = retained.get(keyOf(el));
+    if(!saved) continue;
+    if(el.dataset?.conductorDisclosure) el.open = saved.open;
+    else if(saved.value !== null && !el.value) el.value = saved.value;
+  }
 }
 
 function wireConductorControl(panel, control){
@@ -3684,7 +3771,10 @@ function wireConductorControl(panel, control){
       const operation = stop ? "stop" : takeover ? "takeover" : hold ? "hold" : "unhold";
       const index = Number((stop || takeover || hold || unhold).dataset[`conductor${operation[0].toUpperCase()}${operation.slice(1)}`]);
       const value = name => panel.querySelector(`[data-conductor-${name}="${index}"]`)?.value || "";
-      void control[operation](index,{reason:value("reason"),destinationHolder:value("owner"),destinationAddress:value("address")});
+      const reason = (operation === "hold" || operation === "unhold")
+        ? (value("hold-reason") || value("reason"))
+        : value("reason");
+      void control[operation](index,{reason,destinationHolder:value("owner"),destinationAddress:value("address")});
     }
   });
 }
@@ -3921,7 +4011,7 @@ function wireGlassWriteClicks(documentRef, glassWrites, confirmAction){
     const conductorPanel = $("conductor-control");
     conductorPanel.hidden = false;
     const conductorControl = createConductorControl(fetch,
-      (snapshot, message, busy, pendingCorrection) => { conductorPanel.innerHTML = conductorControlHtml(snapshot, message, busy, esc, pendingCorrection); },
+      (snapshot, message, busy, pendingCorrection) => { renderConductorControl(conductorPanel, conductorControlHtml(snapshot, message, busy, esc, pendingCorrection)); },
       window.confirm.bind(window));
     wireConductorControl(conductorPanel, conductorControl);
     void conductorControl.refresh();
