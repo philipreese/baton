@@ -1181,7 +1181,9 @@ public sealed partial class ConductorFollowDeliveryTests
                 Assert.Contains("operator correction", prompt, StringComparison.Ordinal);
                 Assert.Equal(new PermissionGrant(ReadFiles: true), configuration.PermissionGrant);
             }
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue, token).WaitAsync(TimeSpan.FromSeconds(60), token);
+            // Load acquires the same queue mutex without replacing the snapshot: this checks
+            // that vendor execution is outside the lock, not filesystem replacement durability.
+            await QueueStore.LoadAsync(BatonPaths.QueueFile, token).WaitAsync(TimeSpan.FromSeconds(60), token);
             if (Interrupt)
             {
                 await started!("retained-thread", token);
