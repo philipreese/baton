@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,6 +16,253 @@ namespace Baton.Cli.Tests;
 
 public sealed partial class ConductorFollowDeliveryTests
 {
+    [Fact]
+    public async Task Glass_status_marks_retired_unlaunched_pending_follow_as_historical_without_mutating_evidence()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        var scheduler = fixture.Scheduler();
+        var tags = new[] { "active-pending", "retired-pending", "retired-launch", "retired-response", "retired-missing-mapping", "retired-unreadable" };
+        var sources = new List<QueueItem>();
+        foreach (var tag in tags)
+        {
+            var source = await fixture.HaltAsync(tag, notify: false);
+            await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+            fixture.Usage(DateTimeOffset.UtcNow, 100);
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+            sources.Add(await fixture.RowAsync(tag));
+        }
+        Assert.All(sources, source => Assert.True(source.StoppedWorkJudgment!.FollowContinuationPending));
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(fixture.Root, "conductor-follow"), "launch.json", SearchOption.AllDirectories));
+        var eventsDirectory = Path.Combine(SessionDirectory(fixture), "events");
+        Directory.CreateDirectory(eventsDirectory);
+        foreach (var tag in new[] { "retired-launch", "retired-response" })
+        {
+            var obligation = (await fixture.Store.ReadAsync(fixture.Key(tag), Ct))!;
+            var eventIdentity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(obligation.ObligationId))).ToLowerInvariant();
+            var eventDirectory = Path.Combine(eventsDirectory, eventIdentity);
+            Directory.CreateDirectory(eventDirectory);
+            File.WriteAllText(Path.Combine(eventDirectory, "launch.json"), "{}");
+            if (tag == "retired-response") File.WriteAllText(Path.Combine(eventDirectory, "response.json"), "{}");
+        }
+        var unreadableObligation = (await fixture.Store.ReadAsync(fixture.Key("retired-unreadable"), Ct))!;
+        var unreadableIdentity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(unreadableObligation.ObligationId))).ToLowerInvariant();
+        File.WriteAllText(Path.Combine(eventsDirectory, unreadableIdentity), "not a directory");
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => item.Tag.StartsWith("retired-", StringComparison.Ordinal) ? item with
+            {
+                Halted = false,
+                Retirement = new QueueRetirement(QueueRetirement.Merged, DateTimeOffset.UtcNow,
+                    item.Tag == "retired-pending" ? new string('r', 3000) : $"merged: {item.Tag}"),
+                StoppedWorkJudgment = item.Tag == "retired-missing-mapping"
+                    ? item.StoppedWorkJudgment! with { Key = "missing-obligation-mapping" }
+                    : item.StoppedWorkJudgment,
+            } : item).ToList(),
+        }, Ct);
+
+        var queueBytes = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+        var evidence = Directory.EnumerateFiles(Path.Combine(fixture.Root, "conductor-follow"), "*", SearchOption.AllDirectories)
+            .ToDictionary(path => path, File.ReadAllBytes);
+        var fleet = Path.Combine(fixture.Root, "fleet");
+        var obligationProjection = Path.Combine(fleet, BatonPaths.ConductorObligationsFileName);
+        var liveEvents = Path.Combine(fleet, BatonPaths.FleetEventsFileName);
+        var rolloverEvents = Path.Combine(fleet, BatonPaths.FleetEventsRolloverFileName);
+        if (!File.Exists(rolloverEvents)) File.WriteAllBytes(rolloverEvents, []);
+        var obligationProjectionBytes = await File.ReadAllBytesAsync(obligationProjection, Ct);
+        var liveEventBytes = await File.ReadAllBytesAsync(liveEvents, Ct);
+        var rolloverEventBytes = await File.ReadAllBytesAsync(rolloverEvents, Ct);
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var actions = (await glass.StatusAsync()).GetProperty("actions").EnumerateArray()
+            .ToDictionary(action => action.GetProperty("tag").GetString()!, action => action);
+
+        Assert.Equal("event-pending-turn", actions["active-pending"].GetProperty("state").GetString());
+        Assert.Equal("historical", actions["retired-pending"].GetProperty("state").GetString());
+        var retiredReason = actions["retired-pending"].GetProperty("reason").GetString()!;
+        Assert.Contains("[truncated]", retiredReason);
+        Assert.True(retiredReason.Length <= 512);
+        Assert.Contains("No response or launch was recorded", actions["retired-pending"].GetProperty("reason").GetString());
+        Assert.Null(actions["retired-pending"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("uncertain-turn", actions["retired-launch"].GetProperty("state").GetString());
+        Assert.Equal("received-response-pending-decision", actions["retired-response"].GetProperty("state").GetString());
+        Assert.Equal("unresolved-evidence", actions["retired-missing-mapping"].GetProperty("state").GetString());
+        Assert.Contains("cannot be confirmed", actions["retired-missing-mapping"].GetProperty("reason").GetString());
+        Assert.NotNull(actions["retired-missing-mapping"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("unresolved-evidence", actions["retired-unreadable"].GetProperty("state").GetString());
+        Assert.Contains("cannot be confirmed", actions["retired-unreadable"].GetProperty("reason").GetString());
+        Assert.NotNull(actions["retired-unreadable"].GetProperty("nextTrigger").GetString());
+        Assert.Equal(queueBytes, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+        foreach (var file in evidence) Assert.Equal(file.Value, File.ReadAllBytes(file.Key));
+        Assert.Equal(obligationProjectionBytes, await File.ReadAllBytesAsync(obligationProjection, Ct));
+        Assert.Equal(liveEventBytes, await File.ReadAllBytesAsync(liveEvents, Ct));
+        Assert.Equal(rolloverEventBytes, await File.ReadAllBytesAsync(rolloverEvents, Ct));
+        Assert.True((await fixture.RowAsync("retired-pending")).StoppedWorkJudgment!.FollowContinuationPending);
+        Assert.Equal(new string('r', 3000), (await fixture.RowAsync("retired-pending")).Retirement!.Reason);
+    }
+
+    [Theory]
+    [InlineData("stale-projection")]
+    [InlineData("torn-tail")]
+    public async Task Glass_status_inspects_obligations_without_repairing_fleet_files(string condition)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        var source = await fixture.HaltAsync("retired-inspection", notify: false);
+        var scheduler = fixture.Scheduler();
+        await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+        fixture.Usage(DateTimeOffset.UtcNow, 100);
+        await scheduler.NotifyOwnedHaltAsync(source, Ct);
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => item.Tag == "retired-inspection" ? item with
+            {
+                Halted = false,
+                Retirement = new QueueRetirement(QueueRetirement.Merged, DateTimeOffset.UtcNow, "merged: PR #2693"),
+            } : item).ToList(),
+        }, Ct);
+
+        var fleet = Path.Combine(fixture.Root, "fleet");
+        var obligationProjection = Path.Combine(fleet, BatonPaths.ConductorObligationsFileName);
+        var liveEvents = Path.Combine(fleet, BatonPaths.FleetEventsFileName);
+        var rolloverEvents = Path.Combine(fleet, BatonPaths.FleetEventsRolloverFileName);
+        if (!File.Exists(rolloverEvents)) File.WriteAllBytes(rolloverEvents, []);
+        if (condition == "stale-projection")
+        {
+            var projection = JsonNode.Parse(await File.ReadAllTextAsync(obligationProjection, Ct))!.AsObject();
+            projection["openObligations"] = new JsonArray();
+            File.WriteAllText(obligationProjection, projection.ToJsonString());
+        }
+        else
+        {
+            await File.AppendAllTextAsync(liveEvents, "{\"id\":999999,\"kind\":\"torn", Ct);
+        }
+        var projectionBytes = await File.ReadAllBytesAsync(obligationProjection, Ct);
+        var liveEventBytes = await File.ReadAllBytesAsync(liveEvents, Ct);
+        var rolloverEventBytes = await File.ReadAllBytesAsync(rolloverEvents, Ct);
+
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var action = Assert.Single((await glass.StatusAsync()).GetProperty("actions").EnumerateArray());
+
+        Assert.Equal(condition == "stale-projection" ? "historical" : "unresolved-evidence", action.GetProperty("state").GetString());
+        Assert.Equal(projectionBytes, await File.ReadAllBytesAsync(obligationProjection, Ct));
+        Assert.Equal(liveEventBytes, await File.ReadAllBytesAsync(liveEvents, Ct));
+        Assert.Equal(rolloverEventBytes, await File.ReadAllBytesAsync(rolloverEvents, Ct));
+    }
+
+    [Fact]
+    public async Task Glass_status_preserves_case_insensitive_event_and_marker_names_on_windows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "case-insensitive path controls are Windows-specific");
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        var scheduler = fixture.Scheduler();
+        var tags = new[] { "retired-cased-launch", "retired-cased-response" };
+        foreach (var tag in tags)
+        {
+            var source = await fixture.HaltAsync(tag, notify: false);
+            await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+            fixture.Usage(DateTimeOffset.UtcNow, 100);
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+        }
+
+        var eventsDirectory = Path.Combine(SessionDirectory(fixture), "Events");
+        Directory.CreateDirectory(eventsDirectory);
+        foreach (var tag in tags)
+        {
+            var obligation = (await fixture.Store.ReadAsync(fixture.Key(tag), Ct))!;
+            var eventIdentity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(obligation.ObligationId))).ToLowerInvariant();
+            var eventDirectory = Path.Combine(eventsDirectory, eventIdentity);
+            Directory.CreateDirectory(eventDirectory);
+            File.WriteAllText(Path.Combine(eventDirectory, tag == "retired-cased-launch" ? "Launch.json" : "launch.json"), "{}");
+            if (tag == "retired-cased-response") File.WriteAllText(Path.Combine(eventDirectory, "Response.json"), "{}");
+        }
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => tags.Contains(item.Tag, StringComparer.Ordinal) ? item with
+            {
+                Halted = false,
+                Retirement = new QueueRetirement(QueueRetirement.Merged, DateTimeOffset.UtcNow, $"merged: {item.Tag}"),
+            } : item).ToList(),
+        }, Ct);
+
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var actions = (await glass.StatusAsync()).GetProperty("actions").EnumerateArray()
+            .ToDictionary(action => action.GetProperty("tag").GetString()!, action => action);
+        Assert.Equal("uncertain-turn", actions["retired-cased-launch"].GetProperty("state").GetString());
+        Assert.Equal("received-response-pending-decision", actions["retired-cased-response"].GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public async Task Glass_status_does_not_treat_a_linked_event_directory_as_trustworthy_absence()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-specific");
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        var scheduler = fixture.Scheduler();
+        var tags = new[] { "retired-linked-events", "retired-dangling-events" };
+        foreach (var tag in tags)
+        {
+            var source = await fixture.HaltAsync(tag, notify: false);
+            await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+            fixture.Usage(DateTimeOffset.UtcNow, 100);
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+        }
+        var eventsDirectory = Path.Combine(SessionDirectory(fixture), "events");
+        var linkedPaths = new List<(string Link, string Target)>();
+        foreach (var tag in tags)
+        {
+            var obligation = (await fixture.Store.ReadAsync(fixture.Key(tag), Ct))!;
+            var eventIdentity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(obligation.ObligationId))).ToLowerInvariant();
+            var eventDirectory = Path.Combine(eventsDirectory, eventIdentity);
+            var targetDirectory = Path.Combine(SessionDirectory(fixture), tag + "-target");
+            Directory.CreateDirectory(eventDirectory);
+            Directory.CreateDirectory(targetDirectory);
+            Directory.Delete(eventDirectory);
+            var startInfo = new ProcessStartInfo("cmd", $"/c mklink /J \"{eventDirectory}\" \"{targetDirectory}\"")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
+            if (process is null) Assert.Skip("this host could not start cmd.exe to create a junction");
+            await process.WaitForExitAsync(Ct);
+            if (process.ExitCode != 0) Assert.Skip("this host refused to create an event-directory junction");
+            linkedPaths.Add((eventDirectory, targetDirectory));
+        }
+        // A broken junction is still unsafe evidence, not a trustworthy missing event directory.
+        Directory.Delete(linkedPaths[1].Target);
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => tags.Contains(item.Tag, StringComparer.Ordinal) ? item with
+            {
+                Halted = false,
+                Retirement = new QueueRetirement(QueueRetirement.Merged, DateTimeOffset.UtcNow, "merged: linked evidence"),
+            } : item).ToList(),
+        }, Ct);
+
+        try
+        {
+            await using var glass = await GlassFixture.StartAsync(fixture);
+            var actions = (await glass.StatusAsync()).GetProperty("actions").EnumerateArray()
+                .ToDictionary(action => action.GetProperty("tag").GetString()!, action => action);
+            foreach (var tag in tags)
+            {
+                Assert.Equal("unresolved-evidence", actions[tag].GetProperty("state").GetString());
+                Assert.NotNull(actions[tag].GetProperty("nextTrigger").GetString());
+            }
+        }
+        finally
+        {
+            foreach (var linkedPath in linkedPaths) Directory.Delete(linkedPath.Link);
+        }
+    }
+
     [Fact]
     public async Task Glass_status_projects_exact_nonretired_owned_tasks_as_recorded_evidence()
     {
