@@ -488,9 +488,17 @@ internal sealed partial class ConductorFollowSession
             var eventDirectory = obligation is null ? null : Path.Combine(registration.SessionDirectory, "events", Digest(obligation.ObligationId));
             var completed = eventDirectory is not null && File.Exists(Path.Combine(eventDirectory, "response.json"));
             var uncertain = !completed && eventDirectory is not null && File.Exists(Path.Combine(eventDirectory, "launch.json"));
-            actions.Add(new(SafeLabel(source.Tag), completed ? "received-response-pending-decision" : uncertain ? "uncertain-turn" : "event-pending-turn",
-                pending.FollowContinuationWait ?? "Real event retained; delivery admission pending.",
-                pending.FollowContinuationTrigger ?? "Next scheduler reconciliation checks current eligibility.", SafeLabel(pending.Holder!)));
+            // Retirement only closes the no-marker case. A launch without a response remains uncertain,
+            // and a response still needs a decision, even when the source row has retired.
+            var retiredWithoutLaunch = !completed && !uncertain ? source.Retirement : null;
+            actions.Add(new(SafeLabel(source.Tag), retiredWithoutLaunch is not null ? "historical"
+                    : completed ? "received-response-pending-decision" : uncertain ? "uncertain-turn" : "event-pending-turn",
+                retiredWithoutLaunch is { } retirement
+                    ? $"Retired ({retirement.Kind}): {retirement.Reason}. No response or launch was recorded."
+                    : pending.FollowContinuationWait ?? "Real event retained; delivery admission pending.",
+                retiredWithoutLaunch is null
+                    ? pending.FollowContinuationTrigger ?? "Next scheduler reconciliation checks current eligibility."
+                    : null, SafeLabel(pending.Holder!)));
         }
         var rows = snapshot.Items
             .Where(item => item.Retirement is null && item.OwnedTask is { } task

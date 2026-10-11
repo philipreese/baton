@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,6 +16,62 @@ namespace Baton.Cli.Tests;
 
 public sealed partial class ConductorFollowDeliveryTests
 {
+    [Fact]
+    public async Task Glass_status_marks_retired_unlaunched_pending_follow_as_historical_without_mutating_evidence()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.EnableAutomaticAsync();
+        await fixture.CommandAsync("attach");
+        var scheduler = fixture.Scheduler();
+        var tags = new[] { "active-pending", "retired-pending", "retired-launch", "retired-response" };
+        var sources = new List<QueueItem>();
+        foreach (var tag in tags)
+        {
+            var source = await fixture.HaltAsync(tag, notify: false);
+            await scheduler.ReconcileStoppedWorkAdviceAsync(Ct);
+            fixture.Usage(DateTimeOffset.UtcNow, 100);
+            await scheduler.NotifyOwnedHaltAsync(source, Ct);
+            sources.Add(await fixture.RowAsync(tag));
+        }
+        Assert.All(sources, source => Assert.True(source.StoppedWorkJudgment!.FollowContinuationPending));
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(fixture.Root, "conductor-follow"), "launch.json", SearchOption.AllDirectories));
+        foreach (var tag in new[] { "retired-launch", "retired-response" })
+        {
+            var obligation = (await fixture.Store.ReadAsync(fixture.Key(tag), Ct))!;
+            var eventIdentity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(obligation.ObligationId))).ToLowerInvariant();
+            var eventDirectory = Path.Combine(SessionDirectory(fixture), "events", eventIdentity);
+            Directory.CreateDirectory(eventDirectory);
+            File.WriteAllText(Path.Combine(eventDirectory, "launch.json"), "{}");
+            if (tag == "retired-response") File.WriteAllText(Path.Combine(eventDirectory, "response.json"), "{}");
+        }
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = queue.Items.Select(item => item.Tag.StartsWith("retired-", StringComparison.Ordinal) ? item with
+            {
+                Halted = false,
+                Retirement = new QueueRetirement(QueueRetirement.Merged, DateTimeOffset.UtcNow, $"merged: {item.Tag}"),
+            } : item).ToList(),
+        }, Ct);
+
+        var queueBytes = await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct);
+        var evidence = Directory.EnumerateFiles(Path.Combine(fixture.Root, "conductor-follow"), "*", SearchOption.AllDirectories)
+            .ToDictionary(path => path, File.ReadAllBytes);
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var actions = (await glass.StatusAsync()).GetProperty("actions").EnumerateArray()
+            .ToDictionary(action => action.GetProperty("tag").GetString()!, action => action);
+
+        Assert.Equal("event-pending-turn", actions["active-pending"].GetProperty("state").GetString());
+        Assert.Equal("historical", actions["retired-pending"].GetProperty("state").GetString());
+        Assert.Contains("merged: retired-pending", actions["retired-pending"].GetProperty("reason").GetString());
+        Assert.Contains("No response or launch was recorded", actions["retired-pending"].GetProperty("reason").GetString());
+        Assert.Null(actions["retired-pending"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("uncertain-turn", actions["retired-launch"].GetProperty("state").GetString());
+        Assert.Equal("received-response-pending-decision", actions["retired-response"].GetProperty("state").GetString());
+        Assert.Equal(queueBytes, await File.ReadAllBytesAsync(BatonPaths.QueueFile, Ct));
+        foreach (var file in evidence) Assert.Equal(file.Value, File.ReadAllBytes(file.Key));
+        Assert.True((await fixture.RowAsync("retired-pending")).StoppedWorkJudgment!.FollowContinuationPending);
+    }
+
     [Fact]
     public async Task Glass_status_projects_exact_nonretired_owned_tasks_as_recorded_evidence()
     {
