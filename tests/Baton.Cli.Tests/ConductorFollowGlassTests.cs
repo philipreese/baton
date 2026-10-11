@@ -228,7 +228,7 @@ public sealed partial class ConductorFollowDeliveryTests
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            using var process = Process.Start(startInfo);
+            using var process = global::Baton.Core.ProcessLaunch.Start(startInfo);
             if (process is null) Assert.Skip("this host could not start cmd.exe to create a junction");
             await process.WaitForExitAsync(Ct);
             if (process.ExitCode != 0) Assert.Skip("this host refused to create an event-directory junction");
