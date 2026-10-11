@@ -16,11 +16,15 @@ const snapshot = (state='attached') => ({observedAt:'2026-10-10T00:00:00Z',condu
 const ok = value => ({ok:true,status:200,json:async()=>value});
 const esc = value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const card = conductorControlHtml(snapshot(),'',false,esc);
+const boundedRetirementReason = `Retired (merged): ${'r'.repeat(380)} <retained>... [truncated]. No response or launch was recorded.`;
+assert.ok(boundedRetirementReason.length <= 512);
 const retiredPendingAction = conductorControlHtml({...snapshot(),conductors:[{...row,actions:[{
   tag:'retired-pending',state:'historical',holder:'owner',
-  reason:'Retired (merged): merged: PR #2687 <retained>. No response or launch was recorded.',nextTrigger:null
+  reason:boundedRetirementReason,nextTrigger:null
 }]}]},'',false,esc);
-assert.ok(retiredPendingAction.includes('Action retired-pending: historical. Owner: owner. Retired (merged): merged: PR #2687 &lt;retained&gt;. No response or launch was recorded.'));
+assert.ok(retiredPendingAction.includes('Action retired-pending: historical. Owner: owner. Retired (merged): '));
+assert.ok(retiredPendingAction.includes('&lt;retained&gt;... [truncated]. No response or launch was recorded.'));
+assert.ok(!retiredPendingAction.includes('<retained>'));
 assert.ok(!retiredPendingAction.includes('Next trigger:'));
 const recorded = {observedAt:'2026-10-10T00:00:00Z',availability:'available',omitted:1,items:Array.from({length:21},(_,i)=>({
   task:{id:`task-${String(i).padStart(2,'0')}`,issue:2683,conductorHolder:'prior-owner',preparation:'blocked',readyReceiptId:'ready-1',readyHeadSha:'b'.repeat(40),blocker:'Recorded blocker'},

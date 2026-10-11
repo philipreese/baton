@@ -38,6 +38,7 @@ internal sealed record GlassConductorDetachRequest(
 internal sealed partial class ConductorFollowSession
 {
     private static readonly TimeSpan GlassLockTimeout = TimeSpan.FromSeconds(1);
+    private const int RetirementActionDisplayLimit = 512;
 
     internal static async Task<GlassConductorsSnapshot> ReadGlassStatusAsync(string root,
         CancellationToken token, Func<string, CancellationToken, Task<RepositoryIdentity?>>? resolver = null)
@@ -463,8 +464,19 @@ internal sealed partial class ConductorFollowSession
                     : i.ReplacementReviewAction.HeldPending
                         ? "Unhold this acquisition; the scheduler rechecks source, head, grants, opt-in and runway before launch."
                     : i.ReplacementReviewAction.NextTrigger, SafeLabel(i.ReplacementReviewAction.Holder))).ToList();
-        foreach (var source in snapshot.Items.Where(i => i.Repository == repository && i.ReplacementReviewAction is null
-            && i.StoppedWorkJudgment is { FollowAttachmentId: not null, FollowContinuationPending: true }).Take(100 - actions.Count))
+        var pendingSources = snapshot.Items.Where(i => i.Repository == repository && i.ReplacementReviewAction is null
+            && i.StoppedWorkJudgment is { FollowAttachmentId: not null, FollowContinuationPending: true }).Take(100 - actions.Count).ToArray();
+        ConductorObligationInspection? obligationInspection = null;
+        var obligationInspectionAvailable = true;
+        if (pendingSources.Length > 0)
+        {
+            var fleet = Path.Combine(root, BatonPaths.FleetDirectoryName);
+            var obligations = new ConductorObligationStore(new FleetEventLog(Path.Combine(fleet, BatonPaths.FleetEventsFileName),
+                Path.Combine(fleet, BatonPaths.FleetEventsRolloverFileName), 16 * 1024 * 1024), Path.Combine(fleet, BatonPaths.ConductorObligationsFileName));
+            try { obligationInspection = await obligations.InspectAsync(token).ConfigureAwait(false); }
+            catch (ConductorObligationStoreException) { obligationInspectionAvailable = false; }
+        }
+        foreach (var source in pendingSources)
         {
             var pending = source.StoppedWorkJudgment!;
             var registration = Read<ConductorFollowAttachment>(Path.Combine(root, "conductor-follow", identity.FileSlug, "registration.json"));
@@ -481,20 +493,32 @@ internal sealed partial class ConductorFollowSession
                     "Owner must inspect retained evidence; Unhold cannot restore this acquisition or replay its event.", SafeLabel(pending.Holder!)));
                 continue;
             }
-            var fleet = Path.Combine(root, BatonPaths.FleetDirectoryName);
-            var obligations = new ConductorObligationStore(new FleetEventLog(Path.Combine(fleet, BatonPaths.FleetEventsFileName),
-                Path.Combine(fleet, BatonPaths.FleetEventsRolloverFileName), 16 * 1024 * 1024), Path.Combine(fleet, BatonPaths.ConductorObligationsFileName));
-            var obligation = await obligations.ReadAsync(pending.Key!, token).ConfigureAwait(false);
-            var eventDirectory = obligation is null ? null : Path.Combine(registration.SessionDirectory, "events", Digest(obligation.ObligationId));
-            var completed = eventDirectory is not null && File.Exists(Path.Combine(eventDirectory, "response.json"));
-            var uncertain = !completed && eventDirectory is not null && File.Exists(Path.Combine(eventDirectory, "launch.json"));
+            var obligation = obligationInspectionAvailable && !string.IsNullOrWhiteSpace(pending.Key)
+                && obligationInspection is { } inspected
+                && !inspected.Quarantined.ContainsKey(pending.Key)
+                ? inspected.Obligations.FirstOrDefault(item => string.Equals(item.IdempotencyKey, pending.Key, StringComparison.Ordinal))
+                : null;
+            var markers = obligation is null
+                ? (Available: false, Launch: false, Response: false)
+                : InspectFollowEventMarkers(registration.SessionDirectory, Digest(obligation.ObligationId));
+            var evidenceUnavailable = !obligationInspectionAvailable || obligation is null || !markers.Available;
+            if (evidenceUnavailable)
+            {
+                actions.Add(new(SafeLabel(source.Tag), "unresolved-evidence",
+                    "Retained obligation or launch/response evidence cannot be confirmed.",
+                    "Owner must inspect retained obligation and event evidence; refresh after the evidence is readable.",
+                    SafeLabel(pending.Holder!)));
+                continue;
+            }
+            var completed = markers.Response;
+            var uncertain = !completed && markers.Launch;
             // Retirement only closes the no-marker case. A launch without a response remains uncertain,
             // and a response still needs a decision, even when the source row has retired.
             var retiredWithoutLaunch = !completed && !uncertain ? source.Retirement : null;
             actions.Add(new(SafeLabel(source.Tag), retiredWithoutLaunch is not null ? "historical"
                     : completed ? "received-response-pending-decision" : uncertain ? "uncertain-turn" : "event-pending-turn",
                 retiredWithoutLaunch is { } retirement
-                    ? $"Retired ({retirement.Kind}): {retirement.Reason}. No response or launch was recorded."
+                    ? RetiredFollowReason(retirement)
                     : pending.FollowContinuationWait ?? "Real event retained; delivery admission pending.",
                 retiredWithoutLaunch is null
                     ? pending.FollowContinuationTrigger ?? "Next scheduler reconciliation checks current eligibility."
@@ -526,6 +550,47 @@ internal sealed partial class ConductorFollowSession
         var recordedTasks = new GlassRecordedTasks(observedAt, queueAvailable ? "available" : "unavailable",
             queueAvailable ? visible : [], queueAvailable ? Math.Max(0, rows.Length - visible.Length) : 0);
         return (actions, queueAvailable ? snapshot.Held : null, snapshot.Items, recordedTasks);
+    }
+
+    private static (bool Available, bool Launch, bool Response) InspectFollowEventMarkers(string sessionDirectory, string eventIdentity)
+    {
+        try
+        {
+            var sessionEntries = Directory.EnumerateFileSystemEntries(sessionDirectory)
+                .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
+            if (!sessionEntries.Contains("events")) return (true, false, false);
+
+            var eventsDirectory = Path.Combine(sessionDirectory, "events");
+            var eventEntries = Directory.EnumerateFileSystemEntries(eventsDirectory)
+                .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
+            if (!eventEntries.Contains(eventIdentity)) return (true, false, false);
+
+            var markerEntries = Directory.EnumerateFileSystemEntries(Path.Combine(eventsDirectory, eventIdentity))
+                .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
+            return (true, markerEntries.Contains("launch.json"), markerEntries.Contains("response.json"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Directory.Exists/File.Exists turn access failures into false; enumeration keeps
+            // unknown evidence distinct from a positively observed missing directory or marker.
+            return (false, false, false);
+        }
+    }
+
+    private static string RetiredFollowReason(QueueRetirement retirement)
+    {
+        const string suffix = ". No response or launch was recorded.";
+        const string truncatedSuffix = "... [truncated]. No response or launch was recorded.";
+        var kind = string.IsNullOrWhiteSpace(retirement.Kind) ? "unknown" : retirement.Kind.Trim();
+        if (kind.Length > 80) kind = kind[..77] + "...";
+        var reason = string.IsNullOrWhiteSpace(retirement.Reason) ? "reason unavailable" : retirement.Reason.Trim();
+        var prefix = $"Retired ({kind}): ";
+        var untruncated = prefix + reason + suffix;
+        if (untruncated.Length <= RetirementActionDisplayLimit) return untruncated;
+
+        var reasonLength = RetirementActionDisplayLimit - prefix.Length - truncatedSuffix.Length;
+        if (reasonLength > 0 && reasonLength < reason.Length && char.IsHighSurrogate(reason[reasonLength - 1])) reasonLength--;
+        return prefix + reason[..Math.Max(0, reasonLength)] + truncatedSuffix;
     }
 
     private static QueueTaskPublicView SafeRecordedTask(QueueTaskPublicView task) => task with
