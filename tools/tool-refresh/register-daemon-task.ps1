@@ -69,8 +69,13 @@ $taskSettings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($triggerLogon, $triggerRepeat) `
-    -Settings $taskSettings -Force | Out-Null
+# Explicitly scope the task principal to the same registering user with Interactive logon and
+# Limited run level (#2697, spec/baton.md §7) to avoid implicit S4U principal creation.
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType Interactive -RunLevel Limited
+
+Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal `
+    -Trigger @($triggerLogon, $triggerRepeat) -Settings $taskSettings -Force | Out-Null
 
 # #2036: turn the Task Scheduler operational log on, so the next scheduled relaunch has a record.
 # On 2026-09-07 the daemon exited and no subsequent launch appeared in `daemon.log`; the disabled
