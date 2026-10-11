@@ -624,9 +624,8 @@ public sealed class ConductorFollowSessionTests
             foreach (var argument in new[] { "/c", "mklink", "/J", junction, target })
                 start.ArgumentList.Add(argument);
             using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
-            var stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-            var stderr = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
-            await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+            var (stdout, stderr) = await Baton.Tests.Shared.BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
             if (process.ExitCode != 0 || !Directory.Exists(junction))
                 Assert.Skip($"Host refused the task-workspace junction: {stdout}{stderr}");
             _taskWorkspaceJunction = junction;
@@ -644,9 +643,8 @@ public sealed class ConductorFollowSessionTests
             };
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
             using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
-            var stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-            var stderr = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
-            await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+            var (stdout, stderr) = await Baton.Tests.Shared.BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
             Assert.True(process.ExitCode == 0, $"git {string.Join(' ', arguments)} failed: {stdout}{stderr}");
         }
 
