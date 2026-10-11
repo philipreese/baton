@@ -635,8 +635,13 @@ public sealed class ConductorFollowSessionTests
 
         private static async Task RunGitAsync(string workingDirectory, params string[] arguments)
         {
-            var start = new ProcessStartInfo("git") { WorkingDirectory = workingDirectory, UseShellExecute = false,
-                RedirectStandardOutput = true, RedirectStandardError = true };
+            var start = new ProcessStartInfo("git")
+            {
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
             using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
             var stdout = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
