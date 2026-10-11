@@ -474,31 +474,15 @@ public static class TaskCommand
 
         var currentPr = snapshot.PullRequestObservations?.LastOrDefault(o =>
             o.Repository == owner.Repository && o.PullRequest == item.PullRequest);
+        var decision = TaskDecisionProjection.Decide(item, currentPr, isPreparationOwnerAlive: !abandonedPreparation);
         var readiness = owner.Ready;
-        var receiptMismatches = new List<string>();
-        var receiptMissing = new List<string>();
-        if (readiness is not null)
+        var receiptMismatches = decision.ReceiptBinding?.Mismatches ?? [];
+        var receiptMissing = decision.ReceiptBinding?.Missing ?? [];
+        var receiptBinding = decision.ReceiptBinding is null ? null : new
         {
-            if (string.IsNullOrWhiteSpace(readiness.Id)) receiptMissing.Add("id");
-            if (readiness.ReadyObservedAt == default) receiptMissing.Add("observedAt");
-            if (string.IsNullOrWhiteSpace(readiness.TaskId)) receiptMissing.Add("taskId");
-            else if (!string.Equals(readiness.TaskId, owner.Id, StringComparison.Ordinal)) receiptMismatches.Add("taskId");
-            if (string.IsNullOrWhiteSpace(readiness.Repository)) receiptMissing.Add("repository");
-            else if (!string.Equals(readiness.Repository, owner.Repository, StringComparison.Ordinal)) receiptMismatches.Add("repository");
-            if (readiness.Issue <= 0) receiptMissing.Add("issue");
-            else if (readiness.Issue != owner.Issue) receiptMismatches.Add("issue");
-            if (item.PullRequest is null || item.PullRequest <= 0) receiptMissing.Add("rowPullRequest");
-            if (readiness.PullRequest <= 0) receiptMissing.Add("pullRequest");
-            else if (item.PullRequest is { } rowPullRequest && readiness.PullRequest != rowPullRequest)
-                receiptMismatches.Add("pullRequest");
-            if (string.IsNullOrWhiteSpace(readiness.HeadSha)) receiptMissing.Add("headSha");
-        }
-        var receiptBinding = readiness is null ? null : new
-        {
-            status = receiptMismatches.Count > 0 ? "mismatched"
-                : receiptMissing.Count > 0 ? "incomplete" : "complete",
-            mismatches = receiptMismatches,
-            missing = receiptMissing,
+            status = decision.ReceiptBinding.Status,
+            mismatches = decision.ReceiptBinding.Mismatches,
+            missing = decision.ReceiptBinding.Missing,
         };
         var readinessProjection = readiness is null ? null : new
         {
@@ -512,24 +496,9 @@ public static class TaskCommand
             evidence = "as-of",
             binding = receiptBinding,
         };
-        var headChanged = readiness is not null && currentPr?.HeadSha is { } observedHead
-            && !string.Equals(observedHead, readiness.HeadSha, StringComparison.Ordinal);
-        // Checks is the aggregate display word, not required-check policy. An optional failure
-        // can coexist with passing required checks; the advancer's retained reconciliation error
-        // and required-check wait are the authority for a current readiness regression.
-        var readinessRegressed = readiness is not null
-            && (item.Error is not null || item.RequiredCheckEvidenceWait is not null);
-        var state = item.Retirement is not null ? "retired"
-            : item.State == QueueItemState.Cancelled ? "cancelled"
-            : item.IssuePreparation?.State == TaskPreparationState.Preparing
-                ? abandonedPreparation ? "blocked" : "preparing"
-            : item.IssuePreparation?.State == TaskPreparationState.Blocked || item.Halted
-                || item.State == QueueItemState.Failed ? "blocked"
-            : item.State == QueueItemState.Launched ? "running"
-            : readiness is not null ? item.Stage == WorkStage.Ready && !headChanged && !readinessRegressed
-                && receiptBinding?.status == "complete"
-                ? "ready-as-of" : "stale"
-            : "queued";
+        var headChanged = decision.HeadChanged;
+        var readinessRegressed = decision.ReadinessRegressed;
+        var state = decision.State;
         // Failed rows are not scheduler candidates. Report retained failure evidence without
         // inventing a blocked receipt or promising a daemon retry (#2530).
         if (state == "blocked" && item.State == QueueItemState.Failed
@@ -544,15 +513,7 @@ public static class TaskCommand
         if (item.Retirement is { } retirement)
             reason = string.IsNullOrWhiteSpace(retirement.Reason)
                 ? "retirement-reason-unavailable" : retirement.Reason;
-        var nextTrigger = state switch
-        {
-            "preparing" => "preparation-completion",
-            "queued" or "running" => "daemon-tick",
-            "blocked" => "conductor-judgment",
-            "stale" => "conductor-reassessment",
-            "ready-as-of" => "conductor-handoff",
-            _ => "none",
-        };
+        var nextTrigger = decision.NextTrigger;
         var conductorHandoff = state switch
         {
             "ready-as-of" => new
@@ -565,7 +526,7 @@ public static class TaskCommand
                 currentHolder = currentClaim?.Holder,
                 ownership,
                 readiness = readinessProjection,
-                responsibility = "reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+                responsibility = decision.Responsibility,
                 mergeGrant = false,
             },
             "stale" => new
@@ -578,7 +539,7 @@ public static class TaskCommand
                 currentHolder = currentClaim?.Holder,
                 ownership,
                 readiness = readinessProjection,
-                responsibility = "reassess-current-readiness",
+                responsibility = decision.Responsibility,
                 mergeGrant = false,
             },
             "blocked" => new
@@ -591,7 +552,7 @@ public static class TaskCommand
                 currentHolder = currentClaim?.Holder,
                 ownership,
                 readiness = readinessProjection,
-                responsibility = "judge-retained-blocker",
+                responsibility = decision.Responsibility,
                 mergeGrant = false,
             },
             _ => null,

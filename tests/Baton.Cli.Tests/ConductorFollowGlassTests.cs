@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -74,8 +75,125 @@ public sealed partial class ConductorFollowDeliveryTests
         Assert.Equal("Queued", rows[0].GetProperty("state").GetString());
         Assert.Equal("blocked", rows[0].GetProperty("task").GetProperty("preparation").GetString());
         Assert.Equal("ready-ref", rows[0].GetProperty("task").GetProperty("readyReceiptId").GetString());
+        Assert.Equal("conductor-judgment", rows[0].GetProperty("nextTrigger").GetString());
+        Assert.Equal("judge-retained-blocker", rows[0].GetProperty("responsibility").GetString());
+        Assert.Equal("conductor judgment", rows[0].GetProperty("nextActor").GetString());
+        Assert.Equal("blocked", rows[0].GetProperty("disposition").GetString());
         Assert.True(rows[1].GetProperty("cancelled").GetBoolean());
+        Assert.Equal("none", rows[1].GetProperty("nextTrigger").GetString());
+        Assert.Equal("no next action", rows[1].GetProperty("nextActor").GetString());
+        Assert.Equal("cancelled", rows[1].GetProperty("disposition").GetString());
         Assert.Equal("Launched", rows[2].GetProperty("state").GetString());
+        Assert.Equal("daemon-tick", rows[2].GetProperty("nextTrigger").GetString());
+        Assert.Equal("scheduler reconciliation", rows[2].GetProperty("nextActor").GetString());
+        Assert.Equal("running", rows[2].GetProperty("disposition").GetString());
+        Assert.DoesNotContain("private detail", status.ToString());
+    }
+
+    [Fact]
+    public async Task Glass_status_projects_structured_next_trigger_across_all_lifecycle_states()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var now = DateTimeOffset.UtcNow;
+        var head = new string('c', 40);
+
+        QueueItem CreateTask(string tag, string id, string repo, QueueItemState state,
+            WorkStage stage = WorkStage.Implement,
+            TaskReadyReceipt? ready = null,
+            QueueIssuePreparation? prep = null,
+            string? error = null,
+            RequiredCheckEvidenceWait? wait = null,
+            string? checks = null) => new()
+            {
+                Tag = tag,
+                Role = "implement",
+                Workspace = fixture.Workspace,
+                SpecFile = Path.Combine(fixture.Root, tag + ".md"),
+                Repository = repo,
+                Issue = 2688,
+                Stage = stage,
+                State = state,
+                PullRequest = 42,
+                Error = error,
+                RequiredCheckEvidenceWait = wait,
+                Checks = checks,
+                IssuePreparation = prep,
+                OwnedTask = new OwnedTaskSubmission(id, repo, 2688, "digest", "recorded-owner", now, ready),
+            };
+
+        var validReceipt = new TaskReadyReceipt("ready-1", "task-ready", Repository, 2688, 42,
+            head, "attempt", "digest", "checks", "observation", now, now);
+
+        var readyTask = CreateTask("tag-ready", "task-ready", Repository, QueueItemState.Queued,
+            stage: WorkStage.Ready, ready: validReceipt);
+        var readyNoPrTask = CreateTask("tag-ready-nopr", "task-ready-nopr", Repository, QueueItemState.Queued,
+            stage: WorkStage.Ready, ready: validReceipt with { Id = "ready-nopr", TaskId = "task-ready-nopr" });
+        var readyOptionalChecksTask = CreateTask("tag-ready-opt", "task-ready-opt", Repository, QueueItemState.Queued,
+            stage: WorkStage.Ready, ready: validReceipt with { Id = "ready-opt", TaskId = "task-ready-opt" }, checks: "failure");
+        var staleHeadTask = CreateTask("tag-stale-head", "task-stale-head", Repository, QueueItemState.Queued,
+            stage: WorkStage.Ready, ready: validReceipt with { Id = "ready-stale-head", TaskId = "task-stale-head", HeadSha = new string('d', 40) });
+        var staleIncompleteTask = CreateTask("tag-stale-missing", "task-stale-missing", Repository, QueueItemState.Queued,
+            stage: WorkStage.Ready, ready: validReceipt with { Id = "", TaskId = "task-stale-missing" });
+        var prepAlive = CreateTask("tag-prep-alive", "task-prep-alive", Repository, QueueItemState.Queued,
+            prep: new QueueIssuePreparation(TaskPreparationState.Preparing, now,
+                ProcessId: Environment.ProcessId, ProcessStartedAt: Process.GetCurrentProcess().StartTime.ToUniversalTime()));
+        var prepDead = CreateTask("tag-prep-dead", "task-prep-dead", Repository, QueueItemState.Queued,
+            prep: new QueueIssuePreparation(TaskPreparationState.Preparing, now,
+                ProcessId: 0, ProcessStartedAt: now));
+        var foreign = CreateTask("tag-foreign", "task-foreign", "github.com/foreign/repo", QueueItemState.Queued);
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+        {
+            Items = [readyTask, readyNoPrTask, readyOptionalChecksTask, staleHeadTask, staleIncompleteTask, prepAlive, prepDead, foreign],
+            PullRequestObservations =
+            [
+                new QueuePullRequestObservation(Repository, 42, "open", head, now, now, null)
+            ]
+        }, Ct);
+
+        await using var glass = await GlassFixture.StartAsync(fixture);
+        var status = await glass.StatusAsync();
+        var summary = status.GetProperty("recordedTasks");
+        Assert.Equal("available", summary.GetProperty("availability").GetString());
+        var rows = summary.GetProperty("items").EnumerateArray()
+            .ToDictionary(r => r.GetProperty("task").GetProperty("id").GetString()!, r => r);
+
+        Assert.False(rows.ContainsKey("task-foreign"));
+
+        Assert.Equal("conductor-handoff", rows["task-ready"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+            rows["task-ready"].GetProperty("responsibility").GetString());
+        Assert.Equal("conductor review/merge handoff under existing authority",
+            rows["task-ready"].GetProperty("nextActor").GetString());
+        Assert.Equal("ready-as-of", rows["task-ready"].GetProperty("disposition").GetString());
+
+        Assert.Equal("conductor-handoff", rows["task-ready-nopr"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("conductor review/merge handoff under existing authority",
+            rows["task-ready-nopr"].GetProperty("nextActor").GetString());
+        Assert.Equal("ready-as-of", rows["task-ready-nopr"].GetProperty("disposition").GetString());
+
+        Assert.Equal("conductor-handoff", rows["task-ready-opt"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("conductor review/merge handoff under existing authority",
+            rows["task-ready-opt"].GetProperty("nextActor").GetString());
+        Assert.Equal("ready-as-of", rows["task-ready-opt"].GetProperty("disposition").GetString());
+
+        Assert.Equal("conductor-reassessment", rows["task-stale-head"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("reassess-current-readiness", rows["task-stale-head"].GetProperty("responsibility").GetString());
+        Assert.Equal("conductor readiness reassessment", rows["task-stale-head"].GetProperty("nextActor").GetString());
+        Assert.Equal("stale", rows["task-stale-head"].GetProperty("disposition").GetString());
+
+        Assert.Equal("conductor-reassessment", rows["task-stale-missing"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("conductor readiness reassessment", rows["task-stale-missing"].GetProperty("nextActor").GetString());
+        Assert.Equal("stale", rows["task-stale-missing"].GetProperty("disposition").GetString());
+
+        Assert.Equal("preparation-completion", rows["task-prep-alive"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("preparation completion", rows["task-prep-alive"].GetProperty("nextActor").GetString());
+        Assert.Equal("preparing", rows["task-prep-alive"].GetProperty("disposition").GetString());
+
+        Assert.Equal("conductor-judgment", rows["task-prep-dead"].GetProperty("nextTrigger").GetString());
+        Assert.Equal("judge-retained-blocker", rows["task-prep-dead"].GetProperty("responsibility").GetString());
+        Assert.Equal("conductor judgment", rows["task-prep-dead"].GetProperty("nextActor").GetString());
+        Assert.Equal("blocked", rows["task-prep-dead"].GetProperty("disposition").GetString());
         Assert.DoesNotContain("private detail", status.ToString());
     }
 

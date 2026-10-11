@@ -3294,13 +3294,30 @@ function recordedTasksHtml(summary, escape){
   const rows = Array.isArray(summary.items) ? summary.items.slice(0,20) : [];
   const body = rows.length ? rows.map(row => {
     const task = row && row.task || {};
+    const nextTriggers = {
+      "preparation-completion": { token: "preparation-completion", actor: "preparation completion" },
+      "daemon-tick": { token: "daemon-tick", actor: "scheduler reconciliation" },
+      "conductor-judgment": { token: "conductor-judgment", actor: "conductor judgment" },
+      "conductor-reassessment": { token: "conductor-reassessment", actor: "conductor readiness reassessment" },
+      "conductor-handoff": { token: "conductor-handoff", actor: "conductor review/merge handoff under existing authority" },
+      "none": { token: "none", actor: "no next action" }
+    };
+    let nextTriggerToken = "unavailable";
+    let nextActorCopy = "unavailable";
+    if (row && row.cancelled) {
+      nextTriggerToken = "none";
+      nextActorCopy = "no next action";
+    } else if (row && typeof row.nextTrigger === "string" && Object.prototype.hasOwnProperty.call(nextTriggers, row.nextTrigger)) {
+      nextTriggerToken = nextTriggers[row.nextTrigger].token;
+      nextActorCopy = nextTriggers[row.nextTrigger].actor;
+    }
     return `<div class="control-note"><strong>${escape(task.id || "Unavailable identifier")}</strong> · #${escape(String(task.issue || "unknown"))}<br>`
       + `Recorded conductor holder: ${escape(task.conductorHolder || "Unknown holder")}<br>`
       + `Recorded stage/state: ${escape(row.stage || "unknown")} / ${escape(row.cancelled ? "cancelled (retained record)" : row.state || "unknown")}<br>`
       + `Recorded preparation: ${escape(task.preparation || "unknown")}`
       + (task.readyReceiptId ? `<br>Historical ready reference: ${escape(task.readyReceiptId)}${task.readyHeadSha ? ` · head ${escape(task.readyHeadSha)}` : ""}` : "")
       + (task.blocker ? `<br>Recorded blocker: ${escape(task.blocker)}` : "")
-      + `<br>Next trigger not shown here.</div>`;
+      + `<br>Next trigger: ${escape(nextTriggerToken)} · next actor: ${escape(nextActorCopy)}</div>`;
   }).join("") : `<p class="control-note">No matching recorded task rows.</p>`;
   return `<section aria-label="Recorded repository tasks"><h3>Recorded repository tasks</h3>`
     + `<p class="control-note">Queue observed ${escape(new Date(summary.observedAt).toLocaleString())}. This is read time. Task ownership does not record acquisition generation.</p>`

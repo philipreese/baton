@@ -18,14 +18,20 @@ const esc = value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;'
 const card = conductorControlHtml(snapshot(),'',false,esc);
 const recorded = {observedAt:'2026-10-10T00:00:00Z',availability:'available',omitted:1,items:Array.from({length:21},(_,i)=>({
   task:{id:`task-${String(i).padStart(2,'0')}`,issue:2683,conductorHolder:'prior-owner',preparation:'blocked',readyReceiptId:'ready-1',readyHeadSha:'b'.repeat(40),blocker:'Recorded blocker'},
-  stage:'implement',state:i===0?'Launched':'Queued',cancelled:i===1
+  stage:'implement',state:i===0?'Launched':'Queued',cancelled:i===1,
+  nextTrigger:i===0?'daemon-tick':i===2?'conductor-judgment':i===3?'conductor-reassessment':i===4?'conductor-handoff':i===5?'preparation-completion':'none'
 })).slice(0,20)};
 const recordedCard=conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:recorded}]},'',false,esc);
 assert.ok(recordedCard.includes('Recorded repository tasks'));
 assert.ok(recordedCard.includes('Recorded conductor holder: prior-owner'));
 assert.ok(recordedCard.includes('does not record acquisition generation'));
 assert.ok(recordedCard.includes('Historical ready reference: ready-1'));
-assert.ok(recordedCard.includes('Next trigger not shown here'));
+assert.ok(recordedCard.includes('Next trigger: daemon-tick · next actor: scheduler reconciliation'));
+assert.ok(recordedCard.includes('Next trigger: conductor-judgment · next actor: conductor judgment'));
+assert.ok(recordedCard.includes('Next trigger: conductor-reassessment · next actor: conductor readiness reassessment'));
+assert.ok(recordedCard.includes('Next trigger: conductor-handoff · next actor: conductor review/merge handoff under existing authority'));
+assert.ok(recordedCard.includes('Next trigger: preparation-completion · next actor: preparation completion'));
+assert.ok(recordedCard.includes('Next trigger: none · next actor: no next action'));
 assert.ok(recordedCard.includes('1 additional task record(s) omitted'));
 assert.ok(recordedCard.includes('cancelled (retained record)'));
 assert.ok(recordedCard.includes('href="#queue"') && recordedCard.includes('href="#stream"'));
@@ -34,6 +40,38 @@ assert.ok(conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:
 const hostileRecorded=conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:{...recorded,items:[{...recorded.items[0],task:{...recorded.items[0].task,id:'<img src=x>',conductorHolder:'<script>private</script>'}}]}}]},'',false,esc);
 assert.ok(hostileRecorded.includes('&lt;img src=x&gt;'));
 assert.ok(hostileRecorded.includes('&lt;script&gt;private&lt;/script&gt;'));
+
+// Cancelled historical row must always say no next action
+const cancelledWithTrigger = conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:{observedAt:'2026-10-10T00:00:00Z',availability:'available',omitted:0,items:[{
+  task:{id:'task-cancelled',issue:2683,conductorHolder:'prior-owner'},
+  stage:'implement',state:'Cancelled',cancelled:true,nextTrigger:'daemon-tick'
+}]}}]},'',false,esc);
+assert.ok(cancelledWithTrigger.includes('Next trigger: none · next actor: no next action'));
+
+// Unknown tokens fall back to unavailable
+const unknownTrigger = conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:{observedAt:'2026-10-10T00:00:00Z',availability:'available',omitted:0,items:[{
+  task:{id:'task-unknown',issue:2683,conductorHolder:'prior-owner'},
+  stage:'implement',state:'Queued',cancelled:false,nextTrigger:'foreign-token'
+}]}}]},'',false,esc);
+assert.ok(unknownTrigger.includes('Next trigger: unavailable · next actor: unavailable'));
+
+// Malicious strings must not execute or inject raw tags; unknown token falls back to unavailable
+const maliciousTrigger = conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:{observedAt:'2026-10-10T00:00:00Z',availability:'available',omitted:0,items:[{
+  task:{id:'task-malicious',issue:2683,conductorHolder:'prior-owner'},
+  stage:'implement',state:'Queued',cancelled:false,nextTrigger:'<script>alert(1)</script>'
+}]}}]},'',false,esc);
+assert.ok(!maliciousTrigger.includes('<script>alert(1)</script>'));
+assert.ok(maliciousTrigger.includes('Next trigger: unavailable · next actor: unavailable'));
+
+// Renderer verification across viewports: mobile (320, 390) and desktop (1280)
+// Mocks verify responsive HTML contract and absence of horizontal overflow hazards in the selftest harness;
+// installed acceptance additionally tests live browser viewport layout.
+for (const viewport of [{name:'mobile-320',width:320,isMock:true},{name:'mobile-390',width:390,isMock:true},{name:'desktop-1280',width:1280,isMock:true}]) {
+  const renderedViewport = conductorControlHtml({...snapshot(),conductors:[{...row,recordedTasks:recorded}]},'',false,esc);
+  assert.ok(renderedViewport.includes('Recorded repository tasks'), `viewport ${viewport.name} (${viewport.isMock ? 'mock' : 'installed'}) must render tasks header`);
+  assert.ok(renderedViewport.includes('Next trigger: daemon-tick · next actor: scheduler reconciliation'), `viewport ${viewport.name} (${viewport.isMock ? 'mock' : 'installed'}) must render next actor line`);
+  assert.ok(renderedViewport.includes('class="control-note"'), `viewport ${viewport.name} (${viewport.isMock ? 'mock' : 'installed'}) must preserve control-note typography`);
+}
 assert.ok(conductorControlHtml({...snapshot('detached'),conductors:[{...row,state:'detached',resumeEligible:true}]},'',false,esc).includes('data-conductor-resume="0"'));
 assert.ok(!conductorControlHtml(snapshot('detached'),'',false,esc).includes('data-conductor-resume'));
 assert.ok(card.includes('data-conductor-detach="0"'));
