@@ -500,7 +500,7 @@ internal sealed partial class ConductorFollowSession
                 : null;
             var markers = obligation is null
                 ? (Available: false, Launch: false, Response: false)
-                : InspectFollowEventMarkers(registration.SessionDirectory, Digest(obligation.ObligationId));
+                : InspectFollowEventMarkers(registration.SessionDirectory, Digest(obligation.ObligationId), token);
             var evidenceUnavailable = !obligationInspectionAvailable || obligation is null || !markers.Available;
             if (evidenceUnavailable)
             {
@@ -552,27 +552,48 @@ internal sealed partial class ConductorFollowSession
         return (actions, queueAvailable ? snapshot.Held : null, snapshot.Items, recordedTasks);
     }
 
-    private static (bool Available, bool Launch, bool Response) InspectFollowEventMarkers(string sessionDirectory, string eventIdentity)
+    private static (bool Available, bool Launch, bool Response) InspectFollowEventMarkers(
+        string sessionDirectory, string eventIdentity, CancellationToken token)
     {
+        var session = ProbeFollowEvidencePath(sessionDirectory, token);
+        if (!session.Available || !session.Exists || !session.IsDirectory) return (false, false, false);
+
+        var eventsDirectory = Path.Combine(sessionDirectory, "events");
+        var events = ProbeFollowEvidencePath(eventsDirectory, token);
+        if (!events.Available) return (false, false, false);
+        if (!events.Exists) return (true, false, false);
+        if (!events.IsDirectory) return (false, false, false);
+
+        var eventDirectory = Path.Combine(eventsDirectory, eventIdentity);
+        var eventPath = ProbeFollowEvidencePath(eventDirectory, token);
+        if (!eventPath.Available) return (false, false, false);
+        if (!eventPath.Exists) return (true, false, false);
+        if (!eventPath.IsDirectory) return (false, false, false);
+
+        var launch = ProbeFollowEvidencePath(Path.Combine(eventDirectory, "launch.json"), token);
+        var response = ProbeFollowEvidencePath(Path.Combine(eventDirectory, "response.json"), token);
+        if (!launch.Available || !response.Available || launch.IsDirectory || response.IsDirectory)
+            return (false, false, false);
+        return (true, launch.Exists, response.Exists);
+    }
+
+    private static (bool Available, bool Exists, bool IsDirectory) ProbeFollowEvidencePath(string path, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
         try
         {
-            var sessionEntries = Directory.EnumerateFileSystemEntries(sessionDirectory)
-                .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
-            if (!sessionEntries.Contains("events")) return (true, false, false);
-
-            var eventsDirectory = Path.Combine(sessionDirectory, "events");
-            var eventEntries = Directory.EnumerateFileSystemEntries(eventsDirectory)
-                .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
-            if (!eventEntries.Contains(eventIdentity)) return (true, false, false);
-
-            var markerEntries = Directory.EnumerateFileSystemEntries(Path.Combine(eventsDirectory, eventIdentity))
-                .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
-            return (true, markerEntries.Contains("launch.json"), markerEntries.Contains("response.json"));
+            // RejectLinks checks every existing ancestor. Direct attribute probes preserve the
+            // platform's filename semantics and avoid scanning unrelated retained event names.
+            RejectLinks(path);
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0) return (false, false, false);
+            return (true, true, (attributes & FileAttributes.Directory) != 0);
         }
+        catch (FileNotFoundException) { return (true, false, false); }
+        catch (DirectoryNotFoundException) { return (true, false, false); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Directory.Exists/File.Exists turn access failures into false; enumeration keeps
-            // unknown evidence distinct from a positively observed missing directory or marker.
+            // A failed exact probe is unknown evidence, never proof that a marker is absent.
             return (false, false, false);
         }
     }
