@@ -9,6 +9,19 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.73.0](https://github.com/philipreese/baton/compare/v0.72.0...v0.73.0) (2026-10-11)
+
+
+### Features
+
+* **glass:** Show the task next actor beside the conductor ([#2689](https://github.com/philipreese/baton/issues/2689)) ([3f1b29f](https://github.com/philipreese/baton/commit/3f1b29f54527e0410a14e868b32ba518a1ab8a30))
+
+
+### Bug Fixes
+
+* **glass:** Show retired conductor events truthfully ([#2696](https://github.com/philipreese/baton/issues/2696)) ([1860e26](https://github.com/philipreese/baton/commit/1860e26ae692edff1d777d738eda7702d03963b4))
+* **skills:** Run committed-content audits after committing ([#2691](https://github.com/philipreese/baton/issues/2691)) ([b4bb9f3](https://github.com/philipreese/baton/commit/b4bb9f3ca74fffd3798c5c9906639004bb56862c))
+
 ## [0.72.0](https://github.com/philipreese/baton/compare/v0.71.0...v0.72.0) (2026-10-10)
 
 
