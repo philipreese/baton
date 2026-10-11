@@ -76,7 +76,8 @@ internal sealed partial class ConductorFollowSession
             var state = Read<ConductorFollowState>(Path.Combine(directory, "session.json"));
             if (state.ProjectCeiling is null) throw new IOException("Retained configuration is missing.");
             var session = new ConductorFollowSession(Path.GetFullPath(root), identity, request, state.ProjectCeiling,
-                registration.ClaimGeneration, (_, _, _, _, _, _, _, _) => throw new InvalidOperationException("History cannot launch."));
+                registration.ClaimGeneration, (_, _, _, _, _, _, _, _) => throw new InvalidOperationException("History cannot launch."),
+                RepositoryIdentityResolver.TryResolveAsync);
             session.ValidateState(state);
             if (state.ProjectCeiling.Cap(request.PermissionGrant) != SupportedGrant)
                 throw new IOException("Retained grant drifted.");

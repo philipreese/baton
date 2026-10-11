@@ -147,11 +147,13 @@ internal sealed partial class ConductorFollowSession
     private readonly string _directory;
     private readonly string _generation;
     private readonly ConductorFollowBroker _broker;
+    private readonly Func<string, CancellationToken, Task<RepositoryIdentity?>> _repositoryResolver;
     private string StatePath => Path.Combine(_directory, "session.json");
     private string JournalPath => Path.Combine(_directory, "delivery.jsonl");
 
     private ConductorFollowSession(string root, RepositoryIdentity identity, ConductorFollowRequest request,
-        ProjectCeiling ceiling, string generation, ConductorFollowBroker broker)
+        ProjectCeiling ceiling, string generation, ConductorFollowBroker broker,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver)
     {
         _root = root;
         _identity = identity;
@@ -159,6 +161,7 @@ internal sealed partial class ConductorFollowSession
         _ceiling = ceiling;
         _generation = generation;
         _broker = broker;
+        _repositoryResolver = repositoryResolver;
         _directory = Path.Combine(root, "conductor-follow", identity.FileSlug, Digest(identity.Value + "\n" + generation));
         var fleet = Path.Combine(root, BatonPaths.FleetDirectoryName);
         _obligations = new(new FleetEventLog(Path.Combine(fleet, BatonPaths.FleetEventsFileName),
@@ -188,7 +191,7 @@ internal sealed partial class ConductorFollowSession
         var session = new ConductorFollowSession(Path.GetFullPath(root), identity, request, ceiling,
             ConductorClaimStore.GetClaimGeneration(claim),
             broker ?? ((configuration, prompt, directory, inputs, output, error, token, started) =>
-                CodexAppServerBroker.RunAsync(configuration, prompt, directory, inputs, output, error, token, started)));
+                CodexAppServerBroker.RunAsync(configuration, prompt, directory, inputs, output, error, token, started)), repositoryResolver);
         // Old generations are retained, never silently replaced by a new conversation.
         var parent = Path.GetDirectoryName(session._directory)!;
         RejectLinks(parent);
@@ -291,7 +294,8 @@ internal sealed partial class ConductorFollowSession
                 throw new CliArgumentException("Recorded project trust changed.");
             obligation = await _obligations.ReadAsync(key, cancellationToken).ConfigureAwait(false);
             if (obligation is null) throw new CliArgumentException("Unknown obligation.");
-            var context = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
+            var sourceBinding = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
+            var context = sourceBinding.Context;
             state = LoadState();
             ValidateState(state);
             if (state.Frozen)
@@ -376,9 +380,11 @@ internal sealed partial class ConductorFollowSession
             if (!ConductorClaimStore.IsCurrentHostedAuthority(claim, _request.Holder, _generation)
                 || ReadCeiling(_root, _request.Workspace) != _ceiling)
                 throw new CliArgumentException("Authority changed before launch.");
-            _ = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
             if (beforeLaunchAdmission is not null)
                 await beforeLaunchAdmission(cancellationToken).ConfigureAwait(false);
+            var currentSource = await ReadSourceAsync(key, obligation, cancellationToken).ConfigureAwait(false);
+            if (currentSource.Workspace != sourceBinding.Workspace)
+                throw new CliArgumentException("Task workspace changed before launch.");
             // Detach and launch admission serialize at the same cutover; a detached registration
             // must never acquire a later launch marker. A marker already committed is an issued turn.
             await QueueStore.MutateWithCurrentClaimAsync(Path.Combine(_root, "queue", "queue.json"),
@@ -387,10 +393,11 @@ internal sealed partial class ConductorFollowSession
                     ValidateFinalHostedAuthority(queue, currentClaim, admittedAttachmentId, requiredAdmission is not null);
                     var sources = queue.Items.Where(item => item.StoppedWorkJudgment?.Key == key).ToArray();
                     if (requiredAdmission is not null && queue.Held || ReadCeiling(_root, _request.Workspace) != _ceiling
-                        || sources.Length != 1 || !sources[0].Halted || sources[0].Retirement is not null
-                        || sources[0].CancelledAt is not null || sources[0].StoppedWorkJudgment!.ContextSha256 != obligation.ContextSha256
-                        || StoppedWorkAdviceEvidence.Hash(StoppedWorkAdviceEvidence.Context(sources[0].StoppedWorkJudgment!)) != obligation.ContextSha256)
+                        || sources.Length != 1 || sources[0].Workspace != sourceBinding.Workspace)
                         throw new CliArgumentException("Follow source or grant changed before launch.");
+                    // Repository resolution awaits outside this lock. Recheck the entire current
+                    // task binding here so an intervening owner or attempt change cannot launch.
+                    _ = ValidateSourceBinding(key, obligation, sources[0]);
                     GuardOrdinaryCorrectionPriority(key, Digest(obligation.ObligationId), obligation.ContextSha256!);
                     Write(Path.Combine(evidence, "launch.json"),
                         new ConductorFollowLaunch(SchemaVersion, key, obligation.ObligationId, state.SessionId));
@@ -454,7 +461,30 @@ internal sealed partial class ConductorFollowSession
         }
     }
 
-    private async Task<StoppedWorkAdviceContext> ReadSourceAsync(string key, ConductorObligation obligation, CancellationToken token)
+    private async Task<(StoppedWorkAdviceContext Context, string Workspace)> ReadSourceAsync(string key, ConductorObligation obligation, CancellationToken token)
+    {
+        var queuePath = Path.Combine(_root, BatonPaths.QueueDirectoryName, BatonPaths.QueueFileName);
+        RejectLinks(queuePath);
+        var queue = await QueueStore.LoadAsync(queuePath, token).ConfigureAwait(false);
+        var candidates = queue.Items.Where(item => item.StoppedWorkJudgment?.Key == key).ToArray();
+        if (candidates.Length != 1) throw new CliArgumentException("Missing or ambiguous original queue row.");
+        var item = candidates[0];
+        var context = ValidateSourceBinding(key, obligation, item);
+        // A repository-scoped conductor may receive a task from another checkout, but a queue
+        // repository label alone is not authority. Never add that checkout to the vendor grant.
+        if (string.IsNullOrWhiteSpace(item.Workspace) || !Path.IsPathFullyQualified(item.Workspace))
+            throw new CliArgumentException("Task workspace identity is unavailable.");
+        RejectLinks(item.Workspace);
+        if (item.Workspace != _request.Workspace)
+        {
+            var taskIdentity = await _repositoryResolver(item.Workspace, token).WaitAsync(token).ConfigureAwait(false);
+            if (taskIdentity is null || taskIdentity.Value != _identity.Value)
+                throw new CliArgumentException("Task workspace belongs to a different or unavailable repository.");
+        }
+        return (context, item.Workspace);
+    }
+
+    private StoppedWorkAdviceContext ValidateSourceBinding(string key, ConductorObligation obligation, QueueItem item)
     {
         if (obligation.Status is not (ConductorObligationStatus.Pending or ConductorObligationStatus.Submitted
                 or ConductorObligationStatus.TransportAcknowledged)
@@ -466,16 +496,10 @@ internal sealed partial class ConductorFollowSession
             || !StoppedWorkJudgmentKey.TryParse(key, out var repository, out var tag, out var attempt, out var stage)
             || repository != _identity.Value || obligation.TargetExecution != tag)
             throw new CliArgumentException("Unsupported original halted-task obligation.");
-        var queuePath = Path.Combine(_root, BatonPaths.QueueDirectoryName, BatonPaths.QueueFileName);
-        RejectLinks(queuePath);
-        var queue = await QueueStore.LoadAsync(queuePath, token).ConfigureAwait(false);
-        var candidates = queue.Items.Where(item => item.StoppedWorkJudgment?.Key == key).ToArray();
-        if (candidates.Length != 1) throw new CliArgumentException("Missing or ambiguous original queue row.");
-        var item = candidates[0];
         var intent = item.StoppedWorkJudgment!;
         if (!item.Halted || item.State != QueueItemState.Failed || item.Retirement is not null
             || item.CancelledAt is not null || item.Repository != repository || item.Tag != tag
-            || item.Workspace != _request.Workspace || item.Stage != stage || item.AttemptId != attempt
+            || item.Stage != stage || item.AttemptId != attempt
             || item.OwnedTask is not { } owned || owned.Repository != repository || owned.ConductorHolder != _request.Holder
             || owned.Blocked?.ObligationKey != key || intent.Repository != repository || intent.Tag != tag
             || intent.Holder != _request.Holder || intent.AttemptId != attempt || intent.Stage != stage

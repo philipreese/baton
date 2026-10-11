@@ -14,8 +14,9 @@ namespace Baton.Cli.Tests;
 
 public sealed class ConductorFollowSessionTests
 {
+    private const string RepositoryOrigin = "https://github.com/philipreese/follow-fixture.git";
     private static readonly RepositoryIdentity Repository =
-        RepositoryIdentity.From("https://github.com/philipreese/follow-fixture.git", null)!;
+        RepositoryIdentity.From(RepositoryOrigin, null)!;
 
     [Fact]
     public async Task Follow_real_acknowledged_halts_restart_resume_and_replay_without_spend()
@@ -39,6 +40,133 @@ public sealed class ConductorFollowSessionTests
             Assert.False(call.AllowsSubagents);
         });
         Assert.Equal(original, await fixture.Store.ReadAsync(fixture.Key("one"), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Follow_delivers_halt_from_real_same_repository_linked_task_worktree()
+    {
+        using var fixture = await Fixture.CreateAsync(linkedTaskWorktree: true);
+        var taskIdentity = await RepositoryIdentityResolver.TryResolveAsync(fixture.TaskWorkspace, TestContext.Current.CancellationToken);
+        var conductorIdentity = await RepositoryIdentityResolver.TryResolveAsync(fixture.Workspace, TestContext.Current.CancellationToken);
+        Assert.NotNull(taskIdentity);
+        Assert.Equal(conductorIdentity, taskIdentity);
+        Assert.Equal(Repository.Value, taskIdentity.Value);
+        Assert.NotEqual(fixture.Workspace, fixture.TaskWorkspace);
+
+        var result = Assert.Single(await fixture.RunAsync(fixture.Input("one")));
+
+        Assert.Equal("delivered", result.GetProperty("status").GetString());
+        Assert.Single(fixture.Calls);
+    }
+
+    [Fact]
+    public async Task Follow_refuses_linked_path_even_when_its_repository_matches()
+    {
+        using var fixture = await Fixture.CreateAsync(linkedTaskWorktree: true, reparseTaskWorkspace: true);
+
+        var result = Assert.Single(await fixture.RunAsync(fixture.Input("one")));
+
+        Assert.Equal("refused", result.GetProperty("status").GetString());
+        Assert.Empty(fixture.Calls);
+    }
+
+    [Theory]
+    [InlineData("foreign")]
+    [InlineData("unresolvable")]
+    public async Task Follow_refuses_task_workspace_without_same_repository_identity(string kind)
+    {
+        using var fixture = await Fixture.CreateAsync(
+            taskRepositoryOrigin: kind == "foreign" ? "https://github.com/foreign/follow-fixture.git" : null,
+            unresolvableTaskWorkspace: kind == "unresolvable");
+
+        var result = Assert.Single(await fixture.RunAsync(fixture.Input("one")));
+
+        Assert.Equal("refused", result.GetProperty("status").GetString());
+        Assert.Empty(fixture.Calls);
+    }
+
+    [Fact]
+    public async Task Follow_refuses_task_workspace_drift_before_locked_launch()
+    {
+        using var fixture = await Fixture.CreateAsync(linkedTaskWorktree: true);
+        Assert.Null((await fixture.Store.ReadAsync(fixture.Key("one"), TestContext.Current.CancellationToken))!.TargetWorkspace);
+        var driftWorkspace = Path.Combine(fixture.Root, "task-worktree-drift");
+        await fixture.AddLinkedWorktreeAsync(driftWorkspace);
+
+        var result = await fixture.DeliverAsync("one", async token =>
+        {
+            await QueueStore.MutateAsync(fixture.QueuePath, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item.Tag == "one"
+                    ? item with { Workspace = driftWorkspace }
+                    : item).ToArray(),
+            }, token);
+        });
+
+        Assert.Equal("refused", result.Status);
+        Assert.Empty(fixture.Calls);
+        Assert.False(File.Exists(Path.Combine(result.EvidenceLocation, "launch.json")));
+    }
+
+    [Fact]
+    public async Task Follow_preserves_explicit_target_workspace_binding()
+    {
+        using var fixture = await Fixture.CreateAsync(linkedTaskWorktree: true, bindTaskWorkspace: true);
+        await QueueStore.MutateAsync(fixture.QueuePath, snapshot => snapshot with
+        {
+            Items = snapshot.Items.Select(item => item.Tag == "one"
+                ? item with { Workspace = fixture.Workspace }
+                : item).ToArray(),
+        }, TestContext.Current.CancellationToken);
+
+        var result = Assert.Single(await fixture.RunAsync(fixture.Input("one")));
+
+        Assert.Equal("refused", result.GetProperty("status").GetString());
+        Assert.Empty(fixture.Calls);
+    }
+
+    [Theory]
+    [InlineData("attempt")]
+    [InlineData("owner")]
+    public async Task Follow_refuses_late_queue_identity_drift_after_repository_revalidation(string drift)
+    {
+        using var fixture = await Fixture.CreateAsync(linkedTaskWorktree: true);
+        fixture.AfterTaskWorkspaceResolution(async (lookup, token) =>
+        {
+            if (lookup != 2) return;
+            await QueueStore.MutateAsync(fixture.QueuePath, snapshot => snapshot with
+            {
+                Items = snapshot.Items.Select(item => item.Tag != "one" ? item : drift switch
+                {
+                    "attempt" => item with { AttemptId = new FleetAttemptId("raced-attempt") },
+                    "owner" => item with { OwnedTask = item.OwnedTask! with { ConductorHolder = "raced-holder" } },
+                    _ => item,
+                }).ToArray(),
+            }, token);
+        });
+
+        var result = await fixture.DeliverAsync("one");
+
+        Assert.Equal("refused", result.Status);
+        Assert.Empty(fixture.Calls);
+        Assert.False(File.Exists(Path.Combine(result.EvidenceLocation, "launch.json")));
+    }
+
+    [Fact]
+    public async Task Follow_refuses_repository_identity_change_between_task_lookups()
+    {
+        using var fixture = await Fixture.CreateAsync(linkedTaskWorktree: true);
+        fixture.AfterTaskWorkspaceResolution(async (lookup, _) =>
+        {
+            if (lookup == 1)
+                await fixture.SetTaskWorkspaceOriginAsync("https://github.com/foreign/follow-fixture.git");
+        });
+
+        var result = await fixture.DeliverAsync("one");
+
+        Assert.Equal("refused", result.Status);
+        Assert.Empty(fixture.Calls);
+        Assert.False(File.Exists(Path.Combine(result.EvidenceLocation, "launch.json")));
     }
 
     [Theory]
@@ -325,8 +453,13 @@ public sealed class ConductorFollowSessionTests
     private sealed class Fixture : IDisposable
     {
         private readonly bool _ownsRoot;
+        private bool _usesRealRepositoryResolver;
+        private string? _taskWorkspaceJunction;
+        private int _taskWorkspaceResolutionCount;
+        private Func<int, CancellationToken, Task>? _afterTaskWorkspaceResolution;
         public string Root { get; }
         public string Workspace => Path.Combine(Root, "workspace");
+        public string TaskWorkspace { get; private set; } = "";
         public string RequestFile => Path.Combine(Root, "request.json");
         public string CeilingPath => Path.Combine(Root, "project-ceilings.json");
         public string QueuePath => Path.Combine(Root, "queue", "queue.json");
@@ -340,6 +473,7 @@ public sealed class ConductorFollowSessionTests
             Root = root ?? Path.Combine(Path.GetTempPath(), $"baton-follow-{Guid.NewGuid():N}");
             _ownsRoot = ownsRoot;
             Directory.CreateDirectory(Workspace);
+            TaskWorkspace = Workspace;
             var fleet = Path.Combine(Root, "fleet");
             Directory.CreateDirectory(fleet);
             Store = new(new FleetEventLog(Path.Combine(fleet, "events.jsonl"), Path.Combine(fleet, "events.1.jsonl"), 16 * 1024 * 1024),
@@ -349,9 +483,29 @@ public sealed class ConductorFollowSessionTests
         public string Key(string tag) => StoppedWorkJudgmentKey.For(Repository.Value, tag, new FleetAttemptId("attempt-" + tag), WorkStage.Review);
         public string Input(string tag) => JsonSerializer.Serialize(new { obligationKey = Key(tag) }) + "\n";
 
-        public static async Task<Fixture> CreateAsync(bool acknowledged = false)
+        public static async Task<Fixture> CreateAsync(bool acknowledged = false, bool linkedTaskWorktree = false,
+            string? taskRepositoryOrigin = null, bool unresolvableTaskWorkspace = false, bool reparseTaskWorkspace = false,
+            bool bindTaskWorkspace = false)
         {
             var fixture = new Fixture();
+            if (linkedTaskWorktree || taskRepositoryOrigin is not null || unresolvableTaskWorkspace)
+                await fixture.CreateRepositoryAsync(fixture.Workspace, RepositoryOrigin);
+            if (taskRepositoryOrigin is not null)
+            {
+                fixture.TaskWorkspace = Path.Combine(fixture.Root, "task-worktree");
+                await fixture.CreateRepositoryAsync(fixture.TaskWorkspace, taskRepositoryOrigin);
+            }
+            else if (linkedTaskWorktree)
+            {
+                await fixture.AddLinkedWorktreeAsync(Path.Combine(fixture.Root, "task-worktree"));
+            }
+            else if (unresolvableTaskWorkspace)
+            {
+                fixture.TaskWorkspace = Path.Combine(fixture.Root, "task-worktree");
+                Directory.CreateDirectory(fixture.TaskWorkspace);
+            }
+            if (reparseTaskWorkspace)
+                await fixture.CreateTaskWorkspaceJunctionAsync();
             await ConductorClaimStore.ClaimAsync(Repository, "holder-1", fixture.Root);
             ProjectCeilingStore.Set(fixture.Workspace, ProjectCeiling.Unrestricted, fixture.CeilingPath);
             var items = new List<QueueItem>();
@@ -366,7 +520,7 @@ public sealed class ConductorFollowSessionTests
                     Tag = tag,
                     Role = "review",
                     SpecFile = "fixture.md",
-                    Workspace = fixture.Workspace,
+                    Workspace = fixture.TaskWorkspace,
                     Repository = Repository.Value,
                     Stage = WorkStage.Review,
                     State = QueueItemState.Failed,
@@ -380,7 +534,9 @@ public sealed class ConductorFollowSessionTests
                 });
                 await fixture.Store.EnqueueAsync(new(intent.Key!, intent.Repository, null, tag, intent.PullRequestHead,
                     StoppedWorkJudgmentKey.Action, "holder-1", intent.ObservedAt, StoppedWorkJudgmentKey.ProviderRoute,
-                    StoppedWorkJudgmentKey.Capability, true, TargetRevision: intent.PullRequestHead, ContextSha256: intent.ContextSha256));
+                    StoppedWorkJudgmentKey.Capability, true,
+                    TargetWorkspace: bindTaskWorkspace ? fixture.TaskWorkspace : null,
+                    TargetRevision: intent.PullRequestHead, ContextSha256: intent.ContextSha256));
                 if (acknowledged)
                     await fixture.Store.SubmitAsync(intent.Key!, (_, _) => Task.FromResult(new ConductorTransportResult(true, "prior-advice")));
             }
@@ -425,16 +581,110 @@ public sealed class ConductorFollowSessionTests
             return result;
         };
 
+        private async Task CreateRepositoryAsync(string path, string origin)
+        {
+            Directory.CreateDirectory(path);
+            await RunGitAsync(path, "init");
+            await RunGitAsync(path, "config", "user.name", "Baton fixture");
+            await RunGitAsync(path, "config", "user.email", "baton-fixture@example.invalid");
+            var marker = Path.Combine(path, "fixture.txt");
+            await File.WriteAllTextAsync(marker, "linked worktree fixture\n", TestContext.Current.CancellationToken);
+            await RunGitAsync(path, "add", "fixture.txt");
+            await RunGitAsync(path, "commit", "-m", "fixture base");
+            await RunGitAsync(path, "remote", "add", "origin", origin);
+            _usesRealRepositoryResolver = true;
+        }
+
+        public async Task AddLinkedWorktreeAsync(string path)
+        {
+            await RunGitAsync(Workspace, "worktree", "add", "--detach", path, "HEAD");
+            if (TaskWorkspace == Workspace)
+                TaskWorkspace = path;
+        }
+
+        public void AfterTaskWorkspaceResolution(Func<int, CancellationToken, Task> action)
+        {
+            _taskWorkspaceResolutionCount = 0;
+            _afterTaskWorkspaceResolution = action;
+        }
+
+        public Task SetTaskWorkspaceOriginAsync(string origin) =>
+            RunGitAsync(TaskWorkspace, "remote", "set-url", "origin", origin);
+
+        private async Task CreateTaskWorkspaceJunctionAsync()
+        {
+            var target = TaskWorkspace;
+            var junction = Path.Combine(Root, "task-worktree-alias");
+            var start = new ProcessStartInfo("cmd.exe")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (var argument in new[] { "/c", "mklink", "/J", junction, target })
+                start.ArgumentList.Add(argument);
+            using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
+            var (stdout, stderr) = await Baton.Tests.Shared.BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            if (process.ExitCode != 0 || !Directory.Exists(junction))
+                Assert.Skip($"Host refused the task-workspace junction: {stdout}{stderr}");
+            _taskWorkspaceJunction = junction;
+            TaskWorkspace = junction;
+        }
+
+        private static async Task RunGitAsync(string workingDirectory, params string[] arguments)
+        {
+            var start = new ProcessStartInfo("git")
+            {
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            using var process = global::Baton.Core.ProcessLaunch.Start(start)!;
+            var (stdout, stderr) = await Baton.Tests.Shared.BoundedProcessWait.RunToExitAsync(
+                process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(process.ExitCode == 0, $"git {string.Join(' ', arguments)} failed: {stdout}{stderr}");
+        }
+
         public async Task<JsonElement[]> RunAsync(string input, ConductorFollowBroker? broker = null)
         {
             using var output = new StringWriter();
             await ConductorCommand.ExecuteAsync(ConductorOptionsParser.Parse(["follow", "--request", RequestFile]), output, Root,
-                (_, _) => Task.FromResult<RepositoryIdentity?>(Repository), new StringReader(input),
+                ResolveRepositoryAsync, new StringReader(input),
                 TestContext.Current.CancellationToken, broker ?? Broker);
             return output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => JsonDocument.Parse(line).RootElement.Clone()).ToArray();
         }
 
-        public void Dispose() { if (_ownsRoot) DirectoryCleanup.DeleteRecursively(Root); }
+        public async Task<ConductorFollowResult> DeliverAsync(string tag, Func<CancellationToken, Task>? beforeLaunchAdmission = null)
+        {
+            var session = await ConductorFollowSession.CreateAsync(RequestFile, Root, ResolveRepositoryAsync,
+                TestContext.Current.CancellationToken, Broker);
+            return await session.DeliverAsync(Key(tag), TestContext.Current.CancellationToken,
+                beforeLaunchAdmission: beforeLaunchAdmission);
+        }
+
+        private async Task<RepositoryIdentity?> ResolveRepositoryAsync(string path, CancellationToken token)
+        {
+            if (!_usesRealRepositoryResolver)
+                return Repository;
+            var identity = await RepositoryIdentityResolver.TryResolveAsync(path, token);
+            if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(TaskWorkspace), StringComparison.OrdinalIgnoreCase))
+            {
+                _taskWorkspaceResolutionCount++;
+                if (_afterTaskWorkspaceResolution is { } afterResolution)
+                    await afterResolution(_taskWorkspaceResolutionCount, token);
+            }
+            return identity;
+        }
+
+        public void Dispose()
+        {
+            if (_taskWorkspaceJunction is not null && Directory.Exists(_taskWorkspaceJunction))
+                Directory.Delete(_taskWorkspaceJunction);
+            if (_ownsRoot) DirectoryCleanup.DeleteRecursively(Root);
+        }
     }
 }

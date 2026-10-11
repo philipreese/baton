@@ -163,7 +163,8 @@ internal sealed partial class ConductorFollowSession
         var state = Read<ConductorFollowState>(Path.Combine(directory, "session.json"));
         var session = new ConductorFollowSession(Path.GetFullPath(root), identity, request, state.ProjectCeiling,
             target.ClaimGeneration, broker ?? ((configuration, prompt, output, inputs, stdout, stderr, ct, started) =>
-                Baton.Vendors.CodexAppServerBroker.RunAsync(configuration, prompt, output, inputs, stdout, stderr, ct, started)));
+                Baton.Vendors.CodexAppServerBroker.RunAsync(configuration, prompt, output, inputs, stdout, stderr, ct, started)),
+            resolver ?? RepositoryIdentityResolver.TryResolveAsync);
         session.ValidateState(state);
         try
         {

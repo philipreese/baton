@@ -563,7 +563,8 @@ internal sealed partial class ConductorFollowSession
         var identity = RepositoryIdentity.From("https://" + target.Repository, null)!;
         var session = new ConductorFollowSession(root, identity, request, state.ProjectCeiling, target.ClaimGeneration,
             broker ?? ((configuration, prompt, outputDirectory, inputs, output, error, ct, started) =>
-                CodexAppServerBroker.RunAsync(configuration, prompt, outputDirectory, inputs, output, error, ct, started)));
+                CodexAppServerBroker.RunAsync(configuration, prompt, outputDirectory, inputs, output, error, ct, started)),
+            resolver ?? RepositoryIdentityResolver.TryResolveAsync);
         // No remote work or session wait in acceptance. Delivery retains existing resolver checks.
         return await session.DeliverCorrectionAsync(token, resolver ?? RepositoryIdentityResolver.TryResolveAsync).ConfigureAwait(false);
     }
