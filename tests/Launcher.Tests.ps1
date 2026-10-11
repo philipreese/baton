@@ -398,6 +398,55 @@ try {
         throw "Assertion failed: baton-daemon still relies on RestartCount/RestartInterval instead of its repeating trigger"
     }
 
+    # 10. #2697: register-daemon-task.ps1 creates an explicit Interactive Limited principal
+    # for the registering user and wires it into Register-ScheduledTask.
+    Write-Host "Test 10: baton-daemon registers an explicit interactive limited principal..."
+    $principalCalls = $daemonAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq "New-ScheduledTaskPrincipal"
+    }, $true)
+    Assert-Equal 1 $principalCalls.Count "baton-daemon calls New-ScheduledTaskPrincipal exactly once"
+    $principalCall = $principalCalls[0]
+    $principalParams = @{}
+    for ($i = 0; $i -lt $principalCall.CommandElements.Count; $i++) {
+        $element = $principalCall.CommandElements[$i]
+        if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+            $paramName = $element.ParameterName
+            $paramVal = $null
+            if ($i + 1 -lt $principalCall.CommandElements.Count -and
+                -not ($principalCall.CommandElements[$i + 1] -is [System.Management.Automation.Language.CommandParameterAst])) {
+                $paramVal = $principalCall.CommandElements[$i + 1].Extent.Text
+            }
+            $principalParams[$paramName] = $paramVal
+        }
+    }
+    Assert-Equal '"$env:USERDOMAIN\$env:USERNAME"' $principalParams["UserId"] "principal UserId matches logon trigger"
+    Assert-Equal "Interactive" $principalParams["LogonType"] "principal LogonType is Interactive"
+    Assert-Equal "Limited" $principalParams["RunLevel"] "principal RunLevel is Limited"
+
+    $registerCalls = $daemonAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq "Register-ScheduledTask"
+    }, $true)
+    Assert-Equal 1 $registerCalls.Count "baton-daemon calls Register-ScheduledTask exactly once"
+    $registerCall = $registerCalls[0]
+    $registerParams = @{}
+    for ($i = 0; $i -lt $registerCall.CommandElements.Count; $i++) {
+        $element = $registerCall.CommandElements[$i]
+        if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+            $paramName = $element.ParameterName
+            $paramVal = $null
+            if ($i + 1 -lt $registerCall.CommandElements.Count -and
+                -not ($registerCall.CommandElements[$i + 1] -is [System.Management.Automation.Language.CommandParameterAst])) {
+                $paramVal = $registerCall.CommandElements[$i + 1].Extent.Text
+            }
+            $registerParams[$paramName] = $paramVal
+        }
+    }
+    Assert-Equal '$principal' $registerParams["Principal"] "Register-ScheduledTask receives -Principal `$principal"
+
     Write-Host "All launcher tests PASSED!"
 } finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
