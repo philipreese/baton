@@ -9,6 +9,15 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.73.1](https://github.com/philipreese/baton/compare/v0.73.0...v0.73.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **conductor:** Admit verified same-repository task worktrees ([#2704](https://github.com/philipreese/baton/issues/2704)) ([c4bb09c](https://github.com/philipreese/baton/commit/c4bb09c9b43683abea9a00e0813250bd282e4934))
+* **daemon:** Explicitly register the interactive limited principal ([#2698](https://github.com/philipreese/baton/issues/2698)) ([46a2e7e](https://github.com/philipreese/baton/commit/46a2e7e41d7bd91d763cfd6db14cef87c4f4bde5))
+* **glass:** Simplify mobile conductor controls ([#2701](https://github.com/philipreese/baton/issues/2701)) ([1c2e5f1](https://github.com/philipreese/baton/commit/1c2e5f1999db0bc5c16ac24b3ffcbf4cb0213135))
+
 ## [0.73.0](https://github.com/philipreese/baton/compare/v0.72.0...v0.73.0) (2026-10-11)
 
 
