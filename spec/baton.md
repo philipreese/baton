@@ -9151,9 +9151,12 @@ The summary labels the holder as recorded and states that task ownership has no 
 generation. A matching current or prior holder never proves ownership by this hosted session, and
 Take Over, Stop, Unhold, release/reacquire or same-holder reacquisition never transfers or relabels
 task rows. A readiness reference is historical and does not assert current readiness, merge authority
-or completion. Launched does not prove a live worker. No next step is manufactured; absent a scoped
-structured source, the card says “Next trigger not shown here” and links to existing Queue and Stream
-surfaces. Queue observation time is read time. Available empty results, unavailable queue evidence
+or completion. Launched does not prove a live worker. No next step is manufactured; the scoped
+structured decision source (§14, #2623) supplies the task's next trigger and actor, projected using bounded
+allowlisted tokens and plain-language copy (preparation completion, scheduler reconciliation, conductor
+judgment, conductor readiness reassessment, conductor review/merge handoff under existing authority, or no
+next action for cancelled/retired; unknown tokens render unavailable). Links to existing Queue and Stream
+surfaces remain. Queue observation time is read time. Available empty results, unavailable queue evidence
 and truncation are distinct. GET remains read-only and makes no provider calls; refresh obtains a new
 snapshot without rewriting the timestamp of an already-rendered page. Public strings are bounded and
 escaped, unsafe identifiers and unknown blocker tokens use neutral labels, and private paths, errors,

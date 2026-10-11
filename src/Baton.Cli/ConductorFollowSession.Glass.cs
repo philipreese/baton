@@ -21,7 +21,8 @@ internal sealed record GlassConductorStatus(string Repository, string? Holder, s
 
 internal sealed record GlassHostedControlResult(ConductorHostedControlReceipt Receipt, string Cleanup);
 internal sealed record GlassIssuedActionStatus(string Tag, string State, string? Reason, string? NextTrigger, string Holder);
-internal sealed record GlassRecordedTask(QueueTaskPublicView Task, string Stage, string State, bool Cancelled);
+internal sealed record GlassRecordedTask(QueueTaskPublicView Task, string Stage, string State, bool Cancelled,
+    string NextTrigger, string? Responsibility = null, string? NextActor = null, string? Disposition = null);
 internal sealed record GlassRecordedTasks(DateTimeOffset ObservedAt, string Availability,
     IReadOnlyList<GlassRecordedTask> Items, int Omitted);
 
@@ -495,9 +496,23 @@ internal sealed partial class ConductorFollowSession
             .Where(item => item.Retirement is null && item.OwnedTask is { } task
                 && item.Repository == repository && task.Repository == repository && item.Repository == task.Repository)
             .OrderBy(item => item.OwnedTask!.Id, StringComparer.Ordinal)
-            .Select(item => new GlassRecordedTask(SafeRecordedTask(QueueBoard.PublicTask(item)!),
-                item.Stage is { } stage ? WorkStages.Token(stage) : "unknown",
-                SafeRecordedToken(item.State.ToString()), item.State.ToString().Equals("Cancelled", StringComparison.OrdinalIgnoreCase)))
+            .Select(item =>
+            {
+                var pr = snapshot.PullRequestObservations?.LastOrDefault(o =>
+                    o.Repository == item.OwnedTask!.Repository && o.PullRequest == item.PullRequest);
+                var isPrepAlive = item.IssuePreparation is { State: TaskPreparationState.Preparing } prep
+                    && TaskPreparationLiveness.IsOwnerAlive(prep);
+                var decision = TaskDecisionProjection.Decide(item, pr, isPrepAlive);
+                return new GlassRecordedTask(
+                    SafeRecordedTask(QueueBoard.PublicTask(item)!),
+                    item.Stage is { } stage ? WorkStages.Token(stage) : "unknown",
+                    SafeRecordedToken(item.State.ToString()),
+                    item.State.ToString().Equals("Cancelled", StringComparison.OrdinalIgnoreCase),
+                    SafeRecordedNextTrigger(decision.NextTrigger),
+                    SafeRecordedResponsibility(decision.Responsibility),
+                    SafeRecordedNextActor(decision.NextActor),
+                    SafeRecordedDisposition(decision.State));
+            })
             .ToArray();
         var visible = rows.Take(20).ToArray();
         var recordedTasks = new GlassRecordedTasks(observedAt, queueAvailable ? "available" : "unavailable",
@@ -514,6 +529,51 @@ internal sealed partial class ConductorFollowSession
         ReadyReceiptId = task.ReadyReceiptId is null ? null : SafeRecordedIdentifier(task.ReadyReceiptId),
         ReadyHeadSha = task.ReadyHeadSha is null ? null : SafeRecordedSha(task.ReadyHeadSha),
         Blocker = task.Blocker is null ? null : SafeRecordedBlocker(task.Blocker),
+    };
+
+    private static string SafeRecordedNextTrigger(string value) => value switch
+    {
+        "preparation-completion" => "preparation-completion",
+        "daemon-tick" => "daemon-tick",
+        "conductor-judgment" => "conductor-judgment",
+        "conductor-reassessment" => "conductor-reassessment",
+        "conductor-handoff" => "conductor-handoff",
+        "none" => "none",
+        _ => "unavailable",
+    };
+
+    private static string? SafeRecordedResponsibility(string? value) => value switch
+    {
+        "judge-retained-blocker" => "judge-retained-blocker",
+        "reassess-current-readiness" => "reassess-current-readiness",
+        "reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority"
+            => "reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+        null => null,
+        _ => "unavailable",
+    };
+
+    private static string SafeRecordedNextActor(string value) => value switch
+    {
+        "preparation completion" => "preparation completion",
+        "scheduler reconciliation" => "scheduler reconciliation",
+        "conductor judgment" => "conductor judgment",
+        "conductor readiness reassessment" => "conductor readiness reassessment",
+        "conductor review/merge handoff under existing authority" => "conductor review/merge handoff under existing authority",
+        "no next action" => "no next action",
+        _ => "unavailable",
+    };
+
+    private static string SafeRecordedDisposition(string value) => value switch
+    {
+        "preparing" => "preparing",
+        "queued" => "queued",
+        "running" => "running",
+        "blocked" => "blocked",
+        "stale" => "stale",
+        "ready-as-of" => "ready-as-of",
+        "cancelled" => "cancelled",
+        "retired" => "retired",
+        _ => "unavailable",
     };
 
     private static string SafeRecordedIdentifier(string value) => value.Length is > 0 and <= 64

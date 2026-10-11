@@ -3023,4 +3023,185 @@ public sealed class TaskCommandTests
             DirectoryCleanup.DeleteRecursively(home);
         }
     }
+
+    [Fact]
+    public void TaskDecisionProjection_precedence_and_invariants_are_preserved()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var head = new string('a', 40);
+        const string repo = "github.com/example/repo";
+        const string taskId = "task-test";
+
+        var validReceipt = new TaskReadyReceipt("receipt-1", taskId, repo, 42, 10,
+            head, "attempt-1", "digest", "passing", "observation", now, now);
+
+        QueueItem BaseItem(QueueItemState state = QueueItemState.Queued, WorkStage stage = WorkStage.Implement,
+            TaskReadyReceipt? receipt = null) => new()
+            {
+                Tag = taskId,
+                Role = "implement",
+                Workspace = "C:/ws",
+                SpecFile = "C:/ws/spec.md",
+                Repository = repo,
+                Issue = 42,
+                PullRequest = 10,
+                Stage = stage,
+                State = state,
+                OwnedTask = new OwnedTaskSubmission(taskId, repo, 42, "digest", "holder-1", now, receipt),
+            };
+
+        // 1. Retired precedence over everything else
+        var retiredItem = BaseItem(QueueItemState.Cancelled, WorkStage.Ready, validReceipt) with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, now, "retired disposition"),
+        };
+        var retiredDecision = TaskDecisionProjection.Decide(retiredItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("retired", retiredDecision.State);
+        Assert.Equal("none", retiredDecision.NextTrigger);
+        Assert.Null(retiredDecision.Responsibility);
+        Assert.Equal("no next action", retiredDecision.NextActor);
+
+        // 2. Cancelled precedence over preparation, blocked, launched, readiness, queued
+        var cancelledItem = BaseItem(QueueItemState.Cancelled, WorkStage.Ready, validReceipt) with
+        {
+            Halted = true,
+            IssuePreparation = new QueueIssuePreparation(TaskPreparationState.Preparing, now),
+        };
+        var cancelledDecision = TaskDecisionProjection.Decide(cancelledItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("cancelled", cancelledDecision.State);
+        Assert.Equal("none", cancelledDecision.NextTrigger);
+        Assert.Null(cancelledDecision.Responsibility);
+        Assert.Equal("no next action", cancelledDecision.NextActor);
+
+        // 3. Preparation owner alive -> preparing
+        var prepAliveItem = BaseItem() with
+        {
+            IssuePreparation = new QueueIssuePreparation(TaskPreparationState.Preparing, now),
+        };
+        var prepAliveDecision = TaskDecisionProjection.Decide(prepAliveItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("preparing", prepAliveDecision.State);
+        Assert.Equal("preparation-completion", prepAliveDecision.NextTrigger);
+        Assert.Null(prepAliveDecision.Responsibility);
+        Assert.Equal("preparation completion", prepAliveDecision.NextActor);
+
+        // 4. Preparation owner not alive (missing identity or inspection failure) -> blocked
+        var prepDeadDecision = TaskDecisionProjection.Decide(prepAliveItem, null, isPreparationOwnerAlive: false);
+        Assert.Equal("blocked", prepDeadDecision.State);
+        Assert.Equal("conductor-judgment", prepDeadDecision.NextTrigger);
+        Assert.Equal("judge-retained-blocker", prepDeadDecision.Responsibility);
+        Assert.Equal("conductor judgment", prepDeadDecision.NextActor);
+
+        // 5. Preparation blocked
+        var prepBlockedItem = BaseItem() with
+        {
+            IssuePreparation = new QueueIssuePreparation(TaskPreparationState.Blocked, now),
+        };
+        var prepBlockedDecision = TaskDecisionProjection.Decide(prepBlockedItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("blocked", prepBlockedDecision.State);
+        Assert.Equal("conductor-judgment", prepBlockedDecision.NextTrigger);
+        Assert.Equal("judge-retained-blocker", prepBlockedDecision.Responsibility);
+        Assert.Equal("conductor judgment", prepBlockedDecision.NextActor);
+
+        // 6. Halted or Failed -> blocked
+        var haltedItem = BaseItem() with { Halted = true };
+        var haltedDecision = TaskDecisionProjection.Decide(haltedItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("blocked", haltedDecision.State);
+        Assert.Equal("conductor-judgment", haltedDecision.NextTrigger);
+
+        var failedItem = BaseItem(QueueItemState.Failed);
+        var failedDecision = TaskDecisionProjection.Decide(failedItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("blocked", failedDecision.State);
+        Assert.Equal("conductor-judgment", failedDecision.NextTrigger);
+
+        // 7. Launched -> running
+        var launchedItem = BaseItem(QueueItemState.Launched);
+        var launchedDecision = TaskDecisionProjection.Decide(launchedItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("running", launchedDecision.State);
+        Assert.Equal("daemon-tick", launchedDecision.NextTrigger);
+        Assert.Null(launchedDecision.Responsibility);
+        Assert.Equal("scheduler reconciliation", launchedDecision.NextActor);
+
+        // 8. Ready-as-of with matching PR observation
+        var readyItem = BaseItem(QueueItemState.Queued, WorkStage.Ready, validReceipt);
+        var matchingPr = new QueuePullRequestObservation(repo, 10, "open", head, now, now, null);
+        var readyDecision = TaskDecisionProjection.Decide(readyItem, matchingPr, isPreparationOwnerAlive: true);
+        Assert.Equal("ready-as-of", readyDecision.State);
+        Assert.Equal("conductor-handoff", readyDecision.NextTrigger);
+        Assert.Equal("reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+            readyDecision.Responsibility);
+        Assert.Equal("conductor review/merge handoff under existing authority", readyDecision.NextActor);
+        Assert.NotNull(readyDecision.ReceiptBinding);
+        Assert.Equal("complete", readyDecision.ReceiptBinding.Status);
+        Assert.False(readyDecision.HeadChanged);
+        Assert.False(readyDecision.ReadinessRegressed);
+
+        // 9. Ready-as-of with missing PR observation alone (still ready-as-of)
+        var readyNoPrDecision = TaskDecisionProjection.Decide(readyItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("ready-as-of", readyNoPrDecision.State);
+        Assert.Equal("conductor-handoff", readyNoPrDecision.NextTrigger);
+        Assert.Equal("reconcile-review-and-fresh-forge-gates-then-merge-under-existing-authority",
+            readyNoPrDecision.Responsibility);
+        Assert.Equal("conductor review/merge handoff under existing authority", readyNoPrDecision.NextActor);
+
+        // 10. Optional checks failure alone does not regress readiness
+        var readyOptionalChecksItem = readyItem with { Checks = "failure" };
+        var readyOptionalDecision = TaskDecisionProjection.Decide(readyOptionalChecksItem, matchingPr, isPreparationOwnerAlive: true);
+        Assert.Equal("ready-as-of", readyOptionalDecision.State);
+        Assert.Equal("conductor-handoff", readyOptionalDecision.NextTrigger);
+        Assert.False(readyOptionalDecision.ReadinessRegressed);
+
+        // 11. Required checks wait regresses readiness -> stale
+        var readyWaitItem = readyItem with
+        {
+            RequiredCheckEvidenceWait = new RequiredCheckEvidenceWait(head, now, now, 1, "check pending"),
+        };
+        var readyWaitDecision = TaskDecisionProjection.Decide(readyWaitItem, matchingPr, isPreparationOwnerAlive: true);
+        Assert.Equal("stale", readyWaitDecision.State);
+        Assert.Equal("conductor-reassessment", readyWaitDecision.NextTrigger);
+        Assert.Equal("reassess-current-readiness", readyWaitDecision.Responsibility);
+        Assert.Equal("conductor readiness reassessment", readyWaitDecision.NextActor);
+        Assert.True(readyWaitDecision.ReadinessRegressed);
+
+        // 12. Retained error regresses readiness -> stale
+        var readyErrorItem = readyItem with { Error = "retained error" };
+        var readyErrorDecision = TaskDecisionProjection.Decide(readyErrorItem, matchingPr, isPreparationOwnerAlive: true);
+        Assert.Equal("stale", readyErrorDecision.State);
+        Assert.Equal("conductor-reassessment", readyErrorDecision.NextTrigger);
+        Assert.Equal("reassess-current-readiness", readyErrorDecision.Responsibility);
+        Assert.Equal("conductor readiness reassessment", readyErrorDecision.NextActor);
+        Assert.True(readyErrorDecision.ReadinessRegressed);
+
+        // 13. Changed PR head -> stale
+        var differentHeadPr = new QueuePullRequestObservation(repo, 10, "open", new string('b', 40), now, now, null);
+        var headChangedDecision = TaskDecisionProjection.Decide(readyItem, differentHeadPr, isPreparationOwnerAlive: true);
+        Assert.Equal("stale", headChangedDecision.State);
+        Assert.Equal("conductor-reassessment", headChangedDecision.NextTrigger);
+        Assert.True(headChangedDecision.HeadChanged);
+
+        // 14. Missing receipt subject (e.g. empty ID) -> incomplete binding -> stale
+        var incompleteReceiptItem = BaseItem(QueueItemState.Queued, WorkStage.Ready, validReceipt with { Id = "" });
+        var incompleteDecision = TaskDecisionProjection.Decide(incompleteReceiptItem, matchingPr, isPreparationOwnerAlive: true);
+        Assert.Equal("stale", incompleteDecision.State);
+        Assert.Equal("conductor-reassessment", incompleteDecision.NextTrigger);
+        Assert.Equal("incomplete", incompleteDecision.ReceiptBinding?.Status);
+        Assert.Contains("id", incompleteDecision.ReceiptBinding?.Missing!);
+
+        // 15. Mismatched receipt subject (e.g. TaskId mismatch) -> mismatched binding -> stale
+        var mismatchedReceiptItem = BaseItem(QueueItemState.Queued, WorkStage.Ready, validReceipt with { TaskId = "other-task" });
+        var mismatchedDecision = TaskDecisionProjection.Decide(mismatchedReceiptItem, matchingPr, isPreparationOwnerAlive: true);
+        Assert.Equal("stale", mismatchedDecision.State);
+        Assert.Equal("conductor-reassessment", mismatchedDecision.NextTrigger);
+        Assert.Equal("mismatched", mismatchedDecision.ReceiptBinding?.Status);
+        Assert.Contains("taskId", mismatchedDecision.ReceiptBinding?.Mismatches!);
+
+        // 16. Queued item with no receipt -> queued
+        var plainQueuedItem = BaseItem();
+        var plainQueuedDecision = TaskDecisionProjection.Decide(plainQueuedItem, null, isPreparationOwnerAlive: true);
+        Assert.Equal("queued", plainQueuedDecision.State);
+        Assert.Equal("daemon-tick", plainQueuedDecision.NextTrigger);
+        Assert.Null(plainQueuedDecision.Responsibility);
+        Assert.Equal("scheduler reconciliation", plainQueuedDecision.NextActor);
+        Assert.Null(plainQueuedDecision.ReceiptBinding);
+    }
 }
+
