@@ -39,12 +39,11 @@ Record each exit code in the workspace:
 
 Report red checks; name any that cannot run and why.
 
-## Committed-content audits, after the commit and before push
+## Committed audits (after commit, before push)
 
-Run `pixi run audit-recordonce` and, where that task exists, `pixi run audit-docsbudget` against the
-committed change. If an audit fails, commit the repair under `docs/agents/developing-baton.md`'s
-Git conventions before rerunning it; a working-tree-only repair leaves the audited commit unchanged.
-Record each exit code with the other verification results.
+Run `pixi run audit-recordonce` and, where available, `pixi run audit-docsbudget`. On failure, commit
+the repair per `docs/agents/developing-baton.md` Git conventions before rerunning; worktree edits
+leave the audited commit unchanged. Record exits.
 
 ## Delivery
 
@@ -59,29 +58,20 @@ Record each exit code with the other verification results.
 
 ## End-of-implementation self-check
 
-Before completion, in this same context:
-
-- Compare `origin/main..HEAD` to the brief; name unmet acceptance.
-- Confirm final HEAD is pushed and a draft PR exists at that head.
-- Re-read the stored PR body against the final commit. Treat `changes.md` as an as-of handoff:
-  its local HEAD/time describe what was known when it was written; Baton's post-exit
-  observation, not a later rewrite of that handoff, records final push and PR facts.
-- Confirm required checks ran and recorded exits are true.
+Before completion, in this same context, compare `origin/main..HEAD` with the brief and name unmet acceptance.
+Confirm final HEAD is pushed and a draft PR exists at its head.
+Re-read the stored PR body against the final commit; confirm checks ran with true exits. Treat `changes.md` as an as-of handoff;
+don't rewrite it for post-exit push/PR facts, which Baton records.
 
 This is result validation, not an independent review. Uncertain GitHub effects remain obligations;
 issuing a command does not prove its intended state.
 
 ## changes.md
 
-Write the review handoff to `$BATON_OUTPUT_DIR/changes.md`:
-
-- State local HEAD and observation time. Preserve this before commit/push/PR; report later facts
-  through the branch and PR, not here.
-- Per finding/slice: files, change, reason.
-- Verification commands and exit codes.
-- What was NOT done and why; only the operator scales down.
-- For changed protected paths (spec/baton.md §11 C-15), add `## PROTECTED` and explain why
-  operator merge is required.
+Write `$BATON_OUTPUT_DIR/changes.md` before commit/push/PR: local HEAD/time; each finding's files,
+change/reason; verification commands/exits; and what was not done/why (only the operator scales down).
+Keep it as-of; Baton records later push/PR facts. For spec/baton.md §11 C-15 paths, add
+`## PROTECTED` and explain why operator merge is required.
 
 ## Public repository
 
